@@ -36,6 +36,7 @@ typedef unsigned long	Elf32_Word;
 #define EM_88K   5
 #define EM_486   6   /* Perhaps disused */
 #define EM_860   7
+#define EM_PPC   20
 
 /* This is the info that is needed to parse the dynamic section of the file */
 #define DT_NULL		0
@@ -79,6 +80,23 @@ typedef unsigned long	Elf32_Word;
 #define ELF32_ST_BIND(x) ((x) >> 4)
 #define ELF32_ST_TYPE(x) (((unsigned int) x) & 0xf)
 
+/* Symbolic values for the entries in the auxiliary table
+   put on the initial stack */
+#define AT_NULL   0	/* end of vector */
+#define AT_IGNORE 1	/* entry should be ignored */
+#define AT_EXECFD 2	/* file descriptor of program */
+#define AT_PHDR   3	/* program headers for program */
+#define AT_PHENT  4	/* size of program header entry */
+#define AT_PHNUM  5	/* number of program headers */
+#define AT_PAGESZ 6	/* system page size */
+#define AT_BASE   7	/* base address of interpreter */
+#define AT_FLAGS  8	/* flags */
+#define AT_ENTRY  9	/* entry point of program */
+#define AT_NOTELF 10	/* program is not ELF */
+#define AT_UID    11	/* real uid */
+#define AT_EUID   12	/* effective uid */
+#define AT_GID    13	/* real gid */
+#define AT_EGID   14	/* effective gid */
 
 
 typedef struct dynamic{
@@ -147,6 +165,12 @@ typedef struct elfhdr{
   Elf32_Half	e_shnum;
   Elf32_Half	e_shstrndx;
 } Elf32_Ehdr;
+
+/* These constants define the permissions on sections in the program
+   header, p_flags. */
+#define PF_R		0x4
+#define PF_W		0x2
+#define PF_X		0x1
 
 typedef struct elf_phdr{
   Elf32_Word	p_type;
@@ -226,6 +250,27 @@ typedef struct {
 #define	ELFCLASS32	1
 #define	ELFCLASS64	2
 #define	ELFCLASSNUM	3
+
+#define ELFDATANONE	0		/* e_ident[EI_DATA] */
+#define ELFDATA2LSB	1
+#define ELFDATA2MSB	2
+
+#define EV_NONE		0		/* e_version, EI_VERSION */
+#define EV_CURRENT	1
+#define EV_NUM		2
+
+/* Notes used in ET_CORE */
+#define NT_PRSTATUS	1
+#define NT_PRFPREG	2
+#define NT_PRPSINFO	3
+#define NT_TASKSTRUCT	4
+
+/* Note header in a PT_NOTE section */
+typedef struct elf_note {
+  Elf32_Word	n_namesz;	/* Name size */
+  Elf32_Word	n_descsz;	/* Content size */
+  Elf32_Word	n_type;		/* Content type */
+} Elf32_Nhdr;
 
 #define ELF_START_MMAP 0x80000000
 

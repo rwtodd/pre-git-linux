@@ -6,13 +6,7 @@
  *
  */
 
-#ifdef MODULE
 #include <linux/module.h>
-#include <linux/version.h>
-#else
-#define MOD_INC_USE_COUNT
-#define MOD_DEC_USE_COUNT
-#endif
 
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
@@ -50,7 +44,7 @@ void UMSDOS_put_inode(struct inode *inode)
 	if (inode != NULL && inode == pseudo_root){
 		printk ("Umsdos: Oops releasing pseudo_root. Notify jacques@solucorp.qc.ca\n");
 	}
-	msdos_put_inode(inode);
+	fat_put_inode(inode);
 }
 
 
@@ -61,9 +55,9 @@ void UMSDOS_put_super(struct super_block *sb)
 }
 
 
-void UMSDOS_statfs(struct super_block *sb,struct statfs *buf)
+void UMSDOS_statfs(struct super_block *sb,struct statfs *buf, int bufsiz)
 {
-	msdos_statfs(sb,buf);
+	fat_statfs(sb,buf,bufsiz);
 }
 
 
@@ -263,7 +257,7 @@ void UMSDOS_write_inode(struct inode *inode)
 	struct iattr newattrs;
 
 	PRINTK (("UMSDOS_write_inode emd %d\n",inode->u.umsdos_i.i_emd_owner));
-	msdos_write_inode(inode);
+	fat_write_inode(inode);
 	newattrs.ia_mtime = inode->i_mtime;
 	newattrs.ia_atime = inode->i_atime;
 	newattrs.ia_ctime = inode->i_ctime;
@@ -410,6 +404,7 @@ struct super_block *UMSDOS_read_super(
 	printk ("UMSDOS Beta 0.6 (compatibility level %d.%d, fast msdos)\n"
 		,UMSDOS_VERSION,UMSDOS_RELEASE);
 	if (sb != NULL){
+		MSDOS_SB(sb)->options.dotsOK = 0;  /* disable hidden==dotfile */
 		sb->s_op = &umsdos_sops;
 		PRINTK (("umsdos_read_super %p\n",sb->s_mounted));
 		umsdos_setup_dir_inode (sb->s_mounted);
@@ -418,8 +413,8 @@ struct super_block *UMSDOS_read_super(
 			/* #Specification: pseudo root / mount
 				When a umsdos fs is mounted, a special handling is done
 				if it is the root partition. We check for the presence
-				of the file /linux/etc/init or /linux/etc/rc.
-				If one is there, we do a chroot("/linux").
+				of the file /linux/etc/init or /linux/etc/rc or
+				/linux/sbin/init. If one is there, we do a chroot("/linux").
 
 				We check both because (see init/main.c) the kernel
 				try to exec init at different place and if it fails
@@ -452,25 +447,42 @@ struct super_block *UMSDOS_read_super(
 					,UMSDOS_PSDROOT_LEN,&pseudo)==0
 				&& S_ISDIR(pseudo->i_mode)){
 				struct inode *etc = NULL;
-				struct inode *rc = NULL;
+				struct inode *sbin = NULL;
+				int pseudo_ok = 0;
 				Printk (("/%s is there\n",UMSDOS_PSDROOT_NAME));
 				if (umsdos_real_lookup (pseudo,"etc",3,&etc)==0
 					&& S_ISDIR(etc->i_mode)){
-					struct inode *init;
+					struct inode *init = NULL;
+					struct inode *rc = NULL;
 					Printk (("/%s/etc is there\n",UMSDOS_PSDROOT_NAME));
 					if ((umsdos_real_lookup (etc,"init",4,&init)==0
 							&& S_ISREG(init->i_mode))
 						|| (umsdos_real_lookup (etc,"rc",2,&rc)==0
 							&& S_ISREG(rc->i_mode))){
-						umsdos_setup_dir_inode (pseudo);
-						Printk (("Activating pseudo root /%s\n",UMSDOS_PSDROOT_NAME));
-						pseudo_root = pseudo;
-						pseudo->i_count++;
-						pseudo = NULL;
+						pseudo_ok = 1;
 					}
 					iput (init);
 					iput (rc);
 				}
+				if (!pseudo_ok
+					&& umsdos_real_lookup (pseudo,"sbin",4,&sbin)==0
+					&& S_ISDIR(sbin->i_mode)){
+					struct inode *init = NULL;
+					Printk (("/%s/sbin is there\n",UMSDOS_PSDROOT_NAME));
+					if (umsdos_real_lookup (sbin,"init",4,&init)==0
+							&& S_ISREG(init->i_mode)){
+						pseudo_ok = 1;
+					}
+					iput (init);
+				}
+				if (pseudo_ok){
+					umsdos_setup_dir_inode (pseudo);
+					Printk (("Activating pseudo root /%s\n",UMSDOS_PSDROOT_NAME));
+					pseudo_root = pseudo;
+					pseudo->i_count++;
+					pseudo = NULL;
+				}
+				iput (sbin);
 				iput (etc);
 			}
 			iput (pseudo);
@@ -482,18 +494,24 @@ struct super_block *UMSDOS_read_super(
 }
 
 
-#ifdef MODULE
-
-char kernel_version[] = UTS_RELEASE;
 
 static struct file_system_type umsdos_fs_type = {
 	UMSDOS_read_super, "umsdos", 1, NULL
 };
 
+int init_umsdos_fs(void)
+{
+	return register_filesystem(&umsdos_fs_type);
+}
+
+#ifdef MODULE
 int init_module(void)
 {
-	register_filesystem(&umsdos_fs_type);
-	return 0;
+	int status;
+
+	if ((status = init_umsdos_fs()) == 0)
+		register_symtab(0);
+	return status;
 }
 
 void cleanup_module(void)

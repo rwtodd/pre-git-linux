@@ -4,19 +4,14 @@
  *	controlled by an Intel 82586 coprocessor.
  */
 
-#include	<linux/config.h>
-
-#if	defined(CONFIG_WAVELAN)
-#if	defined(MODULE)
 #include	<linux/module.h>
-#include	<linux/version.h>
-#endif	/* defined(MODULE) */
 
 #include	<linux/kernel.h>
 #include	<linux/sched.h>
 #include	<linux/types.h>
 #include	<linux/fcntl.h>
 #include	<linux/interrupt.h>
+#include	<linux/stat.h>
 #include	<linux/ptrace.h>
 #include	<linux/ioport.h>
 #include	<linux/in.h>
@@ -26,12 +21,13 @@
 #include	<asm/bitops.h>
 #include	<asm/io.h>
 #include	<asm/dma.h>
-#include	<errno.h>
+#include	<linux/errno.h>
 #include	<linux/netdevice.h>
 #include	<linux/etherdevice.h>
 #include	<linux/skbuff.h>
 #include	<linux/malloc.h>
 #include	<linux/timer.h>
+#include	<linux/proc_fs.h>
 #define	STRUCT_CHECK	1
 #include	"i82586.h"
 #include	"wavelan.h"
@@ -40,9 +36,10 @@
 #define WAVELAN_DEBUG			0
 #endif	/* WAVELAN_DEBUG */
 
-#define	nels(a)				(sizeof(a) / sizeof(a[0]))
-
 #define	WATCHDOG_JIFFIES		512	/* TODO: express in HZ. */
+#define	ENABLE_FULL_PROMISCUOUS		0x10000
+
+#define	nels(a)				(sizeof(a) / sizeof(a[0]))
 
 typedef struct device		device;
 typedef struct enet_statistics	en_stats;
@@ -63,6 +60,7 @@ struct net_local
 	unsigned int	correct_nwid;
 	unsigned int	wrong_nwid;
 	unsigned int	promiscuous;
+	unsigned int	full_promiscuous;
 	timer_list	watchdog;
 	device		*dev;
 	net_local	*prev;
@@ -71,7 +69,7 @@ struct net_local
 
 extern int		wavelan_probe(device *);	/* See Space.c */
 
-static char		*version	= "wavelan.c:v6 22/2/95\n";
+static const char	*version	= "wavelan.c:v7 95/4/8\n";
 
 /*
  * Entry point forward declarations.
@@ -79,10 +77,11 @@ static char		*version	= "wavelan.c:v6 22/2/95\n";
 static int		wavelan_probe1(device *, unsigned short);
 static int		wavelan_open(device *);
 static int		wavelan_send_packet(struct sk_buff *, device *);
-static void		wavelan_interrupt(int, struct pt_regs *);
+static void		wavelan_interrupt(int, void *, struct pt_regs *);
 static int		wavelan_close(device *);
 static en_stats		*wavelan_get_stats(device *);
-static void		wavelan_set_multicast_list(device *, int, void *);
+static void		wavelan_set_multicast_list(device *);
+static int		wavelan_get_info(char*, char**, off_t, int, int);
 
 /*
  * Other forward declarations.
@@ -242,6 +241,28 @@ psa_read(unsigned short ioaddr, unsigned short hacr, int o, unsigned char *b, in
 	wavelan_16_on(ioaddr, hacr);
 }
 
+#if	defined(IRQ_SET_WORKS)
+/*
+ * Write bytes to the PSA.
+ */
+static
+void
+psa_write(unsigned short ioaddr, unsigned short hacr, int o, unsigned char *b, int n)
+{
+	wavelan_16_off(ioaddr, hacr);
+
+	while (n-- > 0)
+	{
+		outw(o, PIOR2(ioaddr));
+		o++;
+		outb(*b, PIOP2(ioaddr));
+		b++;
+	}
+
+	wavelan_16_on(ioaddr, hacr);
+}
+#endif	/* defined(IRQ_SET_WORKS) */
+
 /*
  * Read bytes from the on-board RAM.
  */
@@ -310,21 +331,36 @@ mmc_write(unsigned short ioaddr, unsigned short o, unsigned char *b, int n)
 	}
 }
 
+static int	irqvals[]	=
+{
+	   0,    0,    0, 0x01,
+	0x02, 0x04,    0, 0x08,
+	   0,    0, 0x10, 0x20,
+	0x40,    0,    0, 0x80,
+};
+
+#if	defined(IRQ_SET_WORKS)
+static
+int
+wavelan_unmap_irq(int irq, unsigned char *irqval)
+{
+	if (irq < 0 || irq >= nels(irqvals) || irqvals[irq] == 0)
+		return -1;
+	
+	*irqval = (unsigned char)irqvals[irq];
+
+	return 0;
+}
+#endif	/* defined(IRQ_SET_WORKS) */
+
 /*
  * Map values from the irq parameter register to irq numbers.
  */
 static
 int
-wavelan_map_irq(unsigned short ioaddr, unsigned char irqval)
+wavelan_map_irq(unsigned char irqval)
 {
-	int		irq;
-	static int	irqvals[]	=
-	{
-		   0,    0,    0, 0x01,
-		0x02, 0x04,    0, 0x08,
-		   0,    0, 0x10, 0x20,
-		0x40,    0,    0, 0x80,
-	};
+	int	irq;
 
 	for (irq = 0; irq < nels(irqvals); irq++)
 	{
@@ -392,7 +428,7 @@ wavelan_mmc_init(device *dev, psa_t *psa)
 	}
 	else
 	{
-		if (lp->promiscuous)
+		if (lp->promiscuous && lp->full_promiscuous)
 			m.mmw_loopt_sel = MMW_LOOPT_SEL_UNDEFINED;
 		else
 			m.mmw_loopt_sel = 0x00;
@@ -456,7 +492,7 @@ wavelan_ack(device *dev)
  */
 static
 int
-wavelan_synchronous_cmd(device *dev, char *str)
+wavelan_synchronous_cmd(device *dev, const char *str)
 {
 	unsigned short	ioaddr;
 	net_local	*lp;
@@ -507,6 +543,9 @@ wavelan_hardware_reset(device *dev)
 	int		i;
 	ac_cfg_t	cfg;
 	ac_ias_t	ias;
+
+	if (wavelan_debug > 0)
+		printk("%s: ->wavelan_hardware_reset(dev=0x%x)\n", dev->name, (unsigned int)dev);
 
 	ioaddr = dev->base_addr;
 	lp = (net_local *)dev->priv;
@@ -565,7 +604,12 @@ wavelan_hardware_reset(device *dev)
 	}
 
 	if (i <= 0)
+	{
 		printk("%s: wavelan_hardware_reset(): iscp_busy timeout.\n", dev->name);
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_hardware_reset(): -1\n", dev->name);
+		return -1;
+	}
 
 	for (i = 15; i > 0; i--)
 	{
@@ -578,7 +622,12 @@ wavelan_hardware_reset(device *dev)
 	}
 
 	if (i <= 0)
+	{
 		printk("%s: wavelan_hardware_reset(): status: expected 0x%02x, got 0x%02x.\n", dev->name, SCB_ST_CX | SCB_ST_CNA, scb.scb_status);
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_hardware_reset(): -1\n", dev->name);
+		return -1;
+	}
 
 	wavelan_ack(dev);
 
@@ -588,12 +637,18 @@ wavelan_hardware_reset(device *dev)
 	obram_write(ioaddr, OFFSET_CU, (unsigned char *)&cb, sizeof(cb));
 
 	if (wavelan_synchronous_cmd(dev, "diag()") == -1)
+	{
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_hardware_reset(): -1\n", dev->name);
 		return -1;
+	}
 
 	obram_read(ioaddr, OFFSET_CU, (unsigned char *)&cb, sizeof(cb));
 	if (cb.ac_status & AC_SFLD_FAIL)
 	{
 		printk("%s: wavelan_hardware_reset(): i82586 Self Test failed.\n", dev->name);
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_hardware_reset(): -1\n", dev->name);
 		return -1;
 	}
 
@@ -654,7 +709,12 @@ wavelan_hardware_reset(device *dev)
 	obram_write(ioaddr, OFFSET_CU, (unsigned char *)&cfg, sizeof(cfg));
 
 	if (wavelan_synchronous_cmd(dev, "reset()-configure") == -1)
+	{
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_hardware_reset(): -1\n", dev->name);
+
 		return -1;
+	}
 
 	memset(&ias, 0x00, sizeof(ias));
 	ias.ias_h.ac_command = AC_CFLD_EL | (AC_CFLD_CMD & acmd_ia_setup);
@@ -663,18 +723,23 @@ wavelan_hardware_reset(device *dev)
 	obram_write(ioaddr, OFFSET_CU, (unsigned char *)&ias, sizeof(ias));
 
 	if (wavelan_synchronous_cmd(dev, "reset()-address") == -1)
+	{
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_hardware_reset(): -1\n", dev->name);
+
 		return -1;
+	}
 
 	wavelan_ints_on(dev);
 
 	if (wavelan_debug > 4)
-	{
 		wavelan_scb_show(ioaddr);
-		printk("%s: Initialized WaveLAN.\n", dev->name);
-	}
 
 	wavelan_ru_start(dev);
 	wavelan_cu_start(dev);
+
+	if (wavelan_debug > 0)
+		printk("%s: <-wavelan_hardware_reset(): 0\n", dev->name);
 
 	return 0;
 }
@@ -682,7 +747,7 @@ wavelan_hardware_reset(device *dev)
 #if	STRUCT_CHECK == 1
 
 static
-char	*
+const char	*
 wavelan_struct_check(void)
 {
 #define	SC(t,s,n)	if (sizeof(t) != s) return n
@@ -708,6 +773,7 @@ int
 wavelan_probe(device *dev)
 {
 	int			i;
+	int			r;
 	short			base_addr;
 	static unsigned short	iobase[]	=
 	{
@@ -721,10 +787,17 @@ wavelan_probe(device *dev)
 		0x390,
 	};
 
+	if (wavelan_debug > 0)
+		printk("%s: ->wavelan_probe(dev=0x%x (base_addr=0x%x))\n", dev->name, (unsigned int)dev, (unsigned int)dev->base_addr);
+
 #if	STRUCT_CHECK == 1
 	if (wavelan_struct_check() != (char *)0)
 	{
 		printk("%s: structure/compiler botch: \"%s\"\n", dev->name, wavelan_struct_check());
+
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_probe(): ENODEV\n", dev->name);
+
 		return ENODEV;
 	}
 #endif	/* STRUCT_CHECK == 1 */
@@ -732,16 +805,25 @@ wavelan_probe(device *dev)
 	base_addr = dev->base_addr;
 
 	if (base_addr < 0)
+	{
 		/*
 		 * Don't probe at all.
 		 */
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_probe(): ENXIO\n", dev->name);
 		return ENXIO;
+	}
 
 	if (base_addr > 0x100)
+	{
 		/*
 		 * Check a single specified location.
 		 */
-		return wavelan_probe1(dev, base_addr);
+		r = wavelan_probe1(dev, base_addr);
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_probe(): %d\n", dev->name, r);
+		return r;
+	}
 
 	for (i = 0; i < nels(iobase); i++)
 	{
@@ -749,8 +831,22 @@ wavelan_probe(device *dev)
 			continue;
 
 		if (wavelan_probe1(dev, iobase[i]) == 0)
+		{
+			if (wavelan_debug > 0)
+				printk("%s: <-wavelan_probe(): 0\n", dev->name);
+			proc_net_register(&(struct proc_dir_entry) {
+				PROC_NET_WAVELAN, 7, "wavelan",
+				S_IFREG | S_IRUGO, 1, 0, 0,
+				0, &proc_net_inode_operations,
+				wavelan_get_info
+			});
+
 			return 0;
+		}
 	}
+
+	if (wavelan_debug > 0)
+		printk("%s: <-wavelan_probe(): ENODEV\n", dev->name);
 
 	return ENODEV;
 }
@@ -763,6 +859,10 @@ wavelan_probe1(device *dev, unsigned short ioaddr)
 	int		irq;
 	int		i;
 	net_local	*lp;
+	int		enable_full_promiscuous;
+
+	if (wavelan_debug > 0)
+		printk("%s: ->wavelan_probe1(dev=0x%x, ioaddr=0x%x)\n", dev->name, (unsigned int)dev, ioaddr);
 
 	wavelan_reset(ioaddr);
 
@@ -780,13 +880,37 @@ wavelan_probe1(device *dev, unsigned short ioaddr)
 		||
 		psa.psa_univ_mac_addr[2] != SA_ADDR2
 	)
+	{
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_probe1(): ENODEV\n", dev->name);
 		return ENODEV;
+	}
 
 	printk("%s: WaveLAN at %#x,", dev->name, ioaddr);
 
-	if ((irq = wavelan_map_irq(ioaddr, psa.psa_int_req_no)) == -1)
+	if (dev->irq != 0)
 	{
-		printk(" could not wavelan_map_irq(0x%x, %d).\n", ioaddr, psa.psa_int_req_no);
+		printk("[WARNING: explicit IRQ value %d ignored: using PSA value instead]", dev->irq);
+#if	defined(IRQ_SET_WORKS)
+Leave this out until I can get it to work -- BJ.
+		if (wavelan_unmap_irq(dev->irq, &psa.psa_int_req_no) == -1)
+		{
+			printk(" could not wavelan_unmap_irq(%d, ..) -- ignored.\n", dev->irq);
+			dev->irq = 0;
+		}
+		else
+		{
+			psa_write(ioaddr, HACR_DEFAULT, (char *)&psa.psa_int_req_no - (char *)&psa, (unsigned char *)&psa.psa_int_req_no, sizeof(psa.psa_int_req_no));
+			wavelan_reset(ioaddr);
+		}
+#endif	/* defined(IRQ_SET_WORKS) */
+	}
+
+	if ((irq = wavelan_map_irq(psa.psa_int_req_no)) == -1)
+	{
+		printk(" could not wavelan_map_irq(%d).\n", psa.psa_int_req_no);
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_probe1(): EAGAIN\n", dev->name);
 		return EAGAIN;
 	}
 
@@ -796,10 +920,19 @@ wavelan_probe1(device *dev, unsigned short ioaddr)
 	dev->base_addr = ioaddr;
 
 	/*
-	 * Apparently the third numeric argument to LILO's
+	 * The third numeric argument to LILO's
 	 * `ether=' control line arrives here as `dev->mem_start'.
-	 * If it is non-zero we use it instead of the PSA NWID.
+	 *
+	 * If bit 16 of dev->mem_start is non-zero we enable
+	 * full promiscuity.
+	 *
+	 * If either of the least significant two bytes of
+	 * dev->mem_start are non-zero we use them instead
+	 * of the PSA NWID.
 	 */
+	enable_full_promiscuous = (dev->mem_start & ENABLE_FULL_PROMISCUOUS) == ENABLE_FULL_PROMISCUOUS;
+	dev->mem_start &= ~ENABLE_FULL_PROMISCUOUS;
+
 	if (dev->mem_start != 0)
 	{
 		psa.psa_nwid[0] = (dev->mem_start >> 8) & 0xFF;
@@ -816,6 +949,8 @@ wavelan_probe1(device *dev, unsigned short ioaddr)
 		printk("%s%02x", (i == 0) ? " " : ":", dev->dev_addr[i]);
 
 	printk(", IRQ %d", dev->irq);
+	if (enable_full_promiscuous)
+		printk(", promisc");
 	printk(", nwid 0x%02x%02x", psa.psa_nwid[0], psa.psa_nwid[1]);
 
 	printk(", PC");
@@ -871,10 +1006,12 @@ wavelan_probe1(device *dev, unsigned short ioaddr)
 
 	printk("\n");
 
-	if (wavelan_debug)
+	if (wavelan_debug > 0)
 		printk(version);
 
 	dev->priv = kmalloc(sizeof(net_local), GFP_KERNEL);
+	if (dev->priv == NULL)
+		return -ENOMEM;
 	memset(dev->priv, 0x00, sizeof(net_local));
 	lp = (net_local *)dev->priv;
 
@@ -895,6 +1032,7 @@ wavelan_probe1(device *dev, unsigned short ioaddr)
 
 	lp->hacr = HACR_DEFAULT;
 
+	lp->full_promiscuous = enable_full_promiscuous;
 	lp->nwid[0] = psa.psa_nwid[0];
 	lp->nwid[1] = psa.psa_nwid[1];
 
@@ -913,7 +1051,12 @@ wavelan_probe1(device *dev, unsigned short ioaddr)
 	 */
 	ether_setup(dev);
 
+	dev->flags &= ~IFF_MULTICAST;		/* Not yet supported */
+	
 	dev->mtu = WAVELAN_MTU;
+
+	if (wavelan_debug > 0)
+		printk("%s: <-wavelan_probe1(): 0\n", dev->name);
 
 	return 0;
 }
@@ -1074,12 +1217,21 @@ wavelan_open(device *dev)
 {
 	unsigned short	ioaddr;
 	net_local	*lp;
+	unsigned long	x;
+	int		r;
+
+	if (wavelan_debug > 0)
+		printk("%s: ->wavelan_open(dev=0x%x)\n", dev->name, (unsigned int)dev);
 
 	ioaddr = dev->base_addr;
 	lp = (net_local *)dev->priv;
 
 	if (dev->irq == 0)
+	{
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_open(): -ENXIO\n", dev->name);
 		return -ENXIO;
+	}
 
 	if
 	(
@@ -1088,26 +1240,36 @@ wavelan_open(device *dev)
 		||
 		(irq2dev_map[dev->irq] = dev) == (device *)0
 		||
-		request_irq(dev->irq, &wavelan_interrupt, 0, "WaveLAN") != 0
+		request_irq(dev->irq, &wavelan_interrupt, 0, "WaveLAN", NULL) != 0
 	)
 	{
 		irq2dev_map[dev->irq] = (device *)0;
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_open(): -EAGAIN\n", dev->name);
 		return -EAGAIN;
 	}
 
-	if (wavelan_hardware_reset(dev) == -1)
+	x = wavelan_splhi();
+	if ((r = wavelan_hardware_reset(dev)) != -1)
 	{
-		free_irq(dev->irq);
+		dev->interrupt = 0;
+		dev->start = 1;
+	}
+	wavelan_splx(x);
+
+	if (r == -1)
+	{
+		free_irq(dev->irq, NULL);
 		irq2dev_map[dev->irq] = (device *)0;
+		if (wavelan_debug > 0)
+			printk("%s: <-wavelan_open(): -EAGAIN(2)\n", dev->name);
 		return -EAGAIN;
 	}
 
-	dev->interrupt = 0;
-	dev->start = 1;
-
-#if	defined(MODULE)
 	MOD_INC_USE_COUNT;
-#endif	/* defined(MODULE) */
+
+	if (wavelan_debug > 0)
+		printk("%s: <-wavelan_open(): 0\n", dev->name);
 
 	return 0;
 }
@@ -1438,7 +1600,7 @@ wavelan_receive(device *dev)
 			}
 #endif	/* 0 */
 
-			if (wavelan_debug > 0)
+			if (wavelan_debug > 5)
 			{
 				unsigned char	addr[WAVELAN_ADDR_SIZE];
 				unsigned short	ltype;
@@ -1475,17 +1637,16 @@ wavelan_receive(device *dev)
 
 			sksize = pkt_len;
 
-			if ((skb = alloc_skb(sksize, GFP_ATOMIC)) == (struct sk_buff *)0)
+			if ((skb = dev_alloc_skb(sksize)) == (struct sk_buff *)0)
 			{
 				printk("%s: could not alloc_skb(%d, GFP_ATOMIC).\n", dev->name, sksize);
 				lp->stats.rx_dropped++;
 			}
 			else
 			{
-				skb->len = pkt_len;
 				skb->dev = dev;
 
-				obram_read(ioaddr, rbd.rbd_bufl, skb->data, pkt_len);
+				obram_read(ioaddr, rbd.rbd_bufl, skb_put(skb,pkt_len), pkt_len);
 
 				if (wavelan_debug > 5)
 				{
@@ -1514,6 +1675,7 @@ wavelan_receive(device *dev)
 					printk("\"\n\n");
 				}
 			
+				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);
 
 				lp->stats.rx_packets++;
@@ -1669,7 +1831,7 @@ wavelan_watchdog(unsigned long a)
 		return;
 	}
 
-	lp->watchdog.expires = WATCHDOG_JIFFIES;
+	lp->watchdog.expires = jiffies+WATCHDOG_JIFFIES;
 	add_timer(&lp->watchdog);
 
 	if (jiffies - dev->trans_start < WATCHDOG_JIFFIES)
@@ -1694,7 +1856,7 @@ wavelan_watchdog(unsigned long a)
 
 static
 void
-wavelan_interrupt(int irq, struct pt_regs *regs)
+wavelan_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	device		*dev;
 	unsigned short	ioaddr;
@@ -1723,14 +1885,14 @@ wavelan_interrupt(int irq, struct pt_regs *regs)
 		 * This will clear it -- ignored for now.
 		 */
 		mmc_read(ioaddr, mmroff(0, mmr_dce_status), &dce_status, sizeof(dce_status));
-		if (wavelan_debug > 4)
+		if (wavelan_debug > 0)
 			printk("%s: warning: wavelan_interrupt(): unexpected mmc interrupt: status 0x%04x.\n", dev->name, dce_status);
 	}
 
 	if ((hasr & HASR_82586_INTR) == 0)
 	{
 		dev->interrupt = 0;
-		if (wavelan_debug > 4)
+		if (wavelan_debug > 0)
 			printk("%s: warning: wavelan_interrupt() but (hasr & HASR_82586_INTR) == 0.\n", dev->name);
 		return;
 	}
@@ -1746,7 +1908,7 @@ wavelan_interrupt(int irq, struct pt_regs *regs)
 
 	set_chan_attn(ioaddr, lp->hacr);
 
-	if (wavelan_debug > 4)
+	if (wavelan_debug > 5)
 		printk("%s: interrupt, status 0x%04x.\n", dev->name, status);
 
 	if ((status & SCB_ST_CX) == SCB_ST_CX)
@@ -1804,6 +1966,9 @@ wavelan_close(device *dev)
 	net_local	*lp;
 	unsigned short	scb_cmd;
 
+	if (wavelan_debug > 0)
+		printk("%s: ->wavelan_close(dev=0x%x)\n", dev->name, (unsigned int)dev);
+
 	ioaddr = dev->base_addr;
 	lp = (net_local *)dev->priv;
 
@@ -1819,7 +1984,7 @@ wavelan_close(device *dev)
 
 	wavelan_ints_off(dev);
 
-	free_irq(dev->irq);
+	free_irq(dev->irq, NULL);
 	irq2dev_map[dev->irq] = (device *)0;
 
 	/*
@@ -1827,9 +1992,10 @@ wavelan_close(device *dev)
 	 */
 	release_region(ioaddr, sizeof(ha_t));
 
-#if	defined(MODULE)
 	MOD_DEC_USE_COUNT;
-#endif	/* defined(MODULE) */
+
+	if (wavelan_debug > 0)
+		printk("%s: <-wavelan_close(): 0\n", dev->name);
 
 	return 0;
 }
@@ -1851,16 +2017,18 @@ wavelan_get_stats(device *dev)
 
 static
 void
-wavelan_set_multicast_list(device *dev, int num_addrs, void *addrs)
+wavelan_set_multicast_list(device *dev)
 {
 	net_local	*lp;
 	unsigned long	x;
 
+	if (wavelan_debug > 0)
+		printk("%s: ->wavelan_set_multicast_list(dev=%p)", dev->name, dev);
+
 	lp = (net_local *)dev->priv;
 
-	switch (num_addrs)
+	if(dev->flags&IFF_PROMISC)
 	{
-	case -1:
 		/*
 		 * Promiscuous mode: receive all packets.
 		 */
@@ -1868,9 +2036,16 @@ wavelan_set_multicast_list(device *dev, int num_addrs, void *addrs)
 		x = wavelan_splhi();
 		(void)wavelan_hardware_reset(dev);
 		wavelan_splx(x);
-		break;
-
-	case 0:
+	}
+#if MULTICAST_IS_ADDED	
+	else if((dev->flags&IFF_ALLMULTI)||dev->mc_list)
+	{
+			
+	
+	}
+#endif	
+	else	
+	{
 		/*
 		 * Normal mode: disable promiscuous mode,
 		 * clear multicast list.
@@ -1879,15 +2054,10 @@ wavelan_set_multicast_list(device *dev, int num_addrs, void *addrs)
 		x = wavelan_splhi();
 		(void)wavelan_hardware_reset(dev);
 		wavelan_splx(x);
-		break;
-
-	default:
-		/*
-		 * Multicast mode: receive normal and
-		 * multicast packets and do best-effort filtering.
-		 */
-		break;
 	}
+
+	if (wavelan_debug > 0)
+		printk("%s: <-wavelan_set_multicast_list()\n", dev->name);
 }
 
 /*
@@ -1941,8 +2111,8 @@ sprintf_stats(char *buffer, device *dev)
 	);
 }
 
-int
-wavelan_get_info(char *buffer, char **start, off_t offset, int length)
+static int
+wavelan_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
 {
 	int		len;
 	off_t		begin;
@@ -1996,32 +2166,36 @@ wavelan_get_info(char *buffer, char **start, off_t offset, int length)
 }
 
 #if	defined(MODULE)
-char			kernel_version[]	= UTS_RELEASE;
+static char		devicename[9]		= { 0, };
 static struct device	dev_wavelan		=
 {
-	"       " /* "wavelan" */,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, wavelan_probe
+	devicename, /* device name is inserted by linux/drivers/net/net_init.c */
+	0, 0, 0, 0,
+	0, 0,
+	0, 0, 0, NULL, wavelan_probe
 };
+
+static int io = 0x390; /* Default from above.. */
+static int irq = 0;
 
 int
 init_module(void)
 {
+	dev_wavelan.base_addr = io;
+	dev_wavelan.irq       = irq;
 	if (register_netdev(&dev_wavelan) != 0)
 		return -EIO;
+
 	return 0;
 }
 
 void
 cleanup_module(void)
 {
-	if (MOD_IN_USE)
-		printk("wavelan: device busy, remove delayed\n");
-	else
-	{
-		unregister_netdev(&dev_wavelan);
-		kfree_s(dev_wavelan.priv, sizeof(struct net_local));
-		dev_wavelan.priv = NULL;
-	}
+	proc_net_unregister(PROC_NET_WAVELAN);
+	unregister_netdev(&dev_wavelan);
+	kfree_s(dev_wavelan.priv, sizeof(struct net_local));
+	dev_wavelan.priv = NULL;
 }
 #endif	/* defined(MODULE) */
 
@@ -2280,7 +2454,7 @@ wavelan_dev_show(device *dev)
 {
 	printk("dev:");
 	printk(" start=%d,", dev->start);
-	printk(" tbusy=%d,", dev->tbusy);
+	printk(" tbusy=%ld,", dev->tbusy);
 	printk(" interrupt=%d,", dev->interrupt);
 	printk(" trans_start=%ld,", dev->trans_start);
 	printk(" flags=0x%x,", dev->flags);
@@ -2330,6 +2504,7 @@ wavelan_local_show(device *dev)
  *	Matthew Geier (matthew@cs.usyd.edu.au),
  *	Remo di Giovanni (remo@cs.usyd.edu.au),
  *	Eckhard Grah (grah@wrcs1.urz.uni-wuppertal.de),
+ *	Vipul Gupta (vgupta@cs.binghamton.edu),
  *	Mark Hagan (mhagan@wtcpost.daytonoh.NCR.COM),
  *	Tim Nicholson (tim@cs.usyd.edu.au),
  *	Ian Parkin (ian@cs.usyd.edu.au),
@@ -2345,4 +2520,3 @@ wavelan_local_show(device *dev)
  * Basser Department of Computer Science           Phone:  +61-2-351-3423
  * University of Sydney, N.S.W., 2006, AUSTRALIA   Fax:    +61-2-351-3838
  */
-#endif	/* defined(CONFIG_WAVELAN) */

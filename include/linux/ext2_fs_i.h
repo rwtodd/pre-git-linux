@@ -1,9 +1,10 @@
 /*
  *  linux/include/linux/ext2_fs_i.h
  *
- *  Copyright (C) 1992, 1993, 1994  Remy Card (card@masi.ibp.fr)
- *                                  Laboratoire MASI - Institut Blaise Pascal
- *                                  Universite Pierre et Marie Curie (Paris VI)
+ * Copyright (C) 1992, 1993, 1994, 1995
+ * Remy Card (card@masi.ibp.fr)
+ * Laboratoire MASI - Institut Blaise Pascal
+ * Universite Pierre et Marie Curie (Paris VI)
  *
  *  from
  *
@@ -34,6 +35,7 @@ struct ext2_inode_info {
 	__u32	i_next_alloc_goal;
 	__u32	i_prealloc_block;
 	__u32	i_prealloc_count;
+	int	i_new_inode:1;	/* Is a freshly allocated inode */
 };
 
 #endif	/* _LINUX_EXT2_FS_I */

@@ -7,12 +7,6 @@
  *  (For directory without EMD file).
  */
 
-#ifdef MODULE
-#include <linux/module.h>
-#endif
-
-#include <asm/segment.h>
-
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
@@ -22,55 +16,77 @@
 #include <linux/umsdos_fs.h>
 #include <linux/malloc.h>
 
+#include <asm/segment.h>
+
 #define PRINTK(x)
 #define Printk(x) printk x
 
 
 extern struct inode *pseudo_root;
 
-static int UMSDOS_rreaddir (
-	struct inode *dir,
-	struct file *filp,
-    struct dirent *dirent,
-	int count)
+struct RDIR_FILLDIR {
+	void *dirbuf;
+	filldir_t filldir;
+	int real_root;
+};
+
+static int rdir_filldir(
+	void * buf,
+	const char * name,
+	int name_len,
+	off_t offset,
+	ino_t ino)
 {
 	int ret = 0;
-	while (1){
-		int len = -1;
-		ret = msdos_readdir(dir,filp,dirent,count);
-		if (ret > 0) len = get_fs_word(&dirent->d_reclen);
-		if (len == 5
-			&& pseudo_root != NULL
-			&& dir->i_sb->s_mounted == pseudo_root->i_sb->s_mounted){
-			/*
-				In pseudo root mode, we must eliminate logically
-				the directory linux from the real root.
-			*/
-			char name[5];
-			memcpy_fromfs (name,dirent->d_name,5);
-			if (memcmp(name,UMSDOS_PSDROOT_NAME,UMSDOS_PSDROOT_LEN)!=0) break;
-		}else{
-			if (pseudo_root != NULL
-				&& len == 2
-				&& dir == dir->i_sb->s_mounted
-				&& dir == pseudo_root->i_sb->s_mounted){
-				char name[2];
-				memcpy_fromfs (name,dirent->d_name,2);
-				if (name[0] == '.' && name[1] == '.'){
-					put_fs_long (pseudo_root->i_ino,&dirent->d_ino);
-				}
+	struct RDIR_FILLDIR *d = (struct RDIR_FILLDIR*) buf;
+	if (d->real_root){
+		/* real root of a pseudo_rooted partition */
+		if (name_len != UMSDOS_PSDROOT_LEN
+			|| memcmp(name,UMSDOS_PSDROOT_NAME,UMSDOS_PSDROOT_LEN)!=0){
+			/* So it is not the /linux directory */
+			if (name_len == 2
+				&& name[0] == '.'
+				&& name[1] == '.'){
+				/* Make sure the .. entry points back to the pseudo_root */
+				ino = pseudo_root->i_ino;
 			}
-			break;
+			ret = d->filldir (d->dirbuf,name,name_len,offset,ino);
 		}
+	}else{
+		/* Any DOS directory */
+		ret = d->filldir (d->dirbuf,name,name_len,offset,ino);
 	}
 	return ret;
 }
 
-int UMSDOS_rlookup(
+
+static int UMSDOS_rreaddir (
+	struct inode *dir,
+	struct file *filp,
+    void *dirbuf,
+	filldir_t filldir)
+{
+	struct RDIR_FILLDIR bufk;
+	bufk.filldir = filldir;
+	bufk.dirbuf = dirbuf;
+	bufk.real_root = pseudo_root != NULL
+		&& dir == dir->i_sb->s_mounted
+		&& dir == pseudo_root->i_sb->s_mounted;
+	return fat_readdir(dir,filp,&bufk,rdir_filldir);
+}
+
+/*
+	Lookup into a non promoted directory.
+	If the result is a directory, make sure we find out if it is
+	a promoted one or not (calling umsdos_setup_dir_inode(inode)).
+*/
+int umsdos_rlookup_x(
 	struct inode *dir,
 	const char *name,
 	int len,
-	struct inode **result)	/* Will hold inode of the file, if successful */
+	struct inode **result,	/* Will hold inode of the file, if successful */
+	int nopseudo)			/* Don't care about pseudo root mode */
+							/* so locating "linux" will work */
 {
 	int ret;
 	if (pseudo_root != NULL
@@ -90,7 +106,7 @@ int UMSDOS_rlookup(
 		ret = umsdos_real_lookup (dir,name,len,result);
 		if (ret == 0){
 			struct inode *inode = *result;
-			if (inode == pseudo_root){
+			if (inode == pseudo_root && !nopseudo){
 				/* #Specification: pseudo root / DOS/linux
 					Even in the real root directory (c:\), the directory
 					/linux won't show
@@ -107,6 +123,14 @@ int UMSDOS_rlookup(
 	}
 	iput (dir);
 	return ret;
+}
+int UMSDOS_rlookup(
+	struct inode *dir,
+	const char *name,
+	int len,
+	struct inode **result)	/* Will hold inode of the file, if successful */
+{
+	return umsdos_rlookup_x(dir,name,len,result,0);
 }
 
 static int UMSDOS_rrmdir (
@@ -237,6 +261,8 @@ struct inode_operations umsdos_rdir_inode_operations = {
 	msdos_rename,		/* rename */
 	NULL,				/* readlink */
 	NULL,				/* follow_link */
+	NULL,				/* readpage */
+	NULL,				/* writepage */
 	NULL,				/* bmap */
 	NULL,				/* truncate */
 	NULL				/* permission */

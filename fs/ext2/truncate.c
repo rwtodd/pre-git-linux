@@ -1,9 +1,10 @@
 /*
  *  linux/fs/ext2/truncate.c
  *
- *  Copyright (C) 1992, 1993, 1994  Remy Card (card@masi.ibp.fr)
- *                                  Laboratoire MASI - Institut Blaise Pascal
- *                                  Universite Pierre et Marie Curie (Paris VI)
+ * Copyright (C) 1992, 1993, 1994, 1995
+ * Remy Card (card@masi.ibp.fr)
+ * Laboratoire MASI - Institut Blaise Pascal
+ * Universite Pierre et Marie Curie (Paris VI)
  *
  *  from
  *
@@ -26,9 +27,21 @@
 #include <linux/locks.h>
 #include <linux/string.h>
 
+#if 0
+
+/*
+ * Secure deletion currently doesn't work. It interacts very badly
+ * with buffers shared with memory mappings, and for that reason
+ * can't be done in the truncate() routines. It should instead be
+ * done separately in "release()" before calling the truncate routines
+ * that will release the actual file blocks.
+ *
+ *		Linus
+ */
 static int ext2_secrm_seed = 152;	/* Random generator base */
 
 #define RANDOM_INT (ext2_secrm_seed = ext2_secrm_seed * 69069l +1)
+#endif
 
 /*
  * Truncate has the most races in the whole filesystem: coding it is
@@ -62,12 +75,8 @@ repeat:
 		tmp = *p;
 		if (!tmp)
 			continue;
-		if (inode->u.ext2_i.i_flags & EXT2_SECRM_FL)
-			bh = getblk (inode->i_dev, tmp,
+		bh = get_hash_table (inode->i_dev, tmp,
 				     inode->i_sb->s_blocksize);
-		else
-			bh = get_hash_table (inode->i_dev, tmp,
-					     inode->i_sb->s_blocksize);
 		if (i < direct_block) {
 			brelse (bh);
 			goto repeat;
@@ -80,25 +89,21 @@ repeat:
 		*p = 0;
 		inode->i_blocks -= blocks;
 		inode->i_dirt = 1;
-		if (inode->u.ext2_i.i_flags & EXT2_SECRM_FL) {
-			memset(bh->b_data, RANDOM_INT, inode->i_sb->s_blocksize);
-			mark_buffer_dirty(bh, 1);
-		}
-		brelse (bh);
+		bforget(bh);
 		if (free_count == 0) {
 			block_to_free = tmp;
 			free_count++;
 		} else if (free_count > 0 && block_to_free == tmp - free_count)
 			free_count++;
 		else {
-			ext2_free_blocks (inode->i_sb, block_to_free, free_count);
+			ext2_free_blocks (inode, block_to_free, free_count);
 			block_to_free = tmp;
 			free_count = 1;
 		}
-/*		ext2_free_blocks (inode->i_sb, tmp, 1); */
+/*		ext2_free_blocks (inode, tmp, 1); */
 	}
 	if (free_count > 0)
-		ext2_free_blocks (inode->i_sb, block_to_free, free_count);
+		ext2_free_blocks (inode, block_to_free, free_count);
 	return retry;
 }
 
@@ -138,12 +143,8 @@ repeat:
 		tmp = *ind;
 		if (!tmp)
 			continue;
-		if (inode->u.ext2_i.i_flags & EXT2_SECRM_FL)
-			bh = getblk (inode->i_dev, tmp,
+		bh = get_hash_table (inode->i_dev, tmp,
 				     inode->i_sb->s_blocksize);
-		else
-			bh = get_hash_table (inode->i_dev, tmp,
-					     inode->i_sb->s_blocksize);
 		if (i < indirect_block) {
 			brelse (bh);
 			goto repeat;
@@ -155,27 +156,23 @@ repeat:
 		}
 		*ind = 0;
 		mark_buffer_dirty(ind_bh, 1);
-		if (inode->u.ext2_i.i_flags & EXT2_SECRM_FL) {
-			memset(bh->b_data, RANDOM_INT, inode->i_sb->s_blocksize);
-			mark_buffer_dirty(bh, 1);
-		}
-		brelse (bh);
+		bforget(bh);
 		if (free_count == 0) {
 			block_to_free = tmp;
 			free_count++;
 		} else if (free_count > 0 && block_to_free == tmp - free_count)
 			free_count++;
 		else {
-			ext2_free_blocks (inode->i_sb, block_to_free, free_count);
+			ext2_free_blocks (inode, block_to_free, free_count);
 			block_to_free = tmp;
 			free_count = 1;
 		}
-/*		ext2_free_blocks (inode->i_sb, tmp, 1); */
+/*		ext2_free_blocks (inode, tmp, 1); */
 		inode->i_blocks -= blocks;
 		inode->i_dirt = 1;
 	}
 	if (free_count > 0)
-		ext2_free_blocks (inode->i_sb, block_to_free, free_count);
+		ext2_free_blocks (inode, block_to_free, free_count);
 	ind = (u32 *) ind_bh->b_data;
 	for (i = 0; i < addr_per_block; i++)
 		if (*(ind++))
@@ -188,9 +185,9 @@ repeat:
 			*p = 0;
 			inode->i_blocks -= blocks;
 			inode->i_dirt = 1;
-			ext2_free_blocks (inode->i_sb, tmp, 1);
+			ext2_free_blocks (inode, tmp, 1);
 		}
-	if (IS_SYNC(inode) && ind_bh->b_dirt) {
+	if (IS_SYNC(inode) && buffer_dirty(ind_bh)) {
 		ll_rw_block (WRITE, 1, &ind_bh);
 		wait_on_buffer (ind_bh);
 	}
@@ -248,9 +245,9 @@ repeat:
 			*p = 0;
 			inode->i_blocks -= blocks;
 			inode->i_dirt = 1;
-			ext2_free_blocks (inode->i_sb, tmp, 1);
+			ext2_free_blocks (inode, tmp, 1);
 		}
-	if (IS_SYNC(inode) && dind_bh->b_dirt) {
+	if (IS_SYNC(inode) && buffer_dirty(dind_bh)) {
 		ll_rw_block (WRITE, 1, &dind_bh);
 		wait_on_buffer (dind_bh);
 	}
@@ -307,9 +304,9 @@ repeat:
 			*p = 0;
 			inode->i_blocks -= blocks;
 			inode->i_dirt = 1;
-			ext2_free_blocks (inode->i_sb, tmp, 1);
+			ext2_free_blocks (inode, tmp, 1);
 		}
-	if (IS_SYNC(inode) && tind_bh->b_dirt) {
+	if (IS_SYNC(inode) && buffer_dirty(tind_bh)) {
 		ll_rw_block (WRITE, 1, &tind_bh);
 		wait_on_buffer (tind_bh);
 	}
@@ -320,6 +317,9 @@ repeat:
 void ext2_truncate (struct inode * inode)
 {
 	int retry;
+	struct buffer_head * bh;
+	int err;
+	int offset;
 
 	if (!(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) ||
 	    S_ISLNK(inode->i_mode)))
@@ -328,7 +328,6 @@ void ext2_truncate (struct inode * inode)
 		return;
 	ext2_discard_prealloc(inode);
 	while (1) {
-		down(&inode->i_sem);
 		retry = trunc_direct(inode);
 		retry |= trunc_indirect (inode, EXT2_IND_BLOCK,
 			(u32 *) &inode->u.ext2_i.i_data[EXT2_IND_BLOCK]);
@@ -336,13 +335,30 @@ void ext2_truncate (struct inode * inode)
 			EXT2_ADDR_PER_BLOCK(inode->i_sb),
 			(u32 *) &inode->u.ext2_i.i_data[EXT2_DIND_BLOCK]);
 		retry |= trunc_tindirect (inode);
-		up(&inode->i_sem);
 		if (!retry)
 			break;
 		if (IS_SYNC(inode) && inode->i_dirt)
 			ext2_sync_inode (inode);
 		current->counter = 0;
 		schedule ();
+	}
+	/*
+	 * If the file is not being truncated to a block boundary, the
+	 * contents of the partial block following the end of the file must be
+	 * zeroed in case it ever becomes accessible again because of
+	 * subsequent file growth.
+	 */
+	offset = inode->i_size & (inode->i_sb->s_blocksize - 1);
+	if (offset) {
+		bh = ext2_bread (inode,
+				 inode->i_size >> EXT2_BLOCK_SIZE_BITS(inode->i_sb),
+				 0, &err);
+		if (bh) {
+			memset (bh->b_data + offset, 0,
+				inode->i_sb->s_blocksize - offset);
+			mark_buffer_dirty (bh, 0);
+			brelse (bh);
+		}
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	inode->i_dirt = 1;

@@ -1,9 +1,10 @@
 /*
  *  linux/include/linux/ext2_fs_sb.h
  *
- *  Copyright (C) 1992, 1993, 1994  Remy Card (card@masi.ibp.fr)
- *                                  Laboratoire MASI - Institut Blaise Pascal
- *                                  Universite Pierre et Marie Curie (Paris VI)
+ * Copyright (C) 1992, 1993, 1994, 1995
+ * Remy Card (card@masi.ibp.fr)
+ * Laboratoire MASI - Institut Blaise Pascal
+ * Universite Pierre et Marie Curie (Paris VI)
  *
  *  from
  *
@@ -14,6 +15,8 @@
 
 #ifndef _LINUX_EXT2_FS_SB
 #define _LINUX_EXT2_FS_SB
+
+#include <linux/ext2_fs.h>
 
 /*
  * The following is not needed anymore since the descriptors buffer
@@ -52,6 +55,11 @@ struct ext2_sb_info {
 	unsigned short s_resuid;
 	unsigned short s_resgid;
 	unsigned short s_mount_state;
+	unsigned short s_pad;
+	int s_addr_per_block_bits;
+	int s_desc_per_block_bits;
+	int s_inode_size;
+	int s_first_ino;
 };
 
 #endif	/* _LINUX_EXT2_FS_SB */

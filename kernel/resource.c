@@ -13,7 +13,7 @@
 #include <linux/types.h>
 #include <linux/ioport.h>
 
-#define IOTABLE_SIZE 32
+#define IOTABLE_SIZE 64
 
 typedef struct resource_entry_t {
 	u_long from, num;
@@ -90,15 +90,6 @@ void request_region(unsigned int from, unsigned int num, const char *name)
 		p->next = &iotable[i];
 		return;
 	}
-}
-
-/*
- * This is for compatibility with older drivers.
- * It can be removed when all drivers call the new function.
- */
-void snarf_region(unsigned int from, unsigned int num)
-{
-	request_region(from,num,"No name given.");
 }
 
 /* 
