@@ -1,14 +1,21 @@
+/* $Id: delay.h,v 1.2 1999/01/04 16:09:20 ralf Exp $
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1994 by Waldorf Electronics
+ * Copyright (C) 1995 - 1998 by Ralf Baechle
+ */
 #ifndef __ASM_MIPS_DELAY_H
 #define __ASM_MIPS_DELAY_H
 
 extern __inline__ void __delay(int loops)
 {
 	__asm__ __volatile__ (
-		".set\tnoreorder\n\t"
-		".set\tnoat\n\t"
-		"1:\tbne\t$0,%0,1b\n\t"
-		"subu\t%0,%0,1\n\t"
-		".set\tat\n\t"
+		".set\tnoreorder\n"
+		"1:\tbnez\t%0,1b\n\t"
+		"subu\t%0,1\n\t"
 		".set\treorder"
 		:"=r" (loops)
 		:"0" (loops));
@@ -24,23 +31,22 @@ extern __inline__ void __delay(int loops)
  * first constant multiplications gets optimized away if the delay is
  * a constant)
  */
-extern __inline__ void udelay(unsigned long usecs)
+extern __inline__ void __udelay(unsigned long usecs, unsigned long lps)
 {
 	usecs *= 0x000010c6;		/* 2**32 / 1000000 */
-	__asm__("multu\t%0,%1\n\t"
+	__asm__("multu\t%0,%2\n\t"
 		"mfhi\t%0"
 		:"=r" (usecs)
-		:"0" (usecs),"r" (loops_per_sec));
+		:"0" (usecs),"r" (lps));
 	__delay(usecs);
 }
 
-/*
- * The different variants for 32/64 bit are pure paranoia. The typical
- * range of numbers that appears for MIPS machines avoids overflows.
- */
-extern __inline__ unsigned long muldiv(unsigned long a, unsigned long b, unsigned long c)
-{
-	return (a*b)/c;
-}
+#ifdef __SMP__
+#define __udelay_val cpu_data[smp_processor_id()].udelay_val
+#else
+#define __udelay_val loops_per_sec
+#endif
+
+#define udelay(usecs) __udelay((usecs),__udelay_val)
 
 #endif /* __ASM_MIPS_DELAY_H */

@@ -1,3 +1,13 @@
+/* $Id: page.h,v 1.6 1999/01/04 16:09:24 ralf Exp $
+ *
+ * Definitions for page handling
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1994 - 1998 by Ralf Baechle
+ */
 #ifndef __ASM_MIPS_PAGE_H
 #define __ASM_MIPS_PAGE_H
 
@@ -10,7 +20,10 @@
 
 #define STRICT_MM_TYPECHECKS
 
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
+
+extern void (*clear_page)(unsigned long page);
+extern void (*copy_page)(unsigned long to, unsigned long from);
 
 #ifdef STRICT_MM_TYPECHECKS
 /*
@@ -52,51 +65,20 @@ typedef unsigned long pgprot_t;
 
 #endif /* !defined (STRICT_MM_TYPECHECKS) */
 
-/*
- * We need a special version of copy_page that can handle virtual caches.
- * While we're at tweaking with caches we can use that to make it even
- * faster.  The R10000 accelerated caching mode will further accelerate it.
- */
-extern void __copy_page(unsigned long from, unsigned long to);
-#define copy_page(from,to) __copy_page((unsigned long)from, (unsigned long)to)
-
-#endif /* __LANGUAGE_ASSEMBLY__ */
+#endif /* _LANGUAGE_ASSEMBLY */
 
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-/* This handles the memory map */
-#if __mips == 3
 /*
- * We handle pages at XKPHYS + 0x1800000000000000 (cachable, noncoherent)
- * Pagetables are at  XKPHYS + 0x1000000000000000 (uncached)
+ * This handles the memory map.
+ * We handle pages at KSEG0 for kernels with 32 bit address space.
  */
-#define PAGE_OFFSET	0x9800000000000000UL
-#define PT_OFFSET	0x9000000000000000UL
-#define MAP_MASK        0x07ffffffffffffffUL
-#else
-/*
- * We handle pages at KSEG0 (cachable, noncoherent)
- * Pagetables are at  KSEG1 (uncached)
- */
-#define PAGE_OFFSET	0x80000000
-#define PT_OFFSET	0xa0000000
-#define MAP_MASK        0x1fffffff
-#endif
+#define PAGE_OFFSET	0x80000000UL
+#define __pa(x)		((unsigned long) (x) - PAGE_OFFSET)
+#define __va(x)		((void *)((unsigned long) (x) + PAGE_OFFSET))
+#define MAP_NR(addr)	(__pa(addr) >> PAGE_SHIFT)
 
-#define MAP_NR(addr)	((((unsigned long)(addr)) & MAP_MASK) >> PAGE_SHIFT)
-
-#ifndef __LANGUAGE_ASSEMBLY__
-
-extern unsigned long page_colour_mask;
-
-extern inline unsigned long
-page_colour(unsigned long page)
-{
-	return page & page_colour_mask;
-}
-
-#endif /* defined (__LANGUAGE_ASSEMBLY__) */
 #endif /* defined (__KERNEL__) */
 
 #endif /* __ASM_MIPS_PAGE_H */

@@ -1,107 +1,146 @@
 /*
- *  linux/arch/i386/kernel/time.c
+ * $Id: time.c,v 1.47.2.4 1999/08/27 04:20:32 cort Exp $
+ * Common time routines among all ppc machines.
  *
- *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
+ * Written by Cort Dougan (cort@cs.nmt.edu) to merge
+ * Paul Mackerras' version and mine for PReP and Pmac.
+ * MPC8xx/MBX changes by Dan Malek (dmalek@jlc.net).
  *
- * Adapted for PowerPC (PreP) by Gary Thomas
+ * Since the MPC8xx has a programmable interrupt timer, I decided to
+ * use that rather than the decrementer.  Two reasons: 1.) the clock
+ * frequency is low, causing 2.) a long wait in the timer interrupt
+ *		while ((d = get_dec()) == dval)
+ * loop.  The MPC8xx can be driven from a variety of input clocks,
+ * so a number of assumptions have been made here because the kernel
+ * parameter HZ is a constant.  We assume (correctly, today :-) that
+ * the MPC8xx on the MBX board is driven from a 32.768 kHz crystal.
+ * This is then divided by 4, providing a 8192 Hz clock into the PIT.
+ * Since it is not possible to get a nice 100 Hz clock out of this, without
+ * creating a software PLL, I have set HZ to 128.  -- Dan
  *
- * This file contains the PC-specific time handling details:
- * reading the RTC at bootup, etc..
- * 1994-07-02    Alan Modra
- *	fixed set_rtc_mmss, fixed time.year for >= 2000, new mktime
- * 1995-03-26    Markus Kuhn
- *      fixed 500 ms bug at call to set_rtc_mmss, fixed DS12887
- *      precision CMOS clock update
+ * 1997-09-10  Updated NTP code according to technical memorandum Jan '96
+ *             "A Kernel Model for Precision Timekeeping" by Dave Mills
  */
+
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/interrupt.h>
+#include <linux/timex.h>
+#include <linux/kernel_stat.h>
+#include <linux/mc146818rtc.h>
+#include <linux/time.h>
+#include <linux/init.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
+#include <asm/processor.h>
 #include <asm/nvram.h>
-#include <asm/mc146818rtc.h>
+#include <asm/cache.h>
+#ifdef CONFIG_8xx
+#include <asm/8xx_immap.h>
+#endif
+#include <asm/machdep.h>
 
-#include <linux/timex.h>
-#include <linux/config.h>
+#include "time.h"
 
-extern int isBeBox[];
+void smp_local_timer_interrupt(struct pt_regs *);
 
-#define TIMER_IRQ 0
+/* keep track of when we need to update the rtc */
+time_t last_rtc_update = 0;
 
-/* Cycle counter value at the previous timer interrupt.. */
-static unsigned long long last_timer_cc = 0;
-static unsigned long long init_timer_cc = 0;
+/* The decrementer counts down by 128 every 128ns on a 601. */
+#define DECREMENTER_COUNT_601	(1000000000 / HZ)
+#define COUNT_PERIOD_NUM_601	1
+#define COUNT_PERIOD_DEN_601	1000
 
-static inline int CMOS_READ(int addr)
-{
-	outb(addr>>8, NVRAM_AS1);
-	outb(addr, NVRAM_AS0);
-	return (inb(NVRAM_DATA));
-}
-
-/* This function must be called with interrupts disabled 
- * It was inspired by Steve McCanne's microtime-i386 for BSD.  -- jrs
- * 
- * However, the pc-audio speaker driver changes the divisor so that
- * it gets interrupted rather more often - it loads 64 into the
- * counter rather than 11932! This has an adverse impact on
- * do_gettimeoffset() -- it stops working! What is also not
- * good is that the interval that our timer function gets called
- * is no longer 10.0002 ms, but 9.9767 ms. To get around this
- * would require using a different timing source. Maybe someone
- * could use the RTC - I know that this can interrupt at frequencies
- * ranging from 8192Hz to 2Hz. If I had the energy, I'd somehow fix
- * it so that at startup, the timer code in sched.c would select
- * using either the RTC or the 8253 timer. The decision would be
- * based on whether there was any other device around that needed
- * to trample on the 8253. I'd set up the RTC to interrupt at 1024 Hz,
- * and then do some jiggery to have a version of do_timer that 
- * advanced the clock by 1/1024 s. Every time that reached over 1/100
- * of a second, then do all the old code. If the time was kept correct
- * then do_gettimeoffset could just return 0 - there is no low order
- * divider that can be accessed.
- *
- * Ideally, you would be able to use the RTC for the speaker driver,
- * but it appears that the speaker driver really needs interrupt more
- * often than every 120 us or so.
- *
- * Anyway, this needs more thought....		pjsg (1993-08-28)
- * 
- * If you are really that interested, you should be reading
- * comp.protocols.time.ntp!
- */
-
-#define TICK_SIZE tick
-
-static unsigned long do_slow_gettimeoffset(void)
-{
-	int count;
-	unsigned long offset = 0;
-
-	/* timer count may underflow right here */
-	outb_p(0x00, 0x43);	/* latch the count ASAP */
-	count = inb_p(0x40);	/* read the latched count */
-	count |= inb(0x40) << 8;
-	/* we know probability of underflow is always MUCH less than 1% */
-	if (count > (LATCH - LATCH/100)) {
-		/* check for pending timer interrupt */
-		outb_p(0x0a, 0x20);
-		if (inb(0x20) & 1)
-			offset = TICK_SIZE;
-	}
-	count = ((LATCH-1) - count) * TICK_SIZE;
-	count = (count + LATCH/2) / LATCH;
-	return offset + count;
-}
-
-static unsigned long (*do_gettimeoffset)(void) = do_slow_gettimeoffset;
+unsigned decrementer_count;	/* count value for 1e6/HZ microseconds */
+unsigned count_period_num;	/* 1 decrementer count equals */
+unsigned count_period_den;	/* count_period_num / count_period_den us */
 
 /*
- * This version of gettimeofday has near microsecond resolution.
+ * timer_interrupt - gets called when the decrementer overflows,
+ * with interrupts disabled.
+ * We set it up to overflow again in 1/HZ seconds.
+ */
+void timer_interrupt(struct pt_regs * regs)
+{
+	int dval, d;
+	unsigned long cpu = smp_processor_id();
+	
+	hardirq_enter(cpu);
+#ifdef __SMP__
+	{
+		unsigned int loops = 100000000;
+		while (test_bit(0, &global_irq_lock)) {
+			if (smp_processor_id() == global_irq_holder) {
+				printk("uh oh, interrupt while we hold global irq lock!\n");
+#ifdef CONFIG_XMON
+				xmon(0);
+#endif
+				break;
+			}
+			if (loops-- == 0) {
+				printk("do_IRQ waiting for irq lock (holder=%d)\n", global_irq_holder);
+#ifdef CONFIG_XMON
+				xmon(0);
+#endif
+			}
+		}
+	}
+#endif /* __SMP__ */			
+	
+	while ((dval = get_dec()) < 0) {
+		/*
+		 * Wait for the decrementer to change, then jump
+		 * in and add decrementer_count to its value
+		 * (quickly, before it changes again!)
+		 */
+		while ((d = get_dec()) == dval)
+			;
+		set_dec(d + decrementer_count);
+		if ( !smp_processor_id() )
+		{
+			do_timer(regs);
+			/*
+			 * update the rtc when needed
+			 */
+			if ( (time_status & STA_UNSYNC) &&
+			     ((xtime.tv_sec > last_rtc_update + 60) ||
+			      (xtime.tv_sec < last_rtc_update)) )
+			{
+				if (ppc_md.set_rtc_time(xtime.tv_sec) == 0)
+					last_rtc_update = xtime.tv_sec;
+				else
+					/* do it again in 60 s */
+					last_rtc_update = xtime.tv_sec;
+			}
+		}
+	}
+#ifdef __SMP__
+	smp_local_timer_interrupt(regs);
+#endif		
+
+#ifdef CONFIG_APUS
+	{
+		extern void apus_heartbeat (void);
+		apus_heartbeat ();
+	}
+#endif
+#if defined(CONFIG_ALL_PPC) || defined(CONFIG_CHRP)
+	if ( _machine == _MACH_chrp )
+		chrp_event_scan();
+#endif	
+
+	hardirq_exit(cpu);
+}
+
+/*
+ * This version of gettimeofday has microsecond resolution.
  */
 void do_gettimeofday(struct timeval *tv)
 {
@@ -110,131 +149,61 @@ void do_gettimeofday(struct timeval *tv)
 	save_flags(flags);
 	cli();
 	*tv = xtime;
-	tv->tv_usec += do_gettimeoffset();
+	/* XXX we don't seem to have the decrementers synced properly yet */
+#ifndef __SMP__
+	tv->tv_usec += (decrementer_count - get_dec())
+	    * count_period_num / count_period_den;
 	if (tv->tv_usec >= 1000000) {
 		tv->tv_usec -= 1000000;
 		tv->tv_sec++;
 	}
+#endif
 	restore_flags(flags);
 }
 
 void do_settimeofday(struct timeval *tv)
 {
+	unsigned long flags;
+	int frac_tick;
+	
+	last_rtc_update = 0; /* so the rtc gets updated soon */
+	frac_tick = tv->tv_usec % (1000000 / HZ);
+	save_flags(flags);
 	cli();
-	/* This is revolting. We need to set the xtime.tv_usec
-	 * correctly. However, the value in this location is
-	 * is value at the last tick.
-	 * Discover what correction gettimeofday
-	 * would have done, and then undo it!
-	 */
-	tv->tv_usec -= do_gettimeoffset();
+	xtime.tv_sec = tv->tv_sec;
+	xtime.tv_usec = tv->tv_usec - frac_tick;
+	set_dec(frac_tick * count_period_den / count_period_num);
+	time_adjust = 0;                /* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_state = TIME_ERROR;        /* p. 24, (a) */
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
+	restore_flags(flags);
+}
 
-	if (tv->tv_usec < 0) {
-		tv->tv_usec += 1000000;
-		tv->tv_sec--;
+
+__initfunc(void time_init(void))
+{
+        if (ppc_md.time_init != NULL)
+        {
+                ppc_md.time_init();
+        }
+
+	if ((_get_PVR() >> 16) == 1) {
+		/* 601 processor: dec counts down by 128 every 128ns */
+		decrementer_count = DECREMENTER_COUNT_601;
+		count_period_num = COUNT_PERIOD_NUM_601;
+		count_period_den = COUNT_PERIOD_DEN_601;
+        } else if (!smp_processor_id()) {
+                ppc_md.calibrate_decr();
 	}
 
-	xtime = *tv;
-	time_state = TIME_BAD;
-	time_maxerror = 0x70000000;
-	time_esterror = 0x70000000;
-	sti();
-}
+        xtime.tv_sec = ppc_md.get_rtc_time();
+        xtime.tv_usec = 0;
 
-
-/*
- * In order to set the CMOS clock precisely, set_rtc_mmss has to be
- * called 500 ms after the second nowtime has started, because when
- * nowtime is written into the registers of the CMOS clock, it will
- * jump to the next second precisely 500 ms later. Check the Motorola
- * MC146818A or Dallas DS12887 data sheet for details.
- */
-static int set_rtc_mmss(unsigned long nowtime)
-{
-	int retval = 0;
-	int real_seconds, real_minutes, cmos_minutes;
-	unsigned char save_control, save_freq_select;
-
-#ifdef __powerpc__
-return (-1);  /* Not implemented */
-#else	
-
-	save_control = CMOS_READ(RTC_CONTROL); /* tell the clock it's being set */
-	CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
-
-	save_freq_select = CMOS_READ(RTC_FREQ_SELECT); /* stop and reset prescaler */
-	CMOS_WRITE((save_freq_select|RTC_DIV_RESET2), RTC_FREQ_SELECT);
-
-	cmos_minutes = CMOS_READ(RTC_MINUTES);
-	if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-		BCD_TO_BIN(cmos_minutes);
-
-	/*
-	 * since we're only adjusting minutes and seconds,
-	 * don't interfere with hour overflow. This avoids
-	 * messing with unknown time zones but requires your
-	 * RTC not to be off by more than 15 minutes
-	 */
-	real_seconds = nowtime % 60;
-	real_minutes = nowtime / 60;
-	if (((abs(real_minutes - cmos_minutes) + 15)/30) & 1)
-		real_minutes += 30;		/* correct for half hour time zone */
-	real_minutes %= 60;
-
-	if (abs(real_minutes - cmos_minutes) < 30) {
-		if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
-			BIN_TO_BCD(real_seconds);
-			BIN_TO_BCD(real_minutes);
-		}
-		CMOS_WRITE(real_seconds,RTC_SECONDS);
-		CMOS_WRITE(real_minutes,RTC_MINUTES);
-	} else
-		retval = -1;
-
-	/* The following flags have to be released exactly in this order,
-	 * otherwise the DS12887 (popular MC146818A clone with integrated
-	 * battery and quartz) will not reset the oscillator and will not
-	 * update precisely 500 ms later. You won't find this mentioned in
-	 * the Dallas Semiconductor data sheets, but who believes data
-	 * sheets anyway ...                           -- Markus Kuhn
-	 */
-	CMOS_WRITE(save_control, RTC_CONTROL);
-	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
-
-	return retval;
-#endif	
-}
-
-/* last time the cmos clock got updated */
-static long last_rtc_update = 0;
-
-/*
- * timer_interrupt() needs to keep up the real-time clock,
- * as well as call the "do_timer()" routine every clocktick
- */
-static inline void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
-{
-	do_timer(regs);
-
-	/*
-	 * If we have an externally synchronized Linux clock, then update
-	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
-	 * called as close as possible to 500 ms before the new second starts.
-	 */
-	if (time_state != TIME_BAD && xtime.tv_sec > last_rtc_update + 660 &&
-	    xtime.tv_usec > 500000 - (tick >> 1) &&
-	    xtime.tv_usec < 500000 + (tick >> 1))
-	  if (set_rtc_mmss(xtime.tv_sec) == 0)
-	    last_rtc_update = xtime.tv_sec;
-	  else
-	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
-#if 0
-	/* As we return to user mode fire off the other CPU schedulers.. this is 
-	   basically because we don't yet share IRQ's around. This message is
-	   rigged to be safe on the 386 - basically its a hack, so don't look
-	   closely for now.. */
-	smp_message_pass(MSG_ALL_BUT_SELF, MSG_RESCHEDULE, 0L, 0); 
-#endif	    
+	set_dec(decrementer_count);
+	/* allow updates right away */
+	last_rtc_update = 0;
 }
 
 /* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
@@ -252,85 +221,110 @@ static inline void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
  * machines were long is 32-bit! (However, as time_t is signed, we
  * will already get problems at other places on 2038-01-19 03:14:08)
  */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
+unsigned long mktime(unsigned int year, unsigned int mon,
+		     unsigned int day, unsigned int hour,
+		     unsigned int min, unsigned int sec)
 {
+	
 	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
 		mon += 12;	/* Puts Feb last since it has leap day */
 		year -= 1;
 	}
 	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
+		(unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
+		year*365 - 719499
+		)*24 + hour /* now have hours */
+		)*60 + min /* now have minutes */
+		)*60 + sec; /* finally seconds */
 }
 
-unsigned long get_cmos_time(void)
-{
-	unsigned int year, mon, day, hour, min, sec;
-	int i;
+#define TICK_SIZE tick
+#define FEBRUARY	2
+#define	STARTOFTIME	1970
+#define SECDAY		86400L
+#define SECYR		(SECDAY * 365)
+#define	leapyear(year)		((year) % 4 == 0)
+#define	days_in_year(a) 	(leapyear(a) ? 366 : 365)
+#define	days_in_month(a) 	(month_days[(a) - 1])
 
-	if (isBeBox[0])
-	{
-#ifndef __powerpc__	
-	/* The Linux interpretation of the CMOS clock register contents:
-	 * When the Update-In-Progress (UIP) flag goes from 1 to 0, the
-	 * RTC registers show the second which has precisely just started.
-	 * Let's hope other operating systems interpret the RTC the same way.
+static int month_days[12] = {
+	31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+};
+
+/*
+ * This only works for the Gregorian calendar - i.e. after 1752 (in the UK)
+ */
+void GregorianDay(struct rtc_time * tm)
+{
+	int leapsToDate;
+	int lastYear;
+	int day;
+	int MonthOffset[] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+
+	lastYear=tm->tm_year-1;
+
+	/*
+	 * Number of leap corrections to apply up to end of last year
 	 */
-	/* read RTC exactly on falling edge of update flag */
-	for (i = 0 ; i < 1000000 ; i++)	/* may take up to 1 second... */
-		if (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP)
-			break;
-	for (i = 0 ; i < 1000000 ; i++)	/* must try at least 2.228 ms */
-		if (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP))
-			break;
-#endif			
-		do { /* Isn't this overkill ? UIP above should guarantee consistency */
-			sec = CMOS_MCRTC_READ(MCRTC_SECONDS);
-			min = CMOS_MCRTC_READ(MCRTC_MINUTES);
-			hour = CMOS_MCRTC_READ(MCRTC_HOURS);
-			day = CMOS_MCRTC_READ(MCRTC_DAY_OF_MONTH);
-			mon = CMOS_MCRTC_READ(MCRTC_MONTH);
-			year = CMOS_MCRTC_READ(MCRTC_YEAR);
-		} while (sec != CMOS_MCRTC_READ(MCRTC_SECONDS));
-	} else
-	{ /* Motorola PowerStack etc. */
-		do { /* Isn't this overkill ? UIP above should guarantee consistency */
-			sec = CMOS_READ(RTC_SECONDS);
-			min = CMOS_READ(RTC_MINUTES);
-			hour = CMOS_READ(RTC_HOURS);
-			day = CMOS_READ(RTC_DAY_OF_MONTH);
-			mon = CMOS_READ(RTC_MONTH);
-			year = CMOS_READ(RTC_YEAR);
-		} while (sec != CMOS_READ(RTC_SECONDS));
-		BCD_TO_BIN(sec);
-		BCD_TO_BIN(min);
-		BCD_TO_BIN(hour);
-		BCD_TO_BIN(day);
-		BCD_TO_BIN(mon);
-		BCD_TO_BIN(year);
+	leapsToDate = lastYear/4 - lastYear/100 + lastYear/400;
+
+	/*
+	 * This year is a leap year if it is divisible by 4 except when it is
+	 * divisible by 100 unless it is divisible by 400
+	 *
+	 * e.g. 1904 was a leap year, 1900 was not, 1996 is, and 2000 will be
+	 */
+	if((tm->tm_year%4==0) &&
+	   ((tm->tm_year%100!=0) || (tm->tm_year%400==0)) &&
+	   (tm->tm_mon>2))
+	{
+		/*
+		 * We are past Feb. 29 in a leap year
+		 */
+		day=1;
 	}
-#if 0	
-printk("CMOS TOD - M/D/Y H:M:S = %d/%d/%d %d:%02d:%02d\n", mon, day, year, hour, min, sec);
-#endif
-	if ((year += 1900) < 1970)
-		year += 100;
-	return mktime(year, mon, day, hour, min, sec);
+	else
+	{
+		day=0;
+	}
+
+	day += lastYear*365 + leapsToDate + MonthOffset[tm->tm_mon-1] +
+		   tm->tm_mday;
+
+	tm->tm_wday=day%7;
 }
 
-void time_init(void)
+void to_tm(int tim, struct rtc_time * tm)
 {
-	void (*irq_handler)(int, struct pt_regs *);
-	xtime.tv_sec = get_cmos_time();
-	xtime.tv_usec = 0;
+	register int    i;
+	register long   hms, day;
 
-	/* If we have the CPU hardware time counters, use them */
-	irq_handler = timer_interrupt;
-	if (request_irq(TIMER_IRQ, irq_handler, 0, "timer", NULL) != 0)
-		panic("Could not allocate timer IRQ!");
+	day = tim / SECDAY;
+	hms = tim % SECDAY;
+
+	/* Hours, minutes, seconds are easy */
+	tm->tm_hour = hms / 3600;
+	tm->tm_min = (hms % 3600) / 60;
+	tm->tm_sec = (hms % 3600) % 60;
+
+	/* Number of years in days */
+	for (i = STARTOFTIME; day >= days_in_year(i); i++)
+		day -= days_in_year(i);
+	tm->tm_year = i;
+
+	/* Number of months in days left */
+	if (leapyear(tm->tm_year))
+		days_in_month(FEBRUARY) = 29;
+	for (i = 1; day >= days_in_month(i); i++)
+		day -= days_in_month(i);
+	days_in_month(FEBRUARY) = 28;
+	tm->tm_mon = i;
+
+	/* Days are what is left over (+1) from all that. */
+	tm->tm_mday = day + 1;
+
+	/*
+	 * Determine the day of week
+	 */
+	GregorianDay(tm);
 }
-

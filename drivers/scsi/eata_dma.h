@@ -4,7 +4,7 @@
 *             mike@i-Connect.Net                        *
 *             neuffer@mail.uni-mainz.de                 *
 *********************************************************
-* last change: 96/05/05                                 *
+* last change: 96/10/14                                 *
 ********************************************************/
 
 #ifndef _EATA_DMA_H
@@ -17,7 +17,7 @@
 
 #define VER_MAJOR 2
 #define VER_MINOR 5
-#define VER_SUB   "8d"
+#define VER_SUB   "9b"
 
 
 /************************************************************************
@@ -25,7 +25,12 @@
  ************************************************************************/
 
 #define CHECKPAL        0        /* EISA pal checking on/off            */
-#define NEWSTUFF        0        /* Some changes for ISA/EISA boards    */
+#define CHECK_BLINK     1        /* Switch Blink state check off, might *
+                                  * be nessessary for some MIPS machines*/ 
+#define CRIPPLE_QUEUE   0        /* Only enable this if the interrupt 
+                                  * controller on your motherboard is 
+                                  * broken and you are experiencing 
+                                  * massive interrupt losses */
 
 /************************************************************************
  * Debug options.                                                       * 
@@ -79,26 +84,17 @@ int eata_release(struct Scsi_Host *);
 
 #include <scsi/scsicam.h>
 
-#define EATA_DMA {                   \
-        NULL, NULL,                  \
-        NULL,               /* proc_dir_entry */ \
-        eata_proc_info,     /* procinfo       */ \
-        "EATA (Extended Attachment) HBA driver", \
-        eata_detect,                 \
-        eata_release,                \
-	NULL, NULL,                  \
-	eata_queue,                  \
-	eata_abort,                  \
-	eata_reset,                  \
-	NULL,   /* Slave attach */   \
-	scsicam_bios_param,          \
-	0,      /* Canqueue     */   \
-	0,      /* this_id      */   \
-	0,      /* sg_tablesize */   \
-	0,      /* cmd_per_lun  */   \
-	0,      /* present      */   \
-	1,      /* True if ISA  */   \
-	ENABLE_CLUSTERING }
+#define EATA_DMA {                                      \
+        proc_info:         eata_proc_info,     /* procinfo       */ \
+        name:              "EATA (Extended Attachment) HBA driver", \
+        detect:            eata_detect,                 \
+        release:           eata_release,                \
+	queuecommand:      eata_queue,                  \
+	abort:             eata_abort,                  \
+	reset:             eata_reset,                  \
+	bios_param:        scsicam_bios_param,          \
+	unchecked_isa_dma: 1,      /* True if ISA  */   \
+	use_clustering:    ENABLE_CLUSTERING }
 
 
 #endif /* _EATA_DMA_H */

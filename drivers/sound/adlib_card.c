@@ -2,66 +2,69 @@
  * sound/adlib_card.c
  *
  * Detection routine for the AdLib card.
+ *
+ * Copyright (C) by Hannu Savolainen 1993-1997
+ *
+ * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
+ * Version 2 (June 1991). See the "COPYING" file distributed with this software
+ * for more info.
  */
 
-/*
- * Copyright by Hannu Savolainen 1993-1996
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met: 1. Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer. 2.
- * Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
+
 #include <linux/config.h>
-
-
+#include <linux/module.h>
 #include "sound_config.h"
+#include "soundmodule.h"
 
-#if defined(CONFIG_YM3812)
-
-long
-attach_adlib_card (long mem_start, struct address_info *hw_config)
+void attach_adlib_card(struct address_info *hw_config)
 {
-
-  mem_start = opl3_init (mem_start, hw_config->io_base, hw_config->osp);
-  request_region (hw_config->io_base, 4, "OPL3/OPL2");
-
-  return mem_start;
+	hw_config->slots[0] = opl3_init(hw_config->io_base, hw_config->osp);
+	request_region(hw_config->io_base, 4, "OPL3/OPL2");
 }
 
-int
-probe_adlib (struct address_info *hw_config)
+int probe_adlib(struct address_info *hw_config)
 {
-
-  if (check_region (hw_config->io_base, 4))
-    {
-      printk ("\n\nopl3.c: I/O port %x already in use\n\n", hw_config->io_base);
-      return 0;
-    }
-
-  return opl3_detect (hw_config->io_base, hw_config->osp);
+	if (check_region(hw_config->io_base, 4)) 
+	{
+		DDB(printk("opl3.c: I/O port %x already in use\n", hw_config->io_base));
+		return 0;
+	}
+	return opl3_detect(hw_config->io_base, hw_config->osp);
 }
 
-void
-unload_adlib (struct address_info *hw_config)
+void unload_adlib(struct address_info *hw_config)
 {
-  release_region (hw_config->io_base, 4);
+	release_region(hw_config->io_base, 4);
+	sound_unload_synthdev(hw_config->slots[0]);
 }
 
+#ifdef MODULE
+
+int io = -1;
+MODULE_PARM(io, "i");
+
+EXPORT_NO_SYMBOLS;
+
+struct address_info cfg;
+
+int init_module(void)
+{
+	if (io == -1) {
+		printk(KERN_ERR "adlib: must specify I/O address.\n");
+		return -EINVAL;
+	}
+	cfg.io_base = io;
+	if (probe_adlib(&cfg) == 0)
+		return -ENODEV;
+	attach_adlib_card(&cfg);
+	SOUND_LOCK;
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	unload_adlib(&cfg);
+	SOUND_LOCK_END;
+}
 
 #endif

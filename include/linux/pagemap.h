@@ -14,16 +14,39 @@
 
 static inline unsigned long page_address(struct page * page)
 {
-	return PAGE_OFFSET + PAGE_SIZE * page->map_nr;
+	return PAGE_OFFSET + PAGE_SIZE * (page - mem_map);
 }
 
-#define PAGE_HASH_BITS 10
-#define PAGE_HASH_SIZE (1 << PAGE_HASH_BITS)
+/*
+ * The page cache can done in larger chunks than
+ * one page, because it allows for more efficient
+ * throughput (it can then be mapped into user
+ * space in smaller chunks for same flexibility).
+ *
+ * Or rather, it _will_ be done in larger chunks.
+ */
+#define PAGE_CACHE_SHIFT	PAGE_SHIFT
+#define PAGE_CACHE_SIZE		PAGE_SIZE
+#define PAGE_CACHE_MASK		PAGE_MASK
 
-#define PAGE_AGE_VALUE 16
+#define page_cache_alloc()	__get_free_page(GFP_USER)
+#define page_cache_free(x)	free_page(x)
+#define page_cache_release(x)	__free_page(x)
+
+/*
+ * From a kernel address, get the "struct page *"
+ */
+#define page_cache_entry(x)	(mem_map + MAP_NR(x))
+
+#define PAGE_HASH_BITS page_hash_bits
+#define PAGE_HASH_MASK page_hash_mask
 
 extern unsigned long page_cache_size; /* # of pages currently in the hash table */
-extern struct page * page_hash_table[PAGE_HASH_SIZE];
+extern unsigned int page_hash_bits;
+extern unsigned int page_hash_mask;
+extern struct page **page_hash_table;
+
+extern void page_cache_init(unsigned long);
 
 /*
  * We use a power-of-two hash table to avoid a modulus,
@@ -34,58 +57,62 @@ extern struct page * page_hash_table[PAGE_HASH_SIZE];
 static inline unsigned long _page_hashfn(struct inode * inode, unsigned long offset)
 {
 #define i (((unsigned long) inode)/(sizeof(struct inode) & ~ (sizeof(struct inode) - 1)))
-#define o (offset >> PAGE_SHIFT)
-#define s(x) ((x)+((x)>>PAGE_HASH_BITS))
-	return s(i+o) & (PAGE_HASH_SIZE-1);
+#define o ((offset >> PAGE_SHIFT) + (offset & ~PAGE_MASK))
+	return ((i+o) & PAGE_HASH_MASK);
 #undef i
 #undef o
-#undef s
 }
 
-#define page_hash(inode,offset) page_hash_table[_page_hashfn(inode,offset)]
+#define page_hash(inode,offset) (page_hash_table+_page_hashfn(inode,offset))
 
-static inline struct page * find_page(struct inode * inode, unsigned long offset)
+static inline struct page * __find_page(struct inode * inode, unsigned long offset, struct page *page)
 {
-	struct page *page;
-
-	for (page = page_hash(inode, offset); page ; page = page->next_hash) {
+	goto inside;
+	for (;;) {
+		page = page->next_hash;
+inside:
+		if (!page)
+			goto not_found;
 		if (page->inode != inode)
 			continue;
-		if (page->offset != offset)
-			continue;
-		/* Found the page. */
-		atomic_inc(&page->count);
-		set_bit(PG_referenced, &page->flags);
-		break;
+		if (page->offset == offset)
+			break;
 	}
+	/* Found the page. */
+	atomic_inc(&page->count);
+	set_bit(PG_referenced, &page->flags);
+not_found:
 	return page;
+}
+
+static inline struct page *find_page(struct inode * inode, unsigned long offset)
+{
+	return __find_page(inode, offset, *page_hash(inode, offset));
 }
 
 static inline void remove_page_from_hash_queue(struct page * page)
 {
-	struct page **p = &page_hash(page->inode,page->offset);
-
+	if(page->pprev_hash) {
+		if(page->next_hash)
+			page->next_hash->pprev_hash = page->pprev_hash;
+		*page->pprev_hash = page->next_hash;
+		page->pprev_hash = NULL;
+	}
 	page_cache_size--;
-	if (page->next_hash)
-		page->next_hash->prev_hash = page->prev_hash;
-	if (page->prev_hash)
-		page->prev_hash->next_hash = page->next_hash;
-	if (*p == page)
-		*p = page->next_hash;
-	page->next_hash = page->prev_hash = NULL;
 }
 
-static inline void add_page_to_hash_queue(struct inode * inode, struct page * page)
+static inline void __add_page_to_hash_queue(struct page * page, struct page **p)
 {
-	struct page **p = &page_hash(inode,page->offset);
-
 	page_cache_size++;
-	set_bit(PG_referenced, &page->flags);
-	page->age = PAGE_AGE_VALUE;
-	page->prev_hash = NULL;
-	if ((page->next_hash = *p) != NULL)
-		page->next_hash->prev_hash = page;
+	if((page->next_hash = *p) != NULL)
+		(*p)->pprev_hash = &page->next_hash;
 	*p = page;
+	page->pprev_hash = p;
+}
+
+static inline void add_page_to_hash_queue(struct page * page, struct inode * inode, unsigned long offset)
+{
+	__add_page_to_hash_queue(page, page_hash(inode,offset));
 }
 
 static inline void remove_page_from_inode_queue(struct page * page)
@@ -123,6 +150,7 @@ static inline void wait_on_page(struct page * page)
 		__wait_on_page(page);
 }
 
+extern void update_vm_cache_conditional(struct inode *, unsigned long, const char *, int, unsigned long);
 extern void update_vm_cache(struct inode *, unsigned long, const char *, int);
 
 #endif

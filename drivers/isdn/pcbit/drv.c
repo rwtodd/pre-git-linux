@@ -11,6 +11,14 @@
  *        PCBIT-D interface with isdn4linux
  */
 
+/*
+ *	Fixes:
+ *
+ *	Nuno Grilo	<l38486@alfa.ist.utl.pt>
+ *      fixed msn_list NULL pointer dereference.
+ *		
+ */
+
 #define __NO_VERSION__
 
 #include <linux/module.h>
@@ -53,7 +61,7 @@ static char* pcbit_devname[MAX_PCBIT_CARDS] = {
 
 int pcbit_command(isdn_ctrl* ctl);
 int pcbit_stat(u_char* buf, int len, int user, int, int);
-int pcbit_xmit(int driver, int chan, struct sk_buff *skb);
+int pcbit_xmit(int driver, int chan, int ack, struct sk_buff *skb);
 int pcbit_writecmd(const u_char*, int, int, int, int);
 
 static int set_protocol_running(struct pcbit_dev * dev);
@@ -79,9 +87,11 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	dev_pcbit[board] = dev;
 	memset(dev, 0, sizeof(struct pcbit_dev));
 
-	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF )
+	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF ) {
+		dev->ph_mem = mem_base;
 		dev->sh_mem = (unsigned char*) mem_base;
-	else
+	}
+	else 
 	{
 		printk("memory address invalid");
 		kfree(dev);
@@ -109,7 +119,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	dev->b2->id = 1;
 
 
-	dev->qdelivery.next = 0;
+	dev->qdelivery.next = NULL;
 	dev->qdelivery.sync = 0;
 	dev->qdelivery.routine = pcbit_deliver;
 	dev->qdelivery.data = dev;
@@ -152,11 +162,10 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	dev_if->channels = 2;
 
 
-	dev_if->features = ISDN_FEATURE_P_EURO | ISDN_FEATURE_L3_TRANS | 
-		ISDN_FEATURE_L2_HDLC;
+	dev_if->features = (ISDN_FEATURE_P_EURO  | ISDN_FEATURE_L3_TRANS | 
+			    ISDN_FEATURE_L2_HDLC | ISDN_FEATURE_L2_TRANS );
 
 	dev_if->writebuf_skb = pcbit_xmit;
-	dev_if->writebuf  = NULL;
 	dev_if->hl_hdrlen = 10;
 
 	dev_if->maxbufsize = MAXBUFSIZE;
@@ -218,7 +227,6 @@ int pcbit_command(isdn_ctrl* ctl)
 	struct pcbit_dev  *dev;
 	struct pcbit_chan *chan;
 	struct callb_data info;
-	char *cp;
 
 	dev = finddev(ctl->driver);
 
@@ -237,14 +245,7 @@ int pcbit_command(isdn_ctrl* ctl)
 		break;
 	case ISDN_CMD_DIAL:
 		info.type = EV_USR_SETUP_REQ;
-		info.data.setup.CalledPN = (char *) &ctl->num;
-		cp = strchr(info.data.setup.CalledPN, ',');
-		if (cp)
-			*cp = 0;
-		else {
-			printk(KERN_DEBUG "DIAL: error in CalledPN\n");
-			return -1;
-		}		
+		info.data.setup.CalledPN = (char *) &ctl->parm.setup.phone;
 		pcbit_fsm_event(dev, chan, EV_USR_SETUP_REQ, &info);
 		break;
 	case ISDN_CMD_ACCEPTD:
@@ -272,7 +273,7 @@ int pcbit_command(isdn_ctrl* ctl)
 		pcbit_clear_msn(dev);
 		break;
 	case ISDN_CMD_SETEAZ:
-		pcbit_set_msn(dev, ctl->num);
+		pcbit_set_msn(dev, ctl->parm.num);
 		break;
 	case ISDN_CMD_SETL3:
 		if ((ctl->arg >> 8) != ISDN_PROTO_L3_TRANS)
@@ -330,7 +331,7 @@ static void pcbit_block_timer(unsigned long data)
 }
 #endif
 
-int pcbit_xmit(int driver, int chnum, struct sk_buff *skb)
+int pcbit_xmit(int driver, int chnum, int ack, struct sk_buff *skb)
 {
 	ushort hdrlen;
 	int refnum, len;
@@ -420,7 +421,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 		{
 			u_char cbuf[1024];
 
-			memcpy_fromfs(cbuf, buf, len);
+			copy_from_user(cbuf, buf, len);
 			for (i=0; i<len; i++)
 				writeb(cbuf[i], dev->sh_mem + i);
 		}
@@ -438,7 +439,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 			/* get it into kernel space */
 			if ((ptr = kmalloc(len, GFP_KERNEL))==NULL)
 				return -ENOMEM;
-			memcpy_fromfs(ptr, buf, len);
+			copy_from_user(ptr, buf, len);
 			loadbuf = ptr;
 		}
 		else
@@ -449,14 +450,8 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 		for (i=0; i < len; i++)
 		{
 			for(j=0; j < LOAD_RETRY; j++)
-			{
-				__volatile__ unsigned char * ptr;
-
-				ptr = dev->sh_mem + dev->loadptr;
-				if (*ptr == 0)
+				if (!(readb(dev->sh_mem + dev->loadptr)))
 					break;
-
-			}
 
 			if (j == LOAD_RETRY)
 			{
@@ -597,20 +592,6 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 		       dev->b1->s_refnum, 
 		       dev->b2->s_refnum);
 #endif
-#if 0	
-		if (dev->b1->s_refnum == refnum)
-			chan = dev->b1;
-		else { 
-		   
-			if (dev->b2->s_refnum == refnum)
-				chan = dev->b2;
-			else {
-				chan = NULL;
-				printk(KERN_WARNING "Connection Confirm - refnum doesn't match chan\n");
-				break;
-			}
-		}
-#else
 		/* We just try to find a channel in the right state */
 
 		if (dev->b1->fsm_state == ST_CALL_INIT)
@@ -624,7 +605,6 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 				break;
 			}
 		}
-#endif
 		if (capi_decode_conn_conf(chan, skb, &complete)) {
 			printk(KERN_DEBUG "conn_conf indicates error\n");
 			pcbit_fsm_event(dev, chan, EV_ERROR, NULL);
@@ -737,9 +717,7 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 #endif
 	}
 
-	skb->free = 1;
-
-	kfree_skb(skb, FREE_READ);
+	kfree_skb(skb);
 
 }
 
@@ -753,8 +731,13 @@ static int stat_st = 0;
 static int stat_end = 0;
 
 
-#define memcpy_to_COND(flag, d, s, len) \
-(flag ? memcpy_tofs(d, s, len) : memcpy(d, s, len))
+static __inline void
+memcpy_to_COND(int flag, char *d, const char *s, int len) {
+	if (flag)
+		copy_to_user(d, s, len);
+	else
+		memcpy(d, s, len);
+}
 
 
 int pcbit_stat(u_char* buf, int len, int user, int driver, int channel)
@@ -931,7 +914,7 @@ static int pcbit_ioctl(isdn_ctrl* ctl)
 		return -ENODEV;
 	}
 
-	cmd = (struct pcbit_ioctl *) ctl->num;
+	cmd = (struct pcbit_ioctl *) ctl->parm.num;
 
 	switch(ctl->arg) {
 	case PCBIT_IOCTL_GETSTAT:
@@ -1051,7 +1034,8 @@ static void pcbit_clear_msn(struct pcbit_dev *dev)
 
 static void pcbit_set_msn(struct pcbit_dev *dev, char *list)
 {
-	struct msn_entry *ptr, *back;
+	struct msn_entry *ptr;
+	struct msn_entry *back = NULL;
 	char *cp, *sp;
 	int len;
 
@@ -1070,7 +1054,8 @@ static void pcbit_set_msn(struct pcbit_dev *dev, char *list)
 		return;
 	}
 
-	for (back=dev->msn_list; back->next; back=back->next);
+	if (dev->msn_list)
+		for (back=dev->msn_list; back->next; back=back->next);
 	
 	sp = list;
 
@@ -1128,10 +1113,3 @@ static int pcbit_check_msn(struct pcbit_dev *dev, char *msn)
 
 	return 0;
 }
-
-
-
-
-
-
-

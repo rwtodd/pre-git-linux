@@ -1,9 +1,9 @@
-/* $Id: isdn_audio.h,v 1.4 1996/06/06 14:43:32 fritz Exp $
- *
+/* $Id: isdn_audio.h,v 1.8 1999/07/11 17:14:07 armin Exp $
+
  * Linux ISDN subsystem, audio conversion and compression (linklevel).
  *
- * Copyright 1994,95,96 by Fritz Elfert (fritz@wuemaus.franken.de)
- * 
+ * Copyright 1994-1999 by Fritz Elfert (fritz@isdn4linux.de)
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
@@ -16,9 +16,29 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * $Log: isdn_audio.h,v $
+ * Revision 1.8  1999/07/11 17:14:07  armin
+ * Added new layer 2 and 3 protocols for Fax and DSP functions.
+ * Moved "Add CPN to RING message" to new register S23,
+ * "Display message" is now correct on register S13 bit 7.
+ * New audio command AT+VDD implemented (deactivate DTMF decoder and
+ * activate possible existing hardware/DSP decoder).
+ * Moved some tty defines to .h file.
+ * Made whitespace possible in AT command line.
+ * Some AT-emulator output bugfixes.
+ * First Fax G3 implementations.
+ *
+ * Revision 1.7  1999/04/12 12:33:11  fritz
+ * Changes from 2.0 tree.
+ *
+ * Revision 1.6  1998/07/26 18:48:44  armin
+ * Added silence detection in voice receive mode.
+ *
+ * Revision 1.5  1997/02/03 22:45:21  fritz
+ * Reformatted according CodingStyle
+ *
  * Revision 1.4  1996/06/06 14:43:32  fritz
  * Changed to support DTMF decoding on audio playback also.
  *
@@ -33,27 +53,36 @@
  *
  */
 
-#define DTMF_NPOINTS 205       /* Number of samples for DTMF recognition */
+#define DTMF_NPOINTS 205        /* Number of samples for DTMF recognition */
 typedef struct adpcm_state {
-        int  a;
-        int  d;
-        int  word;
-        int  nleft;
-        int  nbits;
+	int a;
+	int d;
+	int word;
+	int nleft;
+	int nbits;
 } adpcm_state;
 
 typedef struct dtmf_state {
-        char last;
-        int  idx;
-        int  buf[DTMF_NPOINTS];
+	char last;
+	int idx;
+	int buf[DTMF_NPOINTS];
 } dtmf_state;
+
+typedef struct silence_state {
+	int state;
+	unsigned int idx;
+} silence_state;
 
 extern void isdn_audio_ulaw2alaw(unsigned char *, unsigned long);
 extern void isdn_audio_alaw2ulaw(unsigned char *, unsigned long);
 extern adpcm_state *isdn_audio_adpcm_init(adpcm_state *, int);
-extern int  isdn_audio_adpcm2xlaw(adpcm_state *, int, unsigned char *, unsigned char *, int);
-extern int  isdn_audio_xlaw2adpcm(adpcm_state *, int, unsigned char *, unsigned char *, int);
-extern int  isdn_audio_2adpcm_flush(adpcm_state *s, unsigned char *out);
+extern int isdn_audio_adpcm2xlaw(adpcm_state *, int, unsigned char *, unsigned char *, int);
+extern int isdn_audio_xlaw2adpcm(adpcm_state *, int, unsigned char *, unsigned char *, int);
+extern int isdn_audio_2adpcm_flush(adpcm_state * s, unsigned char *out);
 extern void isdn_audio_calc_dtmf(modem_info *, unsigned char *, int, int);
 extern void isdn_audio_eval_dtmf(modem_info *);
 dtmf_state *isdn_audio_dtmf_init(dtmf_state *);
+extern void isdn_audio_calc_silence(modem_info *, unsigned char *, int, int);
+extern void isdn_audio_eval_silence(modem_info *);
+silence_state *isdn_audio_silence_init(silence_state *);
+extern void isdn_audio_put_dle_code(modem_info *, u_char);

@@ -8,16 +8,13 @@
 	according to the terms of the GNU Public License,
 	incorporated herein by reference.
 
-	The author may be reached at bao@saigon.async.com 
+	The author may be reached at bao.ha@srs.gov 
 	or 418 Hastings Place, Martinez, GA 30907.
 
 	Things remaining to do:
 	Better record keeping of errors.
 	Eliminate transmit interrupt to reduce overhead.
 	Implement "concurrent processing". I won't be doing it!
-	Allow changes to the partition of the transmit and receive
-	buffers, currently the ratio is 3:1 of receive to transmit
-	buffer ratio.  
 
 	Bugs:
 
@@ -26,6 +23,46 @@
 	This is a compatibility hardware problem.
 
 	Versions:
+	0.11e   some tweaks about multiple cards support (PdP, jul/aug 1999)
+	0.11d	added __initdata, __initfunc stuff; call spin_lock_init
+	        in eepro_probe1. Replaced "eepro" by dev->name. Augmented 
+		the code protected by spin_lock in interrupt routine 
+		(PdP, 12/12/1998)
+	0.11c   minor cleanup (PdP, RMC, 09/12/1998)  
+	0.11b   Pascal Dupuis (dupuis@lei.ucl.ac.be): works as a module 
+	        under 2.1.xx. Debug messages are flagged as KERN_DEBUG to 
+		avoid console flooding. Added locking at critical parts. Now 
+		the dawn thing is SMP safe.
+	0.11a   Attempt to get 2.1.xx support up (RMC)
+	0.11	Brian Candler added support for multiple cards. Tested as
+		a module, no idea if it works when compiled into kernel.
+
+	0.10e	Rick Bressler notified me that ifconfig up;ifconfig down fails
+		because the irq is lost somewhere. Fixed that by moving 
+		request_irq and free_irq to eepro_open and eepro_close respectively.
+	0.10d	Ugh! Now Wakeup works. Was seriously broken in my first attempt.
+		I'll need to find a way to specify an ioport other than
+		the default one in the PnP case. PnP definitively sucks.
+		And, yes, this is not the only reason.
+	0.10c	PnP Wakeup Test for 595FX. uncomment #define PnPWakeup;
+		to use.
+	0.10b	Should work now with (some) Pro/10+. At least for 
+		me (and my two cards) it does. _No_ guarantee for 
+		function with non-Pro/10+ cards! (don't have any)
+		(RMC, 9/11/96)
+
+	0.10	Added support for the Etherexpress Pro/10+.  The
+		IRQ map was changed significantly from the old
+		pro/10.  The new interrupt map was provided by
+		Rainer M. Canavan (Canavan@Zeus.cs.bonn.edu).
+		(BCH, 9/3/96)
+
+	0.09	Fixed a race condition in the transmit algorithm,
+		which causes crashes under heavy load with fast
+		pentium computers.  The performance should also
+		improve a bit.  The size of RX buffer, and hence
+		TX buffer, can also be changed via lilo or insmod.
+		(BCH, 7/31/96)
 
 	0.08	Implement 32-bit I/O for the 82595TX and 82595FX
 		based lan cards.  Disable full-duplex mode if TPE
@@ -56,7 +93,7 @@
 */
 
 static const char *version =
-	"eepro.c: v0.08 4/8/96 Bao C. Ha (bao.ha@srs.gov)\n";
+	"eepro.c: v0.11d 08/12/1998 dupuis@lei.ucl.ac.be\n";
 
 #include <linux/module.h>
 
@@ -103,14 +140,54 @@ static const char *version =
 #include <linux/skbuff.h>
 
 
+/* need to remove these asap      */
+/* 2.1.xx compatibility macros... */
+/*                                */
+
+
+#include <linux/version.h>
+
+/* For linux 2.1.xx */
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+
+#include <asm/spinlock.h>
+#include <linux/init.h>
+#include <linux/delay.h>
+
+#define compat_dev_kfree_skb( skb, mode ) dev_kfree_skb( (skb) )
+/* I had reports of looong delays with SLOW_DOWN defined as udelay(2) */
+#define SLOW_DOWN inb(0x80)
+/* udelay(2) */
+#define compat_init_func(X)  __initfunc(X)
+#define compat_init_data     __initdata
+
+#else 
+/* for 2.x */
+
+#define compat_dev_kfree_skb( skb, mode ) dev_kfree_skb( (skb), (mode) )
+#define test_and_set_bit(a,b) set_bit((a),(b))
+#define SLOW_DOWN SLOW_DOWN_IO
+#define compat_init_func(X) X
+#define compat_init_data
+
+#endif
+
+
 /* First, a few definitions that the brave might change. */
 /* A zero-terminated list of I/O addresses to be probed. */
-static unsigned int eepro_portlist[] =
-   { 0x200, 0x240, 0x280, 0x2C0, 0x300, 0x320, 0x340, 0x360, 0};
+static unsigned int eepro_portlist[] compat_init_data =
+   { 0x300, 0x210, 0x240, 0x280, 0x2C0, 0x200, 0x320, 0x340, 0x360, 0};
+/* note: 0x300 is default, the 595FX supports ALL IO Ports 
+  from 0x000 to 0x3F0, some of which are reserved in PCs */
+
+/* To try the (not-really PnP Wakeup: */
+/*
+#define PnPWakeup
+*/
 
 /* use 0 for production, 1 for verification, >2 for debug */
 #ifndef NET_DEBUG
-#define NET_DEBUG 2
+#define NET_DEBUG 0
 #endif
 static unsigned int net_debug = NET_DEBUG;
 
@@ -129,21 +206,105 @@ struct eepro_local {
 	unsigned tx_start; /* start of the transmit chain */
 	int tx_last;  /* pointer to last packet in the transmit chain */
 	unsigned tx_end;   /* end of the transmit chain (plus 1) */
-	int eepro;	/* a flag, TRUE=1 for the EtherExpress Pro/10,
-			   FALSE = 0 for other 82595-based lan cards. */
+	int eepro;	/* 1 for the EtherExpress Pro/10,
+			   2 for the EtherExpress Pro/10+,
+			   0 for other 82595-based lan cards. */
 	int version;	/* a flag to indicate if this is a TX or FX
 				   version of the 82595 chip. */
 	int stepping;
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+	spinlock_t lock; /* Serializing lock  */ 
+#endif
 };
 
 /* The station (ethernet) address prefix, used for IDing the board. */
-#define SA_ADDR0 0x00
+#define SA_ADDR0 0x00	/* Etherexpress Pro/10 */
 #define SA_ADDR1 0xaa
 #define SA_ADDR2 0x00
 
+#define GetBit(x,y) ((x & (1<<y))>>y)
+
+/* EEPROM Word 0: */
+#define ee_PnP       0  /* Plug 'n Play enable bit */
+#define ee_Word1     1  /* Word 1? */
+#define ee_BusWidth  2  /* 8/16 bit */
+#define ee_FlashAddr 3  /* Flash Address */
+#define ee_FlashMask 0x7   /* Mask */
+#define ee_AutoIO    6  /* */
+#define ee_reserved0 7  /* =0! */
+#define ee_Flash     8  /* Flash there? */
+#define ee_AutoNeg   9  /* Auto Negotiation enabled? */
+#define ee_IO0       10 /* IO Address LSB */
+#define ee_IO0Mask   0x /*...*/
+#define ee_IO1       15 /* IO MSB */
+
+/* EEPROM Word 1: */
+#define ee_IntSel    0   /* Interrupt */
+#define ee_IntMask   0x7
+#define ee_LI        3   /* Link Integrity 0= enabled */
+#define ee_PC        4   /* Polarity Correction 0= enabled */
+#define ee_TPE_AUI   5   /* PortSelection 1=TPE */
+#define ee_Jabber    6   /* Jabber prevention 0= enabled */
+#define ee_AutoPort  7   /* Auto Port Selection 1= Disabled */
+#define ee_SMOUT     8   /* SMout Pin Control 0= Input */
+#define ee_PROM      9   /* Flash EPROM / PROM 0=Flash */
+#define ee_reserved1 10  /* .. 12 =0! */
+#define ee_AltReady  13  /* Alternate Ready, 0=normal */
+#define ee_reserved2 14  /* =0! */
+#define ee_Duplex    15
+
+/* Word2,3,4: */
+#define ee_IA5       0 /*bit start for individual Addr Byte 5 */
+#define ee_IA4       8 /*bit start for individual Addr Byte 5 */
+#define ee_IA3       0 /*bit start for individual Addr Byte 5 */
+#define ee_IA2       8 /*bit start for individual Addr Byte 5 */
+#define ee_IA1       0 /*bit start for individual Addr Byte 5 */
+#define ee_IA0       8 /*bit start for individual Addr Byte 5 */
+
+/* Word 5: */
+#define ee_BNC_TPE   0 /* 0=TPE */
+#define ee_BootType  1 /* 00=None, 01=IPX, 10=ODI, 11=NDIS */
+#define ee_BootTypeMask 0x3 
+#define ee_NumConn   3  /* Number of Connections 0= One or Two */
+#define ee_FlashSock 4  /* Presence of Flash Socket 0= Present */
+#define ee_PortTPE   5
+#define ee_PortBNC   6
+#define ee_PortAUI   7
+#define ee_PowerMgt  10 /* 0= disabled */
+#define ee_CP        13 /* Concurrent Processing */
+#define ee_CPMask    0x7
+
+/* Word 6: */
+#define ee_Stepping  0 /* Stepping info */
+#define ee_StepMask  0x0F
+#define ee_BoardID   4 /* Manucaturer Board ID, reserved */
+#define ee_BoardMask 0x0FFF
+
+/* Word 7: */
+#define ee_INT_TO_IRQ 0 /* int to IRQ Mapping  = 0x1EB8 for Pro/10+ */
+#define ee_FX_INT2IRQ 0x1EB8 /* the _only_ mapping allowed for FX chips */
+
+/*..*/
+#define ee_SIZE 0x40 /* total EEprom Size */
+#define ee_Checksum 0xBABA /* initial and final value for adding checksum */
+
+
+/* Card identification via EEprom:   */
+#define ee_addr_vendor 0x10  /* Word offset for EISA Vendor ID */
+#define ee_addr_id 0x11      /* Word offset for Card ID */
+#define ee_addr_SN 0x12      /* Serial Number */
+#define ee_addr_CRC_8 0x14   /* CRC over last thee Bytes */
+
+
+#define ee_vendor_intel0 0x25  /* Vendor ID Intel */
+#define ee_vendor_intel1 0xD4
+#define ee_id_eepro10p0 0x10   /* ID for eepro/10+ */
+#define ee_id_eepro10p1 0x31
+
+
 /* Index to functions, as function prototypes. */
 
-extern int eepro_probe(struct device *dev);	
+extern int eepro_probe(struct device *dev);
 
 static int	eepro_probe1(struct device *dev, short ioaddr);
 static int	eepro_open(struct device *dev);
@@ -153,14 +314,14 @@ static void 	eepro_rx(struct device *dev);
 static void 	eepro_transmit_interrupt(struct device *dev);
 static int	eepro_close(struct device *dev);
 static struct enet_statistics *eepro_get_stats(struct device *dev);
-static void set_multicast_list(struct device *dev);
+static void     set_multicast_list(struct device *dev);
 
 static int read_eeprom(int ioaddr, int location);
 static void hardware_send_packet(struct device *dev, void *buf, short length);
 static int	eepro_grab_irq(struct device *dev);
 
 /*
-  			Details of the i82595.
+			Details of the i82595.
 
 You will need either the datasheet or the user manual to understand what
 is going on here.  The 82595 is very different from the 82586, 82593.
@@ -180,15 +341,26 @@ single packet.  In other systems with faster computers and more congested
 network traffics, the ring linked list should improve performance by
 allowing up to 8K worth of packets to be queued.
 
+The sizes of the receive and transmit buffers can now be changed via lilo 
+or insmod.  Lilo uses the appended line "ether=io,irq,debug,rx-buffer,eth0"
+where rx-buffer is in KB unit.  Modules uses the parameter mem which is
+also in KB unit, for example "insmod io=io-address irq=0 mem=rx-buffer."  
+The receive buffer has to be more than 3K or less than 29K.  Otherwise,
+it is reset to the default of 24K, and, hence, 8K for the trasnmit
+buffer (transmit-buffer = 32K - receive-buffer).
+
 */
 #define	RAM_SIZE	0x8000
 #define	RCV_HEADER	8
-#define	RCV_RAM		0x6000	/* 24KB for RCV buffer */
-#define	RCV_LOWER_LIMIT	0x00	/* 0x0000 */
-#define	RCV_UPPER_LIMIT	((RCV_RAM - 2) >> 8)	/* 0x5ffe */
-#define	XMT_RAM		(RAM_SIZE - RCV_RAM)	/* 8KB for XMT buffer */
-#define	XMT_LOWER_LIMIT	(RCV_RAM >> 8)	/* 0x6000 */
-#define	XMT_UPPER_LIMIT	((RAM_SIZE - 2) >> 8)	/* 0x7ffe */
+#define RCV_RAM 	0x6000  /* 24KB default for RCV buffer */
+#define RCV_LOWER_LIMIT 0x00    /* 0x0000 */
+/* #define RCV_UPPER_LIMIT ((RCV_RAM - 2) >> 8) */    /* 0x5ffe */
+#define RCV_UPPER_LIMIT (((rcv_ram) - 2) >> 8)   
+/* #define XMT_RAM         (RAM_SIZE - RCV_RAM) */    /* 8KB for XMT buffer */
+#define XMT_RAM         (RAM_SIZE - (rcv_ram))    /* 8KB for XMT buffer */
+/* #define XMT_LOWER_LIMIT (RCV_RAM >> 8) */  /* 0x6000 */
+#define XMT_LOWER_LIMIT ((rcv_ram) >> 8) 
+#define XMT_UPPER_LIMIT ((RAM_SIZE - 2) >> 8)   /* 0x7ffe */
 #define	XMT_HEADER	8
 
 #define	RCV_DONE	0x0008
@@ -278,31 +450,63 @@ allowing up to 8K worth of packets to be queued.
 #define EEDO 0x08
 
 
-/* Check for a network adaptor of this type, and return '0' iff one exists.
+/* Check for a network adaptor of this type, and return '0' if one exists.
    If dev->base_addr == 0, probe all likely locations.
    If dev->base_addr == 1, always return failure.
    If dev->base_addr == 2, allocate space for the device and return success
    (detachable devices only).
    */
 #ifdef HAVE_DEVLIST
-/* Support for a alternate probe manager, which will eliminate the
+/* Support for an alternate probe manager, which will eliminate the
    boilerplate below. */
 struct netdev_entry netcard_drv =
 {"eepro", eepro_probe1, EEPRO_IO_EXTENT, eepro_portlist};
 #else
-int
-eepro_probe(struct device *dev)
+compat_init_func(int eepro_probe(struct device *dev))
 {
 	int i;
 	int base_addr = dev ? dev->base_addr : 0;
 
+
+#ifdef PnPWakeup
+	/* XXXX for multiple cards should this only be run once? */
+	
+	/* Wakeup: */
+	#define WakeupPort 0x279
+	#define WakeupSeq    {0x6A, 0xB5, 0xDA, 0xED, 0xF6, 0xFB, 0x7D, 0xBE,\
+	                      0xDF, 0x6F, 0x37, 0x1B, 0x0D, 0x86, 0xC3, 0x61,\
+	                      0xB0, 0x58, 0x2C, 0x16, 0x8B, 0x45, 0xA2, 0xD1,\
+	                      0xE8, 0x74, 0x3A, 0x9D, 0xCE, 0xE7, 0x73, 0x43}
+
+	{
+		unsigned short int WS[32]=WakeupSeq;
+
+		if (check_region(WakeupPort, 2)==0) {
+
+			if (net_debug>5)
+				printk(KERN_DEBUG "Waking UP\n");
+
+			outb_p(0,WakeupPort);
+			outb_p(0,WakeupPort);
+			for (i=0; i<32; i++) {
+				outb_p(WS[i],WakeupPort);
+				if (net_debug>5) printk(KERN_DEBUG ": %#x ",WS[i]);
+			}
+		} else printk(KERN_WARNING "Checkregion Failed!\n");
+	}
+#endif
+
+
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return eepro_probe1(dev, base_addr);
+
 	else if (base_addr != 0)	/* Don't probe at all. */
 		return ENXIO;
 
+
 	for (i = 0; eepro_portlist[i]; i++) {
 		int ioaddr = eepro_portlist[i];
+
 		if (check_region(ioaddr, EEPRO_IO_EXTENT))
 			continue;
 		if (eepro_probe1(dev, ioaddr) == 0)
@@ -313,23 +517,82 @@ eepro_probe(struct device *dev)
 }
 #endif
 
+void printEEPROMInfo(short ioaddr)
+{
+	unsigned short Word;
+	int i,j;
+
+	for (i=0, j=ee_Checksum; i<ee_SIZE; i++)
+		j+=read_eeprom(ioaddr,i);
+	printk("Checksum: %#x\n",j&0xffff);
+
+	Word=read_eeprom(ioaddr, 0);
+	printk(KERN_DEBUG "Word0:\n");
+	printk(KERN_DEBUG " Plug 'n Pray: %d\n",GetBit(Word,ee_PnP));
+	printk(KERN_DEBUG " Buswidth: %d\n",(GetBit(Word,ee_BusWidth)+1)*8 );
+	printk(KERN_DEBUG " AutoNegotiation: %d\n",GetBit(Word,ee_AutoNeg)); 
+	printk(KERN_DEBUG " IO Address: %#x\n", (Word>>ee_IO0)<<4);
+
+	if (net_debug>4)  {
+		Word=read_eeprom(ioaddr, 1);
+		printk(KERN_DEBUG "Word1:\n");
+		printk(KERN_DEBUG " INT: %d\n", Word & ee_IntMask);
+		printk(KERN_DEBUG " LI: %d\n", GetBit(Word,ee_LI));
+		printk(KERN_DEBUG " PC: %d\n", GetBit(Word,ee_PC));
+		printk(KERN_DEBUG " TPE/AUI: %d\n", GetBit(Word,ee_TPE_AUI));
+		printk(KERN_DEBUG " Jabber: %d\n", GetBit(Word,ee_Jabber));
+		printk(KERN_DEBUG " AutoPort: %d\n", GetBit(!Word,ee_Jabber));
+		printk(KERN_DEBUG " Duplex: %d\n", GetBit(Word,ee_Duplex));
+	}
+
+	Word=read_eeprom(ioaddr, 5);
+	printk(KERN_DEBUG "Word5:\n");
+	printk(KERN_DEBUG " BNC: %d\n",GetBit(Word,ee_BNC_TPE));
+	printk(KERN_DEBUG " NumConnectors: %d\n",GetBit(Word,ee_NumConn));
+	printk(KERN_DEBUG " Has ");
+	if (GetBit(Word,ee_PortTPE)) printk("TPE ");
+	if (GetBit(Word,ee_PortBNC)) printk("BNC ");
+	if (GetBit(Word,ee_PortAUI)) printk("AUI ");
+	printk("port(s) \n");
+
+	Word=read_eeprom(ioaddr, 6);
+	printk(KERN_DEBUG "Word6:\n");
+	printk(KERN_DEBUG " Stepping: %d\n",Word & ee_StepMask);
+	printk(KERN_DEBUG " BoardID: %d\n",Word>>ee_BoardID);
+
+	Word=read_eeprom(ioaddr, 7);
+	printk(KERN_DEBUG "Word7:\n");
+	printk(KERN_DEBUG " INT to IRQ:\n");
+
+	printk(KERN_DEBUG);
+
+	for (i=0, j=0; i<15; i++)
+		if (GetBit(Word,i)) printk(" INT%d -> IRQ %d;",j++,i);
+
+	printk("\n");
+}
+
 /* This is the real probe routine.  Linux has a history of friendly device
-   probes on the ISA bus.  A good device probes avoids doing writes, and
+   probes on the ISA bus.  A good device probe avoids doing writes, and
    verifies that the correct device exists and functions.  */
 
 int eepro_probe1(struct device *dev, short ioaddr)
 {
 	unsigned short station_addr[6], id, counter;
-	int i;
-	int eepro;	/* a flag, TRUE=1 for the EtherExpress Pro/10,
-			   FALSE = 0 for other 82595-based lan cards. */
+	int i,j, irqMask;
+	int eepro;
 	const char *ifmap[] = {"AUI", "10Base2", "10BaseT"};
 	enum iftype { AUI=0, BNC=1, TPE=2 };
 
 	/* Now, we are going to check for the signature of the
 	   ID_REG (register 2 of bank 0) */
 
-	if (((id=inb(ioaddr + ID_REG)) & ID_REG_MASK) == ID_REG_SIG) {
+	id=inb(ioaddr + ID_REG);
+ 
+	printk(KERN_DEBUG " id: %#x ",id);
+	printk(" io: %#x ",ioaddr);
+ 
+	if (((id) & ID_REG_MASK) == ID_REG_SIG) {
 
 		/* We seem to have the 82595 signature, let's
 		   play with its counter (last 2 bits of
@@ -349,65 +612,91 @@ int eepro_probe1(struct device *dev, short ioaddr)
 			station_addr[2] = read_eeprom(ioaddr, 4);
 
 			/* Check the station address for the manufacturer's code */
-
-			if (station_addr[2] != 0x00aa || (station_addr[1] & 0xff00) != 0x0000) {
+			if (net_debug>3)
+				printEEPROMInfo(ioaddr);
+				
+			if (read_eeprom(ioaddr,7)== ee_FX_INT2IRQ) { /* int to IRQ Mask */
+				eepro = 2;
+				printk("%s: Intel EtherExpress Pro/10+ ISA\n at %#x,", 
+					dev->name, ioaddr);
+			} else
+			if (station_addr[2] == 0x00aa)  {
+				eepro = 1;
+				printk("%s: Intel EtherExpress Pro/10 ISA at %#x,", 
+					dev->name, ioaddr);
+			}
+			else {
 				eepro = 0;
 				printk("%s: Intel 82595-based lan card at %#x,", 
 					dev->name, ioaddr);
 			}
-			else {
-				eepro = 1;
-				printk("%s: Intel EtherExpress Pro/10 at %#x,", 
-					dev->name, ioaddr);
-			}
 
-   			/* Fill in the 'dev' fields. */
+			/* Fill in the 'dev' fields. */
 			dev->base_addr = ioaddr;
 			
 			for (i=0; i < 6; i++) {
 				dev->dev_addr[i] = ((unsigned char *) station_addr)[5-i];
 				printk("%c%02x", i ? ':' : ' ', dev->dev_addr[i]);
 			}
-				
-			outb(BANK2_SELECT, ioaddr); /* be CAREFUL, BANK 2 now */
-			id = inb(ioaddr + REG3);
-			if (id & TPE_BIT)
-				dev->if_port = TPE;
-			else dev->if_port = BNC;
+			
+			if ((dev->mem_end & 0x3f) < 3 ||	/* RX buffer must be more than 3K */
+				(dev->mem_end & 0x3f) > 29)	/* and less than 29K */
+				dev->mem_end = RCV_RAM;		/* or it will be set to 24K */
+			else dev->mem_end = 1024*dev->mem_end;  /* Maybe I should shift << 10 */
 
-			if (dev->irq < 2 && eepro) {
+			/* From now on, dev->mem_end contains the actual size of rx buffer */
+			
+			if (net_debug > 3)
+				printk(", %dK RCV buffer", (int)(dev->mem_end)/1024);
+				
+				
+			/* ............... */
+
+			if (GetBit( read_eeprom(ioaddr, 5),ee_BNC_TPE))
+				dev->if_port = BNC;
+			else dev->if_port = TPE;
+
+			/* ............... */
+
+
+			if ((dev->irq < 2) && (eepro!=0)) {
 				i = read_eeprom(ioaddr, 1);
-				switch (i & 0x07) {
-					case 0:	dev->irq = 9; break;
-					case 1:	dev->irq = 3; break;
-					case 2:	dev->irq = 5; break;
-					case 3:	dev->irq = 10; break;
-					case 4:	dev->irq = 11; break;
-					default: /* should never get here !!!!! */
-						printk(" illegal interrupt vector stored in EEPROM.\n");
-						return ENODEV;
+				irqMask = read_eeprom(ioaddr, 7);
+				i &= 0x07; /* Mask off INT number */
+				
+				for (j=0; ((j<16) && (i>=0)); j++) {
+					if ((irqMask & (1<<j))!=0) {
+						if (i==0) {
+							dev->irq = j;
+							break; /* found bit corresponding to irq */
+						}
+						i--; /* count bits set in irqMask */
 					}
 				}
-			else if (dev->irq == 2)
-				dev->irq = 9;
+				if (dev -> irq<2) {
+					printk(" Duh! illegal interrupt vector stored in EEPROM.\n");
+						return ENODEV;
+				} else 
+				
+				if (dev->irq==2) dev->irq = 9;
 
+				else if (dev->irq == 2)
+				dev->irq = 9;
+			}
+			
 			if (dev->irq > 2) {
 				printk(", IRQ %d, %s.\n", dev->irq,
 						ifmap[dev->if_port]);
-				if (request_irq(dev->irq, &eepro_interrupt, 0, "eepro", NULL)) {
-					printk("%s: unable to get IRQ %d.\n", dev->name, dev->irq);
-					return -EAGAIN;
-				}
 			}
 			else printk(", %s.\n", ifmap[dev->if_port]);
 			
-			if ((dev->mem_start & 0xf) > 0)
-				net_debug = dev->mem_start & 7;
+			if ((dev->mem_start & 0xf) > 0)	/* I don't know if this is */
+				net_debug = dev->mem_start & 7; /* still useful or not */
 
 			if (net_debug > 3) {
 				i = read_eeprom(ioaddr, 5);
 				if (i & 0x2000) /* bit 13 of EEPROM word 5 */
-					printk("%s: Concurrent Processing is enabled but not used!\n",
+					printk(KERN_DEBUG "%s: Concurrent Processing is enabled but not used!\n",
 						dev->name);
 			}
 
@@ -415,7 +704,7 @@ int eepro_probe1(struct device *dev, short ioaddr)
 				printk(version);
 
 			/* Grab the region so we can find another board if autoIRQ fails. */
-			request_region(ioaddr, EEPRO_IO_EXTENT, "eepro");
+			request_region(ioaddr, EEPRO_IO_EXTENT, dev->name);
 
 			/* Initialize the device structure */
 			dev->priv = kmalloc(sizeof(struct eepro_local), GFP_KERNEL);
@@ -423,10 +712,13 @@ int eepro_probe1(struct device *dev, short ioaddr)
 				return -ENOMEM;
 			memset(dev->priv, 0, sizeof(struct eepro_local));
 
-			dev->open = eepro_open;
-			dev->stop = eepro_close;
-			dev->hard_start_xmit = eepro_send_packet;
-			dev->get_stats = eepro_get_stats;
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+			spin_lock_init(&(((struct eepro_local *)dev->priv)->lock));
+#endif
+			dev->open               = eepro_open;
+			dev->stop               = eepro_close;
+			dev->hard_start_xmit    = eepro_send_packet;
+			dev->get_stats          = eepro_get_stats;
 			dev->set_multicast_list = &set_multicast_list;
 
 			/* Fill in the fields of the device structure with
@@ -454,41 +746,42 @@ int eepro_probe1(struct device *dev, short ioaddr)
    */
 
 static char irqrmap[] = {-1,-1,0,1,-1,2,-1,-1,-1,0,3,4,-1,-1,-1,-1};
+static char irqrmap2[] = {-1,-1,4,0,1,2,-1,3,-1,4,5,6,7,-1,-1,-1};
 static int	eepro_grab_irq(struct device *dev)
 {
-	int irqlist[] = { 5, 9, 10, 11, 4, 3, 0};	
+	int irqlist[] = { 3, 4, 5, 7, 9, 10, 11, 12 };
 	int *irqp = irqlist, temp_reg, ioaddr = dev->base_addr;
-
+	
 	outb(BANK1_SELECT, ioaddr); /* be CAREFUL, BANK 1 now */
 
 	/* Enable the interrupt line. */
 	temp_reg = inb(ioaddr + REG1);
-	outb(temp_reg | INT_ENABLE, ioaddr + REG1); 
+	outb(temp_reg | INT_ENABLE, ioaddr + REG1);
 	
 	outb(BANK0_SELECT, ioaddr); /* be CAREFUL, BANK 0 now */
 
 	/* clear all interrupts */
-	outb(ALL_MASK, ioaddr + STATUS_REG); 
+	outb(ALL_MASK, ioaddr + STATUS_REG);
+
 	/* Let EXEC event to interrupt */
-	outb(ALL_MASK & ~(EXEC_MASK), ioaddr + INT_MASK_REG); 
+	outb(ALL_MASK & ~(EXEC_MASK), ioaddr + INT_MASK_REG);
 
 	do {
 		outb(BANK1_SELECT, ioaddr); /* be CAREFUL, BANK 1 now */
 
 		temp_reg = inb(ioaddr + INT_NO_REG);
-		outb((temp_reg & 0xf8) | irqrmap[*irqp], ioaddr + INT_NO_REG); 
+		outb((temp_reg & 0xf8) | irqrmap[*irqp], ioaddr + INT_NO_REG);
 
 		outb(BANK0_SELECT, ioaddr); /* Switch back to Bank 0 */
 
-		if (request_irq (*irqp, NULL, 0, "bogus", NULL) != EBUSY) {
+		if (request_irq (*irqp, NULL, 0, "bogus", dev) != EBUSY) {
 			/* Twinkle the interrupt, and check if it's seen */
 			autoirq_setup(0);
 
 			outb(DIAGNOSE_CMD, ioaddr); /* RESET the 82595 */
 				
-			if (*irqp == autoirq_report(2) &&  /* It's a good IRQ line */
-				(request_irq(dev->irq = *irqp, &eepro_interrupt, 0, "eepro", NULL) == 0)) 
-					break;
+			if (*irqp == autoirq_report(2))  /* It's a good IRQ line */
+				break;
 
 			/* clear all interrupts */
 			outb(ALL_MASK, ioaddr + STATUS_REG); 
@@ -512,20 +805,30 @@ static int	eepro_grab_irq(struct device *dev)
 	return dev->irq;
 }
 
-static int
-eepro_open(struct device *dev)
+static int eepro_open(struct device *dev)
 {
 	unsigned short temp_reg, old8, old9;
-	int i, ioaddr = dev->base_addr;
+	int irqMask;
+	int i, ioaddr = dev->base_addr, rcv_ram = dev->mem_end;
 	struct eepro_local *lp = (struct eepro_local *)dev->priv;
 
 	if (net_debug > 3)
-		printk("eepro: entering eepro_open routine.\n");
+		printk(KERN_DEBUG "%s: entering eepro_open routine.\n", dev->name);
 
-	if (dev->dev_addr[0] == SA_ADDR0 &&
+	if ((irqMask=read_eeprom(ioaddr,7))== ee_FX_INT2IRQ) /* INT to IRQ Mask */
+		{
+			lp->eepro = 2; /* Yes, an Intel EtherExpress Pro/10+ */
+			if (net_debug > 3) printk(KERN_DEBUG "p->eepro = 2;\n"); 
+		}
+
+	else if ((dev->dev_addr[0] == SA_ADDR0 &&
 			dev->dev_addr[1] == SA_ADDR1 &&
-			dev->dev_addr[2] == SA_ADDR2)
-		lp->eepro = 1; /* Yes, an Intel EtherExpress Pro/10 */
+			dev->dev_addr[2] == SA_ADDR2))
+		{ 
+			lp->eepro = 1;
+			if (net_debug > 3) printk(KERN_DEBUG "p->eepro = 1;\n"); 
+		}  /* Yes, an Intel EtherExpress Pro/10 */
+
 	else lp->eepro = 0; /* No, it is a generic 82585 lan card */
 
 	/* Get the interrupt vector for the 82595 */	
@@ -533,10 +836,20 @@ eepro_open(struct device *dev)
 		printk("%s: unable to get IRQ %d.\n", dev->name, dev->irq);
 		return -EAGAIN;
 	}
-				
-	if (irq2dev_map[dev->irq] != 0
-		|| (irq2dev_map[dev->irq] = dev) == 0)
+		
+	if (request_irq(dev->irq , &eepro_interrupt, 0, dev->name, dev)) {
+		printk("%s: unable to get IRQ %d.\n", dev->name, dev->irq);
 		return -EAGAIN;
+	}
+	
+#ifdef irq2dev_map
+	if  (((irq2dev_map[dev->irq] != 0)
+		|| (irq2dev_map[dev->irq] = dev) == 0) && 
+		(irq2dev_map[dev->irq]!=dev)) {
+		/* printk("%s: IRQ map wrong\n", dev->name); */
+		return -EAGAIN;
+	}
+#endif
 
 	/* Initialize the 82595. */
 
@@ -546,7 +859,7 @@ eepro_open(struct device *dev)
 	lp->stepping = temp_reg >> 5;	/* Get the stepping number of the 595 */
 	
 	if (net_debug > 3)
-		printk("The stepping of the 82595 is %d\n", lp->stepping);
+		printk(KERN_DEBUG "The stepping of the 82595 is %d\n", lp->stepping);
 
 	if (temp_reg & 0x10) /* Check the TurnOff Enable bit */
 		outb(temp_reg & 0xef, ioaddr + EEPROM_REG);
@@ -565,9 +878,22 @@ eepro_open(struct device *dev)
 
 	/* Set the receiving mode */
 	outb(BANK1_SELECT, ioaddr); /* be CAREFUL, BANK 1 now */
-	
+
+	/* Set the interrupt vector */	
 	temp_reg = inb(ioaddr + INT_NO_REG);
-	outb((temp_reg & 0xf8) | irqrmap[dev->irq], ioaddr + INT_NO_REG); 
+	if (lp->eepro == 2)
+		outb((temp_reg & 0xf8) | irqrmap2[dev->irq], ioaddr + INT_NO_REG);
+	else outb((temp_reg & 0xf8) | irqrmap[dev->irq], ioaddr + INT_NO_REG); 
+
+
+	temp_reg = inb(ioaddr + INT_NO_REG);
+	if (lp->eepro == 2)
+		outb((temp_reg & 0xf0) | irqrmap2[dev->irq] | 0x08,ioaddr+INT_NO_REG);
+	else outb((temp_reg & 0xf8) | irqrmap[dev->irq], ioaddr + INT_NO_REG);
+
+	if (net_debug > 3)
+		printk(KERN_DEBUG "eepro_open: content of INT Reg is %x\n", temp_reg);
+
 
 	/* Initialize the RCV and XMT upper and lower limits */
 	outb(RCV_LOWER_LIMIT, ioaddr + RCV_LOWER_LIMIT_REG); 
@@ -583,6 +909,7 @@ eepro_open(struct device *dev)
 
 	/* Let RX and TX events to interrupt */
 	outb(ALL_MASK & ~(RX_MASK | TX_MASK), ioaddr + INT_MASK_REG); 
+
 	/* clear all interrupts */
 	outb(ALL_MASK, ioaddr + STATUS_REG); 
 
@@ -597,20 +924,26 @@ eepro_open(struct device *dev)
 	/* Check for the i82595TX and i82595FX */
 	old8 = inb(ioaddr + 8);
 	outb(~old8, ioaddr + 8);
+
 	if ((temp_reg = inb(ioaddr + 8)) == old8) {
 		if (net_debug > 3)
-			printk("i82595 detected!\n");
+			printk(KERN_DEBUG "i82595 detected!\n");
 		lp->version = LAN595;
 	}
 	else {
 		lp->version = LAN595TX;
 		outb(old8, ioaddr + 8);
 		old9 = inb(ioaddr + 9);
-		outb(~old9, ioaddr + 9);
-		if ((temp_reg = inb(ioaddr + 9)) == ~old9) {
+		/*outb(~old9, ioaddr + 9);
+		if (((temp_reg = inb(ioaddr + 9)) == ( (~old9)&0xff) )) {*/
+		
+		if (irqMask==ee_FX_INT2IRQ) {
 			enum iftype { AUI=0, BNC=1, TPE=2 };
-			if (net_debug > 3)
-				printk("i82595FX detected!\n");
+
+			if (net_debug > 3) {
+				printk(KERN_DEBUG "IrqMask: %#x\n",irqMask);
+				printk(KERN_DEBUG "i82595FX detected!\n");
+			}
 			lp->version = LAN595FX;
 			outb(old9, ioaddr + 9);
 			if (dev->if_port != TPE) {	/* Hopefully, this will fix the
@@ -624,24 +957,27 @@ eepro_open(struct device *dev)
 				outb(BANK0_SELECT, ioaddr); /* be CAREFUL, BANK 0 now */
 			}
 		}
-		else if (net_debug > 3)
-			printk("i82595TX detected!\n");
+		else if (net_debug > 3) {
+			printk(KERN_DEBUG "temp_reg: %#x  ~old9: %#x\n",temp_reg,((~old9)&0xff));
+			printk(KERN_DEBUG "i82595TX detected!\n");
+		}
 	}
 	
 	outb(SEL_RESET_CMD, ioaddr);
+
 	/* We are supposed to wait for 2 us after a SEL_RESET */
-	SLOW_DOWN_IO;
-	SLOW_DOWN_IO;	
+	SLOW_DOWN;
+	SLOW_DOWN;
 
 	lp->tx_start = lp->tx_end = XMT_LOWER_LIMIT << 8; /* or = RCV_RAM */
-	lp->tx_last = 0;  
+	lp->tx_last = 0;
 	
 	dev->tbusy = 0;
 	dev->interrupt = 0;
 	dev->start = 1;
 
 	if (net_debug > 3)
-		printk("eepro: exiting eepro_open routine.\n");
+		printk(KERN_DEBUG "%s: exiting eepro_open routine.\n", dev->name);
 
 	outb(RCV_ENABLE_CMD, ioaddr);
 
@@ -649,33 +985,43 @@ eepro_open(struct device *dev)
 	return 0;
 }
 
-static int
-eepro_send_packet(struct sk_buff *skb, struct device *dev)
+static int eepro_send_packet(struct sk_buff *skb, struct device *dev)
 {
 	struct eepro_local *lp = (struct eepro_local *)dev->priv;
 	int ioaddr = dev->base_addr;
+	int rcv_ram = dev->mem_end;
 
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+	unsigned long flags;
+#endif
+	
 	if (net_debug > 5)
-		printk("eepro: entering eepro_send_packet routine.\n");
+		printk(KERN_DEBUG  "%s: entering eepro_send_packet routine.\n", dev->name);
 	
 	if (dev->tbusy) {
 		/* If we get here, some higher level has decided we are broken.
 		   There should really be a "kick me" function call instead. */
 		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
+		if (tickssofar < 40)
 			return 1;
-		if (net_debug > 1)
-			printk("%s: transmit timed out, %s?\n", dev->name,
-				   "network cable problem");
+	
+		/* if (net_debug > 1) */
+		printk(KERN_ERR "%s: transmit timed out, %s?\n", dev->name, 
+			"network cable problem");
+		/* This is not a duplicate. One message for the console, 
+		   one for the the log file  */
+		printk(KERN_DEBUG "%s: transmit timed out, %s?\n", dev->name,
+			"network cable problem");
 		lp->stats.tx_errors++;
+
 		/* Try to restart the adaptor. */
 		outb(SEL_RESET_CMD, ioaddr); 
 		/* We are supposed to wait for 2 us after a SEL_RESET */
-		SLOW_DOWN_IO;
-		SLOW_DOWN_IO;
+		SLOW_DOWN;
+		SLOW_DOWN;
 
 		/* Do I also need to flush the transmit buffers here? YES? */
-		lp->tx_start = lp->tx_end = RCV_RAM; 
+		lp->tx_start = lp->tx_end = rcv_ram; 
 		lp->tx_last = 0;
 	
 		dev->tbusy=0;
@@ -685,32 +1031,52 @@ eepro_send_packet(struct sk_buff *skb, struct device *dev)
 
 	}
 
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20155
 	/* If some higher layer thinks we've missed an tx-done interrupt
 	   we are passed NULL. Caution: dev_tint() handles the cli()/sti()
 	   itself. */
-	if (skb == NULL) {
+	/*	if (skb == NULL) {
 		dev_tint(dev);
-		return 0;
-	}
+	  	return 0;
+	}*/
+	/* according to A. Cox, this is obsolete since 1.0 */
+#endif
+
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+	spin_lock_irqsave(&lp->lock, flags);
+#endif
 
 	/* Block a timer-based transmit from overlapping. */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
-		printk("%s: Transmitter access conflict.\n", dev->name);
-	else {
+	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0) {
+		printk(KERN_WARNING "%s: Transmitter access conflict.\n", dev->name);
+
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+		spin_unlock_irqrestore(&lp->lock, flags);
+#endif
+	} else {
 		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = skb->data;
 
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+		lp->stats.tx_bytes+=skb->len;
+#endif
+
 		hardware_send_packet(dev, buf, length);
 		dev->trans_start = jiffies;
+
 	}
 
-	dev_kfree_skb (skb, FREE_WRITE);
+	compat_dev_kfree_skb (skb, FREE_WRITE);
 
 	/* You might need to clean up and record Tx statistics here. */
 	/* lp->stats.tx_aborted_errors++; */
 
 	if (net_debug > 5)
-		printk("eepro: exiting eepro_send_packet routine.\n");
+		printk(KERN_DEBUG "%s: exiting eepro_send_packet routine.\n", dev->name);
+
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+	spin_unlock_irqrestore(&lp->lock, flags);
+#endif
 	
 	return 0;
 }
@@ -718,62 +1084,83 @@ eepro_send_packet(struct sk_buff *skb, struct device *dev)
 
 /*	The typical workload of the driver:
 	Handle the network interface interrupts. */
+
 static void
 eepro_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device *dev = (struct device *)(irq2dev_map[irq]);
-	int ioaddr, status, boguscount = 0;
+	struct device *dev =  (struct device *)dev_id;
+	                      /* (struct device *)(irq2dev_map[irq]);*/
+	struct eepro_local *lp = (struct eepro_local *)dev->priv;
+	int ioaddr, status, boguscount = 20;
 
-	if (net_debug > 5)
-		printk("eepro: entering eepro_interrupt routine.\n");
-	
 	if (dev == NULL) {
-		printk ("eepro_interrupt(): irq %d for unknown device.\n", irq);
+                printk (KERN_ERR "eepro_interrupt(): irq %d for unknown device.\\n", irq);
+                return;
+        }
+
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+        spin_lock(&lp->lock);
+#endif
+
+	if (dev->interrupt) {
+		printk(KERN_ERR "%s: Re-entering the interrupt handler.\n", dev->name);
+
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+		spin_unlock(&lp->lock);
+		/* FIXME : with the lock, could this ever happen ? */
+#endif
+
 		return;
 	}
 	dev->interrupt = 1;
+
+	if (net_debug > 5)
+		printk(KERN_DEBUG "%s: entering eepro_interrupt routine.\n", dev->name);
 	
 	ioaddr = dev->base_addr;
 
 	do { 
 		status = inb(ioaddr + STATUS_REG);
-
+		
 		if (status & RX_INT) {
 			if (net_debug > 4)
-				printk("eepro: packet received interrupt.\n");
+			printk(KERN_DEBUG "%s: packet received interrupt.\n", dev->name);
 
 			/* Acknowledge the RX_INT */
-			outb(RX_INT, ioaddr + STATUS_REG); 
-
+			outb(RX_INT, ioaddr + STATUS_REG);
 			/* Get the received packets */
 			eepro_rx(dev);
 		}
+
 		else if (status & TX_INT) {
 			if (net_debug > 4)
-				printk("eepro: packet transmit interrupt.\n");
+			printk(KERN_DEBUG "%s: packet transmit interrupt.\n", dev->name);
 
 			/* Acknowledge the TX_INT */
 			outb(TX_INT, ioaddr + STATUS_REG); 
 
 			/* Process the status of transmitted packets */
 			eepro_transmit_interrupt(dev);
-			dev->tbusy = 0;
-			mark_bh(NET_BH);
-		}		
-	} while ((++boguscount < 10) && (status & 0x06));
-
-	dev->interrupt = 0;
-	if (net_debug > 5)
-		printk("eepro: exiting eepro_interrupt routine.\n");
+		}
 	
+	} while ((boguscount-- > 0) && (status & 0x06));
+
+	dev->interrupt = 0; 
+
+	if (net_debug > 5)
+		printk(KERN_DEBUG "%s: exiting eepro_interrupt routine.\n", dev->name);
+
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+	spin_unlock(&lp->lock);
+#endif
 	return;
 }
 
-static int
-eepro_close(struct device *dev)
+static int eepro_close(struct device *dev)
 {
 	struct eepro_local *lp = (struct eepro_local *)dev->priv;
 	int ioaddr = dev->base_addr;
+	int rcv_ram = dev->mem_end;
 	short temp_reg;
 
 	dev->tbusy = 1;
@@ -789,8 +1176,8 @@ eepro_close(struct device *dev)
 
 	/* Flush the Tx and disable Rx. */
 	outb(STOP_RCV_CMD, ioaddr); 
-	lp->tx_start = lp->tx_end = RCV_RAM ;
-	lp->tx_last = 0;  
+	lp->tx_start = lp->tx_end = rcv_ram ;
+	lp->tx_last = 0;
 
 	/* Mask all the interrupts. */
 	outb(ALL_MASK, ioaddr + INT_MASK_REG); 
@@ -802,15 +1189,17 @@ eepro_close(struct device *dev)
 	outb(RESET_CMD, ioaddr); 
 
 	/* release the interrupt */
-	free_irq(dev->irq, NULL);
+	free_irq(dev->irq, dev);
 
+#ifdef irq2dev_map
 	irq2dev_map[dev->irq] = 0;
+#endif
 
 	/* Update the statistics here. What statistics? */
 
 	/* We are supposed to wait for 200 us after a RESET */
-	SLOW_DOWN_IO;
-	SLOW_DOWN_IO; /* May not be enough? */
+	SLOW_DOWN;
+	SLOW_DOWN; /* May not be enough? */
 
 	MOD_DEC_USE_COUNT;
 	return 0;
@@ -853,7 +1242,8 @@ set_multicast_list(struct device *dev)
 		outb(mode, ioaddr + REG3); /* writing reg. 3 to complete the update */
 		outb(BANK0_SELECT, ioaddr); /* Return to BANK 0 now */
 		printk("%s: promiscuous mode enabled.\n", dev->name);
-	} 
+	}
+	
 	else if (dev->mc_count==0 ) 
 	{
 		outb(BANK2_SELECT, ioaddr); /* be CAREFUL, BANK 2 now */
@@ -863,6 +1253,7 @@ set_multicast_list(struct device *dev)
 		outb(mode, ioaddr + REG3); /* writing reg. 3 to complete the update */
 		outb(BANK0_SELECT, ioaddr); /* Return to BANK 0 now */
 	}
+	
 	else 
 	{
 		unsigned short status, *eaddrs;
@@ -884,6 +1275,7 @@ set_multicast_list(struct device *dev)
 		outw(0, ioaddr + IO_PORT);
 		outw(0, ioaddr + IO_PORT);
 		outw(6*(dev->mc_count + 1), ioaddr + IO_PORT);
+		
 		for (i = 0; i < dev->mc_count; i++) 
 		{
 			eaddrs=(unsigned short *)dmi->dmi_addr;
@@ -892,6 +1284,7 @@ set_multicast_list(struct device *dev)
 			outw(*eaddrs++, ioaddr + IO_PORT);
 			outw(*eaddrs++, ioaddr + IO_PORT);
 		}
+		
 		eaddrs = (unsigned short *) dev->dev_addr;
 		outw(eaddrs[0], ioaddr + IO_PORT);
 		outw(eaddrs[1], ioaddr + IO_PORT);
@@ -901,8 +1294,9 @@ set_multicast_list(struct device *dev)
 
 		/* Update the transmit queue */
 		i = lp->tx_end + XMT_HEADER + 6*(dev->mc_count + 1);
+		
 		if (lp->tx_start != lp->tx_end) 
-		{ 
+		{
 			/* update the next address and the chain bit in the 
 			   last packet */
 			outw(lp->tx_last + XMT_CHAIN, ioaddr + HOST_ADDRESS_REG);
@@ -912,23 +1306,27 @@ set_multicast_list(struct device *dev)
 			outw(status | CHAIN_BIT, ioaddr + IO_PORT);
 			lp->tx_end = i ;
 		}
-		else lp->tx_start = lp->tx_end = i ;
+		else {
+			lp->tx_start = lp->tx_end = i ;
+		}
 
 		/* Acknowledge that the MC setup is done */
 		do { /* We should be doing this in the eepro_interrupt()! */
-			SLOW_DOWN_IO;
-			SLOW_DOWN_IO;
+			SLOW_DOWN;
+			SLOW_DOWN;
 			if (inb(ioaddr + STATUS_REG) & 0x08) 
 			{
 				i = inb(ioaddr);
 				outb(0x08, ioaddr + STATUS_REG);
+				
 				if (i & 0x20) { /* command ABORTed */
 					printk("%s: multicast setup failed.\n", 
 						dev->name);
 					break;
 				} else if ((i & 0x0f) == 0x03)	{ /* MC-Done */
-					printk("%s: set Rx mode to %d addresses.\n", 
-						dev->name, dev->mc_count);
+					printk("%s: set Rx mode to %d address%s.\n",
+						dev->name, dev->mc_count,
+						dev->mc_count > 1 ? "es":"");
 					break;
 				}
 			}
@@ -945,7 +1343,7 @@ set_multicast_list(struct device *dev)
 /* IMPORTANT - the 82595 will be set to Bank 0 after the eeprom is read */
 
 /* The delay between EEPROM clock transitions. */
-#define eeprom_delay()	{ int _i = 40; while (--_i > 0) { __SLOW_DOWN_IO; }}
+#define eeprom_delay() { udelay(40); }
 #define EE_READ_CMD (6 << 6)
 
 int
@@ -993,12 +1391,24 @@ hardware_send_packet(struct device *dev, void *buf, short length)
 {
 	struct eepro_local *lp = (struct eepro_local *)dev->priv;
 	short ioaddr = dev->base_addr;
-	unsigned status, tx_available, last, end, boguscount = 10;
+	int rcv_ram = dev->mem_end;
+	unsigned status, tx_available, last, end, boguscount = 100;
 
 	if (net_debug > 5)
-		printk("eepro: entering hardware_send_packet routine.\n");
+		printk(KERN_DEBUG "%s: entering hardware_send_packet routine.\n", dev->name);
 
 	while (boguscount-- > 0) {
+
+		/* Disable RX and TX interrupts.  Necessary to avoid
+		corruption of the HOST_ADDRESS_REG by interrupt
+		service routines. */
+		outb(ALL_MASK, ioaddr + INT_MASK_REG);
+
+		if (dev->interrupt == 1) {
+			/* Enable RX and TX interrupts */
+			outb(ALL_MASK & ~(RX_MASK | TX_MASK), ioaddr + INT_MASK_REG); 
+			continue;
+		}
 
 		/* determine how much of the transmit buffer space is available */
 		if (lp->tx_end > lp->tx_start)
@@ -1007,30 +1417,34 @@ hardware_send_packet(struct device *dev, void *buf, short length)
 			tx_available = lp->tx_start - lp->tx_end;
 		else tx_available = XMT_RAM;
 
-		/* Disable RX and TX interrupts.  Necessary to avoid
-		   corruption of the HOST_ADDRESS_REG by interrupt
-		   service routines. */
-		outb(ALL_MASK, ioaddr + INT_MASK_REG);
-
 		if (((((length + 3) >> 1) << 1) + 2*XMT_HEADER) 
 			>= tx_available)   /* No space available ??? */
+			{
+			eepro_transmit_interrupt(dev); /* Clean up the transmiting queue */
+
+			/* Enable RX and TX interrupts */
+			outb(ALL_MASK & ~(RX_MASK | TX_MASK), ioaddr + INT_MASK_REG); 
 			continue;
+		}
 
 		last = lp->tx_end;
 		end = last + (((length + 3) >> 1) << 1) + XMT_HEADER;
 
 		if (end >= RAM_SIZE) { /* the transmit buffer is wrapped around */
+		
 			if ((RAM_SIZE - last) <= XMT_HEADER) {	
-			/* Arrrr!!!, must keep the xmt header together,
-			  several days were lost to chase this one down. */
-				last = RCV_RAM;
+				/* Arrrr!!!, must keep the xmt header together,
+				several days were lost to chase this one down. */
+				
+				last = rcv_ram;
 				end = last + (((length + 3) >> 1) << 1) + XMT_HEADER;
-			}	
-			else end = RCV_RAM + (end - RAM_SIZE);
+			}
+			
+			else end = rcv_ram + (end - RAM_SIZE);
 		}
 
 		outw(last, ioaddr + HOST_ADDRESS_REG);
-		outw(XMT_CMD, ioaddr + IO_PORT);
+		outw(XMT_CMD, ioaddr + IO_PORT); 
 		outw(0, ioaddr + IO_PORT);
 		outw(end, ioaddr + IO_PORT);
 		outw(length, ioaddr + IO_PORT);
@@ -1044,77 +1458,86 @@ hardware_send_packet(struct device *dev, void *buf, short length)
 			outb(temp & ~(IO_32_BIT), ioaddr + INT_MASK_REG);
 		}
 
-		if (lp->tx_start != lp->tx_end) { 
-			/* update the next address and the chain bit in the 
-			   last packet */
-			if (lp->tx_end != last) {
-				outw(lp->tx_last + XMT_CHAIN, ioaddr + HOST_ADDRESS_REG);
-				outw(last, ioaddr + IO_PORT);
-			}
-			outw(lp->tx_last + XMT_COUNT, ioaddr + HOST_ADDRESS_REG);
-			status = inw(ioaddr + IO_PORT);
-			outw(status | CHAIN_BIT, ioaddr + IO_PORT);
-		}
-
 		/* A dummy read to flush the DRAM write pipeline */
 		status = inw(ioaddr + IO_PORT); 
 
-		/* Enable RX and TX interrupts */
-		outb(ALL_MASK & ~(RX_MASK | TX_MASK), ioaddr + INT_MASK_REG); 
-	
-		if (lp->tx_start == lp->tx_end) {
+		if (lp->tx_start == lp->tx_end) {	
 			outw(last, ioaddr + XMT_BAR);
 			outb(XMT_CMD, ioaddr);
 			lp->tx_start = last;   /* I don't like to change tx_start here */
 		}
-		else	outb(RESUME_XMT_CMD, ioaddr);
+		else {
+			/* update the next address and the chain bit in the 
+			last packet */
+			
+			if (lp->tx_end != last) {
+				outw(lp->tx_last + XMT_CHAIN, ioaddr + HOST_ADDRESS_REG);
+				outw(last, ioaddr + IO_PORT); 
+			}
+			
+			outw(lp->tx_last + XMT_COUNT, ioaddr + HOST_ADDRESS_REG);
+			status = inw(ioaddr + IO_PORT); 
+			outw(status | CHAIN_BIT, ioaddr + IO_PORT);
+
+			/* Continue the transmit command */
+			outb(RESUME_XMT_CMD, ioaddr);
+		}
 
 		lp->tx_last = last;
 		lp->tx_end = end;
 
 		if (dev->tbusy) {
 			dev->tbusy = 0;
-			mark_bh(NET_BH);
 		}
+		
+		/* Enable RX and TX interrupts */
+		outb(ALL_MASK & ~(RX_MASK | TX_MASK), ioaddr + INT_MASK_REG);
 
 		if (net_debug > 5)
-			printk("eepro: exiting hardware_send_packet routine.\n");
+			printk(KERN_DEBUG "%s: exiting hardware_send_packet routine.\n", dev->name);
 		return;
 	}
+
 	dev->tbusy = 1;
 	if (net_debug > 5)
-		printk("eepro: exiting hardware_send_packet routine.\n");
+		printk(KERN_DEBUG "%s: exiting hardware_send_packet routine.\n", dev->name);
 }
 
 static void
 eepro_rx(struct device *dev)
 {
 	struct eepro_local *lp = (struct eepro_local *)dev->priv;
-	short ioaddr = dev->base_addr;
+	short ioaddr = dev->base_addr, rcv_ram = dev->mem_end;
 	short boguscount = 20;
 	short rcv_car = lp->rx_start;
 	unsigned rcv_event, rcv_status, rcv_next_frame, rcv_size;
 
 	if (net_debug > 5)
-		printk("eepro: entering eepro_rx routine.\n");
+		printk(KERN_DEBUG "%s: entering eepro_rx routine.\n", dev->name);
 	
 	/* Set the read pointer to the start of the RCV */
 	outw(rcv_car, ioaddr + HOST_ADDRESS_REG);
+	
 	rcv_event = inw(ioaddr + IO_PORT);
 
 	while (rcv_event == RCV_DONE) {
-		rcv_status = inw(ioaddr + IO_PORT);
+	
+		rcv_status = inw(ioaddr + IO_PORT); 
 		rcv_next_frame = inw(ioaddr + IO_PORT);
-		rcv_size = inw(ioaddr + IO_PORT);
+		rcv_size = inw(ioaddr + IO_PORT); 
 
 		if ((rcv_status & (RX_OK | RX_ERROR)) == RX_OK) {
+		
 			/* Malloc up new buffer. */
 			struct sk_buff *skb;
 
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+			lp->stats.rx_bytes+=rcv_size;
+#endif
 			rcv_size &= 0x3fff;
 			skb = dev_alloc_skb(rcv_size+5);
 			if (skb == NULL) {
-				printk("%s: Memory squeeze, dropping packet.\n", dev->name);
+				printk(KERN_NOTICE "%s: Memory squeeze, dropping packet.\n", dev->name);
 				lp->stats.rx_dropped++;
 				break;
 			}
@@ -1123,32 +1546,39 @@ eepro_rx(struct device *dev)
 
 			if (lp->version == LAN595)
 				insw(ioaddr+IO_PORT, skb_put(skb,rcv_size), (rcv_size + 3) >> 1);
-			else {	/* LAN595TX or LAN595FX, capable of 32-bit I/O processing */
+			else { /* LAN595TX or LAN595FX, capable of 32-bit I/O processing */
 				unsigned short temp = inb(ioaddr + INT_MASK_REG);
 				outb(temp | IO_32_BIT, ioaddr + INT_MASK_REG);
-				insl(ioaddr+IO_PORT_32_BIT, skb_put(skb,rcv_size), (rcv_size + 3) >> 2);
+				insl(ioaddr+IO_PORT_32_BIT, skb_put(skb,rcv_size), 
+					(rcv_size + 3) >> 2);
 				outb(temp & ~(IO_32_BIT), ioaddr + INT_MASK_REG);
 			}
-
 	
 			skb->protocol = eth_type_trans(skb,dev);	
 			netif_rx(skb);
 			lp->stats.rx_packets++;
 		}
+		
 		else { /* Not sure will ever reach here, 
-			  I set the 595 to discard bad received frames */
+			I set the 595 to discard bad received frames */
 			lp->stats.rx_errors++;
+			
 			if (rcv_status & 0x0100)
 				lp->stats.rx_over_errors++;
+			
 			else if (rcv_status & 0x0400)
 				lp->stats.rx_frame_errors++;
+			
 			else if (rcv_status & 0x0800)
 				lp->stats.rx_crc_errors++;
+			
 			printk("%s: event = %#x, status = %#x, next = %#x, size = %#x\n", 
 				dev->name, rcv_event, rcv_status, rcv_next_frame, rcv_size);
 		}
+
 		if (rcv_status & 0x1000)
 			lp->stats.rx_length_errors++;
+
 		if (--boguscount == 0)
 			break;
 
@@ -1160,10 +1590,11 @@ eepro_rx(struct device *dev)
 	} 
 	if (rcv_car == 0)
 		rcv_car = (RCV_UPPER_LIMIT << 8) | 0xff;
+		
 	outw(rcv_car - 1, ioaddr + RCV_STOP);
 
 	if (net_debug > 5)
-		printk("eepro: exiting eepro_rx routine.\n");
+		printk(KERN_DEBUG "%s: exiting eepro_rx routine.\n", dev->name);
 }
 
 static void
@@ -1171,73 +1602,120 @@ eepro_transmit_interrupt(struct device *dev)
 {
 	struct eepro_local *lp = (struct eepro_local *)dev->priv;
 	short ioaddr = dev->base_addr;
-	short boguscount = 10; 
+	short boguscount = 20; 
 	short xmt_status;
+	
+	/*
+	if (dev->tbusy == 0) {
+		printk("%s: transmit_interrupt called with tbusy = 0 ??\n",
+			dev->name);
+		printk(KERN_DEBUG "%s: transmit_interrupt called with tbusy = 0 ??\n",
+			dev->name);
+	}
+	*/
 
 	while (lp->tx_start != lp->tx_end) { 
-
-		outw(lp->tx_start, ioaddr + HOST_ADDRESS_REG);
-		xmt_status = inw(ioaddr+IO_PORT);
-		if ((xmt_status & TX_DONE_BIT) == 0) break;
-		xmt_status = inw(ioaddr+IO_PORT);
-		lp->tx_start = inw(ioaddr+IO_PORT);
 	
-		if (dev->tbusy) {
-			dev->tbusy = 0;
-			mark_bh(NET_BH);
-		}
+		outw(lp->tx_start, ioaddr + HOST_ADDRESS_REG); 
+		xmt_status = inw(ioaddr+IO_PORT);
+		
+		if ((xmt_status & TX_DONE_BIT) == 0) break;
+
+		xmt_status = inw(ioaddr+IO_PORT); 
+		lp->tx_start = inw(ioaddr+IO_PORT);
+
+		dev->tbusy = 0;
+		mark_bh(NET_BH);
 
 		if (xmt_status & 0x2000)
-			lp->stats.tx_packets++;
+			lp->stats.tx_packets++; 
 		else {
 			lp->stats.tx_errors++;
 			if (xmt_status & 0x0400)
 				lp->stats.tx_carrier_errors++;
 			printk("%s: XMT status = %#x\n",
 				dev->name, xmt_status);
+			printk(KERN_DEBUG "%s: XMT status = %#x\n",
+				dev->name, xmt_status);
 		}
-		if (xmt_status & 0x000f)
+		
+		if (xmt_status & 0x000f) {
 			lp->stats.collisions += (xmt_status & 0x000f);
-		if ((xmt_status & 0x0040) == 0x0)
+		}
+		
+		if ((xmt_status & 0x0040) == 0x0) {
 			lp->stats.tx_heartbeat_errors++;
+		}
 
 		if (--boguscount == 0)
-			break;  
+			break;
 	}
 }
 
 #ifdef MODULE
-static char devicename[9] = { 0, };
-static struct device dev_eepro = {
-	devicename, /* device name is inserted by linux/drivers/net/net_init.c */
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, eepro_probe };
 
-static int io = 0x200;
-static int irq = 0;
+#define MAX_EEPRO 8
+static char devicename[MAX_EEPRO][9];
+static struct device dev_eepro[MAX_EEPRO];
 
-int
+static int io[MAX_EEPRO] = {
+#ifdef PnPWakeup
+  0x210,  /*: default for PnP enabled FX chips */
+#else
+  0x200,  /* Why? */
+#endif
+  [1 ... MAX_EEPRO - 1] = -1 };
+static int irq[MAX_EEPRO] = { [0 ... MAX_EEPRO-1] = 0 };
+static int mem[MAX_EEPRO] = {	/* Size of the rx buffer in KB */
+  [0 ... MAX_EEPRO-1] = RCV_RAM/1024
+};
+
+static int n_eepro = 0;
+/* For linux 2.1.xx */
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20155
+MODULE_AUTHOR("Pascal Dupuis <dupuis@lei.ucl.ac.be> for the 2.1 stuff (locking,...)");
+MODULE_DESCRIPTION("Intel i82595 ISA EtherExpressPro10/10+ driver");
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_EEPRO) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_EEPRO) "i");
+MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_EEPRO) "i");
+#endif 
+
+int 
 init_module(void)
 {
-	if (io == 0)
-		printk("eepro: You should not use auto-probing with insmod!\n");
-	dev_eepro.base_addr = io;
-	dev_eepro.irq       = irq;
+	if (io[0] == 0)
+		printk("eepro_init_module: You should not use auto-probing with insmod!\n");
 
-	if (register_netdev(&dev_eepro) != 0)
-		return -EIO;
-	return 0;
+	while (n_eepro < MAX_EEPRO && io[n_eepro] >= 0) {
+		struct device *d = &dev_eepro[n_eepro];
+		d->name		= devicename[n_eepro]; /* inserted by drivers/net/net_init.c */
+		d->mem_end	= mem[n_eepro];
+		d->base_addr	= io[n_eepro];
+		d->irq		= irq[n_eepro];
+		d->init		= eepro_probe;
+
+		if (register_netdev(d) == 0)
+			n_eepro++;
+	}
+	
+	return n_eepro ? 0 : -ENODEV;
 }
 
 void
 cleanup_module(void)
 {
-	unregister_netdev(&dev_eepro);
-	kfree_s(dev_eepro.priv,sizeof(struct eepro_local));
-	dev_eepro.priv=NULL;
+	int i;
+	
+	for (i=0; i<n_eepro; i++) {
+		struct device *d = &dev_eepro[i];
+		unregister_netdev(d);
 
-	/* If we don't do this, we can't re-insmod it later. */
-	release_region(dev_eepro.base_addr, EEPRO_IO_EXTENT);
+		kfree_s(d->priv,sizeof(struct eepro_local));
+		d->priv=NULL;
+
+		/* If we don't do this, we can't re-insmod it later. */
+		release_region(d->base_addr, EEPRO_IO_EXTENT);
+		
+	}
 }
 #endif /* MODULE */

@@ -45,11 +45,14 @@
  *      Allow only to set io base address on command line: sjcd=<io_base>
  *      Changes to Documentation/cdrom/sjcd
  *      Added cleanup after any error in the initialisation.
+ *  1.7 Added code to set the sector size tables to prevent the bug present in 
+ *      the previous version of this driver.  Coded added by Anthony Barbachan 
+ *      from bugfix tip originally suggested by Alan Cox.
  *
  */
 
 #define SJCD_VERSION_MAJOR 1
-#define SJCD_VERSION_MINOR 6
+#define SJCD_VERSION_MINOR 7
 
 #ifdef MODULE
 #include <linux/module.h>
@@ -65,14 +68,15 @@
 #include <linux/ioport.h>
 #include <linux/string.h>
 #include <linux/major.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #define MAJOR_NR SANYO_CDROM_MAJOR
 #include <linux/blk.h>
-#include <linux/sjcd.h>
+#include "sjcd.h"
 
 static int sjcd_present = 0;
 
@@ -106,6 +110,10 @@ static int sjcd_audio_status;
 static struct sjcd_play_msf sjcd_playing;
 
 static int sjcd_base = SJCD_BASE_ADDR;
+
+#ifdef MODULE
+MODULE_PARM(sjcd_base, "i");
+#endif
 
 static struct wait_queue *sjcd_waitq = NULL;
 
@@ -155,7 +163,7 @@ static int sjcd_cleanup(void);
  * Set up device, i.e., use command line data to set
  * base address.
  */
-void sjcd_setup( char *str, int *ints )
+__initfunc(void sjcd_setup( char *str, int *ints ))
 {
    if (ints[0] > 0)
       sjcd_base = ints[1];
@@ -722,7 +730,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
     printk( "SJCD: ioctl: playtrkind\n" );
 #endif
     if( ( s = verify_area( VERIFY_READ, (void *)arg, sizeof( ti ) ) ) == 0 ){
-      memcpy_fromfs( &ti, (void *)arg, sizeof( ti ) );
+      copy_from_user( &ti, (void *)arg, sizeof( ti ) );
 
       if( ti.cdti_trk0 < sjcd_first_track_no ) return( -EINVAL );
       if( ti.cdti_trk1 > sjcd_last_track_no )
@@ -754,7 +762,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
 	sjcd_audio_status = CDROM_AUDIO_NO_STATUS;
       }
 
-      memcpy_fromfs( &sjcd_msf, (void *)arg, sizeof( sjcd_msf ) );
+      copy_from_user( &sjcd_msf, (void *)arg, sizeof( sjcd_msf ) );
 
       sjcd_playing.start.min = bin2bcd( sjcd_msf.cdmsf_min0 );
       sjcd_playing.start.sec = bin2bcd( sjcd_msf.cdmsf_sec0 );
@@ -779,7 +787,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
     if( ( s = verify_area( VERIFY_WRITE, (void *)arg, sizeof( toc_header ) ) ) == 0 ){
       toc_header.cdth_trk0 = sjcd_first_track_no;
       toc_header.cdth_trk1 = sjcd_last_track_no;
-      memcpy_tofs( (void *)arg, &toc_header, sizeof( toc_header ) );
+      copy_to_user( (void *)arg, &toc_header, sizeof( toc_header ) );
     }
     return( s );
   }
@@ -792,7 +800,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
     if( ( s = verify_area( VERIFY_WRITE, (void *)arg, sizeof( toc_entry ) ) ) == 0 ){
       struct sjcd_hw_disk_info *tp;
 
-      memcpy_fromfs( &toc_entry, (void *)arg, sizeof( toc_entry ) );
+      copy_from_user( &toc_entry, (void *)arg, sizeof( toc_entry ) );
 
       if( toc_entry.cdte_track == CDROM_LEADOUT )
 	tp = &sjcd_table_of_contents[ 0 ];
@@ -814,7 +822,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
 	break;
       default: return( -EINVAL );
       }
-      memcpy_tofs( (void *)arg, &toc_entry, sizeof( toc_entry ) );
+      copy_to_user( (void *)arg, &toc_entry, sizeof( toc_entry ) );
     }
     return( s );
   }
@@ -827,7 +835,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
     if( ( s = verify_area( VERIFY_WRITE, (void *)arg, sizeof( subchnl ) ) ) == 0 ){
       struct sjcd_hw_qinfo q_info;
 
-      memcpy_fromfs( &subchnl, (void *)arg, sizeof( subchnl ) );
+      copy_from_user( &subchnl, (void *)arg, sizeof( subchnl ) );
       if( sjcd_get_q_info( &q_info ) < 0 ) return( -EIO );
 
       subchnl.cdsc_audiostatus = sjcd_audio_status;
@@ -851,7 +859,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
 	break;
       default: return( -EINVAL );
       }
-      memcpy_tofs( (void *)arg, &subchnl, sizeof( subchnl ) );
+      copy_to_user( (void *)arg, &subchnl, sizeof( subchnl ) );
     }
     return( s );
   }
@@ -864,7 +872,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
     if( ( s = verify_area( VERIFY_READ, (void *)arg, sizeof( vol_ctrl ) ) ) == 0 ){
       unsigned char dummy[ 4 ];
 
-      memcpy_fromfs( &vol_ctrl, (void *)arg, sizeof( vol_ctrl ) );
+      copy_from_user( &vol_ctrl, (void *)arg, sizeof( vol_ctrl ) );
       sjcd_send_4_cmd( SCMD_SET_VOLUME, vol_ctrl.channel0, 0xFF,
 		      vol_ctrl.channel1, 0xFF );
       if( sjcd_receive_status() < 0 ) return( -EIO );
@@ -892,7 +900,7 @@ static int sjcd_ioctl( struct inode *ip, struct file *fp,
     printk( "SJCD: ioctl: statistic\n" );
 #endif
     if( ( s = verify_area( VERIFY_WRITE, (void *)arg, sizeof( statistic ) ) ) == 0 )
-      memcpy_tofs( (void *)arg, &statistic, sizeof( statistic ) );
+      copy_to_user( (void *)arg, &statistic, sizeof( statistic ) );
     return( s );
   }
 #endif
@@ -1381,7 +1389,7 @@ int sjcd_open( struct inode *ip, struct file *fp ){
 /*
  * On close, we flush all sjcd blocks from the buffer cache.
  */
-static void sjcd_release( struct inode *inode, struct file *file ){
+static int sjcd_release( struct inode *inode, struct file *file ){
   int s;
 
 #if defined( SJCD_TRACE )
@@ -1409,6 +1417,7 @@ static void sjcd_release( struct inode *inode, struct file *file ){
       }
     }
   }
+  return 0;
 }
 
 /*
@@ -1419,16 +1428,20 @@ static struct file_operations sjcd_fops = {
   block_read,         /* read - general block-dev read */
   block_write,        /* write - general block-dev write */
   NULL,               /* readdir - bad */
-  NULL,               /* select */
+  NULL,               /* poll */
   sjcd_ioctl,         /* ioctl */
   NULL,               /* mmap */
   sjcd_open,          /* open */
+  NULL,		      /* flush */
   sjcd_release,       /* release */
   NULL,               /* fsync */
   NULL,               /* fasync */
   sjcd_disk_change,   /* media change */
   NULL                /* revalidate */
 };
+
+static int blksize = 2048;
+static int secsize = 2048;
 
 /*
  * Following stuff is intended for initialization of the cdrom. It
@@ -1444,7 +1457,7 @@ static struct {
  * Test for presence of drive and initialize it. Called at boot time.
  * Probe cdrom, find out version and status.
  */
-int sjcd_init( void ){
+__initfunc(int sjcd_init( void )){
   int i;
 
   printk(KERN_INFO "SJCD: Sanyo CDR-H94A cdrom driver version %d.%d.\n", SJCD_VERSION_MAJOR,
@@ -1453,6 +1466,9 @@ int sjcd_init( void ){
 #if defined( SJCD_TRACE )
   printk("SJCD: sjcd=0x%x: ", sjcd_base);
 #endif  
+
+	hardsect_size[MAJOR_NR] = &secsize;
+	blksize_size[MAJOR_NR] = &blksize;
 
   if( register_blkdev( MAJOR_NR, "sjcd", &sjcd_fops ) != 0 ){
     printk( "SJCD: Unable to get major %d for Sanyo CD-ROM\n", MAJOR_NR );
@@ -1481,7 +1497,7 @@ int sjcd_init( void ){
     /*
      * Wait 10ms approx.
      */
-    for( timer = jiffies; jiffies <= timer; );
+    for( timer = jiffies; time_before_eq(jiffies, timer); );
     if ( (i % 100) == 0 ) printk( "." );
     ( void )sjcd_check_status();
   }
@@ -1502,7 +1518,7 @@ int sjcd_init( void ){
     /*
      * Wait 10ms approx.
      */
-    for( timer = jiffies; jiffies <= timer; );
+    for( timer = jiffies; time_before_eq(jiffies, timer); );
     if ( (i % 100) == 0 ) printk( "." );
     ( void )sjcd_check_status();
   }
@@ -1533,7 +1549,7 @@ int sjcd_init( void ){
       /*
        * Wait 10ms approx.
        */
-      for( timer = jiffies; jiffies <= timer; );
+      for( timer = jiffies; time_before_eq(jiffies, timer); );
       if ( (i % 100) == 0 ) printk( "." );
       ( void )sjcd_check_status();
     }

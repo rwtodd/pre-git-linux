@@ -49,8 +49,6 @@ struct ext2_sb_info {
 	struct buffer_head * s_inode_bitmap[EXT2_MAX_GROUP_LOADED];
 	unsigned long s_block_bitmap_number[EXT2_MAX_GROUP_LOADED];
 	struct buffer_head * s_block_bitmap[EXT2_MAX_GROUP_LOADED];
-	int s_rename_lock;
-	struct wait_queue * s_rename_wait;
 	unsigned long  s_mount_opt;
 	unsigned short s_resuid;
 	unsigned short s_resgid;
@@ -60,6 +58,9 @@ struct ext2_sb_info {
 	int s_desc_per_block_bits;
 	int s_inode_size;
 	int s_first_ino;
+	int s_feature_compat;
+	int s_feature_incompat;
+	int s_feature_ro_compat;
 };
 
 #endif	/* _LINUX_EXT2_FS_SB */

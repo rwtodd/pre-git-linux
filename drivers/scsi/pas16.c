@@ -73,7 +73,6 @@
  *     software after reset using the default_irq for the
  *     current board number.
  *
- *
  * 2.  With command line overrides - pas16=port,irq may be 
  *     used on the LILO command line to override the defaults.
  *
@@ -83,6 +82,11 @@
  *     -DPAS16_OVERRIDE={{0x388, 10}}
  *     NOTE:  Untested.
  *	
+ * 4.  When included as a module, with arguments passed on the command line:
+ *         pas16_irq=xx		the interrupt
+ *         pas16_addr=xx	the port
+ *     e.g. "modprobe pas16 pas16_addr=0x388 pas16_irq=5"
+ *
  *     Note that if the override methods are used, place holders must
  *     be specified for other boards in the system.
  *
@@ -99,7 +103,11 @@
  *   interrupts.  Ie, for a board at the default 0x388 base port,
  *   boot: linux pas16=0x388,255
  *
- *     (255 is the IRQ_NONE constant in NCR5380.h)
+ *   IRQ_NONE (255) should be specified for no interrupt,
+ *   IRQ_AUTO (254) to autoprobe for an IRQ line if overridden
+ *   on the command line.
+ *
+ *   (IRQ_AUTO == 254, IRQ_NONE == 255 in NCR5380.h)
  */
  
 #ifdef MODULE
@@ -120,7 +128,8 @@
 #include "constants.h"
 #include "sd.h"
 
-#include<linux/stat.h>
+#include <linux/stat.h>
+#include <linux/init.h>
 
 struct proc_dir_entry proc_scsi_pas16 = {
     PROC_SCSI_PAS16, 5, "pas16",
@@ -128,6 +137,8 @@ struct proc_dir_entry proc_scsi_pas16 = {
 };
 static int pas_maxi = 0;
 static int pas_wmaxi = 0;
+static unsigned short pas16_addr = 0;
+static int pas16_irq = 0;
  
 
 int scsi_irq_translate[] =
@@ -138,20 +149,21 @@ int scsi_irq_translate[] =
  * irq jumpers on the board).  The first value in the array will be
  * assigned to logical board 0, the next to board 1, etc.
  */
-int default_irqs[] = {  PAS16_DEFAULT_BOARD_1_IRQ,
-			PAS16_DEFAULT_BOARD_2_IRQ,
-			PAS16_DEFAULT_BOARD_3_IRQ,
-			PAS16_DEFAULT_BOARD_4_IRQ
-		     };
+int default_irqs[] __initdata = 
+	{  PAS16_DEFAULT_BOARD_1_IRQ,
+	   PAS16_DEFAULT_BOARD_2_IRQ,
+	   PAS16_DEFAULT_BOARD_3_IRQ,
+	   PAS16_DEFAULT_BOARD_4_IRQ
+	};
 
 static struct override {
     unsigned short io_port;
     int  irq;
 } overrides 
 #ifdef PAS16_OVERRIDE
-    [] = PAS16_OVERRIDE;
+    [] __initdata = PAS16_OVERRIDE;
 #else
-    [4] = {{0,IRQ_AUTO}, {0,IRQ_AUTO}, {0,IRQ_AUTO},
+    [4] __initdata = {{0,IRQ_AUTO}, {0,IRQ_AUTO}, {0,IRQ_AUTO},
 	{0,IRQ_AUTO}};
 #endif
 
@@ -160,11 +172,12 @@ static struct override {
 static struct base {
     unsigned short io_port;
     int noauto;
-} bases[] = { {PAS16_DEFAULT_BASE_1, 0},
-	      {PAS16_DEFAULT_BASE_2, 0},
-	      {PAS16_DEFAULT_BASE_3, 0},
-	      {PAS16_DEFAULT_BASE_4, 0}
-	    };
+} bases[] __initdata = 
+	{ {PAS16_DEFAULT_BASE_1, 0},
+	  {PAS16_DEFAULT_BASE_2, 0},
+	  {PAS16_DEFAULT_BASE_3, 0},
+	  {PAS16_DEFAULT_BASE_4, 0}
+	};
 
 #define NO_BASES (sizeof (bases) / sizeof (struct base))
 
@@ -210,7 +223,8 @@ unsigned short  pas16_offset[ 8 ] =
  *
  */
 
-void	enable_board( int  board_num,  unsigned short port )
+__initfunc(static void
+	enable_board( int  board_num,  unsigned short port ))
 {
     outb( 0xbc + board_num, MASTER_ADDRESS_PTR );
     outb( port >> 2, MASTER_ADDRESS_PTR );
@@ -229,7 +243,8 @@ void	enable_board( int  board_num,  unsigned short port )
  *
  */
 
-void	init_board( unsigned short io_port, int irq, int force_irq )
+__initfunc (static void
+	init_board( unsigned short io_port, int irq, int force_irq ))
 {
 	unsigned int	tmp;
 	unsigned int	pas_irq_code;
@@ -277,7 +292,8 @@ void	init_board( unsigned short io_port, int irq, int force_irq )
  * Returns : 0 if board not found, 1 if found.
  */
 
-int     pas16_hw_detect( unsigned short  board_num )
+__initfunc(static int
+     pas16_hw_detect( unsigned short  board_num ))
 {
     unsigned char	board_rev, tmp;
     unsigned short	io_port = bases[ board_num ].io_port;
@@ -336,7 +352,7 @@ int     pas16_hw_detect( unsigned short  board_num )
  *
  */
 
-void pas16_setup(char *str, int *ints) {
+__initfunc(void pas16_setup(char *str, int *ints)) {
     static int commandline_current = 0;
     int i;
     if (ints[0] != 2) 
@@ -367,7 +383,7 @@ void pas16_setup(char *str, int *ints) {
  *
  */
 
-int pas16_detect(Scsi_Host_Template * tpnt) {
+__initfunc(int pas16_detect(Scsi_Host_Template * tpnt)) {
     static int current_override = 0;
     static unsigned short current_base = 0;
     struct Scsi_Host *instance;
@@ -376,6 +392,22 @@ int pas16_detect(Scsi_Host_Template * tpnt) {
 
     tpnt->proc_dir = &proc_scsi_pas16;
     tpnt->proc_info = &pas16_proc_info;
+
+    if (pas16_addr != 0) {
+	overrides[0].io_port = pas16_addr;
+	/*
+	*  This is how we avoid seeing more than
+	*  one host adapter at the same I/O port.
+	*  Cribbed shamelessly from pas16_setup().
+	*/
+	for (count = 0; count < NO_BASES; ++count)
+	    if (bases[count].io_port == pas16_addr) {
+ 		    bases[count].noauto = 1;
+		    break;
+	}
+    }
+    if (pas16_irq != 0)
+	overrides[0].irq = pas16_irq;
 
     for (count = 0; current_override < NO_OVERRIDES; ++current_override) {
 	io_port = 0;
@@ -420,7 +452,7 @@ int pas16_detect(Scsi_Host_Template * tpnt) {
 	    instance->irq = NCR5380_probe_irq(instance, PAS16_IRQS);
 
 	if (instance->irq != IRQ_NONE) 
-	    if (request_irq(instance->irq, pas16_intr, SA_INTERRUPT, "pas16", NULL)) {
+	    if (request_irq(instance->irq, do_pas16_intr, SA_INTERRUPT, "pas16", NULL)) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
 		    instance->host_no, instance->irq);
 		instance->irq = IRQ_NONE;
@@ -510,7 +542,7 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
     register unsigned char  *d = dst;
     register unsigned short reg = (unsigned short) (instance->io_port + 
 	P_DATA_REG_OFFSET);
-    register i = len;
+    register int i = len;
     int ii = 0;
 
     while ( !(inb(instance->io_port + P_STATUS_REG_OFFSET) & P_ST_RDY) )
@@ -546,7 +578,7 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
     int len) {
     register unsigned char *s = src;
     register unsigned short reg = (instance->io_port + P_DATA_REG_OFFSET);
-    register i = len;
+    register int i = len;
     int ii = 0;
 
     while ( !((inb(instance->io_port + P_STATUS_REG_OFFSET)) & P_ST_RDY) )
@@ -570,7 +602,11 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 #ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
 Scsi_Host_Template driver_template = MV_PAS16;
-
+  
 #include <linux/module.h>
+ 
+MODULE_PARM(pas16_addr, "h");
+MODULE_PARM(pas16_irq, "i");
+
 #include "scsi_module.c"
 #endif

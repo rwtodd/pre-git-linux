@@ -19,24 +19,26 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-static int sysv_dir_read(struct inode * inode, struct file * filp, char * buf, int count)
+static ssize_t sysv_dir_read(struct file * filp, char * buf,
+			     size_t count, loff_t *ppos)
 {
 	return -EISDIR;
 }
 
-static int sysv_readdir(struct inode *, struct file *, void *, filldir_t);
+static int sysv_readdir(struct file *, void *, filldir_t);
 
 static struct file_operations sysv_dir_operations = {
 	NULL,			/* lseek - default */
 	sysv_dir_read,		/* read */
 	NULL,			/* write - bad */
 	sysv_readdir,		/* readdir */
-	NULL,			/* select - default */
+	NULL,			/* poll - default */
 	NULL,			/* ioctl - default */
 	NULL,			/* mmap */
 	NULL,			/* no special open code */
+	NULL,			/* flush */
 	NULL,			/* no special release code */
 	file_fsync		/* default fsync */
 };
@@ -60,21 +62,19 @@ struct inode_operations sysv_dir_inode_operations = {
 	NULL,			/* readpage */
 	NULL,			/* writepage */
 	NULL,			/* bmap */
-	sysv_truncate,		/* truncate */
+	NULL,			/* truncate */
 	NULL			/* permission */
 };
 
-static int sysv_readdir(struct inode * inode, struct file * filp,
-	void * dirent, filldir_t filldir)
+static int sysv_readdir(struct file * filp, void * dirent, filldir_t filldir)
 {
-	struct super_block * sb;
+	struct inode *inode = filp->f_dentry->d_inode;
+	struct super_block * sb = inode->i_sb;
 	unsigned int offset,i;
 	struct buffer_head * bh;
 	char* bh_data;
 	struct sysv_dir_entry * de, sde;
 
-	if (!inode || !(sb = inode->i_sb) || !S_ISDIR(inode->i_mode))
-		return -EBADF;
 	if ((unsigned long)(filp->f_pos) % SYSV_DIRSIZE)
 		return -EBADF;
 	while (filp->f_pos < inode->i_size) {

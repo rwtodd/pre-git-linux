@@ -1,4 +1,4 @@
-/* $Id: vaddrs.h,v 1.20 1996/04/25 06:13:40 davem Exp $ */
+/* $Id: vaddrs.h,v 1.22 1999/04/20 13:22:55 anton Exp $ */
 #ifndef _SPARC_VADDRS_H
 #define _SPARC_VADDRS_H
 
@@ -17,8 +17,8 @@
  * a pointer and then the value in the assembly code
  */
 #define  IOBASE_VADDR   0xfe000000  /* Base for mapping pages */
-#define  IOBASE_LEN     0x00200000  /* Length of the IO area */
-#define  IOBASE_END     0xfe200000
+#define  IOBASE_LEN     0x00300000  /* Length of the IO area */
+#define  IOBASE_END     0xfe300000
 #define  DVMA_VADDR     0xfff00000  /* Base area of the DVMA on suns */
 #define  DVMA_LEN       0x00040000  /* Size of the DVMA address space */
 #define  DVMA_END       0xfff40000
@@ -51,7 +51,7 @@
 /* On sun4m machines we need per-cpu virtual areas */
 #define  PERCPU_VADDR   0xffc00000  /* Base for per-cpu virtual mappings */
 #define  PERCPU_ENTSIZE 0x00100000
-#define  PERCPU_LEN     ((PERCPU_ENTSIZE*NCPUS))
+#define  PERCPU_LEN     ((PERCPU_ENTSIZE*SUN4M_NCPUS))
 
 /* per-cpu offsets */
 #define  PERCPU_TBR_OFFSET      0x00000      /* %tbr, mainly used for identification. */

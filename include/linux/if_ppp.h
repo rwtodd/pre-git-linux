@@ -1,4 +1,4 @@
-/*	$Id: if_ppp.h,v 1.3 1995/06/12 11:36:50 paulus Exp $	*/
+/*	$Id: if_ppp.h,v 1.19 1999/03/31 06:07:57 paulus Exp $	*/
 
 /*
  * if_ppp.h - Point-to-Point Protocol definitions.
@@ -21,7 +21,7 @@
  */
 
 /*
- *  ==FILEVERSION 960109==
+ *  ==FILEVERSION 990331==
  *
  *  NOTE TO MAINTAINERS:
  *     If you modify this file at all, please set the above date.
@@ -35,19 +35,13 @@
 #ifndef _IF_PPP_H_
 #define _IF_PPP_H_
 
-#if defined(__linux__)
-#include <linux/if.h>
-#include <linux/ioctl.h>
-#include <linux/ppp_defs.h>
-#endif
-
 /*
  * Packet sizes
  */
 
 #define	PPP_MTU		1500	/* Default MTU (size of Info field) */
 #define PPP_MAXMRU	65000	/* Largest MRU we allow */
-#define PPP_VERSION	"2.2.0"
+#define PPP_VERSION	"2.3.7"
 #define PPP_MAGIC	0x5002	/* Magic value for the ppp structure */
 #define PROTO_IPX	0x002b	/* protocol numbers */
 #define PROTO_DNA_RT    0x0027  /* DNA Routing */
@@ -73,13 +67,11 @@
 #define SC_LOG_OUTPKT	0x00040000	/* log contents of pkts sent */
 #define SC_LOG_RAWIN	0x00080000	/* log all chars received */
 #define SC_LOG_FLUSH	0x00100000	/* log all chars flushed */
-#define	SC_MASK		0x0fE0ffff	/* bits that user can change */
+#define	SC_SYNC		0x00200000	/* synchronous serial mode */
+#define	SC_MASK		0x0f2000ff	/* bits that user can change */
 
 /* state bits */
-#define	SC_ESCAPED	0x80000000	/* saw a PPP_ESCAPE */
-#define	SC_FLUSH	0x40000000	/* flush input until next PPP_FLAG */
-#define SC_VJ_RESET	0x20000000	/* Need to reset the VJ decompressor */
-#define SC_XMIT_BUSY	0x10000000	/* ppp_write_wakeup is active */
+#define SC_XMIT_BUSY	0x10000000	/* (used by isdn_ppp?) */
 #define SC_RCV_ODDP	0x08000000	/* have rcvd char with odd parity */
 #define SC_RCV_EVNP	0x04000000	/* have rcvd char with even parity */
 #define SC_RCV_B7_1	0x02000000	/* have rcvd char with bit 7 = 1 */
@@ -92,8 +84,8 @@
  */
 
 struct npioctl {
-    int		protocol;	/* PPP protocol, e.g. PPP_IP */
-    enum NPmode	mode;
+	int		protocol;	/* PPP protocol, e.g. PPP_IP */
+	enum NPmode	mode;
 };
 
 /* Structure describing a CCP configuration option, for PPPIOCSCOMPRESS */
@@ -104,13 +96,13 @@ struct ppp_option_data {
 };
 
 struct ifpppstatsreq {
-  struct ifreq	   b;
-  struct ppp_stats stats;			/* statistic information */
+	struct ifreq	 b;
+	struct ppp_stats stats;			/* statistic information */
 };
 
 struct ifpppcstatsreq {
-  struct ifreq		b;
-  struct ppp_comp_stats stats;
+	struct ifreq	      b;
+	struct ppp_comp_stats stats;
 };
 
 #define ifr__name       b.ifr_ifrn.ifrn_name
@@ -141,7 +133,7 @@ struct ifpppcstatsreq {
 #define PPPIOCGIDLE	_IOR('t', 63, struct ppp_idle) /* get idle time */
 
 #define SIOCGPPPSTATS   (SIOCDEVPRIVATE + 0)
-#define SIOCGPPPVER     (SIOCDEVPRIVATE + 1)  /* NEVER change this!! */
+#define SIOCGPPPVER     (SIOCDEVPRIVATE + 1)	/* NEVER change this!! */
 #define SIOCGPPPCSTATS  (SIOCDEVPRIVATE + 2)
 
 #if !defined(ifr_mtu)
