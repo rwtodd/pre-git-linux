@@ -1,0 +1,1196 @@
+(also includes all post-0.99 notes, since those releases are not in this repo)
+
+Date:   Sat Mar 12 12:00:00 1994 -0800
+
+    Linux 1.0
+    
+    CHANGES since 0.99 patchlevel 15:
+    
+    - removed all the bugs, of course.
+    - networking fixes.
+    - more changes than I really wanted..
+    
+    [original announcement below]
+    
+    Linux 1.0---A better UNIX than Windows NT
+    
+    Summary: Linux 1.0 released
+    Keywords: Linux Kernel 1.0 Academy Awards
+    X-Moderator-Added-Keywords: universe, end of
+    
+    Finally, here it is.  Almost on time (being just two years late is
+    peanuts in the OS industry), and better than ever:
+    
+            Linux kernel release 1.0
+    
+    This release has no new major features compared to the pl15 kernels, but
+    contains lots and lots of bugfixes: all the major ones are gone, the
+    smaller ones are hidden better.  Hopefully there are no major new ones.
+    
+    The Linux kernel can be found as source on most of the Linux ftp-sites
+    under the names
+    
+            linux-1.0.tar.gz                (full source)
+            linux-1.0.patch.pl15.gz         (patch against linux-0.99pl15)
+            linux-1.0.patch.alpha.gz        (patch from linux-pre-1.0)
+    
+    it should be available at least at the sites
+    
+            ftp.funet.fi:
+                    pub/OS/Linux/PEOPLE/Linus       (now)
+            sunsite.unc.ed:
+                    pub/Linux/Incoming              (now)
+                    pub/Linux/kernel                (soon)
+            tsx-11.mit.edu:
+                    pub/linux/sources/system        (soon)
+            ftp.cs.helsinki.fi:
+                    pub/Software/Linux/Kernel       (now)
+    
+    This release finally moves Linux out of Beta status and is meant as a
+    base for distributions to build on.  It will neither change Linux'
+    status as FreeWare under the GPL, nor will it mean the end of
+    development on Linux.  In fact many new features where held back for
+    later releases so that 1.0 could become a well tested and hopefully
+    stable release.
+    
+    The Linux kernel wouldn't be where it is today without the help of lots
+    of people: the kernel developers, the people who did user-level programs
+    making linux useful, and the brave and foolhardy people who risked their
+    harddisks and sanity to test it all out.  My thanks to you all.
+    (Editorial note: if you think this sounds too much like the Academy
+    Awards ceremony, just skip this: it's not getting any better.)
+    
+    Thanks to people like Aaron Kushner, Danny ter Haar and the authors of
+    the AnwenderHandbuch (and others) who have helped me with hardware or
+    monetary donations (and to the Oxford Beer Trolls and others who took
+    care of the drinkware).  And thanks to Dirk, who helped me write this
+    announcement despite my lazyness ("hey, it's just another release, who
+    needs an announcement anyway?").
+    
+    To make a long and boring story a bit shorter and boring, here is at
+    least a partial list of people who have been helping make Linux what it
+    is today.  Thanks to you all,
+    
+            Krishna Balasubramanian <balasub@cis.ohio-state.edu>
+            Arindam Banerji <axb@cse.nd.edu>
+            Peter Bauer <100136.3530@compuserve.com>
+            Fred Baumgarten <dc6iq@insu1.etec.uni-karlsruhe.de>
+            Donald Becker <becker@super.org>
+            Stephen R. van den Berg <berg@pool.informatik.rwth-aachen.de>
+            Hennus Bergman <hennus@sky.nl.mugnet.org>
+            Ross Biro <bir7@leland.Stanford.Edu>
+            Bill Bogstad <bogstad@cs.jhu.edu>
+            John Boyd <boyd@cis.ohio-state.edu>
+            Andries Brouwer <aeb@cwi.nl>
+            Remy Card <Remy.Card@masi.ibp.fr>
+            Ed Carp <ecarp@netcom.com>
+            Raymond Chen <raymondc@microsoft.com>
+            Alan Cox <iiitac@pyr.swan.ac.uk>
+            Laurence Culhane <loz@holmes.demon.co.uk>
+            Wayne Davison <davison@borland.com>
+            Thomas Dunbar <tdunbar@vtaix.cc.vt.edu>
+            Torsten Duwe <Torsten.Duwe@informatik.uni-erlangen.de>
+            Drew Eckhardt <drew@cs.Colorado.EDU>
+            Bjorn Ekwall <bj0rn@blox.se>
+            Doug Evans <dje@cygnus.com>
+            Rik Faith <faith@cs.unc.edu>
+            Juergen Fischer <fischer@server.et-inf.fho-emden.de>
+            Jeremy Fitzhardinge <jeremy@sw.oz.au>
+            Ralf Flaxa <rfflaxa@immd4.informatik.uni-erlangen.de>
+            Nigel Gamble <nigel%gamble.uucp@gate.net>
+            Philip Gladstone <philipg@onsett.com>
+            Bruno Haible <haible@ma2s2.mathematik.uni-karlsruhe.de>
+            Andrew Haylett <ajh@gec-mrc.co.uk>
+            Dirk Hohndel <hohndel@informatik.uni-wuerzburg.de>
+            Nick Holloway <alfie@dcs.warwick.ac.uk>
+            Ron Holt <ron@novell.com>
+            Rob W. W. Hooft <hooft@EMBL-Heidelberg.DE>
+            Michael K. Johnson <johnsonm@sunsite.unc.edu>
+            Fred N. van Kempen <waltje@uwalt.nl.mugnet.org>
+            Olaf Kirch <okir@monad.swb.de>
+            Ian Kluft <ikluft@thunder.sbay.org>
+            Rudolf Koenig <rfkoenig@immd4.informatik.uni-erlangen.de>
+            Bas Laarhoven <bas@vimec.nl>
+            Warner Losh <imp@boulder.parcplace.com>
+            H.J. Lu <hjl@nynexst.com>
+            Tuomas J. Lukka <Tuomas.Lukka@Helsinki.FI>
+            Kai M"akisara <Kai.Makisara@vtt.fi>
+            Pat Mackinlay <pat@it.com.au>
+            John A. Martin <jmartin@csc.com>
+            Bradley McLean <brad@bradpc.gaylord.com>
+            Craig Metz <cmetz@tjhsst.edu>
+            William (Bill) Metzenthen <billm@vaxc.cc.monash.edu.au>
+            Rick Miller <rick@discus.mil.wi.us>
+            Corey Minyard <minyard@wf-rch.cirr.com>
+            Eberhard Moenkeberg <emoenke@gwdg.de>
+            Ian A. Murdock <imurdock@shell.portal.com>
+            Johan Myreen <jem@vipunen.hut.fi>
+            Stefan Probst <snprobst@immd4.informatik.uni-erlangen.de>
+            Daniel Quinlan <quinlan@bucknell.edu>
+            Florian La Roche <rzsfl@rz.uni-sb.de>
+            Robert Sanders <gt8134b@prism.gatech.edu>
+            Peter De Schrijver <stud11@cc4.kuleuven.ac.be>
+            Darren Senn <sinster@scintilla.santa-clara.ca.us>
+            Chris Smith <csmith@convex.com>
+            Drew Sullivan <drew@lethe.north.net>
+            Tommy Thorn <Tommy.Thorn@daimi.aau.dk>
+            Jon Tombs <jon@gtex02.us.es>
+            Theodore Ts'o <tytso@mit.edu>
+            Simmule Turner <simmy@digex.com>
+            Stephen Tweedie <sct@dcs.ed.ac.uk>
+            Thomas Uhl <uhl@sun1.rz.fh-heilbronn.de>
+            Juergen Weigert <jnweiger@immd4.informatik.uni-erlangen.de>
+            Matt Welsh <mdw@sunsite.unc.edu>
+            Marco van Wieringen <mvw@mercury.mcs.nl.mugnet.org>
+            Stephen D. Williams <sdw@lig.net>
+            G\"unter Windau <gunter@mbfys.kun.nl>
+            Lars Wirzenius <lars.wirzenius@helsinki.fi>
+            Roger E. Wolff <wolff@dutecai.et.tudelft.nl>
+            Frank Xia <qx@math.columbia.edu>
+            Eric Youngdale <eric@tantalus.nrl.navy.mil>
+            Orest Zborowski <orestz@microsoft.com>
+    
+    A more detailed list with contact and description information can be
+    found in the CREDITS file that accompanies the kernel sources.
+
+Date:   Wed Feb 2 12:00:00 1994 -0800
+
+    pl15b mainly fixes some small tty problems.
+
+Date:   Wed Feb 2 12:00:00 1994 -0800
+
+    pl15a fixes the buffer cache growing problem, adds emulation for a
+    few unimportant floating point instructions (i287 instructions that
+    are No-Ops on the i387, so "emulating" them is easy :^) and fixes a
+    silly bug when mmap'ing stuff write-only.  It also fixes a buggy lock
+    in the networking.
+
+Date:   Wed Feb 2 12:00:00 1994 -0800
+
+    [PATCH] Linux-0.99.15 (February 2, 1994)
+    
+    sbpcd (Sound Blaster Pro CD interface) driver.
+    
+    Andries Brouwer cleans up and re-does keyboard driver diacritical handling.
+    
+    Lots of new sound drivers.
+    
+    Sysvfs added (Xenix, SystemV/386 and Coherent support).  Linux was
+    starting to have a lot of users move over..
+    
+    MAP_ANONYMOUS flag added to mmap().
+    
+    Loadable modules added.
+    
+    Alan Cox is active in networking.
+    
+    [original changelog below]
+    
+    Linux 0.99.15 released: Codefreeze for 1.0
+    
+    People who look into my directory on ftp.funet.fi will already have
+    noticed that the latest version of linux (0.99.15) is available, and I
+    assume it will be available on most other linux sites soon.  As
+    explained in a previous announcement, 0.99.15 is "it", in that this will
+    be the base for 1.0 after about a month of testing.  No further patches
+    are accepted until the 1.0 release, unless they obviously fix a serious
+    bug.
+    
+    **** NOTE 1 ****
+    
+      For this code-freeze to be effective yet still potential bugs be
+      found, testing is needed, along with good reports of errors and
+      problems.  Thus, nobody should think "hey, the *real* release will be
+      out in a month, let's wait for that", but instead think: "hey, I'd
+      better test this one, so that the *real* release won't result in any
+      ugly surprises for me".
+    
+      In short: test it out, preferably even more than you usually do.  Run
+      "crashme" for the whole month if you have the CPU-power to spare,
+      and/or just misuse your machine as badly as you can.  And if there are
+      problems, report them to me (and the better the report, the more
+      likely I am to be able to do something about it).
+    
+    **** NOTE 2 ****
+    
+      Bumping the linux version number to 1.0 doesn't mean anything more
+      than that: it's only a version number change.  More explicitly, it
+      does *NOT* mean that linux will become commercial (the copyright will
+      remain as-is), nor does it mean that development stops here, and that
+      1.0 will be anything special in that respect.
+    
+      I'm also afraid that just changing the version number will not make
+      potential bugs magically disappear: this has been amply proven by
+      various software houses over the years.  This code-freeze is there in
+      order to avoid most of the problems that people sometimes associate
+      with "X.0 releases", and I hope that it will mean that we have a
+      reasonably stable release that we can call 1.0 and one that I won't
+      have to be ashamed of.
+    
+      Ok, enough said, I hope.  The pl15 release is hopefully good, but I'll
+      continue to make ALPHA patches against it along the whole month as
+      problems crop up.  The networking code has been much maligned, and is
+      not perfect by far yet, but it's getting its act together thanks to
+      various developers and testers.  And as wiser men than I have said (or
+      if they haven't, they should have):
+    
+          "There is life after 1.0"
+    
+      Any rumors that the world is coming to an end just because I'm about to
+      release a 1.0-version are greatly exaggerated.  I think.
+    
+                        Linus
+    
+    ----------
+    Things that remained the same between 0.99.14 and 0.99.15:
+    
+    - I again forgot to update the README before uploading the release.  In
+      pl14, I talked about pl13, while the all new and improved README has
+      now caught up with pl14.  Remind me to buy a new brain one of these
+      days.
+    
+    Changes between versions 0.99.14 and 0.99.15:
+    
+     - improved Pentium detection.  Some of you may have had linux report
+       your 4086DX2 as a pentium machine, but the new kernel will tell you
+       the sad truth.  Whee.
+     - Network driver updates by Donald Becker.  New drivers added, old ones
+       updated.
+     - FPU emulation updates by Bill Metzenthen.  Various minor errors and
+       misfeatures fixed (mostly error handling).
+     - Support for the SoubdBlaster Pro CD-ROM driver added by Eberhard
+       Moenkeberg.
+     - extended support for keyboard re-definition, along with font
+       re-programming (Eugene Crosser, Andries Brouwer et al).
+     - tty handling fixes: true canonical mode with most features supported
+       by Julian Cowley.  This may make your canonical mode behave funnily
+       if you happen to use old and broken programs that happened to work
+       with the old and broken behaviour (this includes at least some
+       'getty' programs).
+     - serial driver changes and tty fixes by Theodore Ts'o.
+     - SCSI fixes by Drew Eckhardt, Eric Youngdale, Rik Faith, Kai Mdkisara
+       et al.
+     - Updated sound card driver to version 2.4 (Hannu Savolainen)
+     - COFF binary loading support (but you will still need the experimental
+       iBCS2 patches to run non-linux i386 COFF binaries) by Al Longyear.
+     - Upgraded ext2fs filesystem routines (0.4a -> 0.4b), with new
+       features.  Read the fs/ext2/CHANGES file for details.  Remy Card and
+       Stephen Tweedie.  Get a new fsck that knows about the new features.
+     - pipe behaviour fixed in the presense of multiple writers (now
+       actually conforms to POSIX specs about atomic writes).  Much of the
+       code by Florian Coosmann.
+     - minix filesystem extended to support the clean flag: get a new fsck
+       that knows about it.
+     - System V filesystem (support for Xenix, Coherent and SysV
+       filesystems) by Doug Evans, Paul Monday, Pascal Haible and Bruno
+       Haible.
+     - loadable modules (various authors, don't remember original author of
+       the "modules" code).
+     - Lots of networking fixes by various people: Alan Cox, Charles
+       Hedrick, me and various other people.  Non-byte-aligned networks
+       work, and the networking code should be much stabler in general.
+    
+     + various bugfixes and enhacements here and there (mcd driver update by
+       Jon Tombs, atixlmouse fix by Chris Colohan, /dev/full by XXX etc etc)
+    
+    All in all, the patches come out to 1.5MB uncompressed (about 400kB
+    gzip-9'd), so there is little or no idea to make patches to plain pl14
+    available.  Incremental patches and ALPHA-releases can be found on
+    ftp.funet.fi: pub/OS/Linux/PEOPLE/Linus/ALPHA-pl14.
+
+Date:   Sun Nov 28 12:00:00 1993 -0800
+
+    This is a general announcement of the imminent code-freeze that will
+    hopefully make linux 1.0 a reality.  The plan has been discussed a bit
+    with various developers already, and is already late, but is still in
+    effect otherwise.
+    
+    In short, the next version of linux (0.99.15) will be a "full-featured"
+    release, and only obvious bug-fixes to existing features will be applied
+    before calling it 1.0.  If this means that your favourite feature or
+    networking version won't make it, don't despair: there is life even
+    after beta (and it's probably not worth mailing me about it any more:
+    I've seen quite a few favourite features already ;-).
+    
+    In fact, 1.0 has little "real meaning", as far as development goes, but
+    should be taken as an indication that it can be used for real work
+    (which has been true for some time, depending on your definition of
+    "real work").  Development won't stop or even slow down: some of it has
+    even been shelved pending a 1.0 already.
+    
+    Calling it 1.0 will not necessarily make all bugs go away (quite the
+    opposite, judging by some other programs), but I hope it will be a
+    reasonably stable release.  In order to accomplish this, the code-freeze
+    after 0.99.15 will be about a month, and I hope people will test out
+    that kernel heavily, instead of waiting for "the real release" so that
+    any potential bugs can be found and fixed.
+    
+    As to where we are now: as of this moment, the latest release is the 'r'
+    version of pl14 (aka "ALPHA-pl14r").  I've made ALPHA releases available
+    on ftp.funet.fi almost daily, and expect a final pl15 within a few more
+    days.  Testing out the ALPHA releases is not discouraged either if you
+    like recompiling kernels every day or two..
+    
+    And finally: we also try to create a "credits" file that mentions the
+    developers of the kernel and essential linux utilities.  The credit file
+    compilator is jmartin@opus.starlab.csc.com (John A. Martin), and if you
+    feel you have cause to be mentioned in it, please contact him.
+    
+                Linus
+
+Date:   Sun Nov 28 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.14 (November 28, 1993)
+    
+    Original Changelog:
+    
+    CHANGES since 0.99 patchlevel 13:
+    
+     - new kernel source layout: drivers separated
+     - lots of networking bugs fixed, and new network card drivers (Alan Cox,
+       Donald Becker &co)
+     - sound driver added to the default source distribution (Hannu
+       Savolainen)
+     - updated SCSI driver code (Eric Youngdale, Drew Eckhardt &co)
+     - readonly OS/2 filesystem support (HPFS) added (Chris Smith)
+     - NTP support (Philip Gladstone, Torsten Duwe, ??)
+     - fixed 16MB swap-area limit
+     - lots of minor cleanups, buxfixes etc.
+
+Date:   Sun Sep 19 11:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.13 (September 19, 1993)
+    
+    We get enable_irq()/disable_irq()
+    
+    The C++ experiment is not going well.  Get rid of the 'extern "C"', but
+    replace it with an "asmlinkage" #define that allows us to experiment.
+    
+    ELF binary support it a notable change.
+    
+    Original ChangeLog:
+    
+     - the bad memory management one-liner bug in pl12 is naturally fixed.
+     - compiled with plain C by default instead of C++
+     - ELF binary support (Eric Youngdale)
+     - Quickport mouse support (and some changes to the PS/2 mouse driver)
+       by Johan Myreen and co)
+     - core file name change ("core" -> "core.xxxx" where xxxx is the name
+       of the program that dumped code).  Idea from ???.  Also, core-files
+       now correctly truncate any existing core file before being written.
+     - some mmap() fixes: better error returns, and handling of non-fixed
+       maps for /dev/mem etc.
+     - one kludgy way to fix the wrong arp packets that have plagued net-2d
+       (resulting in arp packets that had the first four bytes of the
+       ethernet address as the IP address).
+     - I fixed the mount-point handling of 'rename()' and 'unlink()/rmdir()'
+       so that they should now work and/or give appropriate error messages.
+       An early version of this patch was already sent to the KERNEL
+       channel, which fixed the rename problem but not a similar bug with
+       unlink.
+     - packet mode fixes by Charles Hedrick.  Sadly, these are likely to
+       break old telnet/rlogin binaries, but it had to be done in order to
+       communicate correctly with the rest of the world.
+     - FPU emulator patches from Bill Metzenthen.  The fprem1 insn should be
+       correct now (not that anybody seems to have seen the incorrect
+       behaviour..)
+     - a few fixes for SCSI (Drew and Eric)
+     - signal.c changes to handle multiple segments (for Wine) correctly.
+     - updated drivers from Donald Becker: 3c509 and AT1500 drivers, but
+       also some other drivers have been edited, and some networking fixes.
+
+Date:   Sat Aug 14 11:00:00 1993 -0800
+
+    Very small patch to 0.99pl12
+    
+    I hate to put out patches this soon after a release, but there is one
+    potentially major problem in pl12 which is very simple to fix..  I'm
+    including patches: both in plain ascii and as a uuencoded gzip file
+    (it's the same patch - the uuencoded one is in case there is any
+    newsserver that messes up whitespace).
+    
+    The main patch is just the change from __get_free_page(GFP_BUFFER) into
+    get_free_page(GFP_KERNEL), and the two minor patches just add checks
+    that actually enforce the read-only nature of current file mmap'ings so
+    that any program that tries to do a write mapping at least will be told
+    that it won't work.
+    
+    I'd suggest anybody compiling pl12 should add at least the file_table.c
+    patch: thanks to Alexandre Julliard for noticing this one.
+    
+                Linus
+
+Date:   Sat Aug 14 11:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.12 (August 14, 1993)
+    
+    CDU31A and MCD CD-ROM drivers.  Ahh, the bad old days of every sound
+    card manufacturer having their own CD interface.
+    
+    Much nicer keymaps for keyboards.
+    
+    Many more network drivers by Donald Becker for the improving NET-2 code.
+    
+    Eric Youngdale makes executables and libraries use the new mmap()
+    functionality.  The old special-cased sharing goes away.  Hurray! This
+    also means that mmap gets a lot more testing.  It also means that NFS
+    has to be fixed to allow mmaps. Done.
+    
+    "sys_modify_ldt()" appears, the extended DOS emulators want it.
+    
+    Still using C++ to compile the kernel.
+    
+    Original changelog:
+    
+     - The memory manager cleanup has continued, and seems to be mostly
+       ready, as proven by the ease of adding mmap() over NFS with the new
+       routines.  So yes, the pl12 kernel will demand-load your binaries
+       over NFS, sharing code and clean data, as well as running shared
+       libraries over NFS.  Memory management by Eric and me, while the NFS
+       mmap code was written by Jon Tombs,
+    
+     - ** IMPORTANT **: The keyboard driver has been enhanced even further,
+       and almost everything is completely re-mappable.  This means that
+       there is a new version of 'loadkeys' and 'dumpkeys' that you must use
+       with this kernel or you'll have problems.  The default keyboard is
+       still the US mapping, but if you want to create your own mappings
+       you'll have to load them with the new binaries.  Get the 'kbd.tar.gz'
+       archive from the same place you get the kernel.
+    
+       The new keymappings allow things like function key string changes,
+       remapping of the control keys, and freedom to remap any of the normal
+       keyboard functions: including special features like rebooting,
+       console switching etc.  The keyboard remapping code has been done
+       mostly by Risto Kankkunen (Risto.Kankkunen@Helsinki.FI).
+    
+     - updated network drivers by Donald Becker
+    
+     - updated serial drivers - tytso@Athena.mit.edu
+    
+     - updated 387 emulation (Bill Metzenthen).  The updated emulator code
+       has more exact trigonometric functions and improved exception
+       handling.  It now behaves very much like a real 486, with only small
+       changes (greater accuracy, slightly different denormal NaN handling
+       etc - hard to detect the differences even if you are looking for
+       them).
+    
+     - network timer fixes by Florian La Roche (much cleaned up net/inet/timer.c
+       and some bad race-conditions fixed).
+    
+     - Scsi code updates by Eric Youngdale and others
+    
+     - Sony CDU-31A CDROM driver by Corey Minyard added to the standard
+       kernel distribution.
+    
+     - The Mitsumi CDROM driver is now part of the standard kernel.  Driver
+       by Martin Harriss with patches by stud11@cc4.kuleuven.ac.be (yes, he
+       probably has a real name, but no, I haven't found it) and Jon Tombs.
+    
+     - various other minor patches (preliminary ldt support etc)
+
+Date:   Sat Jul 17 11:00:00 1993 -0800
+
+    PATCH: fork.c bug in 0.99.pl11
+    
+    There is at least one known problem with 0.99pl11 - it's very minor and
+    will not lead to any real problems, but it's also very easy to fix,
+    so...
+    
+    The problem is a one-liner oversight in kernel/fork.c (thanks to TjL for
+    noticing the symptoms - they aren't easy to see), which is fixed by the
+    following patch:
+    
+    In fact, it's probably easiest to "apply" this patch by hand: just
+    change the "p->tss.fs = KERNEL_DS" in fork.c to "p->tss.fs = USER_DS"
+    and you should be fine.
+    
+                Linus
+
+Date:   Sat Jul 17 11:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.11 (July 17, 1993)
+    
+    Real file mmap with page sharing in the VM code.  We don't do writable
+    shared mappings (and we won't do them for a _long_ time yet), but this
+    is a big step forward!
+    
+    Note in the COPYING file that the GPL only covers the kernel, not user
+    programs. People were starting to find Linux more and more interesting..
+    
+    Improved configure script.
+    
+    Use nicer "save_flags()/cli()/restore_flags()" macros instead of
+    hardcoding the inline assembly.  Clean up other inline assembly usage
+    too.
+    
+    Trying to compile the kernel with C++ compiler.  It will be a failed
+    experiment.
+    
+    Original ChangeLog:
+    
+     - The keyboard is dynamically changeable (this is true of pl10 as
+       well), and you need to get the "keytables.tar.z" archive to set the
+       keyboard to suit your taske unless you want to live with the default
+       US keymaps.
+    
+       Use the "loadkeys map/xxx.map" command to load the keyboard map: you
+       can edit the maps to suit yourself if you can't find a suitable one.
+       The syntax of the keyboard maps should be obvious after looking at
+       the examples.
+    
+     - The memory manager has been cleaned up substantially, and mmap()
+       works for MAP_PRIVATE.  MAP_SHARED is still not supported for
+       anything else than /dev/mem, but even so it actually is usable for a
+       lot of applications.  The shared library routines have been rewritten
+       to use mmap() instead of the old hardcoded behaviour.
+    
+     - The kernel is now compiled with C++ instead of plain C.  Very few
+       actual C++ features are used, but even so C++ allows for more
+       type-checking and type-safe linkage.
+    
+     - The filesystem routines have been cleaned up for multiple block
+       sizes.  None of the filesystems use it yet, but people are working on
+       it.
+    
+     - named pipes and normal pipes should hopefully have the right select()
+       semantics in the presense/absense of writers.
+    
+     - QIC-02 tape driver by Hennus Bergman
+    
+     - selection patches in the default kernel
+    
+     - fixed a bug in the pty code which led to busy waiting in some
+       circumstances instead of sleeping.
+    
+     - Compressed SLIP support (Charles Hedrick). See net/inet/CONFIG
+    
+     - the 'clear_bit()' function was changed to return the previous setting
+       of the bit instead of the old "error-code".  This makes use of the
+       bit operations more logical.
+    
+     - udelay() function for short delays (busy-waiting) added.  Used
+       currently only by the QIC driver.
+    
+     - fork() and sheduler changes to make task switches happen only from
+       kernel mode to kernel mode.  Cleaner and more portable than the old
+       code which counted on being able to task-switch directly into user
+       mode.
+    
+     - debugging malloc code.
+
+Date:   Mon Jun 7 11:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.10 (June 7, 1993)
+    
+    People finally gave up on net-1, Ross Biro grew tired of the flames, and
+    net-2 appears with Fred van Kempen as maintainer.  This is the big
+    switch-over version.
+    
+    fsync() isn't just a stub any more, and System V IPC is also showing up.
+    
+    The "struct file" filetable is made dynamic, instaed of a static
+    allocation.  For the first time you can have _lots_ of files open.
+    
+    Stub for iBCS2 emulation code.
+    
+    [original announcement below]
+    
+    I've finally released an official version of linux-0.99 patchlevel 10:
+    there have been various alpha versions floating around which differ in
+    details (notably networking code), which shouldn't be used any more.
+    The new linux version is available only as full source code: the diffs
+    would have been too big to be useful.  You can find linux-0.99.10.tar.z
+    (along with keytables.tar.z) on nic.funet.fi: pub/OS/Linux/PEOPLE/Linus
+    and probably on tsx-11 and other linux archives within a day or two (so
+    check there first if you are in the states).
+    
+    Linux-0.99 pl10 has a number of new features and changes in interface.
+    The most notable of these are:
+    
+     - the networking code is reorganized (generally called "net-2",
+       although unrelated to the BSD release).  The new code implements a
+       lot of standard features lacking in net-1, and also changes the user
+       interface to be closer to the BSD standards.  Notably, the old
+       configuration binaries won't work, so to get the new networking to
+       work you'll have to get the net-2 binaries as well.  The networking
+       binaries are available on tsx-11.mit.edu (and mirrors) under the
+       directory pub/linux/packages/net/net-2 (and the setup syntax has
+       changed somewhat..)
+    
+       The networking code has been mainly organized and rewritten by Fred
+       van Kempen, with drivers by Donald Becker.
+    
+     - serial line setup has been changed: linux 0.99 pl10 does *not* try to
+       autodetect serial ports very agressively.  If you have other serial
+       ports than the standard com1/com2, or nonstandard IRQ etc values,
+       this means that it's less likely to work without any help.  The
+       solution is not to recompile the kernel - you should get the
+       "setserial" program available from tsx-11.mit.edu in the directory
+       pub/linux/sources/sbin/setserial-2.01.tar.z that allows you to
+       dynamically configure your serial ports to suit your setup.
+    
+       The main organizer behind the serial line changes is tytso (Theodore
+       Ts'o).
+    
+     - Keyboard setup has changed: it is no longer hardcoded at compile
+       time, but instead you can use the new "loadkeys" program to load in a
+       new keyboard map on the fly.  The default keyboard map is the normal
+       US keyboard (yes, I should have used the Finnish one by default, but
+       after thinking of all the problems that would have resulted in I
+       forgot about that idea).  The loadkeys code can be found in the
+       "keytables.tar.z" archive, which also contains keymaps for most
+       normal keyboard types.  To create a custom keyboard table is very
+       easy - just take a 5 minute look at the existing map files (they
+       resemble the ones used by xmodmap, so if you are familiar with
+       those..)
+    
+       The loadable keymaps were mostly implemented by Risto Kankkunen.
+    
+    There are a lot of other internal kernel changes, but they should be
+    mostly transparent, and noticeable only indirectly due to new features
+    or (hopefully) better/faster/whatever operation.  These include:
+    
+     - the SysV IPC patches are in by default: Krishna Balasubramanian.
+       If you need these, you know what it's about (notably, dosemu 0.49
+       wants them).
+     - inode handling is updated: inodes and files are now dynamically
+       allocated within the kernel, and use a hash table for faster lookup
+       (along with a NFU algorithm for the inode cache).  Steven Tweedie.
+     - Updated FPU emulation: mostly exception handling changes, making the
+       emulator handle most exceptions the same way a 486 does.  The
+       emulator is written by Bill Metzenthen.
+     - a few ext2-fs updates by Remy Card and Steven Tweedie.
+     - support for the 'fsync()' function (Steven Tweedie)
+     - various (minor) SCSI patches to catch some error conditions, add
+       support for VLB adaptec controllers without DMA and so on (different
+       people).
+     - other changes - I forget.
+    
+    In addition to patches sent in by others, I've naturally made my own
+    changes (often *to* the patches sent in by others :-).  Among other
+    things, the pl10 buffer cache code now also tries to share pages with
+    executables, resulting in better cacheing especially of binaries (giving
+    noticeable improvements in kernel recompilation speed on some machines).
+    Also, I've changed a lot of low-level things around to help the iBCS2
+    project: this includes things like internal segment handling and the
+    signal stack (which now looks the same as on SysV i386 unixes).  All in
+    all, pl10 has a disturbing amount of new code, but will hopefully work
+    well despite (due to?) the number of changes.
+    
+    The new networking code in particular will change the network setup a
+    lot - it now looks more standard, but if you were used to the old way of
+    doing things..  On the other hand, most people actively using the
+    networking features have hopefully gotten warnings about this on the NET
+    channel for the last few weeks.  Also, the networking code still isn't
+    perfect: Fred is still working on it, but it seems to have reached a
+    reasonably stable platform on which it will be easier to build.  Look
+    out for the new-and-improved networking manual, hopefully out soon(?).
+    
+    Standard request: please try it all out, give it a real shakedown, and
+    send comments/bug-reports to the appropriate place (I'm always
+    appropriate, but you may want to send the report to the mailing lists
+    and/or the newsgroup as well).  I apologize for the lateness of the
+    release (forcing hlu to make interim gcc releases that relied on
+    nonstandard kernels etc), and the changes are somewhat bigger than I'd
+    prefer, so the more testerts that try it out, the faster we can try to
+    fix any possible problems.  The new kernel has gone through various
+    stages of ALPHA-diffs and some late ALPHA-pl10's, so there shouldn't be
+    any major surprises, but alpha releases tend not to get even close to
+    the coverage a real release gets...
+    
+                        Linus
+
+Date:   Fri Apr 23 11:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.9 (April 23, 1993)
+    
+    Bill's math emulator now passes paranoia.
+    
+    Last argument to ioctl is "long".
+    
+    sys_clone() appears.
+    
+    [original announcement below]
+    
+    The latest kernel release is 0.99.9, and can be found on nic.funet.fi:
+    pub/OS/Linux/PEOPLE/Linus, both as patches relative to pl8 and as full
+    sources.  The only major new feature is that the ST-0x driver has
+    finally been updated to the scatter-gather code: ST-0x users should with
+    luck get about 5 times the performance on disk-operations..  Seagate
+    code written by Drew Eckhardt.
+    
+    0.99.9 also fixes:
+    - the FPU-emulator should now handle all rounding-modes correctly, and
+      pass all the paranoia package tests.  Patches by Bill Metzenthen.
+    - bootup enhancements by Chrisoph Niemann (but the SVGA mode numbers
+      have changed, so you may have to edit your lilo configuration file
+      and/or the main Makefile to get the mode you normally want)
+    - ext2fs updated to the very latest release.  Code by Remy Card and
+      Stephen Tweedie.
+    - various minor patches, some of them cosmetic, some of them fixes to
+      smaller bugs..  Thanks to everybody who sent them in (even though not
+      all made it)
+    
+    It might be a good idea to test it all out,
+    
+                Linus
+
+Date:   Thu Apr 8 11:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.8 (April 8, 1993)
+    
+    Mount root filesystem read-only (conditional for now).
+    
+    SCSI updates.
+    
+    Stephen Tweedie shows up in ext2, with an enhanced block allocator.
+    
+    Signal handling update with generated code on the stack and a
+    "sigreturn" system call.  This was needed to maintain compatibility in
+    the face of a changed stack layout.  sigsuspend() also works correctly now.
+    
+    [original announcement below]
+    
+    Yet another kernel release is now available on nic.funet.fi in the usual
+    place (pub/OS/Linux/PEOPLE/Linus for those of you that have already
+    forgotten), and will probably show up on the other ftp-sites within a
+    day or two.  There are two new files:
+    
+     linux-0.99.8.tar.z - the full gzipped and tarred source-tree of the
+       linux kernel.
+    
+     linux-0.99.patch8.z - unified diffs against the last official release
+       (0.99pl7).
+    
+    There is no SLIP or new networking routines in this kernel despite the
+    rumors that have been flying around - the main changes to 0.99.7 are
+    (some of them were in 0.99pl7A as well):
+    
+    - the signal handling code has been extensively reworked, and should be
+      POSIX as well as clean.
+    - dosfs is upgraded to version 12 (Werner Almesberger)
+    - xiafs is upgraded to the latest version (Qi Xia)
+    - ext2fs is upgraded to the latest version (Remy Card/Stephen Tweedie)
+    - FPU-emulation patches for v86 mode and precision rounding (Bill
+      Metzenthen)
+    - SCSI patches by various people (Eric Youngdale & co)
+    - XT harddisk support (Pat Mackinlay)
+    - new trial code to try to handle 387 lockups on some systems more
+      gracefully.
+    - keyboard, lp and serial driver fixes
+    - various minor changes (mounting root read-only, bootup messages
+      cleaned up etc)
+    
+    As always, comments/bugs etc are encouraged,
+    
+                Linus
+
+Date:   Sun Mar 21 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.7A (March 21, 1993)
+    
+    More net-1 work. It's endless.
+    
+    XT harddisk support by Pat Mackinlay.
+    
+    sys_fsync() and SysV IPC code sys_ipc() stubs appear.
+    
+    [original announcement below]
+    
+    I don't generally announce ALPHA-diffs to quite this large an audience,
+    but I'll be partying^H^H^H^H^H^H^H^Hunavailable for the rest of the
+    week, and it's unlikely that I will be able to check mails or the
+    newsgroups until the start of April.  As a result, I'm putting up my
+    latest kernel version for ftp as it fixes some things in 0.99.7.
+    
+    The ALPHA-diffs can be found on nic.funet.fi: in the directory
+    pub/OS/Linux/PEOPLE/Linus.  If you dislike patching, you can get the
+    full sources in "linux-0.99.7A.tar.z", or just get the diff file
+    "ALPHA-diff.z".
+    
+    Changes in this release:
+    - the new kernel now detects the lock-up condition at startup if you
+      have a faulty 386/387 coupling, and will use software floating point
+      in that case.
+    - the Xia filesystem is updated to the latest version
+    - the DOS filesystem is updated to the latest version
+    - the XT disk driver is included: I haven't been able to test it, but
+      at least it won't bother anybody if you don't configure it in..
+    - the latest serial diffs are in
+    - minor ultrastor fixes
+    - some changes to the keyboard and line printer drivers: I hope the
+      keyboard lockups that some people have reported would be gone with
+      this release.
+    - some fixes to arp.c
+    
+    I'll be interested in success/failure reports, although I won't be able
+    to answer them for some time (and I might miss some of the posts on
+    c.o.l).
+    
+                Linus
+
+Date:   Sat Mar 13 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.7 (March 13, 1993)
+    
+    Nigel Gamble makes lp driver able to use interrupts.
+    
+    The mmap() code is finally starting to really happen.  In particular,
+    this means that "verify_area()" is doing more - it can check the actual
+    areas that have been mapped, rather than just blindly assume that the
+    user can access anything in the first 3GB.
+    
+    For now, the mmap code only does anonymous mappings and /dev/mem.
+    Executables are still read into memory.  But the infrastructure is
+    there.
+    
+    The VFS layer stops using names directly in user space - the race
+    conditions were just too hard to handle.  So pathnames are copied into
+    kernel space before they are looked up.
+    
+    Ext2fs (Remy Card) and xiafs (Frank Xia) are merged.  Both are much
+    faster filesystems using bitmaps rather than freelists, and can handle
+    big disks and big files.
+    
+    Ext2fs is based on extfs, while xiafs is a simpler straightforward
+    extension of the old minixfs.
+    
+    Xiafs obviously was eventually dropped.
+    
+    [Original announcement below]
+    
+    It has been two weeks since the last release, so it's high time you
+    should once more enjoy the pleasures of patching up your kernel to a
+    higher version number if you are into those kinds of perversions.  Linux
+    0.99pl7 is available as both full source and diffs against pl6 on
+    nic.funet.fi: pub/OS/Linux/PEOPLE/Linus, and it will probably show up on
+    the other major sites within days.
+    
+    As of pl7, I'm trying out a new format: both the full distribution and
+    the diffs are now compressed with gzip as it is now available at most
+    machines.  Also, the diffs are no longer context diffs: they use the
+    smaller unified diff format.  At least the stock SunOS 'patch' binary
+    seems not to understand them at all, but GNU patch has no problems, and
+    unified diffs are a bit smaller (not that it matters much after gzip has
+    done its deed on them).
+    
+    As to the changes in pl7: they are many and varied, and hopefully all to
+    the better (-"Dream on Linus" -"Shut up").  Short list follows, hope I
+    haven't forgotten anything major.
+    
+     - ext2fs is in: note that this is version 0.2c and that if you are
+       currently using an older version there are some changes.  Small
+       filesystems (< 256MB) should reportedly be automatically converted,
+       bigger filesystems need some assistance. Ext2fs written by Remy Card.
+     - xiafs is also in: again, the final version uses a slightly different
+       layout to support exact file block counts, so if you use the xiafs,
+       you should make sure you have the latest fs-tools.  Xiafs written by
+       Frank Xia.
+     - updated Ultrastor SCSI driver with scatter/gather by Scott Taylor.
+       It should be much faster, as well as support the Ultrastor-34F.
+     - major changes in the memory manager.  Yours truly got carried away,
+       and finally cleaned up the mm layer due to pmacdona wanting mmap() on
+       /dev/zero.  This means that the IPC patches won't go in, and need
+       updating.  Krishna?
+     - more big changes: I rewrote most of the VFS filename-handling.
+       Filenames are copied into kernel space before being used, which
+       cleaned things up somewhat, as well as simplifying some race-
+       condition handling.  As a result, I was also able to easily expand
+       the minix fs to cover the "linux" fs that some people have been using
+       (same layout, but with 30-character names).
+     - updated the printer driver: Nigel Gamble.  It is now able to use
+       interrupts, although the default behaviour is still to poll.
+     - serial driver updates by tytso (but no SLIP yet)
+     - various minor patches for POSIX compliace: Bruce Evans, Rick Sladkey
+       and me.
+     - other minor patches all over the place: scsi, tcpip etc.
+    
+    All in all, the patches are almost half a megabyte even as unified
+    diffs: getting the full sources might be easier than patching it all up.
+    
+    As always, some of the patches are actually tested by me, some aren't
+    (and just because I wrote some of them doesn't mean I actually *tested*
+    them: I have no idea if mmap() works on /dev/zero, although it should).
+    I have neither a printer nor an Ultrastor controller, and I haven't got
+    the diskspace to test out the new filesystems, so I can only hope they
+    work "as advertized".  If you have problems, I want to hear about them,
+    so keep the reports coming, and try to pinpoint the problem as well as
+    you can ("when I do *this* it happens every time..").
+    
+                    Linus
+
+Date:   Sun Feb 21 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.6 (February 21, 1993)
+    
+    Merge a lot of duplicated special file handling into fs/devices.c, and
+    make drivers register their major numbers properly.
+    
+    VFS layer gets fsync virtual function.
+    
+    Compressed image boot, with the kernel loaded into high memory..
+    
+    [original announcement below]
+    
+    I'm starting soon to run out of patchlevel numbers for 0.99, but I made
+    a new release anyway (and long-time linux hackers remember my less than
+    completely logical numbering: when I run out of numbers I'll start using
+    alphabetical characters and other fun characters to indicate new
+    versions :-)
+    
+    0.99pl6 is mainly a syncronization release: it fixes a few bugs and
+    changes the behaviour of 'vhangup()' to be more standard.  The vhangup()
+    changes will break some init/login stuff that depended on the earlier
+    incorrect behaviour - not everybody may want to use pl6 until you are
+    sure your init/login will work happily with it.  Better do these things
+    before 1.0 than to break it later.
+    
+    Patchlevel 6 also changes the vfs functions for special devices as well
+    as adding a 'fsync' field to the inode-operations structure.  Thus
+    ext2fs and xfs need updating.  Remy and Xia? The special file and fifo
+    handling code is no longer supposed to be in the fs-dependent layer, but
+    is handled by the vfs routines, as it's the same for all "normal"
+    filesystems.
+    
+    Ok, here are the actual changes/features of pl6:
+    - the kernel can be loaded in gzipped format and de-compressed at
+      startup beyond the 1MB mark.  Good for bootable rootdisks.  Patches
+      mainly by Hannu Savolainen.
+    - I finally enabled NMI's everywhere (except at the bootup sequence),
+      so if you have memory errors, they will hopefully now result in
+      kernel messages ("NMI received..")
+    - the device registration code for special devices.  Special files are
+      now registered with a special "register_[chr|blk]dev()" function.
+    - consolidated fifo/special dev handling
+    - vhangup patches.  Note that these may break init/login badly, at
+      least if you are using poeigl-1.7.  Be careful that you don't get
+      totally locked out of your machine.
+    - the procfs NULL-dereferencing bugfix (michaelkjohnson)
+    - literal next character handling (very losely based on a patch I
+      received: I essentially rewrote it with final fixes by jrs).
+    - fpu-emu bugfixes by Bill Metzenthen - fixes the "internal error 112"
+      bug as well as a sign bug with zero.
+    - fdomain driver fixes
+    - various other minor fixes (wrongly replying to bad ip messages etc)
+    
+    I'm still not sure about the 387 error detection code: I have had a
+    couple of messages that would suggest that some early clone 387's have
+    problems with math exceptions in protected mode.  With the new (as of
+    99pl5) test at startup this can lead to problems at boot-time.  Please
+    mail me directly if you seem to have problems with this (it should be
+    obvious in pl6 due to debugging messages at startup).
+    
+                Linus
+
+Date:   Tue Feb 9 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.5 (February 9, 1993)
+    
+    net-1: more fixes, use bottom halves for transmitting, more "volatiles"
+    to hide bugs. /proc interfaces for networking.
+    
+    Side note: it took networking a _long_ time to recover from the
+    volatiles.  Getting the locking right rather than trying to make the
+    compiler make races smaller was a hard idea to get through.
+    
+    Bill Metzenthen moves his math emulator to "beta 1.0" status.
+    
+    Fred van Kempen shows up: starting to do a SLIP line discipline for tty
+    devices.
+    
+    Verify FP exception handling.
+    
+    [Original announcement below]
+    
+            "He's done it yet again - doesn't he ever rest?"
+                            - anonymous linux kernel hacker
+    
+    Only complete newbies don't know what this is all about, but I'd better
+    tell you anyway: patchlevel 5 of the 0.99 kernel is now available on
+    nic.funet.fi (pub/OS/Linux/PEOPLE/Linus) as both context diffs against
+    pl4 and complete source code.  I'm not even going to speculate on 1.0
+    right now.
+    
+    The pl5 diffs are about 90kB compressed: the major changes are to the
+    tcp/ip code and the serial driver, while there are various minor fixes
+    strewn around the system:
+    
+     - serial lines/tty changes (tytso & Fred v Kempen)
+     - NFS bugfixes (Rick Sladkey)
+     - tcp/ip (Ross Biro)
+     - coprocessor handling changes (me)
+     - harddisk driver error handling (Mika Liljeberg)
+     - various minor patches (me and others)
+    
+    Serial lines now implement non-blocking opens correctly and support
+    dial-out lines (same minor, major==5).  I changed the default startup
+    mode to be CLOCAL so that people won't get confused by the modem line
+    code when not using dial-in.
+    
+    Another interesting change is the 387 error-coupling tests at bootup:
+    the code to check if the intel-recommended exception 16 error reporting
+    is present is "non-obvious".  If you have had problems with coprocessor
+    error handling, or have a non-intel coprocessor, I'd suggest you test
+    this out: I'd like to hear about problems/successes.
+    
+                    Linus
+    
+    PS.  If you tested out the latest ALPHA-diffs (the ones that already
+    changed the kernel version to pl5), the changes to the final pl5 were
+    only cosmetic.
+
+Date:   Wed Jan 20 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.4 (January 20, 1993)
+    
+    net-1: random addition of "volatile" keywords to try to hide race
+    conditions in the code.
+    
+    File locking updated with shared and exclusive locks for BSD flock.
+    
+    Re-mounting of filesystems and new mount system call.
+    
+    Re: Freeze up on X
+    
+    In article <1993Jan21.181502.23485@miles.com> dennisf@miles.com (Dennis Flaherty) writes:
+    >
+    >Here's another clue.  Try this: when your system freezes, running X, try
+    >MOVING THE MOUSE.  It's weird!!  But moving the mouse actually makes the
+    >system run!  Stop moving the mouse, and the system freezes again.  And
+    >this only happens with 0.99.3, not 0.99.2.
+    
+    Get pl4, and it should be gone.  There was a bug in the handling of
+    uninitialized interrupts in pl3, where they could result in either the
+    wrong interrupt mask being loaded leading to interrupt lock-out or (in
+    some cases) bit corruption at the user level.  The symptoms are exactly
+    as you describe: a good interrupt that didn't happen to be locked out
+    will correct the interrupt mask, and the system goes on (it can be
+    moving the mouse, but it might also be a keyboard event etc).
+    
+                Linus
+
+Date:   Wed Jan 13 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.3 (January 13, 1993)
+    
+    VFS gets "permission()" virtual function.
+    
+    [Original announcement below]
+    
+    Still no 1.0 - I have had a couple of reports of problems, so I'll make
+    yet another 0.99 release.  The diffs (against 0.99.2) and complete
+    source can be found at nic.funet.fi: pub/OS/Linux/PEOPLE/Linus as usual,
+    and will probably show up at the other sites pretty soon.
+    
+    0.99.3 contains no real new features, but the diffs are pretty big
+    anyway (100kB+ compressed): various things have moved around a bit and
+    there are a lot of minor changes.  The changes include (but are not
+    limited to):
+    
+     - the math emulator code now also understands the unofficial codes (in
+       case somebody followed the ML math emulator thread).  I'd be
+       interested to hear whether ML now works with the emulator.
+     - various SCSI driver changes
+     - some re-organization of the tty open/close code to remove a few race
+       conditions.
+     - interrupt handling rewrites (two-level interrupt code cleanups)
+     - the serial drivers are tytso's alpha-drivers: they aren't quite
+       completed, but as they need the interrupt handling patches to get
+       ready, this is probably the least traumatic way of doing it.
+     - some more minor keyboard driver changes (mostly taking advantage of
+       the two-level interrupts)
+    
+    + a lot of other minor changes.  I once more hope people will try it
+    out, and report any problems or successes to me.
+    
+    Known problems:
+     - there seems to be something weird going on in the ST-0x driver with
+       some scsi disks.
+     - tcp/ip is reportedly still not quite stable, and I can't even test it
+       out.
+    
+    NOTE! The DMA functions have changed for the high DMA channels - all DMA
+    functions now take their arguments as the number of bytes instead of the
+    old way of using bytes for ch 0-3 and words for ch 5-7.  This might lead
+    to problems with the SoundBlaster driver, which may need editing.
+    
+                    Linus
+
+Date:   Fri Jan 1 12:00:00 1993 -0800
+
+    [PATCH] Linux-0.99.2 (January 1, 1993)
+    
+    Bottom half race condition fix.
+    
+    Return ENODEV for nonexistent special devices.
+    
+    Fix Unix domain sockets to properly check for target equality.
+    
+    Add 'wchan' to /proc/stat
+    
+    [Original announcement below]
+    
+    Yes, as you've probably noticed, it's now 1993 and I still haven't
+    released 1.0.  Sorry about that, and I have only another patchlevel to
+    offer.  The new kernel should mainly fix some of the keyboard problems
+    people have experienced, but does contain some other minor fixes.
+    
+    Linux 0.99.2 is available now at nic.funet.fi: pub/OS/Linux/PEOPLE/Linus
+    as both sources and diffs against 0.99.1 the diffs are essentially the
+    same as the second alpha-diffs I released for limited testing, with only
+    minor fixes to fs/exec.c and fs/open.c.
+    
+    Please try out 0.99.2: the more feedback (hopefully positive) I get on
+    it, the faster 1.0 will be out.
+    
+    Changes from pl1 are mainly:
+     - pretty much rewritten low-level keyboard handling IO - this time
+       actually trying to do it by the book.  It now handles resend requests
+       from the keyboard etc.
+     - you can run executables from filesystems without bmap support.  This
+       mainly means NFS and msdos.  Note that while it's possible, it's
+       slower and less memory-efficient than using a "normal" linux
+       filesystem, and should generally be avoided.
+     - /proc filesystem changes: /proc/kmsg can be used to log the kernel
+       messages under X11 (instead of using the older system call to do the
+       same), and there are changes to the statistics routines (WCHAN).
+    
+    + various minor fixes (non-existent devices are handled better, some
+    changes to socket bind behaviour etc).
+    
+                    Linus
+
+Date:   Mon Dec 21 12:00:00 1992 -0800
+
+    [PATCH] Linux-0.99.1 (December 21, 1992)
+    
+    Patch 1 addresses the following problems:
+     - configuration. Hope there are no silly problems left..
+     - inode.c: initialization changes (the missing NULL and some other
+       minor fixes).
+     - some SCSI tape driver patches (Kai M{kisara)
+     - tcp/ip patches (Ross Biro, some code by me)
+     - keyboard patches (mainly changed initialization - hope the keyboard
+       lockups are gone).
+     - completed /proc-fs: it should now contain all info needed by 'ps'
+       (Micheal K Johnson).
+     - various minor fixes (the minix-fs link overflow checking etc)
+    
+    Patch1 also contains support for extended VC switching - this is for the
+    upcoming X11 that understands VC's.  One result of this is that console
+    redirection now redirects *only* messages actually sent to /dev/console
+    (aka /dev/tty0), not just to any foreground VC.  Wait for Xfree-1.2 to
+    be able to switch VC's while under X (yes, including several X-sessions
+    active at the same time..).
+    
+    I hope there are still people out there that aren't too busy stuffing
+    themself with turkey to try out a new kernel release.  There is just
+    over a week left of this year, and I need feedback in order to be able
+    to release 1.0.
+    
+                    Linus
+    
+    PS.  Thanks to everybody who has sent me Christmas/New Year/Birthday
+    cards.  Some contained money, some didn't, and I enjoyed them all.
+    Thanks.
+
