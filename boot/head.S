@@ -4,6 +4,10 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#if (MAX_MEGABYTES != 16) && (MAX_MEGABYTES != 32)
+#error "MAX_MEGABYTES must be 16 or 32"
+#endif
+
 /*
  *  head.s contains the 32-bit startup code.
  *
@@ -12,11 +16,11 @@
  * the page directory.
  */
 .text
-.globl _idt,_gdt,_pg_dir,_tmp_floppy_area,_floppy_track_buffer
+.globl _idt,_gdt,_swapper_pg_dir,_tmp_floppy_area,_floppy_track_buffer
 /*
- * pg_dir is the main page directory, address 0x00000000
+ * swapper_pg_dir is the main page directory, address 0x00000000
  */
-_pg_dir:
+_swapper_pg_dir:
 startup_32:
 	cld
 	movl $0x10,%eax
@@ -26,13 +30,6 @@ startup_32:
 	mov %ax,%gs
 	lss _stack_start,%esp
 	call setup_idt
-	call setup_gdt
-	movl $0x10,%eax		# reload all the segment registers
-	mov %ax,%ds		# after changing gdt. CS was already
-	mov %ax,%es		# reloaded in 'setup_gdt'
-	mov %ax,%fs
-	mov %ax,%gs
-	lss _stack_start,%esp
 	xorl %eax,%eax
 1:	incl %eax		# check that A20 really IS enabled
 	movl %eax,0x000000	# loop forever if it isn't
@@ -94,9 +91,9 @@ check_x87:
  *  setup_idt
  *
  *  sets up a idt with 256 entries pointing to
- *  ignore_int, interrupt gates. It then loads
- *  idt. Everything that wants to install itself
- *  in the idt-table may do so themselves. Interrupts
+ *  ignore_int, interrupt gates. It doesn't actually load
+ *  idt - that can be done only after paging has been enabled
+ *  and the kernel moved to 0xC0000000. Interrupts
  *  are enabled elsewhere, when we can be relatively
  *  sure everything is ok. This routine will be over-
  *  written by the page tables.
@@ -115,27 +112,14 @@ rp_sidt:
 	addl $8,%edi
 	dec %ecx
 	jne rp_sidt
-	lidt idt_descr
-	ret
-
-/*
- *  setup_gdt
- *
- *  This routines sets up a new gdt and loads it.
- *  Only two entries are currently built, the same
- *  ones that were built in init.s. The routine
- *  is VERY complicated at two whole lines, so this
- *  rather long comment is certainly needed :-).
- *  This routine will beoverwritten by the page tables.
- */
-setup_gdt:
-	lgdt gdt_descr
 	ret
 
 /*
  * I put the kernel page tables right after the page directory,
  * using 4 of them to span 16 Mb of physical memory. People with
  * more than 16MB will have to expand this.
+ * When MAX_MEGABYTES == 32, this is set up for a maximum of 32 MB
+ * (ref: 17Apr92)  (redone for 0.97 kernel changes, 1Aug92, ref)
  */
 .org 0x1000
 pg0:
@@ -150,6 +134,20 @@ pg2:
 pg3:
 
 .org 0x5000
+#if MAX_MEGABYTES == 32
+pg4:
+
+.org 0x6000
+pg5:
+
+.org 0x7000
+pg6:
+
+.org 0x8000
+pg7:
+
+.org 0x9000
+#endif
 /*
  * empty_bad_page is a bogus page that will be used when out of memory,
  * so that a process isn't accidentally killed due to a page fault when
@@ -158,7 +156,11 @@ pg3:
 .globl _empty_bad_page
 _empty_bad_page:
 
+#if MAX_MEGABYTES == 32
+.org 0xa000
+#else
 .org 0x6000
+#endif
 /*
  * empty_bad_page_table is similar to the above, but is used when the
  * system needs a bogus page-table
@@ -166,7 +168,11 @@ _empty_bad_page:
 .globl _empty_bad_page_table
 _empty_bad_page_table:
 
+#if MAX_MEGABYTES == 32
+.org 0xb000
+#else
 .org 0x7000
+#endif
 /*
  * tmp_floppy_area is used by the floppy-driver when DMA cannot
  * reach to a buffer-block. It needs to be aligned, so that it isn't
@@ -185,6 +191,15 @@ _floppy_track_buffer:
 
 after_page_tables:
 	call setup_paging
+	lgdt gdt_descr
+	lidt idt_descr
+	ljmp $0x08,$1f
+1:	movl $0x10,%eax		# reload all the segment registers
+	mov %ax,%ds		# after changing gdt.
+	mov %ax,%es
+	mov %ax,%fs
+	mov %ax,%gs
+	lss _stack_start,%esp
 	pushl $0		# These are the parameters to main :-)
 	pushl $0
 	pushl $0
@@ -245,47 +260,81 @@ ignore_int:
  * I've tried to show which constants to change by having
  * some kind of marker at them (search for "16Mb"), but I
  * won't guarantee that's all :-( )
+ *
+ * (ref: added support for up to 32mb, 17Apr92)  -- Rik Faith
+ * (ref: update, 25Sept92)  -- croutons@crunchy.uucp 
  */
 .align 2
 setup_paging:
-	movl $1024*5,%ecx		/* 5 pages - pg_dir+4 page tables */
+#if MAXMEGABYTES == 32
+	movl $1024*9,%ecx		/* 9 pages - swapper_pg_dir+8 page tables */
+#else 
+	movl $1024*5,%ecx		/* 5 pages - swapper_pg_dir+4 page tables */
+#endif
 	xorl %eax,%eax
-	xorl %edi,%edi			/* pg_dir is at 0x000 */
+	xorl %edi,%edi			/* swapper_pg_dir is at 0x000 */
 	cld;rep;stosl
-	movl $pg0+7,_pg_dir		/* set present bit/user r/w */
-	movl $pg1+7,_pg_dir+4		/*  --------- " " --------- */
-	movl $pg2+7,_pg_dir+8		/*  --------- " " --------- */
-	movl $pg3+7,_pg_dir+12		/*  --------- " " --------- */
+/* Identity-map the kernel in low 4MB memory for ease of transition */
+	movl $pg0+7,_swapper_pg_dir		/* set present bit/user r/w */
+/* But the real place is at 0xC0000000 */
+	movl $pg0+7,_swapper_pg_dir+3072	/* set present bit/user r/w */
+	movl $pg1+7,_swapper_pg_dir+3076	/*  --------- " " --------- */
+	movl $pg2+7,_swapper_pg_dir+3080	/*  --------- " " --------- */
+	movl $pg3+7,_swapper_pg_dir+3084	/*  --------- " " --------- */
+#if MAX_MEGABYTES == 32
+	movl $pg4+7,_swapper_pg_dir+3088	/*  --------- " " --------- */
+	movl $pg5+7,_swapper_pg_dir+3092	/*  --------- " " --------- */
+	movl $pg6+7,_swapper_pg_dir+3096	/*  --------- " " --------- */
+	movl $pg7+7,_swapper_pg_dir+3100	/*  --------- " " --------- */
+
+	movl $pg7+4092,%edi
+	movl $0x1fff007,%eax		/*  32Mb - 4096 + 7 (r/w user,p) */
+#else 
 	movl $pg3+4092,%edi
-	movl $0xfff007,%eax		/*  16Mb - 4096 + 7 (r/w user,p) */
+	movl $0x0fff007,%eax		/*  16Mb - 4096 + 7 (r/w user,p) */
+#endif
 	std
 1:	stosl			/* fill pages backwards - more efficient :-) */
 	subl $0x1000,%eax
 	jge 1b
 	cld
-	xorl %eax,%eax		/* pg_dir is at 0x0000 */
+	xorl %eax,%eax		/* swapper_pg_dir is at 0x0000 */
 	movl %eax,%cr3		/* cr3 - page directory start */
 	movl %cr0,%eax
 	orl $0x80000000,%eax
 	movl %eax,%cr0		/* set paging (PG) bit */
 	ret			/* this also flushes prefetch-queue */
 
-.align 2
+/*
+ * The interrupt descriptor table has room for 256 idt's
+ */
+.align 4
 .word 0
 idt_descr:
 	.word 256*8-1		# idt contains 256 entries
-	.long _idt
-.align 2
+	.long 0xc0000000+_idt
+
+.align 4
+_idt:
+	.fill 256,8,0		# idt is uninitialized
+
+/*
+ * The real GDT is also 256 entries long - no real reason
+ */
+.align 4
 .word 0
 gdt_descr:
-	.word 256*8-1		# so does gdt (not that that's any
-	.long _gdt		# magic number, but it works for me :^)
+	.word 256*8-1
+	.long 0xc0000000+_gdt
 
-	.align 3
-_idt:	.fill 256,8,0		# idt is uninitialized
-
-_gdt:	.quad 0x0000000000000000	/* NULL descriptor */
-	.quad 0x00c09a0000000fff	/* 16Mb */
-	.quad 0x00c0920000000fff	/* 16Mb */
+/*
+ * This gdt setup gives the kernel a 1GB address space at virtual
+ * address 0xC0000000 - space enough for expansion, I hope.
+ */
+.align 4
+_gdt:
+	.quad 0x0000000000000000	/* NULL descriptor */
+	.quad 0xc0c39a000000ffff	/* 1GB at 0xC0000000 */
+	.quad 0xc0c392000000ffff	/* 1GB */
 	.quad 0x0000000000000000	/* TEMPORARY - don't use */
 	.fill 252,8,0			/* space for LDT's and TSS's etc */
