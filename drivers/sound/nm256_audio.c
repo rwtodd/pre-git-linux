@@ -11,17 +11,19 @@
  * This driver was written by someone who wishes to remain anonymous. 
  * It is in the public domain, so share and enjoy.  Try to make a profit
  * off of it; go on, I dare you.  
+ *
+ * Changes:
+ * 11-10-2000	Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
+ *		Added some __init
  */
-  
-#include <linux/config.h>
-#include <linux/version.h>
-#include <linux/pci.h>
-#include <linux/module.h>
-#include <linux/delay.h>
-#include <linux/apm_bios.h>
 
+#define __NO_VERSION__
+#include <linux/pci.h>
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/pm.h>
+#include <linux/delay.h>
 #include "sound_config.h"
-#include "soundmodule.h"
 #include "nm256.h"
 #include "nm256_coeff.h"
 
@@ -41,19 +43,13 @@ static int nm256_grabInterrupt (struct nm256_info *card);
 static int nm256_releaseInterrupt (struct nm256_info *card);
 static void nm256_interrupt (int irq, void *dev_id, struct pt_regs *dummy);
 static void nm256_interrupt_zx (int irq, void *dev_id, struct pt_regs *dummy);
+static int handle_pm_event (struct pm_dev *dev, pm_request_t rqst, void *data);
 
 /* These belong in linux/pci.h. */
 #define PCI_DEVICE_ID_NEOMAGIC_NM256AV_AUDIO 0x8005
 #define PCI_DEVICE_ID_NEOMAGIC_NM256ZX_AUDIO 0x8006
 
-/* eeeew. */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,0)
 #define RSRCADDRESS(dev,num) ((dev)->resource[(num)].start)
-#else
-#define RSRCADDRESS(dev,num) ((dev)->base_address[(num)] \
-			      & PCI_BASE_ADDRESS_MEM_MASK)
-
-#endif
 
 /* List of cards.  */
 static struct nm256_info *nmcard_list;
@@ -66,9 +62,7 @@ nm256_release_ports (struct nm256_info *card)
 
     for (x = 0; x < 2; x++) {
 	if (card->port[x].ptr != NULL) {
-	    u32 size = 
-		card->port[x].end_offset - card->port[x].start_offset;
-	    release_region ((unsigned long) card->port[x].ptr, size);
+	    iounmap (card->port[x].ptr);
 	    card->port[x].ptr = NULL;
 	}
     }
@@ -383,11 +377,11 @@ nm256_write_block (struct nm256_info *card, char *buffer, u32 amt)
 	u32 rem = ringsize - card->curPlayPos;
 
 	nm256_writeBuffer8 (card, buffer, 1,
-			    card->abuf1 + card->curPlayPos,
-			    rem);
+			      card->abuf1 + card->curPlayPos,
+			      rem);
 	if (amt > rem)
 	    nm256_writeBuffer8 (card, buffer + rem, 1, card->abuf1,
-				amt - rem);
+				  amt - rem);
     } 
     else
 	nm256_writeBuffer8 (card, buffer, 1,
@@ -933,9 +927,10 @@ nm256_default_mixer_ioctl (int dev, unsigned int cmd, caddr_t arg)
 }
 
 static struct mixer_operations nm256_mixer_operations = {
-    "NeoMagic",
-    "NM256AC97Mixer",
-    nm256_default_mixer_ioctl
+    owner:	THIS_MODULE,
+    id:		"NeoMagic",
+    name:	"NM256AC97Mixer",
+    ioctl:	nm256_default_mixer_ioctl
 };
 
 /*
@@ -954,7 +949,7 @@ static struct ac97_mixer_value_list mixer_defaults[] = {
 
 
 /* Installs the AC97 mixer into CARD.  */
-static int
+static int __init
 nm256_install_mixer (struct nm256_info *card)
 {
     int mixer;
@@ -998,7 +993,7 @@ nm256_full_reset (struct nm256_info *card)
  * RAM.
  */
 
-static void
+static void __init
 nm256_peek_for_sig (struct nm256_info *card)
 {
     u32 port1offset 
@@ -1032,7 +1027,7 @@ nm256_peek_for_sig (struct nm256_info *card)
 		pointer);
     }
 
-    release_region ((unsigned long) temp, 16);
+    iounmap (temp);
 }
 
 /* 
@@ -1040,10 +1035,11 @@ nm256_peek_for_sig (struct nm256_info *card)
  * VERSTR is a human-readable version string.
  */
 
-static int
+static int __init
 nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 {
     struct nm256_info *card;
+    struct pm_dev *pmdev;
     int x;
 
     card = kmalloc (sizeof (struct nm256_info), GFP_KERNEL);
@@ -1072,7 +1068,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
     /* Yuck.  But we have to map in port 2 so we can check how much RAM the
        card has.  */
     if (nm256_remap_ports (card)) {
-	kfree_s (card, sizeof (struct nm256_info));
+	kfree (card);
 	return 0;
     }
 
@@ -1098,7 +1094,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 		printk (KERN_ERR "       IRQ and/or DMA for the sound card, this is *not* the correct\n");
 		printk (KERN_ERR "       driver to use.)\n");
 		nm256_release_ports (card);
-		kfree_s (card, sizeof (struct nm256_info));
+		kfree (card);
 		return 0;
 	    }
 	    else {
@@ -1106,7 +1102,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 	    }
 	}
 	else {
-	    printk (KERN_INFO "NM256: Congratulations. You're not running Eunice.\n");
+	 /*   printk (KERN_INFO "NM256: Congratulations. You're not running Eunice.\n")*/;
 	}
 	card->port[0].end_offset = 2560 * 1024;
 	card->introutine = nm256_interrupt;
@@ -1136,7 +1132,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 	    card->port[0].start_offset, card->port[0].end_offset);
 
     if (nm256_remap_ports (card)) {
-	kfree_s (card, sizeof (struct nm256_info));
+	kfree (card);
 	return 0;
     }
 
@@ -1147,7 +1143,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 
     if (nm256_grabInterrupt (card) != 0) {
 	nm256_release_ports (card);
-	kfree_s (card, sizeof (struct nm256_info));
+	kfree (card);
 	return 0;
     }
 
@@ -1200,7 +1196,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 	else {
 	    printk(KERN_ERR "NM256: Too many PCM devices available\n");
 	    nm256_release_ports (card);
-	    kfree_s (card, sizeof (struct nm256_info));
+	    kfree (card);
 	    return 0;
 	}
     }
@@ -1218,57 +1214,49 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 
     nm256_install_mixer (card);
 
+    pmdev = pm_register(PM_PCI_DEV, PM_PCI_ID(pcidev), handle_pm_event);
+    if (pmdev)
+        pmdev->data = card;
+
     return 1;
 }
 
 
-#ifdef CONFIG_APM
 /*
- * APM event handler, so the card is properly reinitialized after a power
+ * PM event handler, so the card is properly reinitialized after a power
  * event.
  */
 static int
-handle_apm_event (apm_event_t event)
+handle_pm_event (struct pm_dev *dev, pm_request_t rqst, void *data)
 {
-    static int down = 0;
-
-    switch (event)
-	{
-	case APM_SYS_SUSPEND:
-	case APM_USER_SUSPEND:
-	    down++;
+    struct nm256_info *crd = (struct nm256_info*) dev->data;
+    if (crd) {
+        switch (rqst) {
+	case PM_SUSPEND:
 	    break;
-	case APM_NORMAL_RESUME:
-	case APM_CRITICAL_RESUME:
-	    if (down)
-		{
-		    struct nm256_info *crd;
-
-		    down = 0;
-		    for (crd = nmcard_list;  crd != NULL; crd = crd->next_card)
-			{
-			    int playing = crd->playing;
-			    nm256_full_reset (crd);
-			    /*
-			     * A little ugly, but that's ok; pretend the
-			     * block we were playing is done. 
-			     */
-			    if (playing)
-				DMAbuf_outputintr (crd->dev_for_play, 1);
-			}
-		}
+	case PM_RESUME:
+            {
+                int playing = crd->playing;
+                nm256_full_reset (crd);
+                /*
+                 * A little ugly, but that's ok; pretend the
+                 * block we were playing is done. 
+                 */
+                if (playing)
+                    DMAbuf_outputintr (crd->dev_for_play, 1);
+            }
 	    break;
 	}
+    }
     return 0;
 }
-#endif
 
 /*
  * 	This loop walks the PCI configuration database and finds where
  *	the sound cards are.
  */
  
-int
+int __init
 init_nm256(void)
 {
     struct pci_dev *pcidev = NULL;
@@ -1291,10 +1279,6 @@ init_nm256(void)
 
     if (count == 0)
 	return -ENODEV;
-
-#ifdef CONFIG_APM
-    apm_register_callback (&handle_apm_event);
-#endif
 
     printk (KERN_INFO "Done installing NM256 audio driver.\n");
     return 0;
@@ -1437,7 +1421,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
     switch (cmd)
 	{
 	case SOUND_PCM_WRITE_RATE:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    if (ret != 0) {
 		oldinfo = card->sinfo[w].samplerate;
@@ -1455,7 +1440,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	    break;
 
 	case SNDCTL_DSP_STEREO:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    card->sinfo[w].stereo = ret ? 1 : 0;
 	    ret = nm256_setInfo (dev, card);
@@ -1465,7 +1451,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	    break;
 
 	case SOUND_PCM_WRITE_CHANNELS:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    if (ret < 1 || ret > 3)
 		ret = card->sinfo[w].stereo + 1;
@@ -1482,7 +1469,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	    break;
 
 	case SNDCTL_DSP_SETFMT:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    if (ret != 0) {
 		oldinfo = card->sinfo[w].bits;
@@ -1639,27 +1627,19 @@ nm256_audio_local_qlen(int dev)
 
 static struct audio_driver nm256_audio_driver =
 {
-    nm256_audio_open,			/* open                 */
-    nm256_audio_close,			/* close                */
-    nm256_audio_output_block,		/* output_block         */
-    nm256_audio_start_input,    	/* start_input          */
-    nm256_audio_ioctl,			/* ioctl                */
-    nm256_audio_prepare_for_input,	/* prepare_for_input    */
-    nm256_audio_prepare_for_output,	/* prepare_for_output   */
-    nm256_audio_reset,			/* reset                */
-    nm256_audio_local_qlen,		/*+local_qlen           */
-    NULL,				/*+copy_from_user       */
-    NULL,				/*+halt_input           */
-    NULL,				/* halt_output          */
-    NULL,				/*+trigger              */
-    NULL,				/*+set_speed            */
-    NULL,				/*+set_bits             */
-    NULL,				/*+set_channels         */
+    owner:		THIS_MODULE,
+    open:		nm256_audio_open,
+    close:		nm256_audio_close,
+    output_block:	nm256_audio_output_block,
+    start_input:	nm256_audio_start_input,
+    ioctl:		nm256_audio_ioctl,
+    prepare_for_input:	nm256_audio_prepare_for_input,
+    prepare_for_output:nm256_audio_prepare_for_output,
+    halt_io:		nm256_audio_reset,
+    local_qlen:		nm256_audio_local_qlen,
 };
 
 EXPORT_SYMBOL(init_nm256);
-
-#ifdef MODULE
 
 static int loaded = 0;
 
@@ -1668,14 +1648,12 @@ MODULE_PARM (buffertop, "i");
 MODULE_PARM (nm256_debug, "i");
 MODULE_PARM (force_load, "i");
 
-int
-init_module (void)
+static int __init do_init_nm256(void)
 {
     nmcard_list = NULL;
     printk (KERN_INFO "NeoMagic 256AV/256ZX audio driver, version 1.1\n");
 
     if (init_nm256 () == 0) {
-	SOUND_LOCK;
 	loaded = 1;
 	return 0;
     }
@@ -1683,14 +1661,11 @@ init_module (void)
 	return -ENODEV;
 }
 
-void
-cleanup_module (void)
+static void __exit cleanup_nm256 (void)
 {
     if (loaded) {
 	struct nm256_info *card;
 	struct nm256_info *next_card;
-
-	SOUND_LOCK_END;
 
 	for (card = nmcard_list; card != NULL; card = next_card) {
 	    stopPlay (card);
@@ -1702,16 +1677,16 @@ cleanup_module (void)
 	    sound_unload_audiodev (card->dev[0]);
 	    sound_unload_audiodev (card->dev[1]);
 	    next_card = card->next_card;
-	    kfree_s (card, sizeof (struct nm256_info));
+	    kfree (card);
 	}
 	nmcard_list = NULL;
     }
-#ifdef CONFIG_APM
-    apm_unregister_callback (&handle_apm_event);
-#endif
+    pm_unregister_all (&handle_pm_event);
 }
-#endif
-
+
+module_init(do_init_nm256);
+module_exit(cleanup_nm256);
+
 /*
  * Local variables:
  *  c-basic-offset: 4

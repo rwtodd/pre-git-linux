@@ -1,13 +1,14 @@
 /*
  *	linux/arch/alpha/kernel/core_irongate.c
  *
- * Code common to all IRONGATE core logic chips.
- *
  * Based on code written by David A. Rusling (david.rusling@reo.mts.dec.com).
- *	Copyright (C) 1999 Alpha Processor, Inc., (David Daniel, Stig Telfer, Soohoon Lee)
+ *
+ *	Copyright (C) 1999 Alpha Processor, Inc.,
+ *		(David Daniel, Stig Telfer, Soohoon Lee)
+ *
+ * Code common to all IRONGATE core logic chips.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/pci.h>
@@ -25,32 +26,20 @@
 #undef __EXTERN_INLINE
 
 #include "proto.h"
-#include "bios32.h"
+#include "pci_impl.h"
 
-/*
- * NOTE: Herein lie back-to-back mb instructions.  They are magic.
- * One plausible explanation is that the I/O controller does not properly
- * handle the system transaction.  Another involves timing.  Ho hum.
- */
+#undef DEBUG_IRONGATE 		/* define to enable verbose Irongate debug */
 
 /*
  * BIOS32-style PCI interface:
  */
 
-/* #define DEBUG_CONFIG */
-#define DEBUG_MCHECK
+#define DEBUG_CONFIG 0
 
-#ifdef DEBUG_CONFIG
+#if DEBUG_CONFIG
 # define DBG_CFG(args)	printk args
 #else
 # define DBG_CFG(args)
-#endif
-
-#ifdef DEBUG_MCHECK
-# define DBG_MCK(args)	printk args
-#define DEBUG_MCHECK_DUMP
-#else
-# define DBG_MCK(args)
 #endif
 
 
@@ -65,7 +54,7 @@
  *	addr[15:11]		Device number (5 bits)
  *	addr[10: 8]		function number
  *	addr[ 7: 2]		register number
-
+ *
  * For IRONGATE:
  *    if (bus = addr[23:16]) == 0
  *    then
@@ -90,14 +79,18 @@
  */
 
 static int
-mk_conf_addr(u8 bus, u8 device_fn, u8 where, struct linux_hose_info *hose,
-	     unsigned long *pci_addr, unsigned char *type1)
+mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
+	     unsigned char *type1)
 {
 	unsigned long addr;
+	u8 bus = dev->bus->number;
+	u8 device_fn = dev->devfn;
 
 	DBG_CFG(("mk_conf_addr(bus=%d ,device_fn=0x%x, where=0x%x, "
 		 "pci_addr=0x%p, type1=0x%p)\n",
 		 bus, device_fn, where, pci_addr, type1));
+
+	*type1 = (bus != 0);
 
 	addr = (bus << 16) | (device_fn << 8) | where;
 	addr |= IRONGATE_CONF;
@@ -107,56 +100,52 @@ mk_conf_addr(u8 bus, u8 device_fn, u8 where, struct linux_hose_info *hose,
 	return 0;
 }
 
-int
-irongate_hose_read_config_byte (u8 bus, u8 device_fn, u8 where, u8 *value,
-			       struct linux_hose_info *hose)
+static int
+irongate_read_config_byte(struct pci_dev *dev, int where, u8 *value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(bus, device_fn, where, hose, &addr, &type1))
+	if (mk_conf_addr(dev, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	*value = __kernel_ldbu(*(vucp)addr);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-int
-irongate_hose_read_config_word (u8 bus, u8 device_fn, u8 where, u16 *value,
-			       struct linux_hose_info *hose)
+static int
+irongate_read_config_word(struct pci_dev *dev, int where, u16 *value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(bus, device_fn, where, hose, &addr, &type1))
+	if (mk_conf_addr(dev, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	*value = __kernel_ldwu(*(vusp)addr);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-int
-irongate_hose_read_config_dword (u8 bus, u8 device_fn, u8 where, u32 *value,
-				struct linux_hose_info *hose)
+static int
+irongate_read_config_dword(struct pci_dev *dev, int where, u32 *value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(bus, device_fn, where, hose, &addr, &type1))
+	if (mk_conf_addr(dev, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	*value = *(vuip)addr;
 	return PCIBIOS_SUCCESSFUL;
 }
 
-int
-irongate_hose_write_config_byte (u8 bus, u8 device_fn, u8 where, u8 value,
-				struct linux_hose_info *hose)
+static int
+irongate_write_config_byte(struct pci_dev *dev, int where, u8 value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(bus, device_fn, where, hose, &addr, &type1))
+	if (mk_conf_addr(dev, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	__kernel_stb(value, *(vucp)addr);
@@ -165,14 +154,13 @@ irongate_hose_write_config_byte (u8 bus, u8 device_fn, u8 where, u8 value,
 	return PCIBIOS_SUCCESSFUL;
 }
 
-int
-irongate_hose_write_config_word (u8 bus, u8 device_fn, u8 where, u16 value,
-				struct linux_hose_info *hose)
+static int
+irongate_write_config_word(struct pci_dev *dev, int where, u16 value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(bus, device_fn, where, hose, &addr, &type1))
+	if (mk_conf_addr(dev, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	__kernel_stw(value, *(vusp)addr);
@@ -181,14 +169,13 @@ irongate_hose_write_config_word (u8 bus, u8 device_fn, u8 where, u16 value,
 	return PCIBIOS_SUCCESSFUL;
 }
 
-int
-irongate_hose_write_config_dword (u8 bus, u8 device_fn, u8 where, u32 value,
-				 struct linux_hose_info *hose)
+static int
+irongate_write_config_dword(struct pci_dev *dev, int where, u32 value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(bus, device_fn, where, hose, &addr, &type1))
+	if (mk_conf_addr(dev, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	*(vuip)addr = value;
@@ -197,11 +184,23 @@ irongate_hose_write_config_dword (u8 bus, u8 device_fn, u8 where, u32 value,
 	return PCIBIOS_SUCCESSFUL;
 }
 
-#if 0
+
+struct pci_ops irongate_pci_ops =
+{
+	read_byte:	irongate_read_config_byte,
+	read_word:	irongate_read_config_word,
+	read_dword:	irongate_read_config_dword,
+	write_byte:	irongate_write_config_byte,
+	write_word:	irongate_write_config_word,
+	write_dword:	irongate_write_config_dword
+};
+
+#ifdef DEBUG_IRONGATE
 static void
 irongate_register_dump(const char *function_name)
 {
 	printk("%s: Irongate registers:\n"
+	       "\tFunction 0:\n"
 	       "\tdev_vendor\t0x%08x\n"
 	       "\tstat_cmd\t0x%08x\n"
 	       "\tclass\t\t0x%08x\n"
@@ -246,7 +245,26 @@ irongate_register_dump(const char *function_name)
 	       "\tagpstat\t\t0x%08x\n"
 	       "\tagpcmd\t\t0x%08x\n"
 	       "\tagpva\t\t0x%08x\n"
-	       "\tagpmode\t\t0x%08x\n",
+	       "\tagpmode\t\t0x%08x\n"
+
+	       "\n\tFunction 1:\n"
+	       "\tdev_vendor:\t0x%08x\n"
+	       "\tcmd_status:\t0x%08x\n"
+	       "\trevid_etc :\t0x%08x\n"
+	       "\thtype_etc :\t0x%08x\n"
+	       "\trsrvd0[0] :\t0x%08x\n"
+	       "\trsrvd0[1] :\t0x%08x\n"
+	       "\tbus_nmbers:\t0x%08x\n"
+	       "\tio_baselim:\t0x%08x\n"
+	       "\tmem_bselim:\t0x%08x\n"
+	       "\tpf_baselib:\t0x%08x\n"
+	       "\trsrvd1[0] :\t0x%08x\n"
+	       "\trsrvd1[1] :\t0x%08x\n"
+	       "\tio_baselim:\t0x%08x\n"
+	       "\trsrvd2[0] :\t0x%08x\n"
+	       "\trsrvd2[1] :\t0x%08x\n"
+	       "\tinterrupt :\t0x%08x\n",
+
 	       function_name,
 	       IRONGATE0->dev_vendor,
 	       IRONGATE0->stat_cmd,
@@ -292,55 +310,35 @@ irongate_register_dump(const char *function_name)
 	       IRONGATE0->agpstat,
 	       IRONGATE0->agpcmd,
 	       IRONGATE0->agpva,
-	       IRONGATE0->agpmode);
+	       IRONGATE0->agpmode,
+	       IRONGATE1->dev_vendor,
+	       IRONGATE1->stat_cmd,
+	       IRONGATE1->class,
+	       IRONGATE1->htype,
+	       IRONGATE1->rsrvd0[0],
+	       IRONGATE1->rsrvd0[1],
+	       IRONGATE1->busnos,
+	       IRONGATE1->io_baselim_regs,
+	       IRONGATE1->mem_baselim,
+	       IRONGATE1->pfmem_baselim,
+	       IRONGATE1->rsrvd1[0],
+	       IRONGATE1->rsrvd1[1],
+	       IRONGATE1->io_baselim,
+	       IRONGATE1->rsrvd2[0],
+	       IRONGATE1->rsrvd2[1],
+	       IRONGATE1->interrupt );
 }
 #else
-#define irongate_register_dump(x)	1
+#define irongate_register_dump(x)
 #endif
-
-void __init
-irongate_init_arch(unsigned long *mem_start, unsigned long *mem_end)
-{
-	struct linux_hose_info *hose;
-
-	irongate_register_dump(__FUNCTION__);
-
-	/* Align memory to cache line; we'll be allocating from it. */
-
-	*mem_start = (*mem_start | 31) + 1;
-
-	/*
-	 * Irongate only supports one PCI bus but do the hose thing anyway.
-	 * Anything to do for AGP???
-	 */
-
-	hose = (struct linux_hose_info *) *mem_start;
-	*mem_start = (unsigned long)(hose + 1);
-	memset(hose, 0, sizeof(*hose));
-	hose->pci_io_space = IRONGATE_IO;
-	hose->pci_mem_space = IRONGATE_MEM;
-	hose->pci_config_space = IRONGATE_CONF;
-	hose->pci_sparse_space = 0;
-	hose->pci_hose_index = 0;
-
-	/* add it to the hose list for bios32.[ch] */
-
-	*hose_tail = hose;
-	hose_tail = &hose->next;
-
-	IRONGATE0->stat_cmd = IRONGATE0->stat_cmd & ~0x100;
-	irongate_pci_clr_err();
-}
 
 int
 irongate_pci_clr_err(void)
 {
-	
 	unsigned int nmi_ctl=0;
 	unsigned int IRONGATE_jd;
 
 again:
-
 	IRONGATE_jd = IRONGATE0->stat_cmd;
 	printk("Iron stat_cmd %x\n", IRONGATE_jd);
 	IRONGATE0->stat_cmd = IRONGATE_jd; /* write again clears error bits */
@@ -359,10 +357,43 @@ again:
         outb(nmi_ctl, 0x61);
         nmi_ctl &= ~0x0c;
         outb(nmi_ctl, 0x61);
-	
+
 	IRONGATE_jd = IRONGATE0->dramms;
 	if (IRONGATE_jd & 0x300) goto again;
-	
+
 	return 0;
 }
 
+void __init
+irongate_init_arch(void)
+{
+	struct pci_controler *hose;
+
+	IRONGATE0->stat_cmd = IRONGATE0->stat_cmd & ~0x100;
+	irongate_pci_clr_err();
+	irongate_register_dump(__FUNCTION__);
+
+	/*
+	 * Create our single hose.
+	 */
+
+	pci_isa_hose = hose = alloc_pci_controler();
+	hose->io_space = &ioport_resource;
+	hose->mem_space = &iomem_resource;
+	hose->index = 0;
+
+	/* This is for userland consumption.  For some reason, the 40-bit
+	   PIO bias that we use in the kernel through KSEG didn't work for
+	   the page table based user mappings.  So make sure we get the
+	   43-bit PIO bias.  */
+	hose->sparse_mem_base = 0;
+	hose->sparse_io_base = 0;
+	hose->dense_mem_base
+	  = (IRONGATE_MEM & 0xffffffffff) | 0x80000000000;
+	hose->dense_io_base
+	  = (IRONGATE_IO & 0xffffffffff) | 0x80000000000;
+
+	hose->sg_isa = hose->sg_pci = NULL;
+	__direct_map_base = 0;
+	__direct_map_size = 0xffffffff;
+}

@@ -1,13 +1,10 @@
-/* $Id: jade_irq.c,v 1.2 1999/07/01 08:07:59 keil Exp $
+/* $Id: jade_irq.c,v 1.5 2000/11/19 17:02:48 kai Exp $
  *
  * jade_irq.c   Low level JADE IRQ stuff (derived from original hscx_irq.c)
  *
  * Author   Roland Klabunde (R.Klabunde@Berkom.de)
  *
- * $Log: jade_irq.c,v $
- * Revision 1.2  1999/07/01 08:07:59  keil
- * Initial version
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
@@ -192,7 +189,7 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 				if (bcs->st->lli.l1writewakeup &&
 					(PACKET_NOACK != bcs->tx_skb->pkt_type))
 					bcs->st->lli.l1writewakeup(bcs->st, bcs->hw.hscx.count);
-				dev_kfree_skb(bcs->tx_skb);
+				dev_kfree_skb_irq(bcs->tx_skb);
 				bcs->hw.hscx.count = 0;
 				bcs->tx_skb = NULL;
 			}

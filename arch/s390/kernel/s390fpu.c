@@ -13,6 +13,7 @@
  *  ( & as usual I didn't feel like debugging inline code ).
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
 
 int save_fp_regs1(s390_fp_regs *fpregs)
@@ -62,7 +63,7 @@ void save_fp_regs(s390_fp_regs *fpregs)
 #if CONFIG_IEEEFPU_EMULATION
 	if(!save_fp_regs1(fpregs))
 	{
-		currentfprs=&current->tss.fp_regs;
+		currentfprs=&current->thread.fp_regs;
 		fpregs->fpc=currentfprs->fpc;
 		fpregs->fprs[1].d=currentfprs->fprs[1].d;
 		fpregs->fprs[3].d=currentfprs->fprs[3].d;
@@ -120,7 +121,7 @@ void restore_fp_regs(s390_fp_regs *fpregs)
 #if CONFIG_IEEEFPU_EMULATION
 	if(!restore_fp_regs1(fpregs))
 	{
-		currentfprs=&current->tss.fp_regs;
+		currentfprs=&current->thread.fp_regs;
 		currentfprs->fpc=fpregs->fpc;
 		currentfprs->fprs[1].d=fpregs->fprs[1].d;
 		currentfprs->fprs[3].d=fpregs->fprs[3].d;

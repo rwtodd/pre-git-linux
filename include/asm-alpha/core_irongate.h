@@ -1,7 +1,6 @@
 #ifndef __ALPHA_IRONGATE__H__
 #define __ALPHA_IRONGATE__H__
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <asm/compiler.h>
 
@@ -13,7 +12,8 @@
  * This file is based on:
  *
  * IronGate management library, (c) 1999 Alpha Processor, Inc.
- * Copyright (C) 1999 Alpha Processor, Inc., (David Daniel, Stig Telfer, Soohoon Lee)
+ * Copyright (C) 1999 Alpha Processor, Inc.,
+ *	(David Daniel, Stig Telfer, Soohoon Lee)
  */
 
 /*
@@ -22,20 +22,7 @@
  * and I/O address space. Memory address space resides in the lower
  * half of the physical address space (PA[43]=0) and I/O address space
  * resides in the upper half of the physical address space (PA[43]=1).
- *
  */
-
-
-#define IRONGATE_DMA_WIN_BASE_DEFAULT	 (0U)
-#define IRONGATE_DMA_WIN_SIZE_DEFAULT	 (0U)
-
-#if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM_SETUP)
-#define IRONGATE_DMA_WIN_BASE		alpha_mv.dma_win_base
-#define IRONGATE_DMA_WIN_SIZE		alpha_mv.dma_win_size
-#else
-#define IRONGATE_DMA_WIN_BASE		IRONGATE_DMA_WIN_BASE_DEFAULT
-#define IRONGATE_DMA_WIN_SIZE		IRONGATE_DMA_WIN_SIZE_DEFAULT
-#endif
 
 /*
  * Irongate CSR map.  Some of the CSRs are 8 or 16 bits, but all access
@@ -94,263 +81,26 @@ typedef struct {
 	igcsr32 agpcmd;			/* 0xA8 - AGP control register */
 	igcsr32 agpva;			/* 0xAC - AGP Virtual Address Space */
 	igcsr32 agpmode;		/* 0xB0 - AGP/GART mode control */
-
 } Irongate0;
 
-/*----------------------------------------------------------------------*/
-/* Bitfield and mask register definitions */
 
-/* Device, vendor IDs - offset 0x00 */
+typedef struct {
 
-typedef union {
-	igcsr32 i;			/* integer value of CSR */
-	struct {
-		unsigned v : 16;
-		unsigned d : 16;
-	} r;				/* structured interpretation */
-} ig_dev_vendor_t;
+	igcsr32 dev_vendor;		/* 0x00 - Device and Vendor IDs */
+	igcsr32 stat_cmd;		/* 0x04 - Status and Command regs */
+	igcsr32 class;			/* 0x08 - subclass, baseclass etc */
+	igcsr32 htype;			/* 0x0C - header type (at 0x0E) */
+	igcsr32 rsrvd0[2];		/* 0x10-0x17 reserved */
+	igcsr32 busnos;			/* 0x18 - Primary, secondary bus nos */
+	igcsr32 io_baselim_regs;	/* 0x1C - IO base, IO lim, AGP status */
+	igcsr32	mem_baselim;		/* 0x20 - memory base, memory lim */
+	igcsr32 pfmem_baselim;		/* 0x24 - prefetchable base, lim */
+	igcsr32 rsrvd1[2];		/* 0x28-0x2F reserved */
+	igcsr32 io_baselim;		/* 0x30 - IO base, IO limit */
+	igcsr32 rsrvd2[2];		/* 0x34-0x3B - reserved */
+	igcsr32 interrupt;		/* 0x3C - interrupt, PCI bridge ctrl */
 
-
-/* Status, command registers - offset 0x04 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned command;
-		unsigned status;
-	} s;
-	struct {
-		/* command register fields */
-		unsigned iospc : 1;		/* always reads zero */
-		unsigned memspc	 : 1;		/* PCI memory space accesses? */
-		unsigned iten : 1;		/* always 1: can be bus initiator */
-		unsigned scmon : 1;		/* always 0 special cycles not chckd */
-		unsigned mwic : 1;		/* always 0 - no mem write & invalid */
-		unsigned vgaps : 1;		/* always 0 - palette rds not special */
-		unsigned per : 1;		/* parity error resp: always 0 */
-		unsigned step : 1;		/* address/data stepping : always 0 */
-		unsigned serre : 1;		/* 1 = sys err output driver enable */
-		unsigned fbbce : 1;		/* fast back-back cycle : always 0 */
-		unsigned zero1 : 6;		/* must be zero */
-
-		/* status register fields */
-		unsigned zero2 : 4;	     /* must be zero */
-		unsigned cl : 1;	    /* config space capa list: always 1 */
-		unsigned pci66 : 1;	    /* 66 MHz PCI support - always 0 */
-		unsigned udf : 1;	    /* user defined features - always 0 */
-		unsigned fbbc : 1;	    /* back-back transactions - always 0 */
-		unsigned ppe : 1;	    /* PCI parity error detected (0) */
-		unsigned devsel : 2;	    /* DEVSEL timing (always 01) */
-		unsigned sta : 1;	    /* signalled target abort (0) */
-		unsigned rta : 1;	    /* recvd target abort */
-		unsigned ria : 1;	    /* recvd initiator abort */
-		unsigned serr : 1;	    /* SERR has been asserted */
-		unsigned dpe : 1;	    /* DRAM parity error (0) */
-	} r;
-} ig_stat_cmd_t;
-
-
-/* Revision ID, Programming interface, subclass, baseclass - offset 0x08 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		/* revision ID */
-		unsigned step : 4;		/* stepping Revision ID */
-		unsigned die : 4;		/* die Revision ID */
-		unsigned pif : 8;		/* programming interface (0x00) */
-		unsigned sub : 8;		/* subclass code (0x00) */
-		unsigned base: 8;		/* baseclass code (0x06) */
-	} r;
-} ig_class_t;
-
-
-/* Latency Timer, PCI Header type - offset 0x0C */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned zero1:8;		/* reserved */
-		unsigned lat : 8;		/* latency in PCI bus clocks */
-		unsigned hdr : 8;		/* PCI header type */
-		unsigned zero2:8;		/* reserved */
-	} r;
-} ig_latency_t;
-
-
-/* Base Address Register 0 - offset 0x10 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned mem : 1;		/* Reg pts to memory (always 0) */
-		unsigned type: 2;		/* 32 bit register = 0b00 */
-		unsigned pref: 1;		/* graphics mem prefetchable=1 */
-		unsigned baddrl : 21;		/* 32M = minimum alloc -> all zero */
-		unsigned size : 6;		/* size requirements for AGP */
-		unsigned zero : 1;		/* reserved=0 */
-	} r;
-} ig_bar0_t;
-
-
-/* Base Address Register 1 - offset 0x14 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned mem : 1;		/* BAR0 maps to memory -> 0 */
-		unsigned type : 2;		/* BAR1 is 32-bit -> 0b00 */
-		unsigned pref : 1;		/* graphics mem prefetchable=1 */
-		unsigned baddrl : 8;		/* 4K alloc for AGP CSRs -> 0b00 */
-		unsigned baddrh : 20;		/* base addr of AGP CSRs A[30:11] */
-	} r;
-} ig_bar1_t;
-
-
-/* Base Address Register 2 - offset 0x18 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned io  : 1;		/* BAR2 maps to I/O space -> 1 */
-		unsigned zero1: 1;		/* reserved */
-		unsigned addr : 22;		/* BAR2[31:10] - PM2_BLK base */
-		unsigned zero2: 8;		/* reserved */
-	} r;
-} ig_bar2_t;
-
-
-/* Capabilities Pointer - offset 0x34 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned cap : 8;		/* =0xA0, offset of AGP ctrl regs */
-		unsigned zero: 24;		/* reserved */
-	} r;
-} ig_capptr_t;
-
-
-/* Base Address Chip Select Register 1,0 - offset 0x40 */
-/* Base Address Chip Select Register 3,2 - offset 0x44 */
-/* Base Address Chip Select Register 5,4 - offset 0x48 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		/* lower bank */
-		unsigned en0 : 1;		/* memory bank enabled */
-		unsigned mask0 : 6;		/* Address mask for A[28:23] */
-		unsigned base0 : 9;		/* Bank Base Address A[31:23] */
-
-		/* upper bank */
-		unsigned en1 : 1;		/* memory bank enabled */
-		unsigned mask1 : 6;		/* Address mask for A[28:23] */
-		unsigned base1 : 9;		/* Bank Base Address A[31:23] */
-	} r;
-} ig_bacsr_t, ig_bacsr10_t, ig_bacsr32_t, ig_bacsr54_t;
-
-
-/* SDRAM Address Mapping Control Register - offset 0x50 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned z1 : 1;		/* reserved */
-		unsigned bnks0: 1;		/* 0->2 banks in chip select 0 */
-		unsigned am0 : 1;		/* row/column addressing */
-		unsigned z2 : 1;		/* reserved */
-
-		unsigned z3 : 1;		/* reserved */
-		unsigned bnks1: 1;		/* 0->2 banks in chip select 1 */
-		unsigned am1 : 1;		/* row/column addressing */
-		unsigned z4 : 1;		/* reserved */
-
-		unsigned z5 : 1;		/* reserved */
-		unsigned bnks2: 1;		/* 0->2 banks in chip select 2 */
-		unsigned am2 : 1;		/* row/column addressing */
-		unsigned z6 : 1;		/* reserved */
-
-		unsigned z7 : 1;		/* reserved */
-		unsigned bnks3: 1;		/* 0->2 banks in chip select 3 */
-		unsigned am3 : 1;		/* row/column addressing */
-		unsigned z8 : 1;		/* reserved */
-
-		unsigned z9 : 1;		/* reserved */
-		unsigned bnks4: 1;		/* 0->2 banks in chip select 4 */
-		unsigned am4 : 1;		/* row/column addressing */
-		unsigned z10 : 1;		/* reserved */
-
-		unsigned z11 : 1;		/* reserved */
-		unsigned bnks5: 1;		/* 0->2 banks in chip select 5 */
-		unsigned am5 : 1;		/* row/column addressing */
-		unsigned z12 : 1;		/* reserved */
-
-		unsigned rsrvd: 8;		/* reserved */
-	} r;
-} ig_drammap_t;
-
-
-/* DRAM timing and driver strength register - offset 0x54 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		/* DRAM timing parameters */
-		unsigned trcd : 2;
-		unsigned tcl : 2;
-		unsigned tras: 3;
-		unsigned trp : 2;
-		unsigned trc : 3;
-		unsigned icl: 2;
-		unsigned ph : 2;
-
-		/* Chipselect driver strength */
-		unsigned adra : 1;
-		unsigned adrb : 1;
-		unsigned ctrl : 3;
-		unsigned dqm : 1;
-		unsigned cs : 1;
-		unsigned clk: 1;
-		unsigned rsrvd:8;
-	} r;
-} ig_dramtm_t;
-
-
-/* DRAM Mode / Status and ECC Register - offset 0x58 */
-
-typedef union {
-
-	igcsr32 i;
-	struct {
-		unsigned chipsel : 6;		/* failing ECC chip select */
-		unsigned zero1 : 2;		/* always reads zero */
-		unsigned status : 2;		/* ECC Detect logic status */
-		unsigned zero2 : 6;		/* always reads zero */
-
-		unsigned cycles : 2;		/* cycles per refresh, see table */
-		unsigned en : 1;		/* ECC enable */
-		unsigned r : 1;			/* Large burst enable (=0) */
-		unsigned bre : 1;		/* Burst refresh enable */
-		unsigned zero3 : 2;		/* reserved = 0 */
-		unsigned mwe : 1;		/* Enable writes to DRAM mode reg */
-		unsigned type : 1;		/* SDRAM = 0, default */
-		unsigned sdraminit : 1;		/* SDRAM init - set params first! */
-		unsigned zero4 : 6;		/* reserved = 0 */
-	} r;
-} ig_dramms_t;
-
-/*----------------------------------------------------------------------*/
+} Irongate1;
 
 
 /*
@@ -370,8 +120,21 @@ typedef union {
 #define IRONGATE_IO		(IDENT_ADDR | IRONGATE_BIAS | 0x1FC000000UL)
 #define IRONGATE_CONF		(IDENT_ADDR | IRONGATE_BIAS | 0x1FE000000UL)
 
+/*
+ * PCI Configuration space accesses are formed like so:
+ *
+ * 0x1FE << 24 |  : 2 2 2 2 1 1 1 1 : 1 1 1 1 1 1 0 0 : 0 0 0 0 0 0 0 0 :
+ *                : 3 2 1 0 9 8 7 6 : 5 4 3 2 1 0 9 8 : 7 6 5 4 3 2 1 0 :
+ *                  ---bus numer---   -device-- -fun-   ---register----
+ */
 
-#define IRONGATE0	( (Irongate0 *) IRONGATE_CONF )
+#define IGCSR(dev,fun,reg)	( IRONGATE_CONF | \
+				((dev)<<11) | \
+				((fun)<<8) | \
+				(reg) )
+
+#define IRONGATE0		((Irongate0 *) IGCSR(0, 0, 0))
+#define IRONGATE1		((Irongate1 *) IGCSR(1, 0, 0))
 
 /*
  * Data structure for handling IRONGATE machine checks:
@@ -384,30 +147,29 @@ typedef union {
 #define SCB_Q_PROCMCHK	0x670
 
 struct el_IRONGATE_sysdata_mcheck {
-  __u32 FrameSize;                 /* Bytes, including this field */
-  __u32 FrameFlags;                /* <31> = Retry, <30> = Second Error */
-  __u32 CpuOffset;                 /* Offset to CPU-specific into */
-  __u32 SystemOffset;              /* Offset to system-specific info */
-  __u32 MCHK_Code;
-  __u32 MCHK_Frame_Rev;
-  __u64 I_STAT;
-  __u64 DC_STAT;
-  __u64 C_ADDR;
-  __u64 DC1_SYNDROME;
-  __u64 DC0_SYNDROME;
-  __u64 C_STAT;
-  __u64 C_STS;
-  __u64 RESERVED0;
-  __u64 EXC_ADDR;
-  __u64 IER_CM;
-  __u64 ISUM;
-  __u64 MM_STAT;
-  __u64 PAL_BASE;
-  __u64 I_CTL;
-  __u64 PCTX;
+	__u32 FrameSize;                 /* Bytes, including this field */
+	__u32 FrameFlags;                /* <31> = Retry, <30> = Second Error */
+	__u32 CpuOffset;                 /* Offset to CPU-specific into */
+	__u32 SystemOffset;              /* Offset to system-specific info */
+	__u32 MCHK_Code;
+	__u32 MCHK_Frame_Rev;
+	__u64 I_STAT;
+	__u64 DC_STAT;
+	__u64 C_ADDR;
+	__u64 DC1_SYNDROME;
+	__u64 DC0_SYNDROME;
+	__u64 C_STAT;
+	__u64 C_STS;
+	__u64 RESERVED0;
+	__u64 EXC_ADDR;
+	__u64 IER_CM;
+	__u64 ISUM;
+	__u64 MM_STAT;
+	__u64 PAL_BASE;
+	__u64 I_CTL;
+	__u64 PCTX;
 };
 
-/*----------------------------------------------------------------------*/
 
 #ifdef __KERNEL__
 
@@ -417,25 +179,10 @@ struct el_IRONGATE_sysdata_mcheck {
 #endif
 
 /*
- * Translate physical memory address as seen on (PCI) bus into
- * a kernel virtual address and vv.
- */
-
-__EXTERN_INLINE unsigned long irongate_virt_to_bus(void * address)
-{
-	return virt_to_phys(address) + IRONGATE_DMA_WIN_BASE;
-}
-
-__EXTERN_INLINE void * irongate_bus_to_virt(unsigned long address)
-{
-	return phys_to_virt(address - IRONGATE_DMA_WIN_BASE);
-}
-
-/*
  * I/O functions:
  *
  * IRONGATE (AMD-751) PCI/memory support chip for the EV6 (21264) and
- * K7 can only use linear accesses to get at PCI memory and I/O spaces
+ * K7 can only use linear accesses to get at PCI memory and I/O spaces.
  */
 
 #define vucp	volatile unsigned char *
@@ -443,90 +190,91 @@ __EXTERN_INLINE void * irongate_bus_to_virt(unsigned long address)
 #define vuip	volatile unsigned int *
 #define vulp	volatile unsigned long *
 
-#define XADDR	((addr) & 0xffffffffUL)
-
 __EXTERN_INLINE unsigned int irongate_inb(unsigned long addr)
 {
-	return __kernel_ldbu(*(vucp)(XADDR + IRONGATE_IO));
+	return __kernel_ldbu(*(vucp)(addr + IRONGATE_IO));
 }
 
 __EXTERN_INLINE void irongate_outb(unsigned char b, unsigned long addr)
 {
-        __kernel_stb(b, *(vucp)(XADDR + IRONGATE_IO));
+        __kernel_stb(b, *(vucp)(addr + IRONGATE_IO));
 	mb();
 }
 
 __EXTERN_INLINE unsigned int irongate_inw(unsigned long addr)
 {
-	return __kernel_ldwu(*(vusp)(XADDR + IRONGATE_IO));
+	return __kernel_ldwu(*(vusp)(addr + IRONGATE_IO));
 }
 
 __EXTERN_INLINE void irongate_outw(unsigned short b, unsigned long addr)
 {
-        __kernel_stw(b, *(vusp)(XADDR + IRONGATE_IO));
+        __kernel_stw(b, *(vusp)(addr + IRONGATE_IO));
 	mb();
 }
 
 __EXTERN_INLINE unsigned int irongate_inl(unsigned long addr)
 {
-	return *(vuip)(XADDR + IRONGATE_IO);
+	return *(vuip)(addr + IRONGATE_IO);
 }
 
 __EXTERN_INLINE void irongate_outl(unsigned int b, unsigned long addr)
 {
-        *(vuip)(XADDR + IRONGATE_IO) = b;
+        *(vuip)(addr + IRONGATE_IO) = b;
 	mb();
 }
 
 /*
- * Memory functions.  all accesses are done through linear space.
+ * Memory functions.  All accesses are done through linear space.
  */
 
 __EXTERN_INLINE unsigned long irongate_readb(unsigned long addr)
 {
-	return __kernel_ldbu(*(vucp)(XADDR + IRONGATE_MEM));
+	return __kernel_ldbu(*(vucp)addr);
 }
 
 __EXTERN_INLINE unsigned long irongate_readw(unsigned long addr)
 {
-	return __kernel_ldwu(*(vusp)(XADDR + IRONGATE_MEM));
+	return __kernel_ldwu(*(vusp)addr);
 }
 
 __EXTERN_INLINE unsigned long irongate_readl(unsigned long addr)
 {
-	return *(vuip)(XADDR + IRONGATE_MEM);
+	return *(vuip)addr;
 }
 
 __EXTERN_INLINE unsigned long irongate_readq(unsigned long addr)
 {
-	return *(vulp)(XADDR + IRONGATE_MEM);
+	return *(vulp)addr;
 }
 
 __EXTERN_INLINE void irongate_writeb(unsigned char b, unsigned long addr)
 {
-	__kernel_stb(b, *(vucp)(XADDR + IRONGATE_MEM));
+	__kernel_stb(b, *(vucp)addr);
 }
 
 __EXTERN_INLINE void irongate_writew(unsigned short b, unsigned long addr)
 {
-	__kernel_stw(b, *(vusp)(XADDR + IRONGATE_MEM));
+	__kernel_stw(b, *(vusp)addr);
 }
 
 __EXTERN_INLINE void irongate_writel(unsigned int b, unsigned long addr)
 {
-	*(vuip)(XADDR + IRONGATE_MEM) = b;
+	*(vuip)addr = b;
 }
 
 __EXTERN_INLINE void irongate_writeq(unsigned long b, unsigned long addr)
 {
-	*(vulp)(XADDR + IRONGATE_MEM) = b;
+	*(vulp)addr = b;
 }
 
-/* Find the DENSE memory area for a given bus address.	*/
-
-__EXTERN_INLINE unsigned long irongate_dense_mem(unsigned long addr)
+__EXTERN_INLINE unsigned long irongate_ioremap(unsigned long addr)
 {
-	return IRONGATE_MEM;
+	return addr + IRONGATE_MEM;
+}
+
+__EXTERN_INLINE int irongate_is_ioaddr(unsigned long addr)
+{
+	return addr >= IRONGATE_MEM;
 }
 
 #undef vucp
@@ -534,46 +282,39 @@ __EXTERN_INLINE unsigned long irongate_dense_mem(unsigned long addr)
 #undef vuip
 #undef vulp
 
-#undef XADDR
-
 #ifdef __WANT_IO_DEF
 
-#define virt_to_bus	irongate_virt_to_bus
-#define bus_to_virt	irongate_bus_to_virt
+#define __inb(p)		irongate_inb((unsigned long)(p))
+#define __inw(p)		irongate_inw((unsigned long)(p))
+#define __inl(p)		irongate_inl((unsigned long)(p))
+#define __outb(x,p)		irongate_outb((x),(unsigned long)(p))
+#define __outw(x,p)		irongate_outw((x),(unsigned long)(p))
+#define __outl(x,p)		irongate_outl((x),(unsigned long)(p))
+#define __readb(a)		irongate_readb((unsigned long)(a))
+#define __readw(a)		irongate_readw((unsigned long)(a))
+#define __readl(a)		irongate_readl((unsigned long)(a))
+#define __readq(a)		irongate_readq((unsigned long)(a))
+#define __writeb(x,a)		irongate_writeb((x),(unsigned long)(a))
+#define __writew(x,a)		irongate_writew((x),(unsigned long)(a))
+#define __writel(x,a)		irongate_writel((x),(unsigned long)(a))
+#define __writeq(x,a)		irongate_writeq((x),(unsigned long)(a))
+#define __ioremap(a)		irongate_ioremap((unsigned long)(a))
+#define __is_ioaddr(a)		irongate_is_ioaddr((unsigned long)(a))
 
-#define __inb		irongate_inb
-#define __inw		irongate_inw
-#define __inl		irongate_inl
-#define __outb		irongate_outb
-#define __outw		irongate_outw
-#define __outl		irongate_outl
-#define __readb		irongate_readb
-#define __readw		irongate_readw
-#define __writeb	irongate_writeb
-#define __writew	irongate_writew
-#define __readl		irongate_readl
-#define __readq		irongate_readq
-#define __writel	irongate_writel
-#define __writeq	irongate_writeq
-#define dense_mem	irongate_dense_mem
-
-#define inb(port) __inb((port))
-#define inw(port) __inw((port))
-#define inl(port) __inl((port))
-
-#define outb(v, port) __outb((v),(port))
-#define outw(v, port) __outw((v),(port))
-#define outl(v, port) __outl((v),(port))
-
-#define readb(a)	__readb((unsigned long)(a))
-#define readw(a)	__readw((unsigned long)(a))
-#define readl(a)	__readl((unsigned long)(a))
-#define readq(a)	__readq((unsigned long)(a))
-
-#define writeb(v,a)	__writeb((v),(unsigned long)(a))
-#define writew(v,a)	__writew((v),(unsigned long)(a))
-#define writel(v,a)	__writel((v),(unsigned long)(a))
-#define writeq(v,a)	__writeq((v),(unsigned long)(a))
+#define inb(p)			__inb(p)
+#define inw(p)			__inw(p)
+#define inl(p)			__inl(p)
+#define outb(x,p)		__outb((x),(p))
+#define outw(x,p)		__outw((x),(p))
+#define outl(x,p)		__outl((x),(p))
+#define __raw_readb(a)		__readb(a)
+#define __raw_readw(a)		__readw(a)
+#define __raw_readl(a)		__readl(a)
+#define __raw_readq(a)		__readq(a)
+#define __raw_writeb(v,a)	__writeb((v),(a))
+#define __raw_writew(v,a)	__writew((v),(a))
+#define __raw_writel(v,a)	__writel((v),(a))
+#define __raw_writeq(v,a)	__writeq((v),(a))
 
 #endif /* __WANT_IO_DEF */
 
@@ -585,4 +326,3 @@ __EXTERN_INLINE unsigned long irongate_dense_mem(unsigned long addr)
 #endif /* __KERNEL__ */
 
 #endif /* __ALPHA_IRONGATE__H__ */
-

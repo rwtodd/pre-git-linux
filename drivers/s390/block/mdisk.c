@@ -13,6 +13,7 @@
 #endif
 
 #define __NO_VERSION__
+#include <linux/config.h>
 #include <linux/version.h>
 
 char kernel_version [] = UTS_RELEASE;
@@ -37,7 +38,7 @@ char kernel_version [] = UTS_RELEASE;
 #include <asm/io.h>                    /* virt_to_phys                     */
 
 	 /* Added statement HSM 12/03/99 */
-#include "../../../arch/s390/kernel/irq.h"
+#include <asm/irq.h>
 
 #define MAJOR_NR MDISK_MAJOR /* force definitions on in blk.h */
 
@@ -112,19 +113,20 @@ struct {
  * Format is: mdisk=<vdev>:<size>:<offset>:<blksize>,<vdev>:<size>:<offset>...
  * <vdev>:<size>:<offset>:<blksize> can be shortened to <vdev>:<size> with offset=0,blksize=512
  */
-__initfunc(void mdisk_setup(char *str,int *ints))
+int __init mdisk_setup(char *str)
 {
 	char *cur = str;
 	int vdev, size, offset=0,blksize;
-	static i = 0;
+	static int i = 0;
 	if (!i)
-	  memset(&mdisk_setup_data,0,sizeof(mdisk_setup_data));
+	        memset(&mdisk_setup_data,0,sizeof(mdisk_setup_data));
 
         while (*cur != 0) {
 	        blksize=MDISK_HARDSECT;
 		vdev = size = offset = 0;
 		if (!isxdigit(*cur)) goto syntax_error;
 		vdev = simple_strtoul(cur,&cur,16);
+		if (*cur != 0 && *cur != ',') { 
 		if (*cur++ != ':') goto syntax_error;
 		if (!isxdigit(*cur)) goto syntax_error;
 		size = simple_strtoul(cur,&cur,16);
@@ -139,10 +141,11 @@ __initfunc(void mdisk_setup(char *str,int *ints))
 			}
 		}
 		if (*cur != ',' && *cur != 0) goto syntax_error;
+		} 
 		if (*cur == ',') cur++;
 		if (i >= MDISK_DEVS) {
 			printk(KERN_WARNING "mnd: too many devices\n");
-			return;
+			return 1;
 		}
 		mdisk_setup_data.vdev[i] = vdev;
 		mdisk_setup_data.size[i] = size;
@@ -152,12 +155,14 @@ __initfunc(void mdisk_setup(char *str,int *ints))
 		i++;
 	}
 	
-	return;
+	return 1;
 
 syntax_error:
         printk(KERN_WARNING "mnd: syntax error in parameter string: %s\n", str);
-	return;
+	return 0;
 }
+
+__setup("mdisk=", mdisk_setup);
 
 /*
  * Open and close
@@ -233,8 +238,6 @@ static int mdisk_ioctl (struct inode *inode, struct file *filp,
 	case BLKRRPART: /* re-read partition table: can't do it */
 		return -EINVAL;
 		
-		RO_IOCTLS(inode->i_rdev, arg); /* the default RO operations */
-		
 	case HDIO_GETGEO:
 		/*
 		 * get geometry of device -> linear
@@ -257,22 +260,10 @@ static int mdisk_ioctl (struct inode *inode, struct file *filp,
  * The file operations
  */
 
-static struct file_operations mdisk_fops = {
-	NULL,          /* lseek: default */
-	block_read,
-	block_write,
-	NULL,          /* mdisk_readdir */
-	NULL,          /* mdisk_select */
-	mdisk_ioctl,
-	NULL,          /* mdisk_mmap */
-	mdisk_open,
-	NULL,          /* mdisk_flush */
-	mdisk_release,
-	block_fsync,
-	NULL,          /* mdisk_fasync */
-	NULL,          /* mdisk_check_change */
-	NULL,          /* mdisk_revalidate */
-	NULL,          /* mdisk_lock */
+static struct block_device_operations mdisk_fops = {
+	ioctl:        mdisk_ioctl,
+	open:         mdisk_open,
+        release:      mdisk_release,
 };
 
 /*
@@ -296,7 +287,6 @@ dia250(void* iob,int cmd)
 		      : "2", "3" );
 	return rc;
 }
-
 /*
  * Init of minidisk device
  */
@@ -365,9 +355,105 @@ mdisk_rw_io_clustered (mdisk_Dev *dev,
 	iob->bio_list     = virt_to_phys(bio_array);
 	
 	rc = dia250(iob,RW_BIO);
-	rc = (rc == 8) ? 0 : rc;
 	return rc;
 }
+
+
+
+/*
+ * The device characteristics function
+ */
+
+static __inline__ int
+dia210(void* devchar)
+{
+	int rc;
+
+	devchar = (void*) virt_to_phys(devchar);
+
+	asm volatile ("    lr    2,%1\n"
+		      "    .long 0x83200210\n"
+		      "    ipm   %0\n"
+		      "    srl   %0,28"
+		      : "=d" (rc)
+		      : "d" (devchar)
+		      : "2" );
+	return rc;
+}
+/*
+ * read the label of a minidisk and extract its characteristics
+ */
+
+static __inline__ int
+mdisk_read_label (mdisk_Dev *dev, int i)
+{
+	static mdisk_dev_char_t devchar;
+	static long label[1024];
+	int block, b;
+	int rc;
+	mdisk_bio_t *bio;
+
+	devchar.dev_nr = dev -> vdev;
+	devchar.rdc_len = sizeof(mdisk_dev_char_t);
+
+	if (dia210(&devchar) == 0) {
+		if (devchar.vdev_class == DEV_CLASS_FBA) {
+			block = 2;
+		}
+		else {
+			block = 3;
+		}
+		bio = dev->bio;
+		for (b=512;b<4097;b=b*2) {
+			rc = mdisk_init_io(dev, b, 0, 64);
+			if (rc > 4) {
+				continue;
+			}
+			memset(&bio[0], 0, sizeof(mdisk_bio_t));
+			bio[0].type = MDISK_READ_REQ;
+			bio[0].block_number = block;
+			bio[0].buffer = virt_to_phys(&label);
+			dev->nr_bhs = 1;
+			if (mdisk_rw_io_clustered(dev,
+			                          &bio[0],
+			                          1,
+			                          (unsigned long) dev,
+			                          MDISK_SYNC)
+			    == 0 ) {
+				if (label[0] != 0xc3d4e2f1) { /* CMS1 */
+					printk ( KERN_WARNING "mnd: %4lX "
+					         "is not CMS format\n",
+					         mdisk_setup_data.vdev[i]);
+					rc = mdisk_term_io(dev);
+					return 1;
+				}
+				if (label[13] == 0) {
+					printk ( KERN_WARNING "mnd: %4lX "
+		   		         "is not reserved\n",
+					         mdisk_setup_data.vdev[i]);
+					rc = mdisk_term_io(dev);
+					return 2;
+				}
+				mdisk_setup_data.size[i] =
+				   (label[7] - 1 - label[13]) *
+				   (label[3] >> 9) >> 1;
+				mdisk_setup_data.blksize[i] = label[3];
+				mdisk_setup_data.offset[i] = label[13] + 1;
+				rc = mdisk_term_io(dev);
+				return rc;
+			}
+			rc = mdisk_term_io(dev);
+		}
+		printk ( KERN_WARNING "mnd: Cannot read label of %4lX "
+			 "- is it formatted?\n",
+			 mdisk_setup_data.vdev[i]);
+		return 3;
+	}
+	return 4;
+}
+
+
+
 
 
 /*
@@ -384,11 +470,11 @@ mdisk_end_request(int nr_bhs)
 	struct buffer_head *bh;
 	struct request *req;
 
-	if (nr_bhs != 1) {
+	if (nr_bhs > 1) {
 		req = CURRENT;
 		bh  = req->bh;
 		
-		for (i=0;i<nr_bhs-1;i++) {
+		for (i=0; i < nr_bhs-1; i++) {
 			req->bh = bh->b_reqnext;
 			bh->b_reqnext = NULL;
 			bh->b_end_io(bh,1);
@@ -411,7 +497,7 @@ mdisk_end_request(int nr_bhs)
  * Block-driver specific functions
  */
 
-void mdisk_request(void)
+void mdisk_request(request_queue_t *queue)
 {
 	mdisk_Dev *dev;
 	mdisk_bio_t *bio;
@@ -507,7 +593,7 @@ void mdisk_request(void)
 #else
 						 MDISK_ASYNC
 #endif
-			)) != 0 ) {
+			)) > 8 ) {
 			printk(KERN_WARNING "mnd%c: %s request failed rc %d"
 			       " sector %ld nr_sectors %ld \n",
 			       DEVICE_NR(CURRENT_DEV),
@@ -524,6 +610,9 @@ void mdisk_request(void)
 #ifdef CONFIG_MDISK_SYNC
 		mdisk_end_request(dev->nr_bhs);
 #else
+		if (rc == 0)
+		        mdisk_end_request(dev->nr_bhs);
+		else
 		return;
 #endif	
 	}
@@ -581,6 +670,7 @@ do_mdisk_bh(void *data)
 		/*
 		 * end request for clustered requests
 		 */
+	  if (CURRENT)
 		mdisk_end_request(dev->nr_bhs);
 	}
 
@@ -588,7 +678,7 @@ do_mdisk_bh(void *data)
 	 * if more to do, call mdisk_request
 	 */
 	if (CURRENT)
-		mdisk_request();
+		mdisk_request(NULL);
 	spin_unlock_irqrestore(&io_request_lock, flags);
 }
 
@@ -598,11 +688,12 @@ mdisk_handler (int cpu, void *ds, struct pt_regs *regs)
 	printk (KERN_ERR "mnd: received I/O interrupt... shouldn't happen\n");
 }
 
-__initfunc(int mdisk_init(void))
+int __init mdisk_init(void)
 {
         int rc,i;
         mdisk_Dev *dev;
-	
+	request_queue_t *q;
+
 	/*
 	 * register block device
 	 */
@@ -611,12 +702,10 @@ __initfunc(int mdisk_init(void))
 		       ,MAJOR_NR);
 		return MAJOR_NR;
 	}
+        q = BLK_DEFAULT_QUEUE(MAJOR_NR);
+        blk_init_queue(q, mdisk_request);
+        blk_queue_headactive(BLK_DEFAULT_QUEUE(major), 0);
 	
-	/*
-	 * setup global major dependend structures
-	 */
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
-
 	/*
 	 * setup sizes for available devices
 	 */
@@ -625,10 +714,10 @@ __initfunc(int mdisk_init(void))
 	blksize_size[MAJOR_NR] = mdisk_blksizes;   /* blksize of device      */
 	hardsect_size[MAJOR_NR] = mdisk_hardsects;
 	max_sectors[MAJOR_NR]   = mdisk_maxsectors;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	
 	for (i=0;i<MDISK_DEVS;i++) {
-		mdisk_sizes[i] = mdisk_setup_data.size[i];
-		if (mdisk_sizes[i] == 0) {
+		if (mdisk_setup_data.vdev[i] == 0) {
 			continue;
 		}
 		/* Added block HSM 12/03/99 */
@@ -636,7 +725,7 @@ __initfunc(int mdisk_init(void))
 				 mdisk_handler, 0, "mnd",
 				 &(mdisk_devices[i].dev_status)) ){
 			printk ( KERN_WARNING "mnd: Cannot acquire I/O irq of"
-				 " %4X for paranoia reasons, skipping\n",
+				 " %4lX for paranoia reasons, skipping\n",
 				 mdisk_setup_data.vdev[i]);
 			continue;
 		}
@@ -647,6 +736,9 @@ __initfunc(int mdisk_init(void))
 		dev->bio=mdisk_bio[i];
 		dev->iob=&mdisk_iob[i];
 		dev->vdev = mdisk_setup_data.vdev[i];
+
+		if ( mdisk_setup_data.size[i] == 0 )
+		        rc = mdisk_read_label(dev, i);
 		dev->size = mdisk_setup_data.size[i] * 2; /* buffer 512 b */
 		dev->blksize = mdisk_setup_data.blksize[i]; 
 		dev->tqueue.routine = do_mdisk_bh;
@@ -658,6 +750,7 @@ __initfunc(int mdisk_init(void))
 		  dev->blkmult==4?2:
 		  dev->blkmult==8?3:-1;
 
+		mdisk_sizes[i] = mdisk_setup_data.size[i];
 		mdisk_blksizes[i]  = mdisk_setup_data.blksize[i];
 		mdisk_hardsects[i] = mdisk_setup_data.blksize[i];
 

@@ -3,7 +3,7 @@
  *    S390 low-level entry points.
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  *               Hartmut Penner (hp@de.ibm.com),
  *               Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com),
@@ -51,10 +51,14 @@ SP_CRREGS    =  (SP_TRAP+4)
 /* fpu registers are saved & restored by the gdb stub itself */
 SP_FPC       =  (SP_CRREGS+(NUM_CRS*CR_SIZE))
 SP_FPRS      =  (SP_FPC+FPC_SIZE+FPC_PAD_SIZE)
-SP_SIZE      =  (SP_FPRS+(NUM_FPRS*FPR_SIZE))
+/* SP_PGM_OLD_ILC etc are not part of pt_regs & they are not 
+ defined in ptrace.h but space is needed for this too */
+SP_PGM_OLD_ILC= (SP_FPRS+(NUM_FPRS*FPR_SIZE))
 #else
-SP_SIZE      =  (SP_TRAP+4)
+SP_PGM_OLD_ILC= (SP_TRAP+4)
 #endif
+SP_SVC_STEP   = (SP_PGM_OLD_ILC+4) 
+SP_SIZE      =  (SP_SVC_STEP+4)
 /*
  * these defines are offsets into the thread_struct
  */
@@ -76,9 +80,8 @@ _TSS_PER     = (_TSS_MM+8)
 state        =  0
 flags        =  4
 sigpending   =  8
-addr_limit   = 12
-exec_domain  = 20
 need_resched = 24
+processor    = 60
 
 /* PSW related defines */
 disable      = 0xFC
@@ -114,7 +117,7 @@ sysc_dn:
  *    R15 - kernel stack pointer
  */
 
-#define SAVE_ALL1(psworg) \
+#define SAVE_ALL(psworg) \
 	st      %r15,__LC_SAVE_AREA   ; \
         tm      psworg+1,0x01         ; /* test problem state bit */ \
 	jz	0f		      ; /* skip stack setup save */ \
@@ -127,42 +130,24 @@ sysc_dn:
         mvc     SP_RF(4,%r15),__LC_SAVE_AREA   ; /* move R15 to stack */ \
         stam    %a0,%a15,SP_AREGS(%r15) ; /* store access registers to kst. */ \
         mvc     SP_PSW(8,%r15),psworg ; /* move user PSW to stack */ \
-        xc      0(7,%r15),0(%r15)     ; /* clear back chain & trap ind. */ \
-        mvi     SP_TRAP+3(%r15),psworg ; /* store trap indication in pt_regs */ \
+        lhi     %r0,psworg            ; /* store trap indication */ \
+        st      %r0,SP_TRAP(%r15)     ; \
+        xc      0(4,%r15),0(%r15)     ; /* clear back chain */ \
+        tm      psworg+1,0x01         ; /* kmod.c .wishes the set_fs & gs */ \
+        jz      1f                    ; /* to work across syscalls */ \
         slr     %r0,%r0               ; \
         sar     %a2,%r0               ; /* set ac.reg. 2 to primary space */ \
         lhi     %r0,1                 ; \
-        sar     %a4,%r0               ; /* set access reg. 4 to home space */
+        sar     %a4,%r0               ; /* set access reg. 4 to home space */ \
+1:
 
-#define RESTORE_ALL1 \
-        mvc     0x50(8,0),SP_PSW(%r15)  ; /* move user PSW to lowcore */ \
-        lam     %a0,%a15,SP_AREGS(%r15) ; /* load the access registers */ \
-        lm      %r0,%r15,SP_R0(%r15)  ; /* load gprs 0-15 of user */ \
-        ni      0x51(0),0xfd          ; /* clear wait state bit */ \
-        lpsw    0x50                    /* back to caller */
+#define RESTORE_ALL \
+        mvc     __LC_RETURN_PSW(8,0),SP_PSW(%r15) ; /* move user PSW to lowcore */ \
+        lam     %a0,%a15,SP_AREGS(%r15)   ; /* load the access registers */ \
+        lm      %r0,%r15,SP_R0(%r15)      ; /* load gprs 0-15 of user */ \
+        ni      __LC_RETURN_PSW+1(0),0xfd ; /* clear wait state bit */ \
+        lpsw    __LC_RETURN_PSW             /* back to caller */
 
-#if CONFIG_REMOTE_DEBUG
-#define SAVE_ALL(psworg) \
-	SAVE_ALL1(psworg) \
-	tm      psworg+1,0x01         ; /* test problem state bit */ \
-	jz	0f		      ; /* skip stack setup save */ \
-	stctl    %c0,%c15,SP_CRREGS(%r15) ; /* save control regs for remote debugging */ \
-0:
-
-#define RESTORE_ALL  \
-	tm      SP_PSW+1(%r15),0x01          ; /* test problem state bit */ \
-	jz	0f		             ; /* skip cr restore */ \
-	lctl    %c0,%c15,SP_CRREGS(%r15) ; /* store control regs for remote debugging */ \
-0:	RESTORE_ALL1 
-#else
-	
-#define SAVE_ALL(psworg)  \
-	SAVE_ALL1(psworg)
-
-#define RESTORE_ALL  \
-	RESTORE_ALL1 
-#endif
-	
 #define GET_CURRENT /* load pointer to task_struct to R9 */ \
         lhi     %r9,-8192             ; \
         nr      %r9,15
@@ -186,9 +171,6 @@ resume:
         lctl    %c9,%c11,_TSS_PER(%r3)  # Nope we didn't
 RES_DN1:
         stm     %r6,%r15,24(%r15)       # store resume registers of prev task
-	iac     %r1                     # get address space control bits
-        sacf    0
-	st      %r1,4(%r15)
         st      %r15,_TSS_KSP(%r2) # store kernel stack ptr to prev->tss.ksp
         lhi     %r0,-8192
         nr      %r0,%r15
@@ -201,11 +183,7 @@ RES_DN1:
         stam    %a4,%a4,_TSS_AR4(%r2)   # store kernel access reg. 4
         lam     %a2,%a2,_TSS_AR2(%r3)   # load kernel access reg. 2
         lam     %a4,%a4,_TSS_AR4(%r3)   # load kernel access reg. 4
-        lctl    %c7,%c7,_TSS_USERSEG(%r3)   # load secondary-space for new task
-        lctl    %c13,%c13,_TSS_USERSEG(%r3) # load home-space for new task
         lr      %r2,%r0                 # return task_struct of last task
-        l       %r1,4(%r15)
-        sacf    0(%r1)                  # set address space control bits
         lm      %r6,%r15,24(%r15)       # load resume registers of next task
         br      %r14
 
@@ -215,19 +193,18 @@ RES_DN1:
  */
 
 sysc_lit:
-  sysc_bhmask:        .long  bh_mask
-  sysc_bhactive:      .long  bh_active
   sysc_do_signal:     .long  do_signal
-  sysc_do_bottom_half:.long  do_bottom_half
+  sysc_do_softirq:    .long  do_softirq
   sysc_schedule:      .long  schedule
   sysc_trace:         .long  syscall_trace
-#ifdef __SMP__
+#ifdef CONFIG_SMP
   sysc_schedtail:     .long  schedule_tail
 #endif
   sysc_clone:         .long  sys_clone
   sysc_fork:          .long  sys_fork
   sysc_vfork:         .long  sys_vfork
   sysc_sigreturn:     .long  sys_sigreturn
+  sysc_rt_sigreturn:  .long  sys_rt_sigreturn
   sysc_execve:        .long  sys_execve
   sysc_sigsuspend:    .long  sys_sigsuspend
   sysc_rt_sigsuspend: .long  sys_rt_sigsuspend
@@ -235,6 +212,8 @@ sysc_lit:
 	.globl  system_call
 system_call:
         SAVE_ALL(0x20)
+	XC      SP_SVC_STEP(4,%r15),SP_SVC_STEP(%r15)
+pgm_system_call:	
         basr    %r13,0
         ahi     %r13,sysc_lit-.   # setup base pointer R13 to sysc_lit
         slr     %r8,%r8           # gpr 8 is call save (-> tracesys)
@@ -253,15 +232,12 @@ system_call:
 sysc_return:
         GET_CURRENT               # load pointer to task_struct to R9
         tm      SP_PSW+1(%r15),0x01 # returning to user ?
-#        tm      SP_PSW+2(%r15),0xc0 # returning to user or kernel thread ?
         jno     sysc_leave        # no-> skip bottom half, resched & signal
 #
 # check, if bottom-half has to be done
 #
-        l       %r1,sysc_bhmask-sysc_lit(%r13)
-        l       %r0,0(%r1)
-        l       %r1,sysc_bhactive-sysc_lit(%r13)
-        n       %r0,0(%r1)
+        l       %r0,__LC_IRQ_STAT     # get softirq_active
+        n       %r0,__LC_IRQ_STAT+4   # and it with softirq_mask
         jnz     sysc_handle_bottom_half
 #
 # check, if reschedule is needed
@@ -272,7 +248,8 @@ sysc_return_bh:
         icm     %r0,15,sigpending(%r9)   # get sigpending from task_struct
         jnz     sysc_signal_return
 sysc_leave:
-  
+	icm     %r0,15,SP_SVC_STEP(%r15)   # get sigpending from task_struct
+        jnz     pgm_svcret
 	stnsm   24(%r15),disable  # disable I/O and ext. interrupts
         RESTORE_ALL
 
@@ -304,13 +281,13 @@ sysc_tracesys:
 
 
 #
-# call do_bottom_half and return from syscall, if interrupt-level
+# call do_softirq and return from syscall, if interrupt-level
 # is zero
 #
 sysc_handle_bottom_half:        
-        l       %r1,sysc_do_bottom_half-sysc_lit(%r13)
+        l       %r1,sysc_do_softirq-sysc_lit(%r13)
 	la      %r14,sysc_return_bh-sysc_lit(%r13)
-        br      %r1               # call do_bottom_half
+        br      %r1               # call do_softirq
 
 #
 # call schedule with sysc_return as return-address
@@ -331,7 +308,7 @@ ret_from_fork:
         stosm   24(%r15),0x03     # reenable interrupts
         sr      %r0,%r0           # child returns 0
         st      %r0,SP_R2(%r15)   # store return value (change R2 on stack)
-#ifdef __SMP__
+#ifdef CONFIG_SMP
         l       %r1,sysc_schedtail-sysc_lit(%r13)
 	la      %r14,sysc_return-sysc_lit(%r13)
         br      %r1               # call schedule_tail, return to sysc_return
@@ -361,17 +338,23 @@ sys_vfork_glue:
         br      %r1                   # branch to sys_vfork
 
 sys_execve_glue:        
-        la      %r2,SP_PTREGS(%r15)    # load pt_regs
+        la      %r2,SP_PTREGS(%r15)   # load pt_regs
         l       %r1,sysc_execve-sysc_lit(%r13)
+	lr      %r12,%r14             # save return address
         basr    %r14,%r1              # call sys_execve
         ltr     %r2,%r2               # check if execve failed
-        jnz     sysc_return-4         # it did fail -> store result in gpr2
-        j       sysc_return           # SKIP ST 2,SP_R2(15) after BASR 14,8
-                                      # in system_call
+        bnz     0(%r12)               # it did fail -> store result in gpr2
+        b       4(%r12)               # SKIP ST 2,SP_R2(15) after BASR 14,8
+                                      # in system_call/sysc_tracesys
 
 sys_sigreturn_glue:     
         la      %r2,SP_PTREGS(%r15)   # load pt_regs as parameter
         l       %r1,sysc_sigreturn-sysc_lit(%r13)
+        br      %r1                   # branch to sys_sigreturn
+
+sys_rt_sigreturn_glue:     
+        la      %r2,SP_PTREGS(%r15)   # load pt_regs as parameter
+        l       %r1,sysc_rt_sigreturn-sysc_lit(%r13)
         br      %r1                   # branch to sys_sigreturn
 
 #
@@ -387,7 +370,7 @@ sys_sigsuspend_glue:
         lr      %r3,%r2               # move history0 parameter
         la      %r2,SP_PTREGS(%r15)   # load pt_regs as first parameter
         l       %r1,sysc_sigsuspend-sysc_lit(%r13)
-	la      %r14,sysc_return-sysc_lit(%r13) # skip store of return value
+	la      %r14,4(%r14)          # skip store of return value
         br      %r1                   # branch to sys_sigsuspend
 
 sys_rt_sigsuspend_glue: 
@@ -395,7 +378,7 @@ sys_rt_sigsuspend_glue:
         lr      %r3,%r2               # move unewset parameter
         la      %r2,SP_PTREGS(%r15)   # load pt_regs as first parameter
         l       %r1,sysc_rt_sigsuspend-sysc_lit(%r13)
-	la      %r14,sysc_return-sysc_lit(%r13) # skip store of return value
+	la      %r14,4(%r14)          # skip store of return value
         br      %r1                   # branch to sys_rt_sigsuspend
 
 	.globl  sys_call_table	
@@ -407,7 +390,7 @@ sys_call_table:
         .long  sys_write
         .long  sys_open                  /* 5 */
         .long  sys_close
-        .long  sys_waitpid
+        .long  sys_ni_syscall           /* old waitpid syscall holder */
         .long  sys_creat
         .long  sys_link
         .long  sys_unlink                /* 10 */
@@ -416,19 +399,19 @@ sys_call_table:
         .long  sys_time
         .long  sys_mknod
         .long  sys_chmod                /* 15 */
-        .long  sys_lchown
+        .long  sys_lchown16
         .long  sys_ni_syscall           /* old break syscall holder */
-        .long  sys_stat
+        .long  sys_ni_syscall           /* old stat syscall holder */
         .long  sys_lseek
         .long  sys_getpid               /* 20 */
         .long  sys_mount
-        .long  sys_umount
-        .long  sys_setuid
-        .long  sys_getuid
+        .long  sys_oldumount
+        .long  sys_setuid16
+        .long  sys_getuid16
         .long  sys_stime                /* 25 */
         .long  sys_ptrace
         .long  sys_alarm
-        .long  sys_fstat
+        .long  sys_ni_syscall           /* old fstat syscall holder */
         .long  sys_pause
         .long  sys_utime                /* 30 */
         .long  sys_ni_syscall           /* old stty syscall holder */
@@ -446,20 +429,20 @@ sys_call_table:
         .long  sys_times
         .long  sys_ni_syscall           /* old prof syscall holder */
         .long  sys_brk                  /* 45 */
-        .long  sys_setgid
-        .long  sys_getgid
+        .long  sys_setgid16
+        .long  sys_getgid16
         .long  sys_signal
-        .long  sys_geteuid
-        .long  sys_getegid              /* 50 */
+        .long  sys_geteuid16
+        .long  sys_getegid16            /* 50 */
         .long  sys_acct
-        .long  sys_ni_syscall           /* old phys syscall holder */
+        .long  sys_umount
         .long  sys_ni_syscall           /* old lock syscall holder */
         .long  sys_ioctl
         .long  sys_fcntl                /* 55 */
         .long  sys_ni_syscall           /* old mpx syscall holder */
         .long  sys_setpgid
         .long  sys_ni_syscall           /* old ulimit syscall holder */
-        .long  sys_olduname
+        .long  sys_ni_syscall           /* old uname syscall holder */
         .long  sys_umask                /* 60 */
         .long  sys_chroot
         .long  sys_ustat
@@ -468,10 +451,10 @@ sys_call_table:
         .long  sys_getpgrp              /* 65 */
         .long  sys_setsid
         .long  sys_sigaction
-        .long  sys_sgetmask
-        .long  sys_ssetmask
-        .long  sys_setreuid             /* 70 */
-        .long  sys_setregid
+        .long  sys_ni_syscall           /* old sgetmask syscall holder */
+        .long  sys_ni_syscall           /* old ssetmask syscall holder */
+        .long  sys_setreuid16           /* 70 */
+        .long  sys_setregid16
         .long  sys_sigsuspend_glue
         .long  sys_sigpending
         .long  sys_sethostname
@@ -480,22 +463,22 @@ sys_call_table:
         .long  sys_getrusage
         .long  sys_gettimeofday
         .long  sys_settimeofday
-        .long  sys_getgroups            /* 80 */
-        .long  sys_setgroups
-        .long  old_select
+        .long  sys_getgroups16          /* 80 */
+        .long  sys_setgroups16
+        .long  sys_ni_syscall           /* old select syscall holder */
         .long  sys_symlink
-        .long  sys_lstat
+        .long  sys_ni_syscall           /* old lstat syscall holder */
         .long  sys_readlink             /* 85 */
         .long  sys_uselib
         .long  sys_swapon
         .long  sys_reboot
-        .long  old_readdir
+        .long  sys_ni_syscall           /* old readdir syscall holder */
         .long  old_mmap                 /* 90 */
         .long  sys_munmap
         .long  sys_truncate
         .long  sys_ftruncate
         .long  sys_fchmod
-        .long  sys_fchown                /* 95 */
+        .long  sys_fchown16              /* 95 */
         .long  sys_getpriority
         .long  sys_setpriority
         .long  sys_ni_syscall            /* old profil syscall holder */
@@ -509,10 +492,10 @@ sys_call_table:
         .long  sys_newstat
         .long  sys_newlstat
         .long  sys_newfstat
-        .long  sys_uname
+        .long  sys_ni_syscall            /* old uname syscall holder */
         .long  sys_ni_syscall            /* 110 */ /* iopl for i386 */
         .long  sys_vhangup
-        .long  sys_idle
+        .long  sys_ni_syscall            /* old "idle" system call */
         .long  sys_ni_syscall            /* vm86old for i386 */
         .long  sys_wait4
         .long  sys_swapoff               /* 115 */
@@ -538,8 +521,8 @@ sys_call_table:
         .long  sys_sysfs                 /* 135 */
         .long  sys_personality
         .long  sys_ni_syscall            /* for afs_syscall */
-        .long  sys_setfsuid
-        .long  sys_setfsgid
+        .long  sys_setfsuid16
+        .long  sys_setfsgid16
         .long  sys_llseek                /* 140 */
         .long  sys_getdents
         .long  sys_select
@@ -564,16 +547,16 @@ sys_call_table:
         .long  sys_sched_rr_get_interval
         .long  sys_nanosleep
         .long  sys_mremap
-        .long  sys_setresuid
-        .long  sys_getresuid             /* 165 */
+        .long  sys_setresuid16
+        .long  sys_getresuid16           /* 165 */
         .long  sys_ni_syscall            /* for vm86 */
         .long  sys_query_module
         .long  sys_poll
         .long  sys_nfsservctl
-        .long  sys_setresgid             /* 170 */
-        .long  sys_getresgid
+        .long  sys_setresgid16           /* 170 */
+        .long  sys_getresgid16
         .long  sys_prctl
-        .long  sys_rt_sigreturn
+        .long  sys_rt_sigreturn_glue
         .long  sys_rt_sigaction
         .long  sys_rt_sigprocmask        /* 175 */
         .long  sys_rt_sigpending
@@ -582,7 +565,7 @@ sys_call_table:
         .long  sys_rt_sigsuspend_glue
         .long  sys_pread                 /* 180 */
         .long  sys_pwrite
-        .long  sys_chown
+        .long  sys_chown16
         .long  sys_getcwd
         .long  sys_capget
         .long  sys_capset                /* 185 */
@@ -591,71 +574,39 @@ sys_call_table:
         .long  sys_ni_syscall            /* streams1 */
         .long  sys_ni_syscall            /* streams2 */
         .long  sys_vfork_glue            /* 190 */
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall            /* 195 */
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall     /* 205 */
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall    /* 215 */
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall    /* 225 */
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall    /* 235 */
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall    /* 245 */
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_ni_syscall
-        .long  sys_msgcp         /* 255 */
+        .long  sys_getrlimit
+	.long  sys_ni_syscall  /* FIXME: problem with sys_mmap2: 6 parms */
+        .long  sys_truncate64
+        .long  sys_ftruncate64
+        .long  sys_stat64                /* 195 */
+        .long  sys_lstat64
+        .long  sys_fstat64
+	.long  sys_lchown
+	.long  sys_getuid
+	.long  sys_getgid		 /* 200 */
+	.long  sys_geteuid
+	.long  sys_getegid
+	.long  sys_setreuid
+	.long  sys_setregid
+	.long  sys_getgroups             /* 205 */
+	.long  sys_setgroups
+	.long  sys_fchown
+	.long  sys_setresuid
+	.long  sys_getresuid
+	.long  sys_setresgid             /* 210 */
+	.long  sys_getresgid
+	.long  sys_chown
+	.long  sys_setuid
+	.long  sys_setgid
+	.long  sys_setfsuid              /* 215 */
+	.long  sys_setfsgid
+        .long  sys_pivot_root
+        .long  sys_mincore
+        .long  sys_madvise
+	.long  sys_getdents64		 /* 220 */
+	.rept  255-220
+	.long  sys_ni_syscall
+	.endr
 
 /*
  * Program check handler routine
@@ -694,30 +645,25 @@ pgm_check_handler:
         lpsw    0x28
 # it was a single stepped SVC that is causing all the trouble
 pgm_svcper:
-        st      %r15,__LC_SAVE_AREA
-        l       %r15,__LC_PGM_NEW_PSW+4  # prepare return psw
-        ahi     %r15,pgm_svcret-pgm_check_handler
-        st      %r15,__LC_PGM_OLD_PSW+4  # use pgm old psw as temp storage
-        tm      __LC_SVC_OLD_PSW,0x01    # test problem state of svc old psw
-        jz      .+8
-        l       %r15,__LC_KERNEL_STACK   # load ksp
-        ahi     %r15,-16
-        srl     %r15,3                   # align stack pointer to 8
-        sll     %r15,3
-        mvc     0(4,%r15),__LC_SAVE_AREA # save user r15
-        mvc     4(4,%r15),__LC_PGM_ILC   # save program check information
-        mvc     8(8,%r15),__LC_SVC_OLD_PSW # save return point
-        mvc     __LC_SVC_OLD_PSW(8),__LC_PGM_OLD_PSW # move prepared return pt.
-        j       system_call              # now do the svc
+        SAVE_ALL(0x20)
+        mvi     SP_SVC_STEP(%r15),1 # make SP_SVC_STEP nonzero
+        mvc     SP_PGM_OLD_ILC(4,%r15),__LC_PGM_ILC # save program check information
+        j       pgm_system_call              # now do the svc
 pgm_svcret:
-        mvc     __LC_PGM_OLD_PSW(8),8(%r15) # return point is svc return point
-        mvc     __LC_PGM_ILC(4),4(%r15)  # restore program check info
-        l       %r15,0(%r15)             # restore user r15
+        lh      %r7,SP_PGM_OLD_ILC(%r15)     # get ilc from stack
+        lhi     %r0,0x28
+        st      %r0,SP_TRAP(%r15) # set new trap indicator
+        xc      SP_SVC_STEP(4,%r15),SP_SVC_STEP(%r15)
+        basr    %r13,0
+        ahi     %r13,pgm_lit-.    # setup base pointer
+        j       pgm_no_sv
 pgm_sv:
         SAVE_ALL(0x28)
+        XC      SP_SVC_STEP(4,%r15),SP_SVC_STEP(%r15)
         basr    %r13,0
         ahi     %r13,pgm_lit-.    # setup base pointer R13 to $PGMDAT
         lh      %r7,__LC_PGM_ILC  # load instruction length
+pgm_no_sv:
         lh      %r8,__LC_PGM_INT_CODE  # N.B. saved int code used later KEEP it
         stosm   24(%r15),0x03     # reenable interrupts
         lr      %r3,%r8
@@ -751,10 +697,6 @@ pgm_return:
         l       %r13,pgm_sysc_lit-pgm_lit(%r13)
         br      %r14
 
-default_trap_handler:
-        .globl  default_trap_handler
-        lpsw    112
-
 /*
  * IO interrupt handler routine
  */
@@ -763,9 +705,7 @@ io_lit:
   io_do_IRQ:        .long do_IRQ
   io_schedule:	    .long schedule
   io_do_signal:     .long do_signal
-  io_bhmask:        .long  bh_mask
-  io_bhactive:      .long  bh_active
-  io_do_bottom_half:.long  do_bottom_half
+  io_do_softirq:    .long  do_softirq
 
         .globl io_int_handler
 io_int_handler:
@@ -782,16 +722,13 @@ io_int_handler:
 io_return:
         GET_CURRENT               # load pointer to task_struct to R9
         tm      SP_PSW+1(%r15),0x01 # returning to user ?
-#        tm      SP_PSW+2(%r15),0x80 # returning to user or kernel thread ?
         jz      io_leave          # no-> skip resched & signal
         stosm   24(%r15),0x03     # reenable interrupts
 #
 # check, if bottom-half has to be done
 #
-        l       %r1,io_bhmask-io_lit(%r13)
-        l       %r0,0(%r1)
-        l       %r1,io_bhactive-io_lit(%r13)
-        n       %r0,0(%r1)
+        l       %r0,__LC_IRQ_STAT     # get softirq_active
+        n       %r0,__LC_IRQ_STAT+4   # and it with softirq_mask
         jnz     io_handle_bottom_half
 io_return_bh:	
 #
@@ -806,13 +743,13 @@ io_leave:
         RESTORE_ALL
 
 #
-# call do_bottom_half and return from syscall, if interrupt-level
+# call do_softirq and return from syscall, if interrupt-level
 # is zero
 #
 io_handle_bottom_half:        
-        l       %r1,io_do_bottom_half-io_lit(%r13)
+        l       %r1,io_do_softirq-io_lit(%r13)
 	la      %r14,io_return_bh-io_lit(%r13)
-        br      %r1               # call do_bottom_half
+        br      %r1               # call do_softirq
 
 #
 # call schedule with io_return as return-address
@@ -838,7 +775,7 @@ io_signal_return:
 
 ext_lit:
   ext_timer_int:     .long  do_timer_interrupt
-#ifdef __SMP__
+#ifdef CONFIG_SMP
   ext_call_int:      .long  do_ext_call_interrupt
 #endif
 #ifdef CONFIG_HWC
@@ -860,7 +797,7 @@ ext_int_handler:
         ahi     %r13,ext_lit-.    # setup base pointer R13 to $EXTDAT
         la      %r2,SP_PTREGS(%r15)    # address of register-save area
         lh      %r3,__LC_EXT_INT_CODE  # error code
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	chi     %r3,0x1202        # EXTERNAL_CALL
 	jne     ext_no_extcall
 	l       %r9,ext_call_int-ext_lit(%r13) # load ext_call_interrupt
@@ -928,7 +865,7 @@ mcck_no_crw:
 mcck_return:
         RESTORE_ALL
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 /*
  * Restart interruption handler, kick starter for additional CPUs
  */

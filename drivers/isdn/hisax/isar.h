@@ -1,29 +1,10 @@
-/* $Id: isar.h,v 1.6 1999/10/14 20:25:29 keil Exp $
+/* $Id: isar.h,v 1.9 2000/06/26 08:59:13 keil Exp $
+ *
  * isar.h   ISAR (Siemens PSB 7110) specific defines
  *
  * Author Karsten Keil (keil@isdn4linux.de)
  *
- *
- * $Log: isar.h,v $
- * Revision 1.6  1999/10/14 20:25:29  keil
- * add a statistic for error monitoring
- *
- * Revision 1.5  1999/08/25 16:59:59  keil
- * Make ISAR V32bis modem running
- * Make LL->HL interface open for additional commands
- *
- * Revision 1.4  1999/08/05 20:43:20  keil
- * ISAR analog modem support
- *
- * Revision 1.3  1999/07/01 08:11:46  keil
- * Common HiSax version for 2.0, 2.1, 2.2 and 2.3 kernel
- *
- * Revision 1.2  1998/11/15 23:54:54  keil
- * changes from 2.0
- *
- * Revision 1.1  1998/08/13 23:33:48  keil
- * First version, only init
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
  
@@ -145,6 +126,28 @@
 #define PSEV_REM_REN	0xcd
 #define PSEV_GSTN_CLR	0xd4
 
+#define PSEV_RSP_READY	0xbc
+#define PSEV_LINE_TX_H	0xb3
+#define PSEV_LINE_TX_B	0xb2
+#define PSEV_LINE_RX_H	0xb1
+#define PSEV_LINE_RX_B	0xb0
+#define PSEV_RSP_CONN	0xb5
+#define PSEV_RSP_DISC	0xb7
+#define PSEV_RSP_FCERR	0xb9
+#define PSEV_RSP_SILDET	0xbe
+#define PSEV_RSP_SILOFF	0xab
+#define PSEV_FLAGS_DET	0xba
+
+#define PCTRL_CMD_FTH	0xa7
+#define PCTRL_CMD_FRH	0xa5
+#define PCTRL_CMD_FTM	0xa8
+#define PCTRL_CMD_FRM	0xa6
+#define PCTRL_CMD_SILON	0xac
+#define PCTRL_CMD_CONT	0xa2
+#define PCTRL_CMD_ESC	0xa4
+#define PCTRL_CMD_SILOFF 0xab
+#define PCTRL_CMD_HALT	0xa9
+
 #define PCTRL_LOC_RET	0xcf
 #define PCTRL_LOC_REN	0xce
 
@@ -183,7 +186,7 @@
 #define HDLC_ERROR	0x1c
 #define HDLC_ERR_FAD	0x10
 #define HDLC_ERR_RER	0x08
-#define HDLC_ERR_CER	0x01
+#define HDLC_ERR_CER	0x04
 #define SART_NMD	0x01
 
 #define BSTAT_RDM0	0x1
@@ -192,6 +195,15 @@
 #define BSTAT_RDM3	0x8
 #define BSTEV_TBO	0x1f
 #define BSTEV_RBO	0x2f
+
+/* FAX State Machine */
+#define STFAX_NULL	0
+#define STFAX_READY	1
+#define STFAX_LINE	2
+#define STFAX_CONT	3
+#define STFAX_ACTIV	4
+#define STFAX_ESCAPE	5
+#define STFAX_SILDET	6
 
 extern int ISARVersion(struct IsdnCardState *cs, char *s);
 extern void isar_int_main(struct IsdnCardState *cs);

@@ -31,6 +31,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
@@ -44,7 +45,7 @@
 #  include <linux/init.h>
 #  include <asm/io.h>
 #  include <asm/uaccess.h>
-#  include <asm/spinlock.h>
+#  include <linux/spinlock.h>
 #endif
 #include <asm/irq.h>
 #include "msnd.h"
@@ -56,7 +57,7 @@
 static multisound_dev_t		*devs[MSND_MAX_DEVS];
 static int			num_devs;
 
-int msnd_register(multisound_dev_t *dev)
+int __init msnd_register(multisound_dev_t *dev)
 {
 	int i;
 
@@ -113,12 +114,12 @@ multisound_dev_t *msnd_get_dev(int j)
 	return devs[i];
 }
 
-void msnd_init_queue(volatile BYTE *base, int start, int size)
+void msnd_init_queue(unsigned long base, int start, int size)
 {
-	writew(PCTODSP_BASED(start), base + JQS_wStart);
-	writew(PCTODSP_OFFSET(size) - 1, base + JQS_wSize);
-	writew(0, base + JQS_wHead);
-	writew(0, base + JQS_wTail);
+	isa_writew(PCTODSP_BASED(start), base + JQS_wStart);
+	isa_writew(PCTODSP_OFFSET(size) - 1, base + JQS_wSize);
+	isa_writew(0, base + JQS_wHead);
+	isa_writew(0, base + JQS_wTail);
 }
 
 void msnd_fifo_init(msnd_fifo *f)
@@ -180,7 +181,7 @@ int msnd_fifo_write(msnd_fifo *f, const char *buf, size_t len, int user)
 			if (copy_from_user(f->data + f->tail, buf, nwritten))
 				return -EFAULT;
 		} else
-			memcpy(f->data + f->tail, buf, nwritten);
+			isa_memcpy_fromio(f->data + f->tail, (unsigned long) buf, nwritten);
 
 		count += nwritten;
 		buf += nwritten;
@@ -218,7 +219,7 @@ int msnd_fifo_read(msnd_fifo *f, char *buf, size_t len, int user)
 			if (copy_to_user(buf, f->data + f->head, nread))
 				return -EFAULT;
 		} else
-			memcpy(buf, f->data + f->head, nread);
+			isa_memcpy_toio((unsigned long) buf, f->data + f->head, nread);
 
 		count += nread;
 		buf += nread;

@@ -1,10 +1,10 @@
-/* $Id: eicon_isa.h,v 1.7 1999/11/18 21:14:30 armin Exp $
+/* $Id: eicon_isa.h,v 1.10 2000/05/07 08:51:04 armin Exp $
  *
- * ISDN low-level module for Eicon.Diehl active ISDN-Cards.
+ * ISDN low-level module for Eicon active ISDN-Cards.
  *
- * Copyright 1998    by Fritz Elfert (fritz@isdn4linux.de)
- * Copyright 1998,99 by Armin Schindler (mac@melware.de)
- * Copyright 1999    Cytronics & Melware (info@melware.de)
+ * Copyright 1998      by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1998-2000 by Armin Schindler (mac@melware.de)
+ * Copyright 1999,2000 Cytronics & Melware (info@melware.de)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,34 +19,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
- *
- * $Log: eicon_isa.h,v $
- * Revision 1.7  1999/11/18 21:14:30  armin
- * New ISA memory mapped IO
- *
- * Revision 1.6  1999/11/15 19:37:04  keil
- * need config.h
- *
- * Revision 1.5  1999/09/08 20:17:31  armin
- * Added microchannel patch from Erik Weber.
- *
- * Revision 1.4  1999/09/06 07:29:35  fritz
- * Changed my mail-address.
- *
- * Revision 1.3  1999/03/29 11:19:47  armin
- * I/O stuff now in seperate file (eicon_io.c)
- * Old ISA type cards (S,SX,SCOM,Quadro,S2M) implemented.
- *
- * Revision 1.2  1999/03/02 12:37:46  armin
- * Added some important checks.
- * Analog Modem with DSP.
- * Channels will be added to Link-Level after loading firmware.
- *
- * Revision 1.1  1999/01/01 18:09:44  armin
- * First checkin of new eicon driver.
- * DIVA-Server BRI/PCI and PRI/PCI are supported.
- * Old diehl code is obsolete.
- *
  *
  */
 
@@ -134,7 +106,6 @@ typedef struct {
 	unsigned char     mvalid;   /* Flag: Memory is valid      */
 	unsigned char     ivalid;   /* Flag: IRQ is valid         */
 	unsigned char     master;   /* Flag: Card ist Quadro 1/4  */
-	void*             generic;  /* Ptr to generic card struct */
 } eicon_isa_card;
 
 /* Offsets for special locations on standard cards */

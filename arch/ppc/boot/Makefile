@@ -14,11 +14,11 @@
 .s.o:
 	$(AS) -o $*.o $<
 .c.o:
-	$(CC) $(CFLAGS)  -DINITRD_OFFSET=$(IOFF) -DINITRD_SIZE=$(ISZ) -DZIMAGE_OFFSET=$(ZOFF) -DZIMAGE_SIZE=$(ZSZ) -c -o $*.o $<
+	$(CC) $(CFLAGS)  -DINITRD_OFFSET=$(IOFF) -DINITRD_SIZE=$(ISZ) -DZIMAGE_OFFSET=$(ZOFF) -DZIMAGE_SIZE=$(ZSZ) -D__BOOTER__ -c -o $*.o $<
 .S.s:
-	$(CC) -D__ASSEMBLY__ -traditional -E -o $*.o $<
+	$(CPP) $(AFLAGS) -traditional -o $*.o $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
+	$(CC) $(AFLAGS) -traditional -c -o $*.o $<
 
 ZOFF = 0
 ZSZ = 0
@@ -41,7 +41,7 @@ else
 TFTPSIMAGE=/tftpboot/sImage
 endif
 
-ifeq ($(CONFIG_PPC64),y)
+ifeq ($(CONFIG_PPC64BRIDGE),y)
 MSIZE=.64
 else
 MSIZE=
@@ -49,11 +49,10 @@ endif
 
 ZLINKFLAGS = -T ../vmlinux.lds -Ttext 0x00800000
 
-GZIP_FLAGS = -v9
+GZIP_FLAGS = -v9f
 
 OBJECTS := head.o misc.o ../coffboot/zlib.o
-CFLAGS = -O2 -DSTDC_HEADERS -fno-builtin -I$(TOPDIR)/include
-OBJCOPY = $(CROSS_COMPILE)objcopy
+CFLAGS = $(CPPFLAGS) -O2 -DSTDC_HEADERS -fno-builtin
 OBJCOPY_ARGS = -O elf32-powerpc
 
 OBJECTS += vreset.o kbd.o of1275.o
@@ -73,6 +72,7 @@ zvmlinux.initrd: zvmlinux
 		-DINITRD_SIZE=`sh size $(OBJDUMP) zvmlinux.initrd initrd` \
 		-DZIMAGE_OFFSET=`sh offset $(OBJDUMP) zvmlinux.initrd image` \
 		-DZIMAGE_SIZE=`sh size $(OBJDUMP) zvmlinux.initrd image` \
+		-D__BOOTER__ \
 		-c -o misc.o misc.c
 	$(LD) $(ZLINKFLAGS) -o zvmlinux.initrd.tmp $(OBJECTS)
 	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
@@ -84,6 +84,10 @@ zvmlinux.initrd: zvmlinux
 zImage: zvmlinux mkprep sImage
 ifdef CONFIG_PREP
 	./mkprep -pbp zvmlinux zImage
+endif
+ifdef CONFIG_APUS
+	$(STRIP) ../../../vmlinux -o vmapus
+	gzip $(GZIP_FLAGS) vmapus
 endif
 
 sImage: ../../../vmlinux
@@ -110,6 +114,7 @@ zvmlinux: $(OBJECTS) ../coffboot/vmlinux.gz
 	$(CC) $(CFLAGS) -DINITRD_OFFSET=0 -DINITRD_SIZE=0 \
 		-DZIMAGE_OFFSET=`sh offset $(OBJDUMP) zvmlinux image` \
 		-DZIMAGE_SIZE=`sh size $(OBJDUMP) zvmlinux image` \
+		-D__BOOTER__ \
 		-c -o misc.o misc.c
 	$(LD) $(ZLINKFLAGS) -o zvmlinux.tmp $(OBJECTS)
 	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment --add-section=image=../coffboot/vmlinux.gz \
@@ -140,7 +145,7 @@ fastdep:
 	$(TOPDIR)/scripts/mkdep *.[Sch] > .depend
 
 dep:
-	$(CPP) -M *.S *.c > .depend
+	$(CPP) $(CPPFLAGS) -M *.S *.c > .depend
 
 # just here to match coffboot/Makefile
 vmlinux.coff:

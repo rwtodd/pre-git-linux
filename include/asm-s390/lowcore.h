@@ -2,7 +2,7 @@
  *  include/asm-s390/lowcore.h
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Hartmut Penner (hp@de.ibm.com),
  *               Martin Schwidefsky (schwidefsky@de.ibm.com),
  *               Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
@@ -28,20 +28,23 @@
 #define __LC_PGM_ILC                    0x08C
 #define __LC_PGM_INT_CODE               0x08E
 #define __LC_TRANS_EXC_ADDR             0x090
+#define __LC_SUBCHANNEL_ID              0x0B8
 #define __LC_SUBCHANNEL_NR              0x0BA
 #define __LC_IO_INT_PARM                0x0BC
 #define __LC_MCCK_CODE                  0x0E8
-#define __LC_CREGS_SAVE_AREA            0x1C0
-#define __LC_AREGS_SAVE_AREA            0x120
+#define __LC_AREGS_SAVE_AREA            0x200
+#define __LC_CREGS_SAVE_AREA            0x240
+#define __LC_RETURN_PSW                 0x280
 
 #define __LC_SYNC_IO_WORD               0x400
 
 #define __LC_SAVE_AREA                  0xC00
 #define __LC_KERNEL_STACK               0xC40
 #define __LC_KERNEL_LEVEL               0xC44
-#define __LC_CPUID                      0xC50
-#define __LC_CPUADDR                    0xC58
-#define __LC_IPLDEV                     0xC6C
+#define __LC_IRQ_STAT                   0xC48
+#define __LC_CPUID                      0xC60
+#define __LC_CPUADDR                    0xC68
+#define __LC_IPLDEV                     0xC7C
 
 
 /* interrupt handler start with all io, external and mcck interrupt disabled */
@@ -53,27 +56,29 @@
 #define _MCCK_PSW_MASK       0x040A0000
 #define _IO_PSW_MASK         0x04080000
 #define _USER_PSW_MASK       0x070DC000/* DAT, IO, EXT, Home-space         */
-#define _PSW_IO_WAIT         0x020A0000/* IO, Wait */
-#define _WAIT_PSW_MASK       0x070EC000/* DAT, IO, EXT, Wait, Home-space   */
+#define _WAIT_PSW_MASK       0x070E0000/* DAT, IO, EXT, Wait, Home-space   */
 #define _DW_PSW_MASK         0x000A0000/* disabled wait PSW mask           */
+
 #define _PRIMARY_MASK        0x0000    /* MASK for SACF                    */
 #define _SECONDARY_MASK      0x0100    /* MASK for SACF                    */
 #define _ACCESS_MASK         0x0200    /* MASK for SACF                    */
 #define _HOME_MASK           0x0300    /* MASK for SACF                    */
 
-#define _PSW_PRIM_SPACE_MODE 0x04000000
-#define _PSW_SEC_SPACE_MODE  0x04008000
-#define _PSW_ACC_REG_MODE    0x04004000
-#define _PSW_HOME_SPACE_MODE 0x0400C000
+#define _PSW_PRIM_SPACE_MODE 0x00000000
+#define _PSW_SEC_SPACE_MODE  0x00008000
+#define _PSW_ACC_REG_MODE    0x00004000
+#define _PSW_HOME_SPACE_MODE 0x0000C000
 
-#define _PSW_WAIT_MASK_BIT   0x00020000
-#define _PSW_IO_MASK_BIT     0x02000000
+#define _PSW_WAIT_MASK_BIT   0x00020000 /* Wait bit */
+#define _PSW_IO_MASK_BIT     0x02000000 /* IO bit */
+#define _PSW_IO_WAIT         0x02020000 /* IO & Wait bit */
 
 /* we run in 31 Bit mode */
 #define _ADDR_31             0x80000000
 
 #ifndef __ASSEMBLY__
 
+#include <linux/config.h>
 #include <asm/processor.h>
 #include <linux/types.h>
 #include <asm/atomic.h>
@@ -123,35 +128,44 @@ struct _lowcore
 	__u32        failing_storage_address;  /* 0x0f8 */
 	__u8         pad5[0x100-0xfc];         /* 0x0fc */
 	__u32        st_status_fixed_logout[4];/* 0x100 */
-	__u8         pad6[0x120-0x110];        /* 0x110 */
-	__u32        access_regs_save_area[16];/* 0x120 */
+	__u8         pad6[0x160-0x110];        /* 0x110 */
 	__u32        floating_pt_save_area[8]; /* 0x160 */
 	__u32        gpregs_save_area[16];     /* 0x180 */
-	__u32        cregs_save_area[16];      /* 0x1c0 */
-	
-	__u8         pad7[0x400-0x200];        /* 0x200 */
+	__u8         pad7[0x200-0x1c0];        /* 0x1c0 */
+
+	__u32        access_regs_save_area[16];/* 0x200 */
+	__u32        cregs_save_area[16];      /* 0x240 */	
+        psw_t        return_psw;               /* 0x280 */
+	__u8         pad8[0x400-0x288];        /* 0x288 */
 
 	__u32        sync_io_word;	       /* 0x400 */
 
-        __u8         pad8[0xc00-0x404];        /* 0x404 */
+        __u8         pad9[0xc00-0x404];        /* 0x404 */
 
         /* System info area */
 	__u32        save_area[16];            /* 0xc00 */
 	__u32        kernel_stack;             /* 0xc40 */
 	__u32        kernel_level;             /* 0xc44 */
-	atomic_t     local_bh_count;           /* 0xc48 */
-	atomic_t     local_irq_count;          /* 0xc4c */
-	struct       cpuinfo_S390 cpu_data;    /* 0xc50 */
-	__u32        ipl_device;               /* 0xc6c */
+	/* entry.S sensitive area start */
+	/* Next 6 words are the s390 equivalent of irq_stat */
+	__u32        __softirq_active;         /* 0xc48 */
+	__u32        __softirq_mask;           /* 0xc4c */
+	__u32        __local_irq_count;        /* 0xc50 */
+	__u32        __local_bh_count;         /* 0xc54 */
+	__u32        __syscall_count;          /* 0xc58 */
+	__u8         pad10[0xc60-0xc5c];       /* 0xc5c */
+	struct       cpuinfo_S390 cpu_data;    /* 0xc60 */
+	__u32        ipl_device;               /* 0xc7c */
+	/* entry.S sensitive area end */
 
         /* SMP info area: defined by DJB */
-        __u64        jiffy_timer_cc;           /* 0xc70 */
-	atomic_t     ext_call_fast;            /* 0xc78 */
-	atomic_t     ext_call_queue;           /* 0xc7c */
-        atomic_t     ext_call_count;           /* 0xc80 */
+        __u64        jiffy_timer_cc;           /* 0xc80 */
+	atomic_t     ext_call_fast;            /* 0xc88 */
+	atomic_t     ext_call_queue;           /* 0xc8c */
+        atomic_t     ext_call_count;           /* 0xc90 */
 
         /* Align SMP info to the top 1k of prefix area */
-	__u8         pad10[0x1000-0xc84];      /* 0xc84 */
+	__u8         pad11[0x1000-0xc94];      /* 0xc94 */
 } __attribute__((packed)); /* End structure*/
 
 extern __inline__ void set_prefix(__u32 address)
@@ -162,7 +176,7 @@ extern __inline__ void set_prefix(__u32 address)
 #define S390_lowcore (*((struct _lowcore *) 0))
 extern struct _lowcore *lowcore_ptr[];
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 #define get_cpu_lowcore(cpu)    S390_lowcore
 #define safe_get_cpu_lowcore(cpu) S390_lowcore
 #else

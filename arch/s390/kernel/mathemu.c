@@ -9,7 +9,6 @@
  * that does not have the IEEE fpu
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
@@ -20,13 +19,13 @@
 static void set_CC_df(__u64 val1,__u64 val2) {
         int rc;
         rc = __cmpdf2(val1,val2);
-        current->tss.regs->psw.mask &= 0xFFFFCFFF;
+        current->thread.regs->psw.mask &= 0xFFFFCFFF;
         switch (rc) {
                 case -1:
-                        current->tss.regs->psw.mask |= 0x00001000;
+                        current->thread.regs->psw.mask |= 0x00001000;
                         break;
                 case 1:
-                        current->tss.regs->psw.mask |= 0x00002000;
+                        current->thread.regs->psw.mask |= 0x00002000;
                         break;
         }
 }
@@ -34,38 +33,38 @@ static void set_CC_df(__u64 val1,__u64 val2) {
 static void set_CC_sf(__u32 val1,__u32 val2) {
         int rc;
         rc = __cmpsf2(val1,val2);
-        current->tss.regs->psw.mask &= 0xFFFFCFFF;
+        current->thread.regs->psw.mask &= 0xFFFFCFFF;
         switch (rc) {
                 case -1:
-                        current->tss.regs->psw.mask |= 0x00001000;
+                        current->thread.regs->psw.mask |= 0x00001000;
                         break;
                 case 1:
-                        current->tss.regs->psw.mask |= 0x00002000;
+                        current->thread.regs->psw.mask |= 0x00002000;
                         break;
         }
 }
 
 
 static void emu_adb (int rx, __u64 val) {
-        current->tss.fp_regs.fprs[rx].d = __adddf3(current->tss.fp_regs.fprs[rx].d,val);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = __adddf3(current->thread.fp_regs.fprs[rx].d,val);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_adbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d = __adddf3(current->tss.fp_regs.fprs[rx].d,
-                                         current->tss.fp_regs.fprs[ry].d);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = __adddf3(current->thread.fp_regs.fprs[rx].d,
+                                         current->thread.fp_regs.fprs[ry].d);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_aeb (int rx, __u32 val) {
-        current->tss.fp_regs.fprs[rx].f = __addsf3(current->tss.fp_regs.fprs[rx].f,val);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __addsf3(current->thread.fp_regs.fprs[rx].f,val);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_aebr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f = __addsf3(current->tss.fp_regs.fprs[rx].f,
-                                        current->tss.fp_regs.fprs[ry].f);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __addsf3(current->thread.fp_regs.fprs[rx].f,
+                                        current->thread.fp_regs.fprs[ry].f);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_axbr (int rx, int ry) {
@@ -73,39 +72,39 @@ static void emu_axbr (int rx, int ry) {
 }
 
 static void emu_cdb (int rx, __u64 val) {
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,val);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,val);
 }
 
 static void emu_cdbr (int rx, int ry) {
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,current->tss.fp_regs.fprs[ry].d);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,current->thread.fp_regs.fprs[ry].d);
 }
 
 static void emu_cdfbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d =
-                     __floatsidf(current->tss.regs->gprs[ry]);
+        current->thread.fp_regs.fprs[rx].d =
+                     __floatsidf(current->thread.regs->gprs[ry]);
 }
 
 static void emu_ceb (int rx, __u32 val) {
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,val);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,val);
 }
 
 static void emu_cebr (int rx, int ry) {
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,current->tss.fp_regs.fprs[ry].f);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,current->thread.fp_regs.fprs[ry].f);
 }
 
 static void emu_cefbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f =
-                     __floatsisf(current->tss.regs->gprs[ry]);
+        current->thread.fp_regs.fprs[rx].f =
+                     __floatsisf(current->thread.regs->gprs[ry]);
 }
 
 static void emu_cfdbr (int rx, int ry, int mask) {
-        current->tss.regs->gprs[rx] =
-                     __fixdfsi(current->tss.fp_regs.fprs[ry].d);
+        current->thread.regs->gprs[rx] =
+                     __fixdfsi(current->thread.fp_regs.fprs[ry].d);
 }
 
 static void emu_cfebr (int rx, int ry, int mask) {
-        current->tss.regs->gprs[rx] =
-                     __fixsfsi(current->tss.fp_regs.fprs[ry].f);
+        current->thread.regs->gprs[rx] =
+                     __fixsfsi(current->thread.fp_regs.fprs[ry].f);
 }
 
 static void emu_cfxbr (int rx, int ry, int mask) {
@@ -121,25 +120,25 @@ static void emu_cxfbr (int rx, int ry) {
 }
 
 static void emu_ddb (int rx, __u64 val) {
-        current->tss.fp_regs.fprs[rx].d = __divdf3(current->tss.fp_regs.fprs[rx].d,val);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = __divdf3(current->thread.fp_regs.fprs[rx].d,val);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_ddbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d = __divdf3(current->tss.fp_regs.fprs[rx].d,
-                                         current->tss.fp_regs.fprs[ry].d);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = __divdf3(current->thread.fp_regs.fprs[rx].d,
+                                         current->thread.fp_regs.fprs[ry].d);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_deb (int rx, __u32 val) {
-        current->tss.fp_regs.fprs[rx].f = __divsf3(current->tss.fp_regs.fprs[rx].f,val);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __divsf3(current->thread.fp_regs.fprs[rx].f,val);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_debr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f = __divsf3(current->tss.fp_regs.fprs[rx].f,
-                                         current->tss.fp_regs.fprs[ry].f);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __divsf3(current->thread.fp_regs.fprs[rx].f,
+                                         current->thread.fp_regs.fprs[ry].f);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_didbr (int rx, int ry, int mask) {
@@ -191,15 +190,15 @@ static void emu_kxbr (int rx, int ry) {
 }
 
 static void emu_lcdbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d =
-        __negdf2(current->tss.fp_regs.fprs[ry].d);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d =
+        __negdf2(current->thread.fp_regs.fprs[ry].d);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_lcebr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f =
-        __negsf2(current->tss.fp_regs.fprs[ry].f);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f =
+        __negsf2(current->thread.fp_regs.fprs[ry].f);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_lcxbr (int rx, int ry) {
@@ -207,12 +206,12 @@ static void emu_lcxbr (int rx, int ry) {
 }
 
 static void emu_ldeb (int rx, __u32 val) {
-        current->tss.fp_regs.fprs[rx].d = __extendsfdf2(val);
+        current->thread.fp_regs.fprs[rx].d = __extendsfdf2(val);
 }
 
 static void emu_ldebr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d =
-        __extendsfdf2(current->tss.fp_regs.fprs[ry].f);
+        current->thread.fp_regs.fprs[rx].d =
+        __extendsfdf2(current->thread.fp_regs.fprs[ry].f);
 }
 
 static void emu_ldxbr (int rx, int ry) {
@@ -220,8 +219,8 @@ static void emu_ldxbr (int rx, int ry) {
 }
 
 static void emu_ledbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f = __truncdfsf2(current->tss.fp_regs.fprs[ry].d);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __truncdfsf2(current->thread.fp_regs.fprs[ry].d);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_lexbr (int rx, int ry) {
@@ -241,13 +240,13 @@ static void emu_lnxbr (int rx, int ry) {
 }
 
 static void emu_lpdbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d = __absdf2(current->tss.fp_regs.fprs[ry].d);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0);
+        current->thread.fp_regs.fprs[rx].d = __absdf2(current->thread.fp_regs.fprs[ry].d);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0);
 }
 
 static void emu_lpebr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f = __abssf2(current->tss.fp_regs.fprs[ry].f);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __abssf2(current->thread.fp_regs.fprs[ry].f);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_lpxbr (int rx, int ry) {
@@ -255,13 +254,13 @@ static void emu_lpxbr (int rx, int ry) {
 }
 
 static void emu_ltdbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d = current->tss.fp_regs.fprs[ry].d;
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = current->thread.fp_regs.fprs[ry].d;
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_ltebr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f = current->tss.fp_regs.fprs[ry].f;
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = current->thread.fp_regs.fprs[ry].f;
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_ltxbr (int rx, int ry) {
@@ -301,14 +300,14 @@ static void emu_maebr (int rx, int ry, int mask) {
 }
 
 static void emu_mdb (int rx, __u64 val) {
-        current->tss.fp_regs.fprs[rx].d = __muldf3(current->tss.fp_regs.fprs[rx].d,val);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = __muldf3(current->thread.fp_regs.fprs[rx].d,val);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_mdbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d = __muldf3(current->tss.fp_regs.fprs[rx].d,
-                                         current->tss.fp_regs.fprs[ry].d);
-        set_CC_df(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = __muldf3(current->thread.fp_regs.fprs[rx].d,
+                                         current->thread.fp_regs.fprs[ry].d);
+        set_CC_df(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_mdeb (int rx, __u32 val) {
@@ -320,15 +319,15 @@ static void emu_mdebr (int rx, int ry) {
 }
 
 static void emu_meeb (int rx, __u32 val) {
-        current->tss.fp_regs.fprs[rx].f = __mulsf3(current->tss.fp_regs.fprs[rx].f,
+        current->thread.fp_regs.fprs[rx].f = __mulsf3(current->thread.fp_regs.fprs[rx].f,
                                          val);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_meebr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f = __mulsf3(current->tss.fp_regs.fprs[rx].f,
-                                         current->tss.fp_regs.fprs[ry].f);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __mulsf3(current->thread.fp_regs.fprs[rx].f,
+                                         current->thread.fp_regs.fprs[ry].f);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_msdb (int rx, __u64 val, int mask) {
@@ -360,27 +359,27 @@ static void emu_mxdbr (int rx, int ry) {
 }
 
 static void emu_sdb (int rx, __u64 val) {
-        current->tss.fp_regs.fprs[rx].d = __subdf3(current->tss.fp_regs.fprs[rx].d,
+        current->thread.fp_regs.fprs[rx].d = __subdf3(current->thread.fp_regs.fprs[rx].d,
                                          val);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].d,0ULL);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_sdbr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].d = __subdf3(current->tss.fp_regs.fprs[rx].d,
-                                         current->tss.fp_regs.fprs[ry].d);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].d,0ULL);
+        current->thread.fp_regs.fprs[rx].d = __subdf3(current->thread.fp_regs.fprs[rx].d,
+                                         current->thread.fp_regs.fprs[ry].d);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].d,0ULL);
 }
 
 static void emu_seb (int rx, __u32 val) {
-        current->tss.fp_regs.fprs[rx].f = __subsf3(current->tss.fp_regs.fprs[rx].f,
+        current->thread.fp_regs.fprs[rx].f = __subsf3(current->thread.fp_regs.fprs[rx].f,
                                          val);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_sebr (int rx, int ry) {
-        current->tss.fp_regs.fprs[rx].f = __subsf3(current->tss.fp_regs.fprs[rx].f,
-                                         current->tss.fp_regs.fprs[ry].f);
-        set_CC_sf(current->tss.fp_regs.fprs[rx].f,0);
+        current->thread.fp_regs.fprs[rx].f = __subsf3(current->thread.fp_regs.fprs[rx].f,
+                                         current->thread.fp_regs.fprs[ry].f);
+        set_CC_sf(current->thread.fp_regs.fprs[rx].f,0);
 }
 
 static void emu_sfpc (int rx, int ry) {
@@ -431,7 +430,7 @@ static inline void emu_load_regd(int reg) {
                         "     ld    0,0(%1)\n"
                         "0:   ex    %0,0(1)"
                         : /* no output */
-                        : "a" (reg<<4), "a" (&current->tss.fp_regs.fprs[reg].d)
+                        : "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].d)
                         : "1" );
         }
 }
@@ -443,7 +442,7 @@ static inline void emu_load_rege(int reg) {
                         "     le    0,0(%1)\n"
                         "0:   ex    %0,0(1)"
                         : /* no output */
-                        : "a" (reg<<4), "a" (&current->tss.fp_regs.fprs[reg].f)
+                        : "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].f)
                         : "1" );
         }
 }
@@ -455,7 +454,7 @@ static inline void emu_store_regd(int reg) {
                         "     std   0,0(%1)\n"
                         "0:   ex    %0,0(1)"
                         : /* no output */
-                        : "a" (reg<<4), "a" (&current->tss.fp_regs.fprs[reg].d)
+                        : "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].d)
                         : "1" );
         }
 }
@@ -468,7 +467,7 @@ static inline void emu_store_rege(int reg) {
                         "     ste   0,0(%1)\n"
                         "0:   ex    %0,0(1)"
                         : /* no output */
-                        : "a" (reg<<4), "a" (&current->tss.fp_regs.fprs[reg].f)
+                        : "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].f)
                         : "1" );
         }
 }
@@ -758,7 +757,7 @@ void math_emu_ldr(__u8 *opcode) {
                         "0:   ex    %0,0(1)"
                         : /* no output */
                         : "a" (opc&0x00f0),
-                          "a" (&current->tss.fp_regs.fprs[opc&0x000f].d)
+                          "a" (&current->thread.fp_regs.fprs[opc&0x000f].d)
                         : "1" );
         } else if ((opc & 0x0009) == 0) {  /* test if ry in {0,2,4,6} */
                 __asm__ __volatile (       /* store ry to fp_regs.fprs[rx] */
@@ -767,11 +766,11 @@ void math_emu_ldr(__u8 *opcode) {
                         "0:   ex    %0,0(1)"
                         : /* no output */
                         : "a" ((opc&0x000f)<<4),
-                          "a" (&current->tss.fp_regs.fprs[(opc&0x00f0)>>4].d)
+                          "a" (&current->thread.fp_regs.fprs[(opc&0x00f0)>>4].d)
                         : "1" );
         } else {                          /* move fp_regs.fprs[ry] to fp_regs.fprs[rx] */
-                current->tss.fp_regs.fprs[(opc&0x00f0)>>4] =
-                        current->tss.fp_regs.fprs[opc&0x000f];
+                current->thread.fp_regs.fprs[(opc&0x00f0)>>4] =
+                        current->thread.fp_regs.fprs[opc&0x000f];
         }
 }
 
@@ -789,7 +788,7 @@ void math_emu_ler(__u8 *opcode) {
                         "0:   ex    %0,0(1)"
                         : /* no output */
                         : "a" (opc&0x00f0),
-                          "a" (&current->tss.fp_regs.fprs[opc&0x000f].f)
+                          "a" (&current->thread.fp_regs.fprs[opc&0x000f].f)
                         : "1" );
         } else if ((opc & 0x0009) == 0) {  /* test if ry in {0,2,4,6} */
                 __asm__ __volatile (       /* store ry to fp_regs.fprs[rx] */
@@ -798,11 +797,11 @@ void math_emu_ler(__u8 *opcode) {
                         "0:   ex    %0,0(1)"
                         : /* no output */
                         : "a" ((opc&0x000f)<<4),
-                          "a" (&current->tss.fp_regs.fprs[(opc&0x00f0)>>4].f)
+                          "a" (&current->thread.fp_regs.fprs[(opc&0x00f0)>>4].f)
                         : "1" );
         } else {                          /* move fp_regs.fprs[ry] to fp_regs.fprs[rx] */
-                current->tss.fp_regs.fprs[(opc&0x00f0)>>4] =
-                        current->tss.fp_regs.fprs[opc&0x000f];
+                current->thread.fp_regs.fprs[(opc&0x00f0)>>4] =
+                        current->thread.fp_regs.fprs[opc&0x000f];
         }
 }
 
@@ -815,7 +814,7 @@ void math_emu_ld(__u8 *opcode, struct pt_regs * regs) {
 
         dxb = (__u64 *) calc_addr(regs,opc>>16,opc>>12,opc);
         /* FIXME: how to react if copy_from_user fails ? */
-        copy_from_user(&current->tss.fp_regs.fprs[(opc>>20)&15].d, dxb, 8);
+        copy_from_user(&current->thread.fp_regs.fprs[(opc>>20)&15].d, dxb, 8);
 }
 
 /*
@@ -827,7 +826,7 @@ void math_emu_le(__u8 *opcode, struct pt_regs * regs) {
 
         dxb = (__u32 *) calc_addr(regs,opc>>16,opc>>12,opc);
         /* FIXME: how to react if get_user fails ? */
-        mem = (__u32 *) (&current->tss.fp_regs.fprs[(opc>>20)&15].f);
+        mem = (__u32 *) (&current->thread.fp_regs.fprs[(opc>>20)&15].f);
         get_user(mem[0], dxb);
 }
 
@@ -839,7 +838,7 @@ void math_emu_std(__u8 *opcode, struct pt_regs * regs) {
         __u64 *dxb;
         dxb = (__u64 *) calc_addr(regs,opc>>16,opc>>12,opc);
         /* FIXME: how to react if copy_to_user fails ? */
-        copy_to_user(dxb, &current->tss.fp_regs.fprs[(opc>>20)&15].d, 8);
+        copy_to_user(dxb, &current->thread.fp_regs.fprs[(opc>>20)&15].d, 8);
 }
 
 /*
@@ -850,7 +849,7 @@ void math_emu_ste(__u8 *opcode, struct pt_regs * regs) {
         __u32 *mem, *dxb;
         dxb = (__u32 *) calc_addr(regs,opc>>16,opc>>12,opc);
         /* FIXME: how to react if put_user fails ? */
-        mem = (__u32 *) (&current->tss.fp_regs.fprs[(opc>>20)&15].f);
+        mem = (__u32 *) (&current->thread.fp_regs.fprs[(opc>>20)&15].f);
         put_user(mem[0], dxb);
 }
 

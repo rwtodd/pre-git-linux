@@ -1,10 +1,9 @@
-/* 456789.123456789.123456789.123456789.123456789.123456789.123456789.123456789.
- * IBM CONFIDENTIAL
+/*
  * File...........: linux/drivers/s390/block/dasd_types.h
  * Author.........: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Created........: 08/31/1999
  * Last Modified..: 09/29/1999
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999
+ * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
 
  * List of Changes:
  - Initial Release as of 09/29/1999
@@ -22,11 +21,11 @@
 #ifndef DASD_TYPES_H
 #define DASD_TYPES_H
 
-#include "dasd.h"
-
+#include <linux/config.h>
+#include <linux/dasd.h>
 #include <linux/blkdev.h>
 
-#include "../../../arch/s390/kernel/irq.h"
+#include <asm/irq.h>
 
 #define CCW_DEFINE_EXTENT 0x63
 #define CCW_LOCATE_RECORD 0x43
@@ -35,55 +34,17 @@
 typedef
 enum {
 	dasd_none = -1,
-#ifdef CONFIG_DASD_FBA
-	dasd_fba,
-#endif				/* CONFIG_DASD_FBA */
-#ifdef CONFIG_DASD_CKD
-	dasd_ckd,
-#endif				/* CONFIG_DASD_CKD */
 #ifdef CONFIG_DASD_ECKD
-	dasd_eckd
+	dasd_eckd,
 #endif				/* CONFIG_DASD_ECKD */
+#ifdef CONFIG_DASD_MDSK                                        
+        dasd_mdsk,                                             
+#endif                          /* CONFIG_DASD_MDSK */         
+#ifdef CONFIG_DASD_CKD                                        
+        dasd_ckd,                                             
+#endif                          /* CONFIG_DASD_CKD */         
+        dasd_end
 } dasd_type_t;
-
-typedef
-struct {
-	union {
-		__u8 c;
-		struct {
-			unsigned char reserved:1;
-			unsigned char overrunnable:1;
-			unsigned char burst_byte:1;
-			unsigned char data_chain:1;
-			unsigned char zeros:4;
-		} __attribute__ ((packed)) bits;
-	} __attribute__ ((packed)) mode;
-	union {
-		__u8 c;
-		struct {
-			unsigned char zero0:1;
-			unsigned char removable:1;
-			unsigned char shared:1;
-			unsigned char zero1:1;
-			unsigned char bam:1;
-			unsigned char hpsa:1;
-			unsigned char zeros:2;
-		} __attribute__ ((packed)) bits;
-	} __attribute__ ((packed)) features;
-	__u8 dev_class;
-	__u8 unit_type;
-	__u16 blk_size;
-	__u32 blk_per_cycl;
-	__u32 blk_per_bound;
-	__u32 blk_bdsa;
-	__u32 blk_hpsa;
-	__u16 reserved1;
-	__u16 blk_ce;
-	__u32 reserved2;
-	__u16 reserved3;
-} __attribute__ ((packed, aligned (32))) 
-
-dasd_fba_characteristics_t;
 
 typedef
 struct {
@@ -160,6 +121,17 @@ struct {
 
 dasd_eckd_characteristics_t;
 
+/* eckd count area */
+typedef struct {
+	__u16 cyl;
+	__u16 head;
+	__u8 record;
+	__u8 kl;
+	__u16 dl;
+} __attribute__ ((packed))
+
+eckd_count_t;
+
 #ifdef CONFIG_DASD_CKD
 struct dasd_ckd_characteristics {
 	char info[64];
@@ -177,9 +149,6 @@ struct dasd_eckd_characteristics {
 typedef
 union {
 	char __attribute__ ((aligned (32))) bytes[64];
-#ifdef CONFIG_DASD_FBA
-	dasd_fba_characteristics_t fba;
-#endif				/* CONFIG_DASD_FBA */
 #ifdef CONFIG_DASD_CKD
 	struct dasd_ckd_characteristics ckd;
 #endif				/* CONFIG_DASD_CKD */
@@ -237,22 +206,29 @@ struct {
 	unsigned int blocks;
 	unsigned int s2b_shift;
 	unsigned int b2k_shift;
-	unsigned int first_sector;
+	unsigned int label_block;
 } dasd_sizes_t;
 
 #define DASD_CHANQ_ACTIVE 0x01
 #define DASD_CHANQ_BUSY 0x02
+#define DASD_REQUEST_Q_BROKEN 0x04
+
 typedef
 struct dasd_chanq_t {
 	volatile cqr_t *head;
 	volatile cqr_t *tail;
 	spinlock_t q_lock;	/* lock for queue operations */
 	spinlock_t f_lock;	/* lock for flag operations */
-	long lockflags;
+	int queued_requests;
 	atomic_t flags;
+	atomic_t dirty_requests;
 	struct dasd_chanq_t *next_q;	/* pointer to next queue */
 } __attribute__ ((packed, aligned (16))) 
 dasd_chanq_t;
+
+#define DASD_INFO_FLAGS_INITIALIZED 0x01
+#define DASD_INFO_FLAGS_NOT_FORMATTED 0x02
+#define DASD_INFO_FLAGS_PARTNS_DETECTED 0x04
 
 typedef
 struct dasd_information_t {
@@ -269,16 +245,20 @@ struct dasd_information_t {
 	unsigned long flags;
 	int irq;
 	struct proc_dir_entry *proc_device;
+	devfs_handle_t devfs_entry;
 	union {
+		struct {
+			eckd_count_t count_data;
+		} eckd;
 		struct {
 			char dummy;
 		} fba;
 		struct {
 			char dummy;
-		} ckd;
+		} mdsk;
 		struct {
-			int blk_per_trk;
-		} eckd;
+			char dummy;
+		} ckd;
 	} private;
 } dasd_information_t;
 
@@ -294,7 +274,8 @@ struct {
 	cqr_t *(*get_req_ccw) (int, struct request *);
 	cqr_t *(*rw_label) (int, int, char *);
 	int (*ck_characteristics) (dasd_characteristics_t *);
-	int (*fill_sizes) (int);
+	cqr_t *(*fill_sizes_first) (int);
+	int (*fill_sizes_last) (int);
 	int (*dasd_format) (int, format_data_t *);
 } dasd_operations_t;
 

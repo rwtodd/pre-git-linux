@@ -42,7 +42,6 @@
 #include <linux/interrupt.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
-#include <linux/config.h>
 #include <linux/major.h>
 #include <linux/string.h>
 #include <linux/fcntl.h>
@@ -153,7 +152,7 @@ struct moxa_str {
 	unsigned short closing_wait;
 	int count;
 	int blocked_open;
-	int event;
+	long event; /* long req'd for set_bit --RR */
 	int asyncflags;
 	long session;
 	long pgrp;
@@ -161,8 +160,8 @@ struct moxa_str {
 	struct tty_struct *tty;
 	struct termios normal_termios;
 	struct termios callout_termios;
-	struct wait_queue *open_wait;
-	struct wait_queue *close_wait;
+	wait_queue_head_t open_wait;
+	wait_queue_head_t close_wait;
 	struct tq_struct tqueue;
 };
 
@@ -222,12 +221,12 @@ static struct termios *moxaTermios[MAX_PORTS + 1];
 static struct termios *moxaTermiosLocked[MAX_PORTS + 1];
 static struct moxa_str moxaChannels[MAX_PORTS];
 static int moxaRefcount;
-unsigned char *moxaXmitBuff;
+static unsigned char *moxaXmitBuff;
 static int moxaTimer_on;
-struct timer_list moxaTimer;
+static struct timer_list moxaTimer;
 static int moxaEmptyTimer_on[MAX_PORTS];
-struct timer_list moxaEmptyTimer[MAX_PORTS];
-struct semaphore moxaBuffSem = MUTEX;
+static struct timer_list moxaEmptyTimer[MAX_PORTS];
+static struct semaphore moxaBuffSem;
 
 int moxa_init(void);
 #ifdef MODULE
@@ -340,6 +339,7 @@ int moxa_init(void)
 
 	printk(KERN_INFO "MOXA Intellio family driver version %s\n", MOXA_VERSION);
 
+	init_MUTEX(&moxaBuffSem);
 	memset(&moxaDriver, 0, sizeof(struct tty_driver));
 	memset(&moxaCallout, 0, sizeof(struct tty_driver));
 	moxaDriver.magic = TTY_DRIVER_MAGIC;
@@ -395,8 +395,8 @@ int moxa_init(void)
 		ch->blocked_open = 0;
 		ch->callout_termios = moxaCallout.init_termios;
 		ch->normal_termios = moxaDriver.init_termios;
-		ch->open_wait = 0;
-		ch->close_wait = 0;
+		init_waitqueue_head(&ch->open_wait);
+		init_waitqueue_head(&ch->close_wait);
 	}
 
 	for (i = 0; i < MAX_BOARDS; i++) {
@@ -482,13 +482,15 @@ int moxa_init(void)
 #endif
 	/* Find PCI boards here */
 #ifdef CONFIG_PCI
-	if (pci_present()) {
+	{
 		struct pci_dev *p = NULL;
 		n = sizeof(moxa_pcibrds) / sizeof(moxa_pciinfo);
 		i = 0;
 		while (i < n) {
 			while((p = pci_find_device(moxa_pcibrds[i].vendor_id, moxa_pcibrds[i].device_id, p))!=NULL)
 			{
+				if (pci_enable_device(p))
+					continue;
 				if (numBoards >= MAX_BOARDS) {
 					if (verbose)
 						printk("More than %d MOXA Intellio family boards found. Board is ignored.", MAX_BOARDS);
@@ -511,9 +513,7 @@ int moxa_init(void)
 
 static int moxa_get_PCI_conf(struct pci_dev *p, int board_type, moxa_board_conf * board)
 {
-	unsigned int val;
-
-	board->baseAddr = p->base_address[2] & PCI_BASE_ADDRESS_MEM_MASK;
+	board->baseAddr = pci_resource_start (p, 2);
 	board->boardType = board_type;
 	switch (board_type) {
 	case MOXA_BOARD_C218_ISA:
@@ -540,13 +540,14 @@ static void do_moxa_softint(void *private_)
 	struct moxa_str *ch = (struct moxa_str *) private_;
 	struct tty_struct *tty;
 
-	if (!ch || !(tty = ch->tty))
-		return;
-	if (test_and_clear_bit(MOXA_EVENT_HANGUP, &ch->event)) {
-		tty_hangup(tty);
-		wake_up_interruptible(&ch->open_wait);
-		ch->asyncflags &= ~(ASYNC_NORMAL_ACTIVE | ASYNC_CALLOUT_ACTIVE);
+	if (ch && (tty = ch->tty)) {
+		if (test_and_clear_bit(MOXA_EVENT_HANGUP, &ch->event)) {
+			tty_hangup(tty);	/* FIXME: module removal race here - AKPM */
+			wake_up_interruptible(&ch->open_wait);
+			ch->asyncflags &= ~(ASYNC_NORMAL_ACTIVE | ASYNC_CALLOUT_ACTIVE);
+		}
 	}
+	MOD_DEC_USE_COUNT;
 }
 
 static int moxa_open(struct tty_struct *tty, struct file *filp)
@@ -1013,7 +1014,9 @@ static void moxa_poll(unsigned long ignored)
 						wake_up_interruptible(&ch->open_wait);
 					else {
 						set_bit(MOXA_EVENT_HANGUP, &ch->event);
-						queue_task(&ch->tqueue, &tq_scheduler);
+						MOD_DEC_USE_COUNT;
+						if (schedule_task(&ch->tqueue) == 0)
+							MOD_INC_USE_COUNT;
 					}
 				}
 			}
@@ -1056,7 +1059,7 @@ static void set_tty_param(struct tty_struct *tty)
 static int block_till_ready(struct tty_struct *tty, struct file *filp,
 			    struct moxa_str *ch)
 {
-	struct wait_queue wait = {current, NULL};
+	DECLARE_WAITQUEUE(wait,current);
 	unsigned long flags;
 	int retval;
 	int do_clocal = C_CLOCAL(tty);

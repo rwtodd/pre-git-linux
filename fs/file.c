@@ -1,7 +1,7 @@
 /*
  *  linux/fs/open.c
  *
- *  Copyright (C) 1998, Stephen Tweedie and Bill Hawes
+ *  Copyright (C) 1998-1999, Stephen Tweedie and Bill Hawes
  *
  *  Manage the dynamic fd arrays in the process files_struct.
  */
@@ -16,7 +16,7 @@
 
 
 /*
- * Allocate an fd array, using get_free_page() if possible.
+ * Allocate an fd array, using kmalloc or vmalloc.
  * Note: the array isn't cleared at allocation time.
  */
 struct file ** alloc_fd_array(int num)
@@ -24,11 +24,9 @@ struct file ** alloc_fd_array(int num)
 	struct file **new_fds;
 	int size = num * sizeof(struct file *);
 
-	if (size < PAGE_SIZE)
+	if (size <= PAGE_SIZE)
 		new_fds = (struct file **) kmalloc(size, GFP_KERNEL);
-	else if (size == PAGE_SIZE)
-		new_fds = (struct file **) __get_free_page(GFP_KERNEL);
-	else
+	else 
 		new_fds = (struct file **) vmalloc(size);
 	return new_fds;
 }
@@ -44,16 +42,15 @@ void free_fd_array(struct file **array, int num)
 
 	if (num <= NR_OPEN_DEFAULT) /* Don't free the embedded fd array! */
 		return;
-	else if (size < PAGE_SIZE)
+	else if (size <= PAGE_SIZE)
 		kfree(array);
-	else if (size == PAGE_SIZE)
-		free_page((unsigned long) array);
 	else
 		vfree(array);
 }
 
 /*
- * Expand the fd array in the files_struct.
+ * Expand the fd array in the files_struct.  Called with the files
+ * spinlock held for write.
  */
 
 int expand_fd_array(struct files_struct *files, int nr)
@@ -63,10 +60,11 @@ int expand_fd_array(struct files_struct *files, int nr)
 
 	
 	error = -EMFILE;
-	if (files->max_fds >= NR_OPEN || nr > NR_OPEN)
+	if (files->max_fds >= NR_OPEN || nr >= NR_OPEN)
 		goto out;
 
 	nfds = files->max_fds;
+	write_unlock(&files->file_lock);
 
 	/* 
 	 * Expand to the max in easy steps, and keep expanding it until
@@ -86,10 +84,11 @@ int expand_fd_array(struct files_struct *files, int nr)
 			if (nfds > NR_OPEN)
 				nfds = NR_OPEN;
 		}
-	} while (nfds < nr);
+	} while (nfds <= nr);
 
 	error = -ENOMEM;
 	new_fds = alloc_fd_array(nfds);
+	write_lock(&files->file_lock);
 	if (!new_fds)
 		goto out;
 
@@ -97,11 +96,11 @@ int expand_fd_array(struct files_struct *files, int nr)
 
 	if (nfds > files->max_fds) {
 		struct file **old_fds;
-		int i = files->max_fds;
+		int i;
 		
-		old_fds = files->fd;
-		files->fd = new_fds;
-		files->max_fds = nfds;
+		old_fds = xchg(&files->fd, new_fds);
+		i = xchg(&files->max_fds, nfds);
+
 		/* Don't copy/clear the array if we are creating a new
 		   fd array for fork() */
 		if (i) {
@@ -109,11 +108,16 @@ int expand_fd_array(struct files_struct *files, int nr)
 			/* clear the remainder of the array */
 			memset(&new_fds[i], 0,
 			       (nfds-i) * sizeof(struct file *)); 
+
+			write_unlock(&files->file_lock);
 			free_fd_array(old_fds, i);
+			write_lock(&files->file_lock);
 		}
 	} else {
 		/* Somebody expanded the array while we slept ... */
+		write_unlock(&files->file_lock);
 		free_fd_array(new_fds, nfds);
+		write_lock(&files->file_lock);
 	}
 	error = 0;
 out:
@@ -121,7 +125,7 @@ out:
 }
 
 /*
- * Allocate an fdset array, using get_free_page() if possible.
+ * Allocate an fdset array, using kmalloc or vmalloc.
  * Note: the array isn't cleared at allocation time.
  */
 fd_set * alloc_fdset(int num)
@@ -129,10 +133,8 @@ fd_set * alloc_fdset(int num)
 	fd_set *new_fdset;
 	int size = num / 8;
 
-	if (size < PAGE_SIZE)
+	if (size <= PAGE_SIZE)
 		new_fdset = (fd_set *) kmalloc(size, GFP_KERNEL);
-	else if (size == PAGE_SIZE)
-		new_fdset = (fd_set *) __get_free_page(GFP_KERNEL);
 	else
 		new_fdset = (fd_set *) vmalloc(size);
 	return new_fdset;
@@ -149,16 +151,15 @@ void free_fdset(fd_set *array, int num)
 	
 	if (num <= __FD_SETSIZE) /* Don't free an embedded fdset */
 		return;
-	else if (size < PAGE_SIZE)
+	else if (size <= PAGE_SIZE)
 		kfree(array);
-	else if (size == PAGE_SIZE)
-		free_page((unsigned long) array);
 	else
 		vfree(array);
 }
 
 /*
- * Expand the fdset in the files_struct.
+ * Expand the fdset in the files_struct.  Called with the files spinlock
+ * held for write.
  */
 int expand_fdset(struct files_struct *files, int nr)
 {
@@ -166,10 +167,12 @@ int expand_fdset(struct files_struct *files, int nr)
 	int error, nfds = 0;
 
 	error = -EMFILE;
-	if (files->max_fdset >= NR_OPEN || nr > NR_OPEN)
+	if (files->max_fdset >= NR_OPEN || nr >= NR_OPEN)
 		goto out;
 
 	nfds = files->max_fdset;
+	write_unlock(&files->file_lock);
+
 	/* Expand to the max in easy steps */
 	do {
 		if (nfds < (PAGE_SIZE * 8))
@@ -179,11 +182,12 @@ int expand_fdset(struct files_struct *files, int nr)
 			if (nfds > NR_OPEN)
 				nfds = NR_OPEN;
 		}
-	} while (nfds < nr);
+	} while (nfds <= nr);
 
 	error = -ENOMEM;
 	new_openset = alloc_fdset(nfds);
 	new_execset = alloc_fdset(nfds);
+	write_lock(&files->file_lock);
 	if (!new_openset || !new_execset)
 		goto out;
 
@@ -193,7 +197,7 @@ int expand_fdset(struct files_struct *files, int nr)
 	if (nfds > files->max_fdset) {
 		int i = files->max_fdset / (sizeof(unsigned long) * 8);
 		int count = (nfds - files->max_fdset) / 8;
-
+		
 		/* 
 		 * Don't copy the entire array if the current fdset is
 		 * not yet initialised.  
@@ -204,21 +208,25 @@ int expand_fdset(struct files_struct *files, int nr)
 			memset (&new_openset->fds_bits[i], 0, count);
 			memset (&new_execset->fds_bits[i], 0, count);
 		}
-
-		free_fdset (files->close_on_exec, files->max_fdset);
-		free_fdset (files->open_fds, files->max_fdset);
-		files->max_fdset = nfds;
-		files->open_fds = new_openset;
-		files->close_on_exec = new_execset;
+		
+		nfds = xchg(&files->max_fdset, nfds);
+		new_openset = xchg(&files->open_fds, new_openset);
+		new_execset = xchg(&files->close_on_exec, new_execset);
+		write_unlock(&files->file_lock);
+		free_fdset (new_openset, nfds);
+		free_fdset (new_execset, nfds);
+		write_lock(&files->file_lock);
 		return 0;
 	} 
 	/* Somebody expanded the array while we slept ... */
 
 out:
+	write_unlock(&files->file_lock);
 	if (new_openset)
 		free_fdset(new_openset, nfds);
 	if (new_execset)
 		free_fdset(new_execset, nfds);
+	write_lock(&files->file_lock);
 	return error;
 }
 

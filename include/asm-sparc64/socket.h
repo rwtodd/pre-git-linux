@@ -1,4 +1,4 @@
-/* $Id: socket.h,v 1.5.2.1 1999/08/07 10:52:59 davem Exp $ */
+/* $Id: socket.h,v 1.8 2000/07/08 00:20:43 davem Exp $ */
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
@@ -40,11 +40,17 @@
 #define SO_ATTACH_FILTER	0x001a
 #define SO_DETACH_FILTER        0x001b
 
+#define SO_PEERNAME		0x001c
+#define SO_TIMESTAMP		0x001d
+#define SCM_TIMESTAMP		SO_TIMESTAMP
+
 /* Security levels - as per NRL IPv6 - don't actually do anything */
 #define SO_SECURITY_AUTHENTICATION		0x5001
 #define SO_SECURITY_ENCRYPTION_TRANSPORT	0x5002
 #define SO_SECURITY_ENCRYPTION_NETWORK		0x5004
 
+/* Nast libc5 fixup - bletch */
+#if defined(__KERNEL__)
 /* Socket types. */
 #define SOCK_STREAM	1		/* stream (connection) socket	*/
 #define SOCK_DGRAM	2		/* datagram (conn.less) socket	*/
@@ -56,5 +62,6 @@
 					/* level.  For writing rarp and	*/
 					/* other similar things on the	*/
 					/* user level.			*/
+#endif
 
 #endif /* _ASM_SOCKET_H */

@@ -65,7 +65,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 
         address = S390_lowcore.trans_exc_code&0x7ffff000;
 
-        if (atomic_read(&S390_lowcore.local_irq_count))
+        if (in_irq())
                 die("page fault from irq handler",regs,error_code);
 
         tsk = current;
@@ -130,9 +130,9 @@ bad_area:
 
         /* User mode accesses just cause a SIGSEGV */
         if (psw_mask & PSW_PROBLEM_STATE) {
-                tsk->tss.prot_addr = address;
-                tsk->tss.error_code = error_code;
-                tsk->tss.trap_no = 14;
+                tsk->thread.prot_addr = address;
+                tsk->thread.error_code = error_code;
+                tsk->thread.trap_no = 14;
 
                 printk("User process fault: interruption code 0x%lX\n",error_code);
                 printk("failing address: %lX\n",address);

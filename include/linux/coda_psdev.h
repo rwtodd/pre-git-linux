@@ -4,30 +4,23 @@
 #define CODA_PSDEV_MAJOR 67
 #define MAX_CODADEVS  5	   /* how many do we allow */
 
-extern struct venus_comm coda_upc_comm;
-extern struct coda_sb_info coda_super_info;
 #define CODA_SUPER_MAGIC	0x73757245
 
 struct coda_sb_info
 {
-	struct inode *      sbi_psdev;     /* /dev/cfs? Venus/kernel device */
-	struct inode *      sbi_ctlcp;     /* control magic file */
-	int                 sbi_refct;
-	struct venus_comm *      sbi_vcomm;
-	struct inode *      sbi_root;
+	struct venus_comm * sbi_vcomm;
 	struct super_block *sbi_sb;
-	struct list_head    sbi_cchead;
-	struct list_head    sbi_volroothead;
+	struct list_head    sbi_cihead;
 };
 
 /* communication pending/processing queues */
 struct venus_comm {
 	u_long		    vc_seq;
-	struct wait_queue  *vc_waitq; /* Venus wait queue */
+	wait_queue_head_t   vc_waitq; /* Venus wait queue */
 	struct list_head    vc_pending;
 	struct list_head    vc_processing;
 	int                 vc_inuse;
-	pid_t               vc_pid;   /* Venus pid */
+	struct super_block *vc_sb;
 };
 
 
@@ -35,11 +28,6 @@ static inline struct coda_sb_info *coda_sbp(struct super_block *sb)
 {
     return ((struct coda_sb_info *)((sb)->u.generic_sbp));
 }
-
-
-
-extern void coda_psdev_detach(int unit);
-extern int  init_coda_psdev(void);
 
 
 /* upcalls */
@@ -94,13 +82,14 @@ struct upc_req {
 	u_short	            uc_outSize;
 	u_short	            uc_opcode;  /* copied from data to save lookup */
 	int		    uc_unique;
-	struct wait_queue  *uc_sleep;   /* process' wait queue */
+	wait_queue_head_t   uc_sleep;   /* process' wait queue */
 	unsigned long       uc_posttime;
 };
 
 #define REQ_ASYNC  0x1
 #define REQ_READ   0x2
 #define REQ_WRITE  0x4
+#define REQ_ABORT  0x8
 
 
 /*
@@ -113,6 +102,7 @@ struct coda_upcallstats {
 } ;
 
 extern struct coda_upcallstats coda_callstats;
+extern struct venus_comm coda_comms[];
 
 static inline void clstats(int opcode)
 {

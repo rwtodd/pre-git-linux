@@ -2,12 +2,12 @@
 #define _GDTH_PROC_H
 
 /* gdth_proc.h 
- * $Id: gdth_proc.h,v 1.7 1999/05/26 11:49:32 achim Exp $
+ * $Id: gdth_proc.h,v 1.6 1999/03/05 14:32:36 achim Exp $
  */
 
 static int gdth_set_info(char *buffer,int length,int vh,int hanum,int busnum);
-static int gdth_set_asc_info(char *buffer,int length,int hanum,Scsi_Cmnd scp);
-static int gdth_set_bin_info(char *buffer,int length,int hanum,Scsi_Cmnd scp);
+static int gdth_set_asc_info(char *buffer,int length,int hanum,Scsi_Cmnd * scp);
+static int gdth_set_bin_info(char *buffer,int length,int hanum,Scsi_Cmnd * scp);
 static int gdth_get_info(char *buffer,char **start,off_t offset,
                          int length,int vh,int hanum,int busnum);
 
@@ -18,8 +18,7 @@ static void gdth_stop_timeout(int hanum, int busnum, int id);
 static void gdth_start_timeout(int hanum, int busnum, int id);
 static int gdth_update_timeout(int hanum, Scsi_Cmnd *scp, int timeout);
 
-static void gdth_do_cmd(Scsi_Cmnd *scp, gdth_cmd_str *cmd, 
-                        char *cmnd, int timeout);
+static void gdth_do_cmd(Scsi_Cmnd *scp,gdth_cmd_str *cmd,int timeout);
 void gdth_scsi_done(Scsi_Cmnd *scp);
 
 #endif

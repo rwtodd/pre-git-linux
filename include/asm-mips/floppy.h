@@ -1,20 +1,18 @@
-/* $Id: floppy.h,v 1.6.2.1 1999/06/23 22:28:38 ralf Exp $
- *
+/*
  * Architecture specific parts of the Floppy driver
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996, 1997, 1998 Ralf Baechle
+ * Copyright (C) 1995 - 2000 Ralf Baechle
  */
-#ifndef __ASM_MIPS_FLOPPY_H
-#define __ASM_MIPS_FLOPPY_H
+#ifndef _ASM_FLOPPY_H
+#define _ASM_FLOPPY_H
 
 #include <asm/bootinfo.h>
 #include <asm/jazz.h>
 #include <asm/jazzdma.h>
-#include <asm/mipsconfig.h>
 
 struct fd_ops {
 	unsigned char (*fd_inb)(unsigned int port);
@@ -80,7 +78,14 @@ extern struct fd_ops *fd_ops;
 #define FLOPPY1_TYPE			fd_drive_type(1)
 
 #define FDC1			fd_ops->fd_getfdaddr1();
-static int FDC2=-1;
+
+/*
+ * Hack: The floppy drivrer defines this, before including fdreg.h.  We use
+ * to define FDC2 only one and keep it a static variable in floppy.c.
+ */
+#ifdef FDPATCHES
+static int FDC2 = -1;
+#endif
 
 #define N_FDC 1			/* do you *really* want a second controller? */
 #define N_DRIVE 8
@@ -102,4 +107,4 @@ static int FDC2=-1;
  */
 #define CROSS_64KB(a,s) ((unsigned long)(a)/K_64 != ((unsigned long)(a) + (s) - 1) / K_64)
 
-#endif /* __ASM_MIPS_FLOPPY_H */
+#endif /* _ASM_FLOPPY_H */

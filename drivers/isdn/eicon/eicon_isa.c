@@ -1,11 +1,11 @@
-/* $Id: eicon_isa.c,v 1.12 1999/11/27 12:56:19 armin Exp $
+/* $Id: eicon_isa.c,v 1.16 2000/06/12 12:44:02 armin Exp $
  *
- * ISDN low-level module for Eicon.Diehl active ISDN-Cards.
+ * ISDN low-level module for Eicon active ISDN-Cards.
  * Hardware-specific code for old ISA cards.
  *
- * Copyright 1998    by Fritz Elfert (fritz@isdn4linux.de)
- * Copyright 1998,99 by Armin Schindler (mac@melware.de)
- * Copyright 1999    Cytronics & Melware (info@melware.de)
+ * Copyright 1998      by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1998-2000 by Armin Schindler (mac@melware.de)
+ * Copyright 1999,2000 Cytronics & Melware (info@melware.de)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,54 +21,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
- * $Log: eicon_isa.c,v $
- * Revision 1.12  1999/11/27 12:56:19  armin
- * Forgot some iomem changes for last ioremap compat.
- *
- * Revision 1.11  1999/11/25 11:33:09  armin
- * Microchannel fix from Erik Weber (exrz73@ibm.net).
- *
- * Revision 1.10  1999/11/18 21:14:30  armin
- * New ISA memory mapped IO
- *
- * Revision 1.9  1999/09/08 20:17:31  armin
- * Added microchannel patch from Erik Weber (exrz73@ibm.net).
- *
- * Revision 1.8  1999/09/06 07:29:35  fritz
- * Changed my mail-address.
- *
- * Revision 1.7  1999/08/22 20:26:48  calle
- * backported changes from kernel 2.3.14:
- * - several #include "config.h" gone, others come.
- * - "struct device" changed to "struct net_device" in 2.3.14, added a
- *   define in isdn_compat.h for older kernel versions.
- *
- * Revision 1.6  1999/07/25 15:12:06  armin
- * fix of some debug logs.
- * enabled ISA-cards option.
- *
- * Revision 1.5  1999/04/01 12:48:33  armin
- * Changed some log outputs.
- *
- * Revision 1.4  1999/03/29 11:19:46  armin
- * I/O stuff now in seperate file (eicon_io.c)
- * Old ISA type cards (S,SX,SCOM,Quadro,S2M) implemented.
- *
- * Revision 1.3  1999/03/02 12:37:45  armin
- * Added some important checks.
- * Analog Modem with DSP.
- * Channels will be added to Link-Level after loading firmware.
- *
- * Revision 1.2  1999/01/24 20:14:19  armin
- * Changed and added debug stuff.
- * Better data sending. (still problems with tty's flip buffer)
- *
- * Revision 1.1  1999/01/01 18:09:43  armin
- * First checkin of new eicon driver.
- * DIVA-Server BRI/PCI and PRI/PCI are supported.
- * Old diehl code is obsolete.
- *
- *
  */
 
 #include <linux/config.h>
@@ -79,7 +31,7 @@
 #define release_shmem release_region
 #define request_shmem request_region
 
-char *eicon_isa_revision = "$Revision: 1.12 $";
+char *eicon_isa_revision = "$Revision: 1.16 $";
 
 #undef EICON_MCA_DEBUG
 
@@ -97,7 +49,8 @@ static int eicon_isa_valid_irq[] = {
 static void
 eicon_isa_release_shmem(eicon_isa_card *card) {
 	if (card->mvalid) {
-		release_shmem((unsigned long)card->shmem, card->ramsize);
+		iounmap(card->shmem);
+		release_mem_region(card->physmem, card->ramsize);
 	}
 	card->mvalid = 0;
 }
@@ -141,6 +94,9 @@ eicon_isa_find_card(int Mem, int Irq, char * Id)
 	if (!strlen(Id))
 		return -1;
 
+	if (Mem == -1)
+		return -1;
+
 	/* Check for valid membase address */
 	if ((Mem < 0x0c0000) ||
 	    (Mem > 0x0fc000) ||
@@ -149,12 +105,12 @@ eicon_isa_find_card(int Mem, int Irq, char * Id)
 			 Mem, Id);
 		return -1;
 	}
-	if (check_shmem(Mem, RAMSIZE)) {
+	if (check_mem_region(Mem, RAMSIZE)) {
 		printk(KERN_WARNING "eicon_isa_boot: memory at 0x%x already in use.\n", Mem);
 		return -1;
 	}
 
-	amem = (unsigned long) Mem;
+	amem = (unsigned long) ioremap(Mem, RAMSIZE);
         writew(0x55aa, amem + 0x402);
         if (readw(amem + 0x402) != 0x55aa) primary = 0;
 	writew(0, amem + 0x402);
@@ -164,10 +120,12 @@ eicon_isa_find_card(int Mem, int Irq, char * Id)
 	if (primary) {
 		printk(KERN_INFO "Eicon: assuming pri card at 0x%x\n", Mem);
 		writeb(0, amem + 0x3ffe);
+		iounmap((unsigned char *)amem);
 		return EICON_CTYPE_ISAPRI;
 	} else {
 		printk(KERN_INFO "Eicon: assuming bri card at 0x%x\n", Mem);
 		writeb(0, amem + 0x400);
+		iounmap((unsigned char *)amem);
 		return EICON_CTYPE_ISABRI;
 	}
 	return -1;
@@ -204,14 +162,14 @@ eicon_isa_bootload(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 	else
 		card->ramsize  = RAMSIZE;
 
-	/* Register shmem */
-	if (check_shmem((unsigned long)card->shmem, card->ramsize)) {
+	if (check_mem_region(card->physmem, card->ramsize)) {
 		printk(KERN_WARNING "eicon_isa_boot: memory at 0x%lx already in use.\n",
-			(unsigned long)card->shmem);
+			card->physmem);
 		kfree(code);
 		return -EBUSY;
 	}
-	request_shmem((unsigned long)card->shmem, card->ramsize, "Eicon ISA ISDN");
+	request_mem_region(card->physmem, card->ramsize, "Eicon ISA ISDN");
+	card->shmem = (eicon_isa_shmem *) ioremap(card->physmem, card->ramsize);
 #ifdef EICON_MCA_DEBUG
 	printk(KERN_INFO "eicon_isa_boot: card->ramsize = %d.\n", card->ramsize);
 #endif
@@ -343,7 +301,7 @@ eicon_isa_bootload(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 	printk(KERN_INFO "%s: startup-code loaded\n", eicon_ctype_name[card->type]); 
 	if ((card->type == EICON_CTYPE_QUADRO) && (card->master)) {
 		tmp = eicon_addcard(card->type, card->physmem, card->irq, 
-					((eicon_card *)card->card)->regname);
+				((eicon_card *)card->card)->regname, 0);
 		printk(KERN_INFO "Eicon: %d adapters added\n", tmp);
 	}
 	return 0;

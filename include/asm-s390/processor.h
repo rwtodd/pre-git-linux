@@ -17,6 +17,12 @@
 #include <asm/ptrace.h>
 
 /*
+ * Default implementation of macro that returns current
+ * instruction pointer ("program counter").
+ */
+#define current_text_addr() ({ void *pc; __asm__("basr %0,0":"=a"(pc)); pc; })
+
+/*
  *  CPU type and hardware bug flags. Kept separately for each CPU.
  *  Members of this structure are referenced in head.S, so think twice
  *  before touching them. [mj]
@@ -55,17 +61,16 @@ extern struct task_struct *last_task_used_math;
  */
 #define TASK_UNMAPPED_BASE      (TASK_SIZE / 2)
 
+#define THREAD_SIZE (2*PAGE_SIZE)
+
 typedef struct {
         unsigned long seg;
         unsigned long acc4;
 } mm_segment_t;
 
-
 /* if you change the thread_struct structure, you must
  * update the _TSS_* defines in entry.S
  */
-
-
 
 struct thread_struct
  {
@@ -90,7 +95,7 @@ typedef struct thread_struct thread_struct;
 { &init_mm, 0, 0, NULL, PAGE_SHARED, \
 VM_READ | VM_WRITE | VM_EXEC, 1, NULL, &init_mm.mmap }
 
-#define INIT_TSS  { (struct pt_regs *) 0,                         \
+#define INIT_THREAD { (struct pt_regs *) 0,                       \
                     { 0,{{0},{0},{0},{0},{0},{0},{0},{0},{0},{0}, \
 			    {0},{0},{0},{0},{0},{0}}},            \
                      0, 0,                                        \
@@ -120,10 +125,8 @@ extern void release_thread(struct task_struct *);
 extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 /* Copy and release all segment info associated with a VM */
-#define copy_segments(nr, tsk, mm)      do { } while (0)
+#define copy_segments(nr, mm)           do { } while (0)
 #define release_segments(mm)            do { } while (0)
-#define forget_segments()               do { } while (0)
-
 
 /*
  * Return saved PC of a blocked thread. used in kernel/sched
@@ -133,6 +136,10 @@ extern inline unsigned long thread_saved_pc(struct thread_struct *t)
         return (t->regs) ? ((unsigned long)t->regs->psw.addr) : 0;
 }
 
+unsigned long get_wchan(struct task_struct *p);
+#define KSTK_EIP(tsk)   ((tsk)->thread.regs->psw.addr)
+#define KSTK_ESP(tsk)   ((tsk)->thread.ksp)
+
 /* Allocation and freeing of basic task resources. */
 /*
  * NOTE! The task struct and the stack go together
@@ -140,6 +147,7 @@ extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 #define alloc_task_struct() \
         ((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
 #define free_task_struct(p)     free_pages((unsigned long)(p),1)
+#define get_task_struct(tsk)      atomic_inc(&virt_to_page(tsk)->count)
 
 #define init_task       (init_task_union.task)
 #define init_stack      (init_task_union.stack)

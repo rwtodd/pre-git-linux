@@ -1,42 +1,15 @@
-/* $Id: isurf.c,v 1.8 1999/12/19 13:09:42 keil Exp $
-
+/* $Id: isurf.c,v 1.10 2000/11/24 17:05:38 kai Exp $
+ *
  * isurf.c  low level stuff for Siemens I-Surf/I-Talk cards
  *
  * Author     Karsten Keil (keil@isdn4linux.de)
  *
- * $Log: isurf.c,v $
- * Revision 1.8  1999/12/19 13:09:42  keil
- * changed TASK_INTERRUPTIBLE into TASK_UNINTERRUPTIBLE for
- * signal proof delays
- *
- * Revision 1.7  1999/11/14 23:37:03  keil
- * new ISA memory mapped IO
- *
- * Revision 1.6  1999/09/04 06:20:06  keil
- * Changes from kernel set_current_state()
- *
- * Revision 1.5  1999/08/25 17:00:02  keil
- * Make ISAR V32bis modem running
- * Make LL->HL interface open for additional commands
- *
- * Revision 1.4  1999/08/22 20:27:09  calle
- * backported changes from kernel 2.3.14:
- * - several #include "config.h" gone, others come.
- * - "struct device" changed to "struct net_device" in 2.3.14, added a
- *   define in isdn_compat.h for older kernel versions.
- *
- * Revision 1.3  1999/07/12 21:05:18  keil
- * fix race in IRQ handling
- * added watchdog for lost IRQs
- *
- * Revision 1.2  1999/07/01 08:07:56  keil
- * Initial version
- *
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "isar.h"
@@ -44,7 +17,7 @@
 
 extern const char *CardType[];
 
-static const char *ISurf_revision = "$Revision: 1.8 $";
+static const char *ISurf_revision = "$Revision: 1.10 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -152,6 +125,8 @@ void
 release_io_isurf(struct IsdnCardState *cs)
 {
 	release_region(cs->hw.isurf.reset, 1);
+	iounmap((unsigned char *)cs->hw.isurf.isar);
+	release_mem_region(cs->hw.isurf.phymem, ISURF_IOMEM_SIZE);
 }
 
 static void
@@ -164,10 +139,10 @@ reset_isurf(struct IsdnCardState *cs, u_char chips)
 	byteout(cs->hw.isurf.reset, chips); /* Reset On */
 	save_flags(flags);
 	sti();
-	current->state = TASK_UNINTERRUPTIBLE;
+	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule_timeout((10*HZ)/1000);
 	byteout(cs->hw.isurf.reset, ISURF_ISAR_EA); /* Reset Off */
-	current->state = TASK_UNINTERRUPTIBLE;
+	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule_timeout((10*HZ)/1000);
 	restore_flags(flags);
 }
@@ -216,8 +191,8 @@ isurf_auxcmd(struct IsdnCardState *cs, isdn_ctrl *ic) {
 	return(isar_auxcmd(cs, ic));
 }
 
-__initfunc(int
-setup_isurf(struct IsdnCard *card))
+int __init
+setup_isurf(struct IsdnCard *card)
 {
 	int ver;
 	struct IsdnCardState *cs = card->cs;
@@ -246,8 +221,21 @@ setup_isurf(struct IsdnCard *card))
 	} else {
 		request_region(cs->hw.isurf.reset, 1, "isurf isdn");
 	}
-	cs->hw.isurf.isar = cs->hw.isurf.phymem + ISURF_ISAR_OFFSET;
-	cs->hw.isurf.isac = cs->hw.isurf.phymem + ISURF_ISAC_OFFSET;
+	if (check_mem_region(cs->hw.isurf.phymem, ISURF_IOMEM_SIZE)) {
+		printk(KERN_WARNING
+			"HiSax: %s memory region %lx-%lx already in use\n",
+			CardType[card->typ],
+			cs->hw.isurf.phymem,
+			cs->hw.isurf.phymem + ISURF_IOMEM_SIZE);
+		release_region(cs->hw.isurf.reset, 1);
+		return (0);
+	} else {
+		request_mem_region(cs->hw.isurf.phymem, ISURF_IOMEM_SIZE,
+			"isurf iomem");
+	}
+	cs->hw.isurf.isar =
+		(unsigned long) ioremap(cs->hw.isurf.phymem, ISURF_IOMEM_SIZE);
+	cs->hw.isurf.isac = cs->hw.isurf.isar + ISURF_ISAC_OFFSET;
 	printk(KERN_INFO
 	       "ISurf: defined at 0x%x 0x%lx IRQ %d\n",
 	       cs->hw.isurf.reset,

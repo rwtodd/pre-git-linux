@@ -11,21 +11,10 @@
  */
 
 static const char *version =
-"ncr885e.c:v0.8 11/30/98 dan@synergymicro.com\n";
+"ncr885e.c:v1.0 02/10/00 dan@synergymicro.com, cort@fsmlabs.com\n";
 
-#include <linux/config.h>
-
-#ifdef MODULE
-#ifdef MODVERSIONS
-#include <linux/modversions.h>
-#endif
 #include <linux/module.h>
 #include <linux/version.h>
-#else
-#define MOD_INC_USE_COUNT 
-#define MOD_DEC_USE_COUNT
-#endif
-
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
@@ -33,7 +22,6 @@ static const char *version =
 #include <linux/malloc.h>
 #include <linux/netdevice.h>
 #include <linux/pci.h>
-#include <linux/malloc.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/errno.h>
@@ -50,26 +38,7 @@ static const char *version =
 
 static const char *chipname = "ncr885e";
 
-/* debugging flags */
-#if 0
-#define DEBUG_FUNC    0x0001
-#define DEBUG_PACKET  0x0002
-#define DEBUG_CMD     0x0004
-#define DEBUG_CHANNEL 0x0008
-#define DEBUG_INT     0x0010
-#define DEBUG_RX      0x0020
-#define DEBUG_TX      0x0040
-#define DEBUG_DMA     0x0080
-#define DEBUG_MAC     0x0100
-#define DEBUG_DRIVER  0x0200
-#define DEBUG_ALL     0x1fff
-#endif
-
-#ifdef DEBUG_NCR885E
 #define NCR885E_DEBUG   0
-#else
-#define NCR885E_DEBUG   0
-#endif
 
 /* The 885's Ethernet PCI device id. */
 #ifndef PCI_DEVICE_ID_NCR_53C885_ETHERNET
@@ -117,7 +86,7 @@ struct ncr885e_private {
   
 	struct net_device_stats  stats;
 
-	struct device *dev;
+	struct net_device *dev;
 
 	struct timer_list tx_timeout;
 	int timeout_active;
@@ -125,22 +94,18 @@ struct ncr885e_private {
 	spinlock_t lock;
 };
 
-#ifdef MODULE
-static struct device *root_dev = NULL;
-#endif
+static struct net_device *root_dev = NULL;
 
-
-static int ncr885e_open( struct device *dev );
-static int ncr885e_close( struct device *dev );
-static void ncr885e_rx( struct device *dev );
-static void ncr885e_tx( struct device *dev );
-static int ncr885e_probe1( struct device *dev, unsigned long ioaddr,
-			   unsigned char irq );
-static int ncr885e_xmit_start( struct sk_buff *skb, struct device *dev );
-static struct net_device_stats *ncr885e_stats( struct device *dev );
-static void ncr885e_set_multicast( struct device *dev );
-static void ncr885e_config( struct device *dev );
-static int ncr885e_set_address( struct device *dev, void *addr );
+static int ncr885e_open( struct net_device *dev );
+static int ncr885e_close( struct net_device *dev );
+static void ncr885e_rx( struct net_device *dev );
+static void ncr885e_tx( struct net_device *dev );
+static int ncr885e_probe1( unsigned long ioaddr, unsigned char irq );
+static int ncr885e_xmit_start( struct sk_buff *skb, struct net_device *dev );
+static struct net_device_stats *ncr885e_stats( struct net_device *dev );
+static void ncr885e_set_multicast( struct net_device *dev );
+static void ncr885e_config( struct net_device *dev );
+static int ncr885e_set_address( struct net_device *dev, void *addr );
 static void ncr885e_interrupt( int irq, void *dev_id, struct pt_regs *regs );
 static void show_dbdma_cmd( volatile struct dbdma_cmd *cmd );
 #if 0
@@ -157,9 +122,15 @@ static void write_mii( unsigned long ioaddr, int reg, int data );
 #define RX_RESET_FLAGS    (RX_CHANNEL_RUN|RX_CHANNEL_PAUSE|RX_CHANNEL_WAKE)
 
 
+static struct pci_device_id ncr885e_pci_tbl[] __initdata = {
+	{ PCI_VENDOR_ID_NCR, PCI_DEVICE_ID_NCR_53C885_ETHERNET, PCI_ANY_ID, PCI_ANY_ID, },
+	{ }			/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, ncr885e_pci_tbl);
+
 #if 0
 static int
-debug_ioctl( struct device *dev, struct ifreq *req, int cmd )
+debug_ioctl( struct net_device *dev, struct ifreq *req, int cmd )
 {
 	unsigned long ioaddr = dev->base_addr;
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -220,7 +191,7 @@ debug_ioctl( struct device *dev, struct ifreq *req, int cmd )
 
 /*  Enable interrupts on the 53C885 */
 static inline void
-ncr885e_enable( struct device *dev )
+ncr885e_enable( struct net_device *dev )
 
 {
 	unsigned long ioaddr = dev->base_addr;
@@ -232,7 +203,7 @@ ncr885e_enable( struct device *dev )
 
 /*  Disable interrupts on the 53c885 */
 static inline void
-ncr885e_disable( struct device *dev )
+ncr885e_disable( struct net_device *dev )
 
 {
 	unsigned long ioaddr = dev->base_addr;
@@ -244,7 +215,7 @@ ncr885e_disable( struct device *dev )
 
 
 static inline void
-ncr885e_reset( struct device *dev )
+ncr885e_reset( struct net_device *dev )
 
 {
 	unsigned short reg;  
@@ -312,7 +283,7 @@ ncr885e_reset( struct device *dev )
     interrupt, branch and wait select registers.  */
 
 static void
-ncr885e_config( struct device *dev )
+ncr885e_config( struct net_device *dev )
 
 {
 	unsigned long ioaddr = dev->base_addr;
@@ -399,7 +370,7 @@ ncr885e_config( struct device *dev )
    transmit interrupt  */
 
 static void
-ncr885e_tx( struct device *dev )
+ncr885e_tx( struct net_device *dev )
 
 {
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -438,8 +409,7 @@ ncr885e_tx( struct device *dev )
 	/* look for any channel status (?) */
 	if ( xfer ) {
 
-		dev_kfree_skb( sp->tx_skbufs[i] );
-		mark_bh( NET_BH );
+		dev_kfree_skb_irq( sp->tx_skbufs[i] );
 
 		if ( txbits & TX_STATUS_TXOK ) {
 			sp->stats.tx_packets++;
@@ -456,14 +426,14 @@ ncr885e_tx( struct device *dev )
 
 	}
 
-	dev->tbusy = 0;
+	netif_start_queue(dev);
   
 	return;
 }
 
 /*  rx interrupt handling */
 static void
-ncr885e_rx( struct device *dev )
+ncr885e_rx( struct net_device *dev )
 
 {
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -549,7 +519,7 @@ ncr885e_rx( struct device *dev )
 }
 
 static void
-ncr885e_misc_ints( struct device *dev, unsigned short status )
+ncr885e_misc_ints( struct net_device *dev, unsigned short status )
 
 {
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -625,7 +595,7 @@ static void
 ncr885e_interrupt( int irq, void *dev_id, struct pt_regs *regs )
 
 {
-	struct device  *dev = (struct device *) dev_id;
+	struct net_device  *dev = (struct net_device *) dev_id;
 	struct ncr885e_private *sp;
 	unsigned short status;
 	int ioaddr;
@@ -639,12 +609,6 @@ ncr885e_interrupt( int irq, void *dev_id, struct pt_regs *regs )
 	sp = (struct ncr885e_private *) dev->priv;
 	spin_lock( &sp->lock );
   
-	if ( dev->interrupt ) {
-		printk( KERN_ERR "%s: Re-entering interrupt handler...\n", 
-			dev->name );
-	}
-
-	dev->interrupt = 1;
 	status = inw( ioaddr + INTERRUPT_CLEAR );
 
 	if (ncr885e_debug > 2)
@@ -684,7 +648,6 @@ ncr885e_interrupt( int irq, void *dev_id, struct pt_regs *regs )
 		ncr885e_rx( dev );
 	}
   
-	dev->interrupt = 0;
 	spin_unlock( &sp->lock );
 
 	return;
@@ -693,7 +656,7 @@ ncr885e_interrupt( int irq, void *dev_id, struct pt_regs *regs )
 
 /*  doesn't set the address permanently, however... */
 static int 
-ncr885e_set_address( struct device *dev, void *addr )
+ncr885e_set_address( struct net_device *dev, void *addr )
 
 {
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -753,7 +716,7 @@ static void
 ncr885e_tx_timeout( unsigned long data )
 
 {
-	struct device *dev = (struct device *) data;
+	struct net_device *dev = (struct net_device *) data;
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
 	unsigned long flags, ioaddr;
 	int i;
@@ -792,8 +755,7 @@ ncr885e_tx_timeout( unsigned long data )
 
 	/* start anew from the beginning of the ring buffer (why not?) */
 	sp->tx_current = 0;
-	dev->tbusy = 0;
-	mark_bh( NET_BH );
+	netif_wake_queue(dev);
 
 	/* restart rx dma */
 	outl( (RX_DBDMA_ENABLE << 16) | RX_CHANNEL_RUN,
@@ -804,7 +766,7 @@ ncr885e_tx_timeout( unsigned long data )
 }
 
 static inline void
-ncr885e_set_timeout( struct device *dev )
+ncr885e_set_timeout( struct net_device *dev )
 
 {
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -834,7 +796,7 @@ ncr885e_set_timeout( struct device *dev )
  */
 
 static int
-ncr885e_open( struct device *dev )
+ncr885e_open( struct net_device *dev )
 
 {
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -971,17 +933,13 @@ ncr885e_open( struct device *dev )
 	outl( (RX_DBDMA_ENABLE << 16)|RX_CHANNEL_RUN,
 	      ioaddr + RX_CHANNEL_CONTROL );
 
-	dev->start = 1;
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-
-	MOD_INC_USE_COUNT;
+	netif_start_queue(dev);
 
 	return 0;
 }
 
 static int
-ncr885e_xmit_start( struct sk_buff *skb, struct device *dev )
+ncr885e_xmit_start( struct sk_buff *skb, struct net_device *dev )
 
 {
 	struct ncr885e_private *sp = (struct ncr885e_private *) dev->priv;
@@ -1001,9 +959,10 @@ ncr885e_xmit_start( struct sk_buff *skb, struct device *dev )
 
 	if ( next >= NR_TX_RING )
 		next = 0;
-
+#if 0
 	/* mark ourselves as busy, even if we have too many packets waiting */
-	dev->tbusy = 1;
+	netif_stop_queue(dev);
+#endif
 
 	/* see if it's necessary to defer this packet */
 	if ( sp->tx_active >= MAX_TX_ACTIVE ) {
@@ -1064,15 +1023,14 @@ ncr885e_xmit_start( struct sk_buff *skb, struct device *dev )
 }
 
 static int
-ncr885e_close(struct device *dev)
+ncr885e_close(struct net_device *dev)
 
 {
 	int i;
 	struct ncr885e_private *np = (struct ncr885e_private *) dev->priv;
 	unsigned long ioaddr = dev->base_addr;
 
-	dev->start = 0;
-	dev->tbusy = 1;
+	netif_stop_queue(dev);
 
 	spin_lock( &np->lock );
 
@@ -1108,8 +1066,6 @@ ncr885e_close(struct device *dev)
 
 	kfree( np->head );
 
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -1120,7 +1076,7 @@ ncr885e_close(struct device *dev)
  *  (this avoids having to use the hash table registers)
  */
 static void
-ncr885e_set_multicast( struct device *dev )
+ncr885e_set_multicast( struct net_device *dev )
 
 {
 	int ioaddr = dev->base_addr;
@@ -1148,7 +1104,7 @@ ncr885e_set_multicast( struct device *dev )
 }
 
 static struct net_device_stats *
-ncr885e_stats( struct device *dev )
+ncr885e_stats( struct net_device *dev )
 
 {
 	struct ncr885e_private *np = (struct ncr885e_private *) dev->priv;
@@ -1161,25 +1117,21 @@ ncr885e_stats( struct device *dev )
  *  configuration.
  */
 
-static int
-ncr885e_probe1( struct device *dev, unsigned long ioaddr, unsigned char irq )
+static int __init ncr885e_probe1(unsigned long ioaddr, unsigned char irq )
 
 {
+	struct net_device *dev;
 	struct ncr885e_private *sp;
 	unsigned short station_addr[3], val;
 	unsigned char *p;
 	int  i;
 
-	dev = init_etherdev( dev, 0 );
-
-	/* construct private data for the 885 ethernet */
-	dev->priv = kmalloc( sizeof( struct ncr885e_private ), GFP_KERNEL );
-
-	if ( dev->priv == NULL )
+	dev = init_etherdev( NULL, sizeof( struct ncr885e_private ) );
+	if (!dev)
 		return -ENOMEM;
+	SET_MODULE_OWNER(dev);
 
-	sp = (struct ncr885e_private *) dev->priv;
-	memset( sp, 0, sizeof( struct ncr885e_private ));
+	sp = dev->priv;
 
 	/* snag the station address and display it */
 	for( i = 0; i < 3; i++ ) {
@@ -1199,8 +1151,6 @@ ncr885e_probe1( struct device *dev, unsigned long ioaddr, unsigned char irq )
 
 	printk(", IRQ %d.\n", irq );
 
-	request_region( ioaddr, NCR885E_TOTAL_SIZE, dev->name );
-
 	/* set up a timer */
 	init_timer( &sp->tx_timeout );
 	sp->timeout_active = 0;
@@ -1217,6 +1167,8 @@ ncr885e_probe1( struct device *dev, unsigned long ioaddr, unsigned char irq )
 	dev->hard_start_xmit = ncr885e_xmit_start;
 	dev->set_multicast_list = ncr885e_set_multicast;
 	dev->set_mac_address = ncr885e_set_address;
+	
+	root_dev = dev;
 
 	return 0;
 }
@@ -1227,14 +1179,14 @@ ncr885e_probe1( struct device *dev, unsigned long ioaddr, unsigned char irq )
  *  worry about the rest.
  */
 
-int __init ncr885e_probe( struct device *dev )
+static int __init ncr885e_probe(void)
 {
 	struct pci_dev *pdev = NULL;
-	unsigned int ioaddr, chips = 0;
-	unsigned short cmd;
-	unsigned char irq, latency;
+	unsigned int ioaddr, ret;
+	unsigned char irq;
 
-	while(( pdev = pci_find_device( PCI_VENDOR_ID_NCR, 
+	/* use 'if' not 'while' where because driver only supports one device */
+	if (( pdev = pci_find_device( PCI_VENDOR_ID_NCR, 
 					PCI_DEVICE_ID_NCR_53C885_ETHERNET,
 					pdev )) != NULL ) {
 
@@ -1243,53 +1195,25 @@ int __init ncr885e_probe( struct device *dev )
 			printk( KERN_INFO "%s", version );
 		}
 
+		if (pci_enable_device(pdev))
+			return -ENODEV;
+
 		/* Use I/O space */
-		pci_read_config_dword( pdev, PCI_BASE_ADDRESS_0, &ioaddr );
-		pci_read_config_byte( pdev, PCI_INTERRUPT_LINE, &irq );
+		ioaddr = pci_resource_start (pdev, 0);
+		irq = pdev->irq;
 
-		ioaddr &= ~3;
-		/* Adjust around the Grackle... */
-#ifdef CONFIG_GEMINI
-		ioaddr |= 0xfe000000;
-#endif
-
-		if ( check_region( ioaddr, NCR885E_TOTAL_SIZE ))
-			continue;
+		if ( !request_region( ioaddr, NCR885E_TOTAL_SIZE, "ncr885e" ))
+			return -ENOMEM;
 
 		/* finish off the probe */
-		if ( !(ncr885e_probe1( dev, ioaddr, irq ))) {
-
-			chips++;
-
-			/* Access is via I/O space, bus master enabled... */
-			pci_read_config_word( pdev, PCI_COMMAND, &cmd );
-
-			if ( !(cmd & PCI_COMMAND_MASTER) ) {
-				printk( KERN_INFO "  PCI master bit not set! Now setting.\n");
-				cmd |= PCI_COMMAND_MASTER;
-				pci_write_config_word( pdev, PCI_COMMAND, cmd );
-			}
-
-			if ( !(cmd & PCI_COMMAND_IO) ) {
-				printk( KERN_INFO "  Enabling I/O space.\n" );
-				cmd |= PCI_COMMAND_IO;
-				pci_write_config_word( pdev, PCI_COMMAND, cmd );
-			}
-
-			pci_read_config_byte( pdev, PCI_LATENCY_TIMER, &latency );
-
-			if ( latency < 10 ) {
-				printk( KERN_INFO "  PCI latency timer (CFLT) is unreasonably"
-					" low at %d.  Setting to 255.\n", latency );
-				pci_write_config_byte( pdev, PCI_LATENCY_TIMER, 255 );
-			}
-		}
+		ret = ncr885e_probe1(ioaddr, irq);
+		if (ret)
+			release_region(ioaddr, NCR885E_TOTAL_SIZE);
+		else
+			pci_set_master(pdev);
 	}
 
-	if ( !chips )
-		return -ENODEV;
-	else
-		return 0;
+	return ret;
 }
 
 /* debugging to peek at dma descriptors */
@@ -1417,42 +1341,21 @@ write_mii( unsigned long ioaddr, int reg, int data )
 
 #endif /* NCR885E_DEBUG_MII */
 
-#ifdef MODULE
-#if defined(LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x20118
-MODULE_AUTHOR("dan@synergymicro.com");
-MODULE_DESCRIPTION("Symbios 53C885 Ethernet driver");
-MODULE_PARM(debug, "i");
-#endif 
-
-static int debug = 1;
-
-int
-init_module(void)
+static void __exit ncr885e_cleanup(void)
 {
-	if ( debug >= 0)
-		ncr885e_debug = debug;
-
-	return ncr885e_probe( NULL );
-}
-
-void
-cleanup_module(void)
-{
-	struct ncr885e_private *np;
-
 	if ( root_dev ) {
-
 		unregister_netdev( root_dev );
-		np = (struct ncr885e_private *) root_dev->priv;
 		release_region( root_dev->base_addr, NCR885E_TOTAL_SIZE );
-		kfree( root_dev->priv );
+		kfree( root_dev );
 		root_dev = NULL;
 	}  
 }
-#endif /* MODULE */
+
+module_init(ncr885e_probe);
+module_exit(ncr885e_cleanup);
 
 /*
  * Local variables:
- *  compile-command: "gcc -DMODULE -DMODVERSIONS -D__KERNEL__ -I../../include -Wall -Wstrict-prototypes -O6 -c symba.c"
+ *  c-basic-offset: 8
  * End:
  */

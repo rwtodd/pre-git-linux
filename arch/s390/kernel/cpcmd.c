@@ -2,11 +2,12 @@
  *  arch/s390/kernel/cpcmd.c
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  */
 
 #include <linux/stddef.h>
+#include <linux/kernel.h>
 #include <asm/string.h>
 #include <asm/ebcdic.h>
 
@@ -40,14 +41,5 @@ void cpcmd(char *cmd, char *response, int rlen)
                               : "a" (obuffer), "d" (olen)
                               : "2", "3"  );
         }
-}
-
-int sys_msgcp(char *str)
-{
-        char buffer[256];
-
-        sprintf(buffer, "MSG * %s", str);
-        cpcmd(buffer, NULL, 0);
-        cpcmd("STOP", NULL, 0);
 }
 

@@ -18,6 +18,7 @@
 #define __KERNEL_SYSCALLS__
 #include <stdarg.h>
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -32,10 +33,7 @@
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/interrupt.h>
-#include <linux/config.h>
-#include <linux/unistd.h>
 #include <linux/delay.h>
-#include <linux/smp.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
 
@@ -45,7 +43,7 @@
 #include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/misc390.h>
-#include "irq.h"
+#include <asm/irq.h>
 
 spinlock_t semaphore_wake_lock = SPIN_LOCK_UNLOCKED;
 
@@ -57,20 +55,18 @@ asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
 
 static psw_t wait_psw;
 
-#ifndef __SMP__
-static
-#endif
 int cpu_idle(void *unused)
 {
 	/* endless idle loop with no priority at all */
         init_idle();
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 	wait_psw.mask = _WAIT_PSW_MASK;
 	wait_psw.addr = (unsigned long) &&idle_wakeup | 0x80000000L;
 	while(1) {
-                if (bh_mask & bh_active) {
-                        do_bottom_half();
+                if (softirq_active(smp_processor_id()) &
+		    softirq_mask(smp_processor_id())) {
+                        do_softirq();
                         continue;
                 }
                 if (current->need_resched) {
@@ -87,14 +83,6 @@ idle_wakeup:
 	}
 }
 
-asmlinkage int sys_idle(void)
-{
-	if (current->pid != 0)
-		return -EPERM;
-	cpu_idle(NULL);
-	return 0;
-}
-
 /*
   As all the register will only be made displayable to the root
   user ( via printk ) or checking if the uid of the user is 0 from
@@ -104,7 +92,8 @@ asmlinkage int sys_idle(void)
   0 returned you know you've got all the lines
  */
 
-int sprintf_regs(int line,char *buff,struct task_struct * task,struct thread_struct *tss,struct pt_regs * regs)
+int sprintf_regs(int line, char *buff, struct task_struct * task,
+		 struct thread_struct *thread, struct pt_regs * regs)
 {	
 	int linelen=0;
 	int regno,chaincnt;
@@ -130,98 +119,102 @@ int sprintf_regs(int line,char *buff,struct task_struct * task,struct thread_str
 	};
 
 	if(task)
-		tss=&task->tss;
-	if(tss)
-		regs=tss->regs;
-	switch(line)
-	{
-	case sp_linefeed: linelen=sprintf(buff,"\n");
+		thread = &task->thread;
+	if(thread)
+		regs = thread->regs;
+	switch (line) {
+	case sp_linefeed:
+		linelen=sprintf(buff,"\n");
 		break;
 	case sp_psw:
 		if(regs)
-			linelen=sprintf(buff,"User PSW:    %08lx %08lx\n",
-				(unsigned long) regs->psw.mask,
-				(unsigned long) regs->psw.addr);
+			linelen = sprintf(buff,"User PSW:    %08lx %08lx\n",
+					  (unsigned long) regs->psw.mask,
+					  (unsigned long) regs->psw.addr);
 		else
-			linelen=sprintf(buff,"pt_regs=NULL some info unavailable\n");
+			linelen = sprintf(buff,"pt_regs=NULL some info unavailable\n");
 		break;
 	case sp_ksp:
-		if(task)
-			linelen+=sprintf(&buff[linelen],"task: %08x ",(addr_t)task);
-		if(tss)
-			linelen+=sprintf(&buff[linelen],"tss: %08x ksp: %08x ",
-					 (addr_t)tss,(addr_t)tss->ksp);
-		if(regs)
-			linelen+=sprintf(&buff[linelen],"pt_regs: %08x\n",(addr_t)regs);
+		if (task)
+			linelen += sprintf(&buff[linelen],
+					   "task: %08x ", (addr_t)task);
+		if (thread)
+			linelen += sprintf(&buff[linelen],
+					   "thread: %08x ksp: %08x ",
+					   (addr_t)thread,(addr_t)thread->ksp);
+		if (regs)
+			linelen += sprintf(&buff[linelen],
+					   "pt_regs: %08x\n", (addr_t)regs);
 		break;
 	case sp_gprs:
-		if(regs)
-			linelen=sprintf(buff,"User GPRS:\n");
+		if (regs)
+			linelen = sprintf(buff,"User GPRS:\n");
 		break;
 	case sp_gprs1 ... sp_gprs4:
-		if(regs)
-		{
-			regno=(line-sp_gprs1)*4;
-			linelen=sprintf(buff,"%08x  %08x  %08x  %08x\n",
-			       regs->gprs[regno], regs->gprs[regno+1],
-			       regs->gprs[regno+2], regs->gprs[regno+3]);
+		if (regs) {
+			regno = (line-sp_gprs1)*4;
+			linelen = sprintf(buff,"%08x  %08x  %08x  %08x\n",
+					  regs->gprs[regno],
+					  regs->gprs[regno+1],
+					  regs->gprs[regno+2],
+					  regs->gprs[regno+3]);
 		}
 		break;
 	case sp_acrs:
-		if(regs)
-			linelen=sprintf(buff,"User ACRS:\n");
+		if (regs)
+			linelen = sprintf(buff,"User ACRS:\n");
 		break;	
         case sp_acrs1 ... sp_acrs4:
-		if(regs)
-		{
-			regno=(line-sp_acrs1)*4;
-			linelen=sprintf(buff,"%08x  %08x  %08x  %08x\n",
-					regs->acrs[regno], regs->acrs[regno+1],
-					regs->acrs[regno+2], regs->acrs[regno+3]);
+		if (regs) {
+			regno = (line-sp_acrs1)*4;
+			linelen = sprintf(buff,"%08x  %08x  %08x  %08x\n",
+					  regs->acrs[regno],
+					  regs->acrs[regno+1],
+					  regs->acrs[regno+2],
+					  regs->acrs[regno+3]);
 		}
 		break;
 	case sp_kern_backchain:
-		if(tss&&tss->ksp&&regs)
-			linelen=sprintf(buff,"Kernel BackChain  CallChain    BackChain  CallChain\n");
+		if (thread && thread->ksp && regs)
+			linelen = sprintf(buff,"Kernel BackChain  CallChain    BackChain  CallChain\n");
 		break;
 	default:
-		if(tss&&tss->ksp&&regs)
-		{
-			
-			backchain=(tss->ksp&PSW_ADDR_MASK);
-			endchain=((backchain&(-8192))+8192);
-			prev_backchain=backchain-1;
-			line-=sp_kern_backchain1;
-			for(chaincnt=0;;chaincnt++)
-			{
-				if((backchain==0)||(backchain>=endchain)
-				   ||(chaincnt>=8)||(prev_backchain>=backchain))
+		if(thread && thread->ksp && regs) {
+			backchain = (thread->ksp & PSW_ADDR_MASK);
+			endchain = ((backchain & (-8192)) + 8192);
+			prev_backchain = backchain - 1;
+			line -= sp_kern_backchain1;
+			for (chaincnt = 0; ; chaincnt++) {
+				if ((backchain == 0) ||
+				    (backchain >= endchain) ||
+				    (chaincnt >= 8) || 
+				    (prev_backchain >= backchain))
 					break;
-				if((chaincnt>>1)==line)
-				{
-					linelen+=sprintf(&buff[linelen],"%s%08x   %08x     ",
+				if ((chaincnt >> 1) == line) {
+					linelen += sprintf(&buff[linelen],"%s%08x   %08x     ",
 							 (chaincnt&1) ? "":"       ",
 							 backchain,*(u32 *)(backchain+56));
 				}
-				if((chaincnt>>1)>line)
+				if ((chaincnt >> 1) > line)
 					break;
-				prev_backchain=backchain;
-				backchain=(*((u32 *)backchain))&PSW_ADDR_MASK;
+				prev_backchain = backchain;
+				backchain = (*((u32 *)backchain)) & PSW_ADDR_MASK;
 			}
-			if(linelen)
-				linelen+=sprintf(&buff[linelen],"\n");
+			if (linelen)
+				linelen += sprintf(&buff[linelen],"\n");
 		}
 	}
-	return(linelen);
+	return linelen;
 }
 
 
-void show_regs(struct task_struct * task,struct thread_struct *tss,struct pt_regs *regs)
+void show_regs(struct task_struct *task, struct thread_struct *thread,
+	       struct pt_regs *regs)
 {
 	char buff[80];
 	int line;
 	
-	for(line=0;sprintf_regs(line,buff,task,tss,regs);line++)
+	for (line = 0; sprintf_regs(line,buff,task,thread,regs); line++)
 		printk(buff);
 }
 
@@ -271,6 +264,7 @@ void release_thread(struct task_struct *dead_task)
 }
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long new_stackp,
+	unsigned long unused,
         struct task_struct * p, struct pt_regs * regs)
 {
         struct stack_frame
@@ -283,13 +277,19 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long new_stackp,
             unsigned long gprs[10];    /* gprs 6 -15                       */
             unsigned long fprs[4];     /* fpr 4 and 6                      */
             unsigned long empty[4];
-            struct pt_regs childregs;
+#if CONFIG_REMOTE_DEBUG
+	    gdb_pt_regs childregs;
+#else
+            pt_regs childregs;
+#endif
+            __u32   pgm_old_ilc;       /* single step magic from entry.S */
+            __u32   pgm_svc_step;
           } *frame;
 
         frame = (struct stack_frame *) (2*PAGE_SIZE + (unsigned long) p) -1;
         frame = (struct stack_frame *) (((unsigned long) frame)&-8L);
-        p->tss.regs = &frame->childregs;
-        p->tss.ksp = (unsigned long) frame;
+        p->thread.regs = &frame->childregs;
+        p->thread.ksp = (unsigned long) frame;
         frame->childregs = *regs;
         frame->childregs.gprs[15] = new_stackp;
         frame->eos = 0;
@@ -299,24 +299,22 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long new_stackp,
 
         /* fake return stack for resume(), don't go back to schedule */
         frame->gprs[9]  = (unsigned long) frame;
-
+	frame->pgm_svc_step = 0; /* Nope we aren't single stepping an svc */
         /* save fprs, if used in last task */
-	save_fp_regs(&p->tss.fp_regs);
-        p->tss.user_seg = __pa((unsigned long) p->mm->pgd) | _USER_SEG_TABLE_LEN;
-        p->tss.fs = USER_DS;
+	save_fp_regs(&p->thread.fp_regs);
+        p->thread.user_seg = __pa((unsigned long) p->mm->pgd) | _SEGMENT_TABLE;
+        p->thread.fs = USER_DS;
         /* Don't copy debug registers */
-        memset(&p->tss.per_info,0,sizeof(p->tss.per_info));
+        memset(&p->thread.per_info,0,sizeof(p->thread.per_info));
         return 0;
 }
-
-
 
 asmlinkage int sys_fork(struct pt_regs regs)
 {
         int ret;
 
         lock_kernel();
-        ret = do_fork(SIGCHLD, regs.gprs[15], &regs);
+        ret = do_fork(SIGCHLD, regs.gprs[15], &regs, 0);
         unlock_kernel();
         return ret;
 }
@@ -332,7 +330,7 @@ asmlinkage int sys_clone(struct pt_regs regs)
         newsp = regs.gprs[2];
         if (!newsp)
                 newsp = regs.gprs[15];
-        ret = do_fork(clone_flags, newsp, &regs);
+        ret = do_fork(clone_flags, newsp, &regs, 0);
         unlock_kernel();
         return ret;
 }
@@ -350,7 +348,7 @@ asmlinkage int sys_clone(struct pt_regs regs)
 asmlinkage int sys_vfork(struct pt_regs regs)
 {
 	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD,
-                       regs.gprs[15], &regs);
+                       regs.gprs[15], &regs, 0);
 }
 
 /*
@@ -361,7 +359,6 @@ asmlinkage int sys_execve(struct pt_regs regs)
         int error;
         char * filename;
 
-        lock_kernel();
         filename = getname((char *) regs.orig_gpr2);
         error = PTR_ERR(filename);
         if (IS_ERR(filename))
@@ -371,7 +368,6 @@ asmlinkage int sys_execve(struct pt_regs regs)
 		current->flags &= ~PF_DTRACE;
         putname(filename);
 out:
-        unlock_kernel();
         return error;
 }
 
@@ -382,7 +378,7 @@ out:
 int dump_fpu (struct pt_regs * regs, s390_fp_regs *fpregs)
 {
 	save_fp_regs(fpregs);
-	return(TRUE);
+	return 1;
 }
 
 /*
@@ -403,13 +399,34 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 		dump->u_ssize = ((unsigned long) (TASK_SIZE - dump->start_stack)) >> PAGE_SHIFT;
 	memcpy(&dump->regs.gprs[0],regs,sizeof(s390_regs));
 	dump_fpu (regs, &dump->regs.fp_regs);
-	memcpy(&dump->regs.per_info,&current->tss.per_info,sizeof(per_struct));
+	memcpy(&dump->regs.per_info,&current->thread.per_info,sizeof(per_struct));
 }
 
+/*
+ * These bracket the sleeping functions..
+ */
+extern void scheduling_functions_start_here(void);
+extern void scheduling_functions_end_here(void);
+#define first_sched	((unsigned long) scheduling_functions_start_here)
+#define last_sched	((unsigned long) scheduling_functions_end_here)
 
-
-
-
-
-
+unsigned long get_wchan(struct task_struct *p)
+{
+	unsigned long r14, r15;
+	unsigned long stack_page;
+	int count = 0;
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+	stack_page = (unsigned long) p;
+	r15 = p->thread.ksp;
+	do {
+		r14 = *(unsigned long *) (r15+56);
+		if (r14 < first_sched || r14 >= last_sched)
+			return r14;
+		r15 = *(unsigned long *) (r15+60);
+	} while (count++ < 16);
+	return 0;
+}
+#undef last_sched
+#undef first_sched
 

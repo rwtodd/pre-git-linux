@@ -22,7 +22,7 @@
 
 #include "proto.h"
 
-static void
+void
 dik_show_regs(struct pt_regs *regs, unsigned long *r9_15)
 {
 	printk("pc = [<%016lx>]  ra = [<%016lx>]  ps = %04lx\n",
@@ -39,18 +39,21 @@ dik_show_regs(struct pt_regs *regs, unsigned long *r9_15)
 		       r9_15[9], r9_15[10], r9_15[11]);
 		printk("s3 = %016lx  s4 = %016lx  s5 = %016lx\n",
 		       r9_15[12], r9_15[13], r9_15[14]);
-		printk("s6 = %016lx", r9_15[15]);
+		printk("s6 = %016lx\n", r9_15[15]);
 	}
 
-	printk("  a0 = %016lx  a1 = %016lx\na2 = %016lx",
+	printk("a0 = %016lx  a1 = %016lx  a2 = %016lx\n",
 	       regs->r16, regs->r17, regs->r18);
-	printk("  a3 = %016lx  a4 = %016lx\na5 = %016lx",
+	printk("a3 = %016lx  a4 = %016lx  a5 = %016lx\n",
  	       regs->r19, regs->r20, regs->r21);
- 	printk("  t8 = %016lx  t9 = %016lx\nt10= %016lx",
+ 	printk("t8 = %016lx  t9 = %016lx  t10= %016lx\n",
 	       regs->r22, regs->r23, regs->r24);
-	printk("  t11= %016lx  pv = %016lx\nat = %016lx",
+	printk("t11= %016lx  pv = %016lx  at = %016lx\n",
 	       regs->r25, regs->r27, regs->r28);
-	printk("  gp = %016lx  sp = %p\n", regs->gp, regs+1);
+	printk("gp = %016lx  sp = %p\n", regs->gp, regs+1);
+#if 0
+__halt();
+#endif
 }
 
 static char * ireg_name[] = {"v0", "t0", "t1", "t2", "t3", "t4", "t5", "t6",
@@ -257,9 +260,9 @@ disassemble(unsigned int instr)
 static void
 dik_show_code(unsigned int *pc)
 {
-	int i;
+	long i;
 
-	printk("Code:\n");
+	printk("Code:");
 	for (i = -6; i < 2; i++) {
 		unsigned int insn;
 		if (__get_user(insn, pc+i))
@@ -267,30 +270,32 @@ dik_show_code(unsigned int *pc)
 		printk("%c", i ? ' ' : '*');
 		disassemble(insn);
 	}
+	printk("\n");
 }
 
 static void
 dik_show_trace(unsigned long *sp)
 {
-	int i = 1;
-
-	printk("Trace: ");
-	do {
+	long i = 0;
+	printk("Trace:");
+	while (0x1ff8 & (unsigned long) sp) {
 		extern unsigned long _stext, _etext;
-		unsigned long kpc = *sp;
-
-		if (kpc < (unsigned long) &_stext)
+		unsigned long tmp = *sp;
+		sp++;
+		if (tmp < (unsigned long) &_stext)
 			continue;
-		if (kpc >= (unsigned long) &_etext)
+		if (tmp >= (unsigned long) &_etext)
 			continue;
 		/*
 		 * Assume that only the low 24-bits of a kernel text address
 		 * is interesting.
 		 */
-		printk("%6x%c", (int)kpc & 0xffffff, (++i % 11) ? ' ' : '\n');
-	} while (((unsigned long)++sp & 0x1ff8) && (i < 33));
-	if (i >= 33)
-		printk(" ...");
+		printk("%6x%c", (int)tmp & 0xffffff, (++i % 11) ? ' ' : '\n');
+		if (i > 40) {
+			printk(" ...");
+			break;
+		}
+	}
 	printk("\n");
 }
 
@@ -299,7 +304,7 @@ die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 {
 	if (regs->ps & 8)
 		return;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	printk("CPU %d ", hard_smp_processor_id());
 #endif
 	printk("%s(%d): %s %ld\n", current->comm, current->pid, str, err);
@@ -307,17 +312,17 @@ die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 	dik_show_code((unsigned int *)regs->pc);
 	dik_show_trace((unsigned long *)(regs+1));
 
-	if (current->tss.flags & (1UL << 63)) {
+	if (current->thread.flags & (1UL << 63)) {
 		printk("die_if_kernel recursion detected.\n");
 		sti();
 		while (1);
 	}
-	current->tss.flags |= (1UL << 63);
+	current->thread.flags |= (1UL << 63);
 	do_exit(SIGSEGV);
 }
 
 #ifndef CONFIG_MATHEMU
-static long dummy_emul() { return 0; }
+static long dummy_emul(void) { return 0; }
 long (*alpha_fp_emul_imprecise)(struct pt_regs *regs, unsigned long writemask)
   = (void *)dummy_emul;
 long (*alpha_fp_emul) (unsigned long pc)
@@ -358,7 +363,9 @@ do_entIF(unsigned long type, unsigned long a1,
 	 unsigned long a2, unsigned long a3, unsigned long a4,
 	 unsigned long a5, struct pt_regs regs)
 {
-	die_if_kernel("Instruction fault", &regs, type, 0);
+	die_if_kernel((type == 1 ? "Kernel Bug" : "Instruction fault"),
+		      &regs, type, 0);
+
 	switch (type) {
 	      case 0: /* breakpoint */
 		if (ptrace_cancel_bpt(current)) {
@@ -417,7 +424,7 @@ do_entIF(unsigned long type, unsigned long a1,
 			/* EV4 does not implement anything except normal
 			   rounding.  Everything else will come here as
 			   an illegal instruction.  Emulate them.  */
-			if (alpha_fp_emul(regs.pc - 4))
+			if (alpha_fp_emul(regs.pc-4))
 				return;
 		}
 		send_sig(SIGILL, current, 1);
@@ -652,7 +659,7 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 got_exception:
 	/* Ok, we caught the exception, but we don't want it.  Is there
 	   someone to pass it along to?  */
-	if ((fixup = search_exception_table(pc)) != 0) {
+	if ((fixup = search_exception_table(pc, regs.gp)) != 0) {
 		unsigned long newpc;
 		newpc = fixup_exception(una_reg, fixup, pc);
 
@@ -698,12 +705,12 @@ got_exception:
 	dik_show_code((unsigned int *)pc);
 	dik_show_trace((unsigned long *)(&regs+1));
 
-	if (current->tss.flags & (1UL << 63)) {
+	if (current->thread.flags & (1UL << 63)) {
 		printk("die_if_kernel recursion detected.\n");
 		sti();
 		while (1);
 	}
-	current->tss.flags |= (1UL << 63);
+	current->thread.flags |= (1UL << 63);
 	do_exit(SIGSEGV);
 }
 
@@ -805,7 +812,7 @@ do_entUnaUser(void * va, unsigned long opcode,
 	/* Check the UAC bits to decide what the user wants us to do
 	   with the unaliged access.  */
 
-	uac_bits = (current->tss.flags >> UAC_SHIFT) & UAC_BITMASK;
+	uac_bits = (current->thread.flags >> UAC_SHIFT) & UAC_BITMASK;
 	if (!(uac_bits & UAC_NOPRINT)) {
 		if (cnt >= 5 && jiffies - last_time > 5*HZ) {
 			cnt = 0;

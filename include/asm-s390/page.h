@@ -2,7 +2,7 @@
  *  include/asm-s390/page.h
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Hartmut Penner (hp@de.ibm.com)
  */
 
@@ -18,6 +18,29 @@
 #ifndef __ASSEMBLY__
 
 #define STRICT_MM_TYPECHECKS
+
+#define BUG() do { \
+        printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+        __asm__ __volatile__(".word 0x0000"); \
+} while (0)                                       
+
+#define PAGE_BUG(page) do { \
+        BUG(); \
+} while (0)                      
+
+/* Pure 2^n version of get_order */
+extern __inline__ int get_order(unsigned long size)
+{
+        int order;
+
+        size = (size-1) >> (PAGE_SHIFT-1);
+        order = -1;
+        do {
+                size >>= 1;
+                order++;
+        } while (size);
+        return order;
+}
 
 /*
  * gcc uses builtin, i.e. MVCLE for both operations
@@ -89,7 +112,8 @@ typedef unsigned long pgprot_t;
 #define PAGE_OFFSET             ((unsigned long)__PAGE_OFFSET)
 #define __pa(x)                 ((unsigned long)(x)-PAGE_OFFSET)
 #define __va(x)                 ((void *)((unsigned long)(x)+PAGE_OFFSET))
-#define MAP_NR(addr)            (__pa(addr) >> PAGE_SHIFT)
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 #endif                                 /* __KERNEL__                       */
 

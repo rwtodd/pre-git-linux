@@ -57,7 +57,7 @@ typedef struct openprom_private_data
 } DATA;
 
 /* ID of the PROM node containing all of the EEPROM options. */
-static int options_node;
+static int options_node = 0;
 
 /*
  * Copy an openpromio structure into kernel space from user space.
@@ -73,10 +73,17 @@ static int copyin(struct openpromio *info, struct openpromio **opp_p)
 	if (!info || !opp_p)
 		return -EFAULT;
 
-	get_user_ret(bufsize, &info->oprom_size, -EFAULT);
+	if (get_user(bufsize, &info->oprom_size))
+		return -EFAULT;
 
-	if (bufsize == 0 || bufsize > OPROMMAXPARAM)
+	if (bufsize == 0)
 		return -EINVAL;
+
+	/* If the bufsize is too large, just limit it.
+	 * Fix from Jason Rappleye.
+	 */
+	if (bufsize > OPROMMAXPARAM)
+		bufsize = OPROMMAXPARAM;
 
 	if (!(*opp_p = kmalloc(sizeof(int) + bufsize + 1, GFP_KERNEL)))
 		return -ENOMEM;
@@ -126,7 +133,8 @@ static int getstrings(struct openpromio *info, struct openpromio **opp_p)
  */
 static int copyout(void *info, struct openpromio *opp, int len)
 {
-	copy_to_user_ret(info, opp, len, -EFAULT);
+	if (copy_to_user(info, opp, len))
+		return -EFAULT;
 	return 0;
 }
 
@@ -198,11 +206,6 @@ static int openprom_sunos_ioctl(struct inode * inode, struct file * file,
 	case OPROMSETOPT2:
 		buf = opp->oprom_array + strlen(opp->oprom_array) + 1;
 		len = opp->oprom_array + bufsize - buf;
-
-		if (cnt++ < 10)
-			printk(KERN_DEBUG "OPROMSETOPT%s %s='%s'\n",
-			       (cmd == OPROMSETOPT) ? "" : "2",
-			       opp->oprom_array, buf);
 
 		save_and_cli(flags);
 		error = prom_setprop(options_node, opp->oprom_array,
@@ -363,7 +366,8 @@ static int openprom_bsd_ioctl(struct inode * inode, struct file * file,
 
 	switch (cmd) {
 	case OPIOCGET:
-		copy_from_user_ret(&op, (void *)arg, sizeof(op), -EFAULT);
+		if (copy_from_user(&op, (void *)arg, sizeof(op)))
+			return -EFAULT;
 
 		if (!goodnode(op.op_nodeid,data))
 			return -EINVAL;
@@ -385,9 +389,10 @@ static int openprom_bsd_ioctl(struct inode * inode, struct file * file,
 
 		if (len <= 0) {
 			kfree(str);
-			/* Verified by the above copy_from_user_ret */
-			__copy_to_user_ret((void *)arg, &op,
-					   sizeof(op), -EFAULT);
+			/* Verified by the above copy_from_user */
+			if (__copy_to_user((void *)arg, &op,
+				       sizeof(op)))
+				return -EFAULT;
 			return 0;
 		}
 
@@ -413,7 +418,8 @@ static int openprom_bsd_ioctl(struct inode * inode, struct file * file,
 		return error;
 
 	case OPIOCNEXTPROP:
-		copy_from_user_ret(&op, (void *)arg, sizeof(op), -EFAULT);
+		if (copy_from_user(&op, (void *)arg, sizeof(op)))
+			return -EFAULT;
 
 		if (!goodnode(op.op_nodeid,data))
 			return -EINVAL;
@@ -456,7 +462,8 @@ static int openprom_bsd_ioctl(struct inode * inode, struct file * file,
 		return error;
 
 	case OPIOCSET:
-		copy_from_user_ret(&op, (void *)arg, sizeof(op), -EFAULT);
+		if (copy_from_user(&op, (void *)arg, sizeof(op)))
+			return -EFAULT;
 
 		if (!goodnode(op.op_nodeid,data))
 			return -EINVAL;
@@ -484,13 +491,14 @@ static int openprom_bsd_ioctl(struct inode * inode, struct file * file,
 		return 0;
 
 	case OPIOCGETOPTNODE:
-		copy_to_user_ret((void *)arg, &options_node,
-				 sizeof(int), -EFAULT);
+		if (copy_to_user((void *)arg, &options_node, sizeof(int)))
+			return -EFAULT;
 		return 0;
 
 	case OPIOCGETNEXT:
 	case OPIOCGETCHILD:
-		copy_from_user_ret(&node, (void *)arg, sizeof(int), -EFAULT);
+		if (copy_from_user(&node, (void *)arg, sizeof(int)))
+			return -EFAULT;
 
 		save_and_cli(flags);
 		if (cmd == OPIOCGETNEXT)
@@ -499,7 +507,8 @@ static int openprom_bsd_ioctl(struct inode * inode, struct file * file,
 			node = __prom_getchild(node);
 		restore_flags(flags);
 
-		__copy_to_user_ret((void *)arg, &node, sizeof(int), -EFAULT);
+		if (__copy_to_user((void *)arg, &node, sizeof(int)))
+			return -EFAULT;
 
 		return 0;
 
@@ -594,29 +603,21 @@ static int openprom_open(struct inode * inode, struct file * file)
 	data->lastnode = prom_root_node;
 	file->private_data = (void *)data;
 
-	MOD_INC_USE_COUNT;
-
 	return 0;
 }
 
 static int openprom_release(struct inode * inode, struct file * file)
 {
-	kfree_s(file->private_data, sizeof(DATA));
-	MOD_DEC_USE_COUNT;
+	kfree(file->private_data);
 	return 0;
 }
 
 static struct file_operations openprom_fops = {
-	openprom_lseek,
-	NULL,			/* openprom_read */
-	NULL,			/* openprom_write */
-	NULL,			/* openprom_readdir */
-	NULL,			/* openprom_poll */
-	openprom_ioctl,
-	NULL,			/* openprom_mmap */
-	openprom_open,
-	NULL,			/* flush */
-	openprom_release
+	owner:		THIS_MODULE,
+	llseek:		openprom_lseek,
+	ioctl:		openprom_ioctl,
+	open:		openprom_open,
+	release:	openprom_release,
 };
 
 static struct miscdevice openprom_dev = {
@@ -625,11 +626,7 @@ static struct miscdevice openprom_dev = {
 
 EXPORT_NO_SYMBOLS;
 
-#ifdef MODULE
-int init_module(void)
-#else
-__initfunc(int openprom_init(void))
-#endif
+static int __init openprom_init(void)
 {
 	unsigned long flags;
 	int error;
@@ -654,9 +651,10 @@ __initfunc(int openprom_init(void))
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit openprom_cleanup(void)
 {
 	misc_deregister(&openprom_dev);
 }
-#endif
+
+module_init(openprom_init);
+module_exit(openprom_cleanup);

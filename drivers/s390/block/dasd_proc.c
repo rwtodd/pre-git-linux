@@ -9,79 +9,32 @@
 
 #include <linux/proc_fs.h>
 
-#include "dasd.h"
+#include <linux/dasd.h>
+
 #include "dasd_types.h"
 
-int dasd_proc_read_devices ( char *, char **, off_t, int, int);
+int dasd_proc_read_devices ( char *, char **, off_t, int);
 #ifdef DASD_PROFILE
-extern int dasd_proc_read_statistics ( char *, char **, off_t, int, int);
-extern int dasd_proc_read_debug ( char *, char **, off_t, int, int);
+extern int dasd_proc_read_statistics ( char *, char **, off_t, int);
+extern int dasd_proc_read_debug ( char *, char **, off_t, int);
 #endif /* DASD_PROFILE */
 
-struct proc_dir_entry dasd_proc_root_entry = {
-	0,
-	4,"dasd",
-	S_IFDIR | S_IRUGO | S_IXUGO | S_IWUSR | S_IWGRP,
-	1,0,0,
-	0,
-	NULL,
-};
-
-struct proc_dir_entry dasd_proc_devices_entry = {
-	0,
-	7,"devices",
-	S_IFREG | S_IRUGO | S_IXUGO | S_IWUSR | S_IWGRP,
-	1,0,0,
-	0,
-	NULL,
-	&dasd_proc_read_devices,
-};
-
-#ifdef DASD_PROFILE
-struct proc_dir_entry dasd_proc_stats_entry = {
-	0,
-	10,"statistics",
-	S_IFREG | S_IRUGO | S_IXUGO | S_IWUSR | S_IWGRP,
-	1,0,0,
-	0,
-	NULL,
-	&dasd_proc_read_statistics,
-};
-
-struct proc_dir_entry dasd_proc_debug_entry = {
-	0,
-	5,"debug",
-	S_IFREG | S_IRUGO | S_IXUGO | S_IWUSR | S_IWGRP,
-	1,0,0,
-	0,
-	NULL,
-	&dasd_proc_read_debug,
-};
-#endif /* DASD_PROFILE */
-
-struct proc_dir_entry dasd_proc_device_template = {
-	0,
-	6,"dd????",
-	S_IFBLK | S_IRUGO | S_IWUSR | S_IWGRP,
-	1,0,0,
-	0,
-	NULL,
-};
+static struct proc_dir_entry *dasd_proc_root_entry;
 
 void
 dasd_proc_init ( void )
 {
-	proc_register( & proc_root, & dasd_proc_root_entry);
-	proc_register( & dasd_proc_root_entry, & dasd_proc_devices_entry);
+	dasd_proc_root_entry = proc_mkdir("dasd", NULL);
+	create_proc_info_entry("devices",0,&dasd_proc_root_entry,dasd_proc_read_devices);
 #ifdef DASD_PROFILE
- 	proc_register( & dasd_proc_root_entry, & dasd_proc_stats_entry); 
- 	proc_register( & dasd_proc_root_entry, & dasd_proc_debug_entry); 
+	create_proc_info_entry("statistics",0,&dasd_proc_root_entry,dasd_proc_read_statistics);
+	create_proc_info_entry("debug",0,&dasd_proc_root_entry,dasd_proc_read_debug);
 #endif /* DASD_PROFILE */
 }
 
 
 int 
-dasd_proc_read_devices ( char * buf, char **start, off_t off, int len, int d)
+dasd_proc_read_devices ( char * buf, char **start, off_t off, int len)
 {
 	int i;
 	len = sprintf ( buf, "dev# MAJ minor node        Format\n");
@@ -92,12 +45,12 @@ dasd_proc_read_devices ( char * buf, char **start, off_t off, int len, int d)
 		if ( len >= PAGE_SIZE - 80 )
 			len += sprintf ( buf + len, "terminated...\n");
 		len += sprintf ( buf + len,
-				 "%04X %3d %5d /dev/dd%04X",
+				 "%04X %3d %5d /dev/dasd%c",
 				 dasd_info[i]->info.devno,
 				 DASD_MAJOR,
 				 i << PARTN_BITS,
-				 i );
-                if (info->flags == DASD_NOT_FORMATTED) {
+				 'a' + i );
+                if (info->flags == DASD_INFO_FLAGS_NOT_FORMATTED) {
 			len += sprintf ( buf + len, "    n/a");
 		} else {
 			len += sprintf ( buf + len, " %6d", 

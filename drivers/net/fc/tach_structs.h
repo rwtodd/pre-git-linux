@@ -1,7 +1,7 @@
 /**********************************************************************
  * iph5526.c: Structures for the Interphase 5526 PCI Fibre Channel 
  *			  IP/SCSI driver.
- * Copyright (C) 1999 Vineet M Abraham <vma@iol.unh.edu>
+ * Copyright (C) 1999 Vineet M Abraham <vmabraham@hotmail.com>
  **********************************************************************/
 
 #ifndef _TACH_STRUCT_H
@@ -393,7 +393,7 @@ struct fc_info {
 	struct timer_list lport_timer;
 	struct timer_list explore_timer;
 	struct timer_list display_cache_timer;
-	struct device *dev;
+	struct net_device *dev;
 	struct Scsi_Host *host;
 	spinlock_t fc_lock;
 };

@@ -2,7 +2,7 @@
  * File...........: linux/drivers/s390/block/dasd_eckd.c
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999
+ * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
  */
 
 #include <linux/stddef.h>
@@ -13,14 +13,14 @@
 #endif				/* MODULE */
 
 #include <linux/malloc.h>
+#include <linux/dasd.h>
 #include <asm/io.h>
 
-#include "../../../arch/s390/kernel/irq.h"
+#include <asm/irq.h>
 
 #include "dasd_types.h"
 #include "dasd_ccwstuff.h"
 
-#include "dasd.h"
 
 #ifdef PRINTK_HEADER
 #undef PRINTK_HEADER
@@ -270,16 +270,6 @@ typedef struct {
 
 eckd_home_t;
 
-/* eckd count area */
-typedef struct {
-	__u16 cyl;
-	__u16 head;
-	__u8 record;
-	__u8 kl;
-	__u16 dl;
-} __attribute__ ((packed))
-
-eckd_count_t;
 
 static unsigned int
 round_up_multiple (unsigned int no, unsigned int mult)
@@ -347,17 +337,17 @@ recs_per_track (dasd_eckd_characteristics_t * rdc,
 		unsigned int kl, unsigned int dl)
 {
 	int rpt = 0;
-	if (rdc->formula == 0x01) {
+	int dn;
+        switch ( rdc -> dev_type ) {
+	case 0x3380: 
 		if (kl)
 			return 1499 / (15 +
 				       7 + ceil_quot (kl + 12, 32) +
 				       ceil_quot (dl + 12, 32));
 		else
 			return 1499 / (15 + ceil_quot (dl + 12, 32));
-
-	}
-	if (rdc->formula == 0x02) {
-		int dn = ceil_quot (dl + 6, 232) + 1;
+	case 0x3390: 
+		dn = ceil_quot (dl + 6, 232) + 1;
 		if (kl) {
 			int kn = ceil_quot (kl + 6, 232) + 1;
 			return 1729 / (10 +
@@ -366,6 +356,16 @@ recs_per_track (dasd_eckd_characteristics_t * rdc,
 		} else
 			return 1729 / (10 +
 				       9 + ceil_quot (dl + 6 * dn, 34));
+	case 0x9345: 
+	        dn = ceil_quot (dl + 6, 232) + 1;
+                if (kl) {
+                        int kn = ceil_quot (kl + 6, 232) + 1;
+                        return 1420 / (18 +
+                                       7 + ceil_quot (kl + 6 * kn, 34) +
+                                       ceil_quot (dl + 6 * dn, 34));
+                } else
+                        return 1420 / (18 +
+                                       7 + ceil_quot (dl + 6 * dn, 34));
 	}
 	return rpt;
 }
@@ -403,9 +403,11 @@ define_extent (ccw1_t * de_ccw,
 	case DASD_ECKD_CCW_READ_CKD_MT:
 	case DASD_ECKD_CCW_READ_COUNT:
 		data->mask.perm = 0x1;
+                data->attributes.operation = 0x3; /* enable seq. caching */
 		break;
 	case DASD_ECKD_CCW_WRITE:
 	case DASD_ECKD_CCW_WRITE_MT:
+                data->attributes.operation = 0x3; /* enable seq. caching */
 		break;
 	case DASD_ECKD_CCW_WRITE_CKD:
 	case DASD_ECKD_CCW_WRITE_CKD_MT:
@@ -635,7 +637,7 @@ dasd_eckd_format_track (int di, int trk, int bs)
         fcp -> devindex = di;
         fcp -> flags = DASD_DO_IO_SLEEP;
         do {
-                struct wait_queue wait = {current, NULL};
+                DECLARE_WAITQUEUE(wait, current);
                 unsigned long flags;
                 int irq;
                 int cs;
@@ -874,27 +876,20 @@ dasd_eckd_format (int devindex, format_data_t * fdata)
 	return rc;
 }
 
-int
-dasd_eckd_read_count (int di)
+cqr_t *
+dasd_eckd_fill_sizes_first (int di)
 {
-	int rc;
 	cqr_t *rw_cp = NULL;
 	ccw1_t *ccw;
 	DE_eckd_data_t *DE_data;
 	LO_eckd_data_t *LO_data;
-	eckd_count_t *count_data;
-        int retries = 5;
-        unsigned long flags;
-        int irq;
-        int cs;
 	dasd_information_t *info = dasd_info[di];
+	eckd_count_t *count_data= &(info->private.eckd.count_data);
 	rw_cp = request_cqr (3,
 			     sizeof (DE_eckd_data_t) +
-			     sizeof (LO_eckd_data_t) +
-			     sizeof (eckd_count_t));
+			     sizeof (LO_eckd_data_t));
 	DE_data = rw_cp->data;
 	LO_data = rw_cp->data + sizeof (DE_eckd_data_t);
-	count_data = (eckd_count_t*)((long)LO_data + sizeof (LO_eckd_data_t));
 	ccw = rw_cp->cpaddr;
 	define_extent (ccw, DE_data, 0, 0, DASD_ECKD_CCW_READ_COUNT, info);
 	ccw->flags = CCW_FLAG_CC;
@@ -904,40 +899,17 @@ dasd_eckd_read_count (int di)
 	ccw++;
 	ccw->cmd_code = DASD_ECKD_CCW_READ_COUNT;
 	ccw->count = 8;
-	ccw->cda = (void *) virt_to_phys (count_data);
+	ccw->cda = (void *) __pa (count_data);
 	rw_cp->devindex = di;
-        rw_cp -> options = DOIO_WAIT_FOR_INTERRUPT;
-        do {
-                irq = dasd_info[di]->info.irq;
-                s390irq_spin_lock_irqsave (irq, flags);
-                atomic_set(&rw_cp -> status, CQR_STATUS_QUEUED);
-                rc = dasd_start_IO ( rw_cp );
-                s390irq_spin_unlock_irqrestore (irq, flags);
-                retries --;
-	} while ( ( ( (cs=atomic_read(&rw_cp->status)) != CQR_STATUS_DONE) || 
-                    rc ) &&  retries );
-        if ( ( rc || cs != CQR_STATUS_DONE) ) {
-                if ( ( cs == CQR_STATUS_ERROR ) &&
-                     ( rw_cp -> dstat -> ii.sense.data[1] == 0x08 ) ) {
-                        rc = -EMEDIUMTYPE;
-                } else {
-                        dasd_eckd_print_error (rw_cp->dstat);
-                        rc = -EIO;
-                }
-        } else {
-                rc = count_data->dl;
-        }
-	release_cqr (rw_cp);
-	return rc;
+        atomic_set(&rw_cp->status,CQR_STATUS_FILLED);
+	return rw_cp;
 }
 
-int
-dasd_eckd_fill_sizes (int devindex)
+int dasd_eckd_fill_sizes_last (int devindex) 
 {
-	int bs = 0;
 	int sb;
 	dasd_information_t *in = dasd_info[devindex];
-	bs = dasd_eckd_read_count (devindex);
+	int bs = in->private.eckd.count_data.dl;
 	if (bs <= 0) {
                 PRINT_INFO("Cannot figure out blocksize. did you format the disk?\n");
                 memset (&(in -> sizes), 0, sizeof(dasd_sizes_t ));
@@ -972,12 +944,13 @@ dasd_eckd_fill_sizes (int devindex)
 
 dasd_operations_t dasd_eckd_operations =
 {
-	dasd_eckd_ck_devinfo,
-	dasd_eckd_build_req,
-	dasd_eckd_rw_label,
-	dasd_eckd_ck_char,
-	dasd_eckd_fill_sizes,
-	dasd_eckd_format,
+	ck_devinfo:	dasd_eckd_ck_devinfo,
+	get_req_ccw:	dasd_eckd_build_req,
+	rw_label:	dasd_eckd_rw_label,
+	ck_characteristics: 	dasd_eckd_ck_char,
+	fill_sizes_first:	dasd_eckd_fill_sizes_first,
+	fill_sizes_last:	dasd_eckd_fill_sizes_last,
+	dasd_format:	dasd_eckd_format,
 };
 
 /*

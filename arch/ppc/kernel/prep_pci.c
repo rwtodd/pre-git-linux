@@ -1,5 +1,5 @@
 /*
- * $Id: prep_pci.c,v 1.35.2.1 1999/07/22 01:49:42 cort Exp $
+ * $Id: prep_pci.c,v 1.40 1999/09/17 17:23:05 cort Exp $
  * PReP pci functions.
  * Originally by Gary Thomas
  * rewritten and updated by Cort Dougan (cort@cs.nmt.edu)
@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/openpic.h>
 
+#include <asm/init.h>
 #include <asm/byteorder.h>
 #include <asm/io.h>
 #include <asm/ptrace.h>
@@ -34,14 +35,12 @@ unsigned char *Motherboard_map_name;
 
 /* How is the 82378 PIRQ mapping setup? */
 unsigned char *Motherboard_routes;
-void (*Motherboard_non0)(struct pci_dev *);
-
-void Mesquite_Map_Non0(struct pci_dev *);
 
 /* Used for Motorola to store system config register */
 static unsigned long	*ProcInfo;
 
-extern void chrp_do_IRQ(struct pt_regs *,int , int);
+extern int chrp_get_irq(struct pt_regs *);
+extern void chrp_post_irq(struct pt_regs* regs, int);
 
 /* Tables for known hardware */   
 
@@ -170,7 +169,7 @@ static char Mesquite_pci_IRQ_map[23] __prepdata =
 	0,	/* Slot 8  - unused */
 	0,	/* Slot 9  - unused */
 	0,	/* Slot 10 - unxued */
-	0x1e,	/* Slot 11 - PCI-ISA/IDE/USB */
+	0,	/* Slot 11 - unused */
 	0,	/* Slot 12 - unused */
 	0,	/* Slot 13 - unused */
 	2,	/* Slot 14 - Ethernet */
@@ -198,7 +197,7 @@ static char Sitka_pci_IRQ_map[21] __prepdata =
 	0,      /* Slot 8  - unused */
 	0,      /* Slot 9  - unused */
 	0,      /* Slot 10 - unxued */
-	0x1e,   /* Slot 11 - PCI-ISA/IDE/USB */
+	0,      /* Slot 11 - unused */
 	0,      /* Slot 12 - unused */
 	0,      /* Slot 13 - unused */
 	2,      /* Slot 14 - Ethernet */
@@ -224,7 +223,7 @@ static char MTX_pci_IRQ_map[23] __prepdata =
 	0,	/* Slot 8  - unused */
 	0,	/* Slot 9  - unused */
 	0,	/* Slot 10 - unused */
-	0x1e,	/* Slot 11 - PCI-ISA/IDE/USB */
+	0,	/* Slot 11 - unused */
 	3,	/* Slot 12 - SCSI */
 	0,	/* Slot 13 - unused */
 	2,	/* Slot 14 - Ethernet */
@@ -253,7 +252,7 @@ static char MTXplus_pci_IRQ_map[23] __prepdata =
         0,      /* Slot 8  - unused */
         0,      /* Slot 9  - unused */
         0,      /* Slot 10 - unused */
-        0x1e,   /* Slot 11 - PCI-ISA/IDE/USB */
+        0,      /* Slot 11 - unused */
         3,      /* Slot 12 - SCSI */
         0,      /* Slot 13 - unused */
         2,      /* Slot 14 - Ethernet 1 */
@@ -317,7 +316,7 @@ static char Genesis2_pci_IRQ_map[23] __prepdata =
 	0,	/* Slot 10 - Ethernet */
 	0,	/* Slot 11 - Universe PCI - VME Bridge */
 	3,	/* Slot 12 - unused */
-	5,	/* Slot 13 - VME */
+	0,	/* Slot 13 - unused */
 	2,	/* Slot 14 - SCSI */
 	0,	/* Slot 15 - graphics on 3600 */
 	9,	/* Slot 16 - PMC */
@@ -685,13 +684,10 @@ static u_char mvme2600_openpic_initsenses[] __initdata = {
 #define MOT_RAVEN_PRESENT	0x1
 #define MOT_HAWK_PRESENT	0x2
 
-/* Keyboard present flag */
-int prep_kbd_present = 1;   /* Keyboard present by default */
-
+int prep_keybd_present = 1;
 int MotMPIC = 0;
-int mot_multi = 0;
 
-__initfunc(int raven_init(void))
+int __init raven_init(void)
 {
 	unsigned int	devid;
 	unsigned int	pci_membase;
@@ -739,17 +735,13 @@ __initfunc(int raven_init(void))
 	OpenPIC_InitSenses = mvme2600_openpic_initsenses;
 	OpenPIC_NumInitSenses = sizeof(mvme2600_openpic_initsenses);
 
-	ppc_md.do_IRQ = chrp_do_IRQ;
+	ppc_md.get_irq = chrp_get_irq;
+	ppc_md.post_irq = chrp_post_irq;
 	
 	/* If raven is present on Motorola store the system config register
 	 * for later use.
 	 */
 	ProcInfo = (unsigned long *)ioremap(0xfef80400, 4);
-
-	/* Indicate to system if this is a multiprocessor board */
-	if (!(*ProcInfo & MOT_PROC2_BIT)) {
-		mot_multi = 1;
-	}
 
 	/* This is a hack.  If this is a 2300 or 2400 mot board then there is
 	 * no keyboard controller and we have to indicate that.
@@ -757,7 +749,7 @@ __initfunc(int raven_init(void))
 	base_mod = inb(MOTOROLA_BASETYPE_REG);
 	if ((MotMPIC == MOT_HAWK_PRESENT) || (base_mod == 0xF9) ||
 	    (base_mod == 0xFA) || (base_mod == 0xE1))
-		prep_kbd_present = 0;
+		prep_keybd_present = 0;
 
 	return 1;
 }
@@ -770,37 +762,36 @@ struct mot_info {
 	const char	*name;
 	unsigned char	*map;
 	unsigned char	*routes;
-	void		(*map_non0_bus)(struct pci_dev *);	/* For boards with more than bus 0 devices. */
 } mot_info[] = {
-	{0x300, 0x00, 0x00, "MVME 2400",			Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x010, 0x00, 0x00, "Genesis",				Genesis_pci_IRQ_map,	Genesis_pci_IRQ_routes, NULL},
-	{0x020, 0x00, 0x00, "Powerstack (Series E)",		Comet_pci_IRQ_map,	Comet_pci_IRQ_routes,	NULL},
-	{0x040, 0x00, 0x00, "Blackhawk (Powerstack)",		Blackhawk_pci_IRQ_map,	Blackhawk_pci_IRQ_routes, NULL},
-	{0x050, 0x00, 0x00, "Omaha (PowerStack II Pro3000)",	Omaha_pci_IRQ_map,	Omaha_pci_IRQ_routes,	NULL},
-	{0x060, 0x00, 0x00, "Utah (Powerstack II Pro4000)",	Utah_pci_IRQ_map,	Utah_pci_IRQ_routes,	NULL},
-	{0x0A0, 0x00, 0x00, "Powerstack (Series EX)",		Comet2_pci_IRQ_map,	Comet2_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xE0, 0x00, "Mesquite cPCI (MCP750)",		Mesquite_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xE1, 0x00, "Sitka cPCI (MCPN750)",		Sitka_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xE2, 0x00, "Mesquite cPCI (MCP750) w/ HAC",	Mesquite_pci_IRQ_map,	Raven_pci_IRQ_routes,	Mesquite_Map_Non0},
-	{0x1E0, 0xF6, 0x80, "MTX Plus",				MTXplus_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xF6, 0x81, "Dual MTX Plus",			MTXplus_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xF7, 0x80, "MTX wo/ Parallel Port",		MTX_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xF7, 0x81, "Dual MTX wo/ Parallel Port",	MTX_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xF8, 0x80, "MTX w/ Parallel Port",		MTX_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xF8, 0x81, "Dual MTX w/ Parallel Port",	MTX_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xF9, 0x00, "MVME 2300",			Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFA, 0x00, "MVME 2300SC/2600",			Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFB, 0x00, "MVME 2600 with MVME712M",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFC, 0x00, "MVME 2600/2700 with MVME761",	Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFD, 0x80, "MVME 3600 with MVME712M",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFD, 0x81, "MVME 4600 with MVME712M",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFE, 0x80, "MVME 3600 with MVME761",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFE, 0x81, "MVME 4600 with MVME761",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x1E0, 0xFF, 0x00, "MVME 1600-001 or 1600-011",	Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes,	NULL},
-	{0x000, 0x00, 0x00, "",					NULL,			NULL,	NULL}
+	{0x300, 0x00, 0x00, "MVME 2400",			Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x010, 0x00, 0x00, "Genesis",				Genesis_pci_IRQ_map,	Genesis_pci_IRQ_routes},
+	{0x020, 0x00, 0x00, "Powerstack (Series E)",		Comet_pci_IRQ_map,	Comet_pci_IRQ_routes},
+	{0x040, 0x00, 0x00, "Blackhawk (Powerstack)",		Blackhawk_pci_IRQ_map,	Blackhawk_pci_IRQ_routes},
+	{0x050, 0x00, 0x00, "Omaha (PowerStack II Pro3000)",	Omaha_pci_IRQ_map,	Omaha_pci_IRQ_routes},
+	{0x060, 0x00, 0x00, "Utah (Powerstack II Pro4000)",	Utah_pci_IRQ_map,	Utah_pci_IRQ_routes},
+	{0x0A0, 0x00, 0x00, "Powerstack (Series EX)",		Comet2_pci_IRQ_map,	Comet2_pci_IRQ_routes},
+	{0x1E0, 0xE0, 0x00, "Mesquite cPCI (MCP750)",		Mesquite_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xE1, 0x00, "Sitka cPCI (MCPN750)",		Sitka_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xE2, 0x00, "Mesquite cPCI (MCP750) w/ HAC",	Mesquite_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xF6, 0x80, "MTX Plus",				MTXplus_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xF6, 0x81, "Dual MTX Plus",			MTXplus_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xF7, 0x80, "MTX wo/ Parallel Port",		MTX_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xF7, 0x81, "Dual MTX wo/ Parallel Port",	MTX_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xF8, 0x80, "MTX w/ Parallel Port",		MTX_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xF8, 0x81, "Dual MTX w/ Parallel Port",	MTX_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xF9, 0x00, "MVME 2300",			Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFA, 0x00, "MVME 2300SC/2600",			Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFB, 0x00, "MVME 2600 with MVME712M",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFC, 0x00, "MVME 2600/2700 with MVME761",	Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFD, 0x80, "MVME 3600 with MVME712M",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFD, 0x81, "MVME 4600 with MVME712M",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFE, 0x80, "MVME 3600 with MVME761",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFE, 0x81, "MVME 4600 with MVME761",		Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x1E0, 0xFF, 0x00, "MVME 1600-001 or 1600-011",	Genesis2_pci_IRQ_map,	Raven_pci_IRQ_routes},
+	{0x000, 0x00, 0x00, "",					NULL,			NULL}
 };
 
-__initfunc(unsigned long prep_route_pci_interrupts(void))
+unsigned long __init prep_route_pci_interrupts(void)
 {
 	unsigned char *ibc_pirq = (unsigned char *)0x80800860;
 	unsigned char *ibc_pcicon = (unsigned char *)0x80800840;
@@ -858,7 +849,6 @@ __initfunc(unsigned long prep_route_pci_interrupts(void))
 		Motherboard_map_name = (unsigned char *)mot_info[mot_entry].name;
 		Motherboard_map = mot_info[mot_entry].map;
 		Motherboard_routes = mot_info[mot_entry].routes;
-		Motherboard_non0 = mot_info[mot_entry].map_non0_bus;
 
 		if (!(mot_info[entry].cpu_type & 0x100)) {
 			/* AJF adjust level/edge control according to routes */
@@ -989,178 +979,35 @@ __initfunc(unsigned long prep_route_pci_interrupts(void))
 	return 0;
 }
 
-static unsigned int pci_localpirqs[4] =
+void __init
+prep_pcibios_fixup(void)
 {
-	24,
-	25,
-	26,
-	27
-};
+        struct pci_dev *dev;
+        extern unsigned char *Motherboard_map;
+        extern unsigned char *Motherboard_routes;
+        unsigned char i;
 
-static unsigned int pci_remotepirqs[4] =
-{
-	28,
-	29,
-	30,
-	31
-};
-
-static unsigned int pci_remotedev = 0xc0;
-
-void
-Mesquite_Map_Non0(struct pci_dev *pdev)
-{
-	struct pci_bus  *pbus;          /* Parent Bus Structure Pointer */
-	unsigned int    devnum;         /* Accumulated Device Number */
-	unsigned int    irq;            /* IRQ Value */
-
-	/*
-	**    Device Interrupt Line register initialization.
-	**    The IRQ line number will be generated after
-	**    taking into account all the PCI-2-PCI bridge
-	**    devices between the device and the Host Bridge.
-	*/
-	devnum = PCI_SLOT(pdev->devfn);
-	pbus = pdev->bus;
-
-	while ((pbus->parent)->primary != (pbus->parent)->secondary)
-	{
-	    devnum += PCI_SLOT((pbus->self)->devfn);
-
-	    pbus = pbus->parent;
-	}
-
-	devnum &= 0x03;
-
-	/*
-	**    By default, get the PCI local domain IRQ value.
-	*/
-	irq = pci_localpirqs[devnum];
-
-	/*
-	**    Determine if the device is located in the
-	**    remote domain or not. We must find the
-	**    domain's bridge device located on bus 0.
-	*/
-	pbus = pdev->bus;
-
-	while (pbus->primary != 0)
-	    pbus = pbus->parent;
-
-	/*
-	**    Check the device/function of domain's bridge
-	**    device against the remote device/function.
-	**    If the same, then the device is located in
-	**    the remote domain. Thus, get the PCI remote
-	**    domain IRQ value.
-	*/
-	if ((pbus->self)->devfn == pci_remotedev)
-        irq = pci_remotepirqs[devnum];
-
-	/*
-	**    Validate the IRQ number.
-	*/
-	if (irq <= 255)
-	{
-	    /*
-	    **    Set the device's Interrupt Line register
-	    **    to the IRQ number and save it in the
-	    **    device's structure.
-	    */
-
-	    pci_write_config_byte(pdev, PCI_INTERRUPT_LINE, (u8)irq);
-
-	    pdev->irq = irq;
-
-	}
-	return;
-}
-
-int motopenpic_to_irq(int n)
-{
-       if (n & 0xF0) {
-               return (n & 0x0F);
-       } else {
-               return(openpic_to_irq(n));
-       }
-}
-
-void prep_pib_init(void)
-{
-unsigned char   reg;
-unsigned short  short_reg;
-
-struct pci_dev *dev = NULL;
-
-	if (( _prep_type == _PREP_Motorola) && (OpenPIC)) {
-		/*
-		 * Perform specific configuration for the Via Tech or
-		 * or Winbond PCI-ISA-Bridge part.
-		 */
-		if ((dev = pci_find_device(PCI_VENDOR_ID_VIA, 
-					PCI_DEVICE_ID_VIA_82C586_1, dev))) {
-			/*
-			 * PPCBUG does not set the enable bits
-			 * for the IDE device. Force them on here.
-			 */
-			pcibios_read_config_byte(dev->bus->number, 
-					dev->devfn, 0x40, &reg);
-
-			reg |= 0x03; /* IDE: Chip Enable Bits */
-			pcibios_write_config_byte(dev->bus->number, 
-					dev->devfn, 0x40, reg);
-
-		} else if ((dev = pci_find_device(PCI_VENDOR_ID_WINBOND, 
-					PCI_DEVICE_ID_WINBOND_83C553, dev))) {
-			/*
-			 * Clear the PCI Interrupt Routing Control Register.
-			 */
-			short_reg = 0x0000;
-			pcibios_write_config_word(dev->bus->number, 
-					dev->devfn, 0x44, short_reg);
-		}
-	}
-}
-__initfunc(
-void
-prep_pcibios_fixup(void))
-{
-extern unsigned char *Motherboard_map;
-extern unsigned char *Motherboard_routes;
-unsigned char	i;
-struct pci_dev  *dev;
-
-	if (_prep_type == _PREP_Radstone) {
-		printk("Radstone boards require no PCI fixups\n");
+        if ( _prep_type == _PREP_Radstone )
+        {
+                printk("Radstone boards require no PCI fixups\n");
 		return;
-	}
+        }
 
 	prep_route_pci_interrupts();
 
-	prep_pib_init();
-
 	printk("Setting PCI interrupts for a \"%s\"\n", Motherboard_map_name);
-
 	if (OpenPIC) {
-
-	    /* PCI interrupts are controlled by the OpenPIC */
-	    for(dev=pci_devices; dev; dev=dev->next) {
-		if (dev->bus->number == 0) {
-		    dev->irq = 
-		       motopenpic_to_irq(Motherboard_map[PCI_SLOT(dev->devfn)]);
-
-		    pcibios_write_config_byte(dev->bus->number, dev->devfn, 
-					      PCI_INTERRUPT_PIN, dev->irq);
-		} else {
-			if (Motherboard_non0 != NULL)
-				Motherboard_non0(dev);
+		/* PCI interrupts are controlled by the OpenPIC */
+		pci_for_each_dev(dev) {
+			if (dev->bus->number == 0) {
+                       		dev->irq = openpic_to_irq(Motherboard_map[PCI_SLOT(dev->devfn)]);
+				pcibios_write_config_byte(dev->bus->number, dev->devfn, PCI_INTERRUPT_PIN, dev->irq);
+			}
 		}
-
-	    }
-	return;
+		return;
 	}
 
-	for(dev=pci_devices; dev; dev=dev->next) {
+	pci_for_each_dev(dev) {
 		/*
 		 * Use our old hard-coded kludge to figure out what
 		 * irq this device uses.  This is necessary on things
@@ -1169,35 +1016,37 @@ struct pci_dev  *dev;
 		unsigned char d = PCI_SLOT(dev->devfn);
 		dev->irq = Motherboard_routes[Motherboard_map[d]];
 
-		for ( i = 0 ; i <= 5 ; i++ ) {
-			if ( dev->base_address[i] > 0x10000000 ) {
-				printk("Relocating PCI address %lx -> %lx\n",
-				dev->base_address[i],
-				(dev->base_address[i] & 0x00FFFFFF)|0x01000000);
-
-				dev->base_address[i] = (dev->base_address[i] & 
-							0x00FFFFFF)|0x01000000;
-				pci_write_config_dword(dev, 
-						PCI_BASE_ADDRESS_0+(i*0x4),
-						dev->base_address[i] );
-			}
+		for ( i = 0 ; i <= 5 ; i++ )
+		{
+		        if ( dev->resource[i].start > 0x10000000 )
+		        {
+		                printk("Relocating PCI address %lx -> %lx\n",
+		                       dev->resource[i].start,
+		                       (dev->resource[i].start & 0x00FFFFFF)
+		                       | 0x01000000);
+		                dev->resource[i].start =
+		                  (dev->resource[i].start & 0x00FFFFFF) | 0x01000000;
+		                pci_write_config_dword(dev,
+		                        PCI_BASE_ADDRESS_0+(i*0x4),
+		                       dev->resource[i].start );
+		        }
 		}
 #if 0
-	/*
-	 * If we have residual data and if it knows about this
-	 * device ask it what the irq is.
-	 *  -- Cort
-	 */
-	ppcd = residual_find_device_id( ~0L, dev->device, -1,-1,-1, 0);
+		/*
+		 * If we have residual data and if it knows about this
+		 * device ask it what the irq is.
+		 *  -- Cort
+		 */
+		ppcd = residual_find_device_id( ~0L, dev->device,
+		                                -1,-1,-1, 0);
 #endif
 	}
 }
 
 decl_config_access_method(indirect);
 
-__initfunc(
-void
-prep_setup_pci_ptrs(void))
+void __init
+prep_setup_pci_ptrs(void)
 {
 	PPC_DEVICE *hostbridge;
 
@@ -1206,7 +1055,7 @@ prep_setup_pci_ptrs(void))
         {
 		pci_config_address = (unsigned *)0x80000cf8;
 		pci_config_data = (char *)0x80000cfc;
-                set_config_access_method(indirect);		
+		set_config_access_method(indirect);		
         }
         else
         {

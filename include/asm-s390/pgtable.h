@@ -2,7 +2,7 @@
  *  include/asm-s390/pgtable.h
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Hartmut Penner
  *
  *  Derived from "include/asm-i386/pgtable.h"
@@ -10,8 +10,6 @@
 
 #ifndef _ASM_S390_PGTABLE_H
 #define _ASM_S390_PGTABLE_H
-
-#include <linux/config.h>
 
 /*
  * The Linux memory management assumes a three-level page table setup. On
@@ -26,151 +24,25 @@
 #include <asm/processor.h>
 #include <linux/tasks.h>
 
+extern pgd_t swapper_pg_dir[] __attribute__ ((aligned (4096)));
+
 /* Caches aren't brain-dead on S390. */
 #define flush_cache_all()                       do { } while (0)
 #define flush_cache_mm(mm)                      do { } while (0)
 #define flush_cache_range(mm, start, end)       do { } while (0)
 #define flush_cache_page(vma, vmaddr)           do { } while (0)
 #define flush_page_to_ram(page)                 do { } while (0)
+#define flush_dcache_page(page)			do { } while (0)
 #define flush_icache_range(start, end)          do { } while (0)
+#define flush_icache_page(vma,pg)               do { } while (0)
 
 /*
- * TLB flushing:
- *
- *  - flush_tlb() flushes the current mm struct TLBs
- *  - flush_tlb_all() flushes all processes TLBs 
- *    called only from vmalloc/vfree
- *  - flush_tlb_mm(mm) flushes the specified mm context TLB's
- *  - flush_tlb_page(vma, vmaddr) flushes one page
- *  - flush_tlb_range(mm, start, end) flushes a range of pages
- *
+ * ZERO_PAGE is a global shared page that is always zero: used
+ * for zero-mapped memory areas etc..
  */
-
-
-/*
- * s390 has two ways of flushing TLBs
- * 'ptlb' does a flush of the local processor
- * 'ipte' invalidates a pte in a page table and flushes that out of 
- * the TLBs of all PUs of a SMP 
- */
-
-#define __flush_tlb() \
-do {  __asm__ __volatile__("ptlb": : :"memory"); } while (0)
-
-
-static inline void __flush_global_tlb(void) 
-{
-	int cs1=0,dum=0;
-	int *adr;
-	long long dummy=0;
-	adr = (int*) (((int)(((int*) &dummy)+1) & 0xfffffffc)|1);
-	__asm__ __volatile__("lr    2,%0\n\t"
-			     "lr    3,%1\n\t"
-			     "lr    4,%2\n\t"
-			     ".long 0xb2500024" :
-			     : "d" (cs1), "d" (dum), "d" (adr)
-			     : "2", "3", "4");
-}
-
-static inline void __flush_tlb_one(struct mm_struct *mm,
-                                   unsigned long addr);
-
-
-#ifndef __SMP__
-
-#define flush_tlb()       __flush_tlb()
-#define flush_tlb_all()   __flush_tlb()
-#define local_flush_tlb() __flush_tlb()
-
-/*
- * We always need to flush, since s390 does not flush tlb
- * on each context switch
- */
-
-
-static inline void flush_tlb_mm(struct mm_struct *mm)
-{
-        __flush_tlb();
-}
-
-static inline void flush_tlb_page(struct vm_area_struct *vma,
-        unsigned long addr)
-{
-        __flush_tlb_one(vma->vm_mm,addr);
-}
-
-static inline void flush_tlb_range(struct mm_struct *mm,
-        unsigned long start, unsigned long end)
-{
-        __flush_tlb();
-}
-
-#else
-
-/*
- * We aren't very clever about this yet -  SMP could certainly
- * avoid some global flushes..
- */
-
-#include <asm/smp.h>
-
-#define local_flush_tlb() \
-        __flush_tlb()
-
-/*
- *      We only have to do global flush of tlb if process run since last
- *      flush on any other pu than current. 
- *      If we have threads (mm->count > 1) we always do a global flush, 
- *      since the process runs on more than one processor at the same time.
- */
-
-static inline void flush_tlb_current_task(void)
-{
-	if ((atomic_read(&current->mm->count) != 1) ||
-	    (current->mm->cpu_vm_mask != (1UL << smp_processor_id()))) {
-		current->mm->cpu_vm_mask = (1UL << smp_processor_id());
-		__flush_global_tlb();
-	} else {                 
-		local_flush_tlb();
-	}
-}
-
-#define flush_tlb() flush_tlb_current_task()
-
-#define flush_tlb_all() __flush_global_tlb()
-
-static inline void flush_tlb_mm(struct mm_struct * mm)
-{
-	if ((atomic_read(&mm->count) != 1) ||
-	    (mm->cpu_vm_mask != (1UL << smp_processor_id()))) {
-		mm->cpu_vm_mask = (1UL << smp_processor_id());
-		__flush_global_tlb();
-	} else {                 
-		local_flush_tlb();
-	}
-}
-
-static inline void flush_tlb_page(struct vm_area_struct * vma,
-        unsigned long va)
-{
-	__flush_tlb_one(vma->vm_mm,va);
-}
-
-static inline void flush_tlb_range(struct mm_struct * mm,
-				   unsigned long start, unsigned long end)
-{
-	if ((atomic_read(&mm->count) != 1) ||
-	    (mm->cpu_vm_mask != (1UL << smp_processor_id()))) {
-		mm->cpu_vm_mask = (1UL << smp_processor_id());
-		__flush_global_tlb();
-	} else {                 
-		local_flush_tlb();
-	}
-}
-
-#endif
-#endif                                 /* !__ASSEMBLY__                    */
-
+extern unsigned long empty_zero_page[1024];
+#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
+#endif /* !__ASSEMBLY__ */
 
 /* Certain architectures need to do special things when PTEs
  * within a page table are directly modified.  Thus, the following
@@ -205,6 +77,15 @@ static inline void flush_tlb_range(struct mm_struct * mm,
 #define USER_PTRS_PER_PGD  512
 #define USER_PGD_PTRS      512
 #define KERNEL_PGD_PTRS    512
+#define FIRST_USER_PGD_NR  0
+
+#define pte_ERROR(e) \
+	printk("%s:%d: bad pte %08lx.\n", __FILE__, __LINE__, pte_val(e))
+#define pmd_ERROR(e) \
+	printk("%s:%d: bad pmd %08lx.\n", __FILE__, __LINE__, pmd_val(e))
+#define pgd_ERROR(e) \
+	printk("%s:%d: bad pgd %08lx.\n", __FILE__, __LINE__, pgd_val(e))
+
 #ifndef __ASSEMBLY__
 /* Just any arbitrary offset to the start of the vmalloc VM area: the
  * current 8MB value just means that there will be a 8MB "hole" after the
@@ -284,7 +165,7 @@ static inline void flush_tlb_range(struct mm_struct * mm,
  * The Kernel segment-tables includes the User segment-table
  */
 
-#define _SEGMENT_TABLE  (_USER_SEG_TABLE_LEN)
+#define _SEGMENT_TABLE  (_USER_SEG_TABLE_LEN|0x80000000)
 #define _KERNSEG_TABLE  (_KERNEL_SEG_TABLE_LEN)
 /*
  * No mapping available
@@ -328,25 +209,7 @@ static inline void flush_tlb_range(struct mm_struct * mm,
 #undef TEST_VERIFY_AREA
 
 /* page table for 0-4MB for everybody */
-
 extern unsigned long pg0[1024];
-
-/* zero page used for uninitialized stuff */
-extern unsigned long empty_zero_page[1024];
-
-/*
- * BAD_PAGETABLE is used when we need a bogus page-table, while
- * BAD_PAGE is used for a bogus page.
- *
- * ZERO_PAGE is a global shared page that is always zero: used
- * for zero-mapped memory areas etc..
- */
-extern pte_t __bad_page(void);
-extern pte_t * __bad_pagetable(void);
-
-#define BAD_PAGETABLE __bad_pagetable()
-#define BAD_PAGE __bad_page()
-#define ZERO_PAGE(vaddr) ((unsigned long) empty_zero_page)
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR                    (8*sizeof(unsigned long))
@@ -374,21 +237,41 @@ extern pte_t * __bad_pagetable(void);
  * 
  */
 
-#define SET_PAGE_DIR(tsk,pgdir)                                                 \
-do {                                                                            \
+#define SET_PAGE_DIR(tsk,pgdir)                                              \
+do {                                                                         \
         unsigned long __pgdir = (__pa(pgdir) & PAGE_MASK ) | _SEGMENT_TABLE; \
-        (tsk)->tss.user_seg = __pgdir;                                        \
-        if ((tsk) == current) {                                               \
-                __asm__ __volatile__("lctl  7,7,%0": :"m" (__pgdir));         \
-                __asm__ __volatile__("lctl  13,13,%0": :"m" (__pgdir));       \
-        }                                                                     \
+        (tsk)->thread.user_seg = __pgdir;                                    \
+        if ((tsk) == current) {                                              \
+                __asm__ __volatile__("lctl  7,7,%0": :"m" (__pgdir));        \
+                __asm__ __volatile__("lctl  13,13,%0": :"m" (__pgdir));      \
+        }                                                                    \
+} while (0)
+
+/* 
+ * CR 7 (SPST) and cr 13 (HPST) are set to the user pgdir. 
+ * Kernel is running in its own, disjunct address space,
+ * running in primary address space.
+ * Copy to/from user is done via access register mode with
+ * access registers set to 0 or 1. For that purpose we need 
+ * set up CR 7 with the user pgd.  
+ * 
+ */
+
+#define SET_PAGE_DIR(tsk,pgdir)                                              \
+do {                                                                         \
+        unsigned long __pgdir = (__pa(pgdir) & PAGE_MASK ) | _SEGMENT_TABLE; \
+        (tsk)->thread.user_seg = __pgdir;                                    \
+        if ((tsk) == current) {                                              \
+                __asm__ __volatile__("lctl  7,7,%0": :"m" (__pgdir));        \
+                __asm__ __volatile__("lctl  13,13,%0": :"m" (__pgdir));      \
+        }                                                                    \
 } while (0)
 
 
-extern inline int pte_none(pte_t pte)           { return ((pte_val(pte) & (_PAGE_INVALID | _PAGE_RO)) ==  
-							  _PAGE_INVALID); } 
+extern inline int pte_none(pte_t pte)           { return ((pte_val(pte) & (_PAGE_INVALID | _PAGE_RO)) == _PAGE_INVALID); } 
 extern inline int pte_present(pte_t pte)        { return pte_val(pte) & _PAGE_PRESENT; }
 extern inline void pte_clear(pte_t *ptep)       { pte_val(*ptep) = _PAGE_INVALID; }
+#define PTE_INIT(x) pte_clear(x)
 
 extern inline int pmd_none(pmd_t pmd)           { return pmd_val(pmd) & _PAGE_TABLE_INV; }
 extern inline int pmd_bad(pmd_t pmd)            { return (pmd_val(pmd) == 0); }
@@ -443,7 +326,7 @@ extern inline pte_t pte_mkyoung(pte_t pte)      { pte_val(pte) |= _PAGE_ACCESSED
  * and a page entry and page directory to the page they refer to.
  */
 #define mk_pte(page, pgprot) \
-({ pte_t __pte; pte_val(__pte) = __pa(page) + pgprot_val(pgprot); __pte; })
+({ pte_t __pte; pte_val(__pte) = __pa(((page)-mem_map)<<PAGE_SHIFT) + pgprot_val(pgprot); __pte; })
 
 /* This takes a physical page address that is used by the remapping functions */
 #define mk_pte_phys(physpage, pgprot) \
@@ -452,15 +335,18 @@ extern inline pte_t pte_mkyoung(pte_t pte)      { pte_val(pte) |= _PAGE_ACCESSED
 extern inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 { pte_val(pte) = (pte_val(pte) & PAGE_MASK) | pgprot_val(newprot); return pte; }
 
-#define pte_page(pte) \
-((unsigned long) __va(pte_val(pte) & PAGE_MASK))
+#define page_address(page)  ((page)->virtual)
+#define pte_page(x) (mem_map+(unsigned long)((pte_val(pte) >> PAGE_SHIFT)))
 
 #define pmd_page(pmd) \
 ((unsigned long) __va(pmd_val(pmd) & PAGE_MASK))
 
 /* to find an entry in a page-table-directory */
-#define pgd_offset(mm, address) \
-((mm)->pgd + ((address) >> PGDIR_SHIFT))
+#define pgd_index(address) ((address >> PGDIR_SHIFT) & (PTRS_PER_PGD-1))
+
+#define __pgd_offset(address) pgd_index(address)
+
+#define pgd_offset(mm, address) ((mm)->pgd+pgd_index(address))
 
 /* to find an entry in a kernel page-table-directory */
 #define pgd_offset_k(address) pgd_offset(&init_mm, address)
@@ -476,116 +362,6 @@ extern inline pmd_t * pmd_offset(pgd_t * dir, unsigned long address)
 ((pte_t *) (pmd_page(*pmd) + ((address>>10) & ((PTRS_PER_PTE-1)<<2))))
 
 
-static inline void __flush_tlb_one(struct mm_struct *mm,
-                                   unsigned long addr)
-{
-	pgd_t * pgdir;
-	pmd_t * pmd;
-	pte_t * pte, *pto;
-	
-	pgdir = pgd_offset(mm, addr);
-	if (pgd_none(*pgdir) || pgd_bad(*pgdir))
-		return;
-	pmd = pmd_offset(pgdir, addr);
-	if (pmd_none(*pmd) || pmd_bad(*pmd))
-		return;
-	pte = pte_offset(pmd,addr);
-
-	/*
-	 * S390 has 1mb segments, we are emulating 4MB segments
-	 */
-
-	pto = (pte_t*) (((unsigned long) pte) & 0x7ffffc00);
-	       
-       	__asm__ __volatile("    ic   0,2(%0)\n"
-			   "    ipte %1,%2\n"
-			   "    stc  0,2(%0)"
-			   : : "a" (pte), "a" (pto), "a" (addr): "0");
-}
-
-/*
- * Allocate and free page tables. The xxx_kernel() versions are
- * used to allocate a kernel page table - this turns on ASN bits
- * if any.
- */
-
-#define pgd_quicklist (S390_lowcore.cpu_data.pgd_quick)
-#define pmd_quicklist ((unsigned long *)0)
-#define pte_quicklist (S390_lowcore.cpu_data.pte_quick)
-#define pgtable_cache_size (S390_lowcore.cpu_data.pgtable_cache_sz)
-
-extern __inline__ pgd_t* get_pgd_slow(void)
-{
-        int i;
-        pgd_t *pgd,*ret = (pgd_t *)__get_free_pages(GFP_KERNEL,2);
-	if (ret)
-		for (i=0,pgd=ret;i<USER_PTRS_PER_PGD;i++,pgd++)
-			pmd_clear(pmd_offset(pgd,i*PGDIR_SIZE));
-        return ret;
-}
-
-extern __inline__ pgd_t* get_pgd_fast(void)
-{
-        unsigned long *ret;
-	
-        if((ret = pgd_quicklist) != NULL) {
-                pgd_quicklist = (unsigned long *)(*ret);
-                ret[0] = ret[1];
-                pgtable_cache_size--;
-		/*
-		 * Need to flush tlb, since private page tables
-		 * are unique thru address of pgd and virtual address.
-		 * If we reuse pgd we need to be sure no tlb entry
-		 * with that pdg is left -> global flush
-		 *
-		 * Fixme: To avoid this global flush we should
-		 * use pdg_quicklist as fix lenght fifo list
-		 * and not as stack
-		 */
-        } else
-                ret = (unsigned long *)get_pgd_slow();
-        return (pgd_t *)ret;
-}
-
-extern __inline__ void free_pgd_fast(pgd_t *pgd)
-{
-        *(unsigned long *)pgd = (unsigned long) pgd_quicklist;
-        pgd_quicklist = (unsigned long *) pgd;
-        pgtable_cache_size++;
-}
-
-extern __inline__ void free_pgd_slow(pgd_t *pgd)
-{
-        free_pages((unsigned long)pgd,2);
-}
-
-extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
-extern pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long address_preadjusted);
-
-extern __inline__ pte_t* get_pte_fast(void)
-{
-        unsigned long *ret;
-
-        if((ret = (unsigned long *)pte_quicklist) != NULL) {
-                pte_quicklist = (unsigned long *)(*ret);
-                ret[0] = ret[1];
-                pgtable_cache_size--;
-        }
-        return (pte_t *)ret;
-}
-
-extern __inline__ void free_pte_fast(pte_t *pte)
-{
-        *(unsigned long *)pte = (unsigned long) pte_quicklist;
-        pte_quicklist = (unsigned long *) pte;
-        pgtable_cache_size++;
-}
-
-extern __inline__ void free_pte_slow(pte_t *pte)
-{
-        free_page((unsigned long)pte);
-}
-
 /* We don't use pmd cache, so these are dummy routines */
 extern __inline__ pmd_t *get_pmd_fast(void)
 {
@@ -600,82 +376,8 @@ extern __inline__ void free_pmd_slow(pmd_t *pmd)
 {
 }
 
-extern void __bad_pte(pmd_t *pmd);
-extern void __bad_pte_kernel(pmd_t *pmd);
-
-#define pte_free_kernel(pte)    free_pte_fast(pte)
-#define pte_free(pte)           free_pte_fast(pte)
-#define pgd_free(pgd)           free_pgd_fast(pgd)
-#define pgd_alloc()             get_pgd_fast()
-
-extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
-{
-        address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-        if (pmd_none(*pmd)) {
-                pte_t * page = (pte_t *) get_pte_fast();
-
-                if (!page)
-                        return get_pte_kernel_slow(pmd, address);
-                pmd_val(pmd[0]) = _KERNPG_TABLE + __pa(page);
-                pmd_val(pmd[1]) = _KERNPG_TABLE + __pa(page+1024);
-                pmd_val(pmd[2]) = _KERNPG_TABLE + __pa(page+2048);
-                pmd_val(pmd[3]) = _KERNPG_TABLE + __pa(page+3072);
-                return page + address;
-        }
-        if (pmd_bad(*pmd)) {
-                __bad_pte_kernel(pmd);
-                return NULL;
-        }
-        return (pte_t *) pmd_page(*pmd) + address;
-}
-
-extern inline pte_t * pte_alloc(pmd_t * pmd, unsigned long address)
-{
-        address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-
-        if (pmd_none(*pmd))
-                goto getnew;
-        if (pmd_bad(*pmd))
-                goto fix;
-        return (pte_t *) pmd_page(*pmd) + address;
-getnew:
-{
-        unsigned long page = (unsigned long) get_pte_fast();
-
-        if (!page)
-                return get_pte_slow(pmd, address);
-        pmd_val(pmd[0]) = _PAGE_TABLE + __pa(page);
-        pmd_val(pmd[1]) = _PAGE_TABLE + __pa(page+1024);
-        pmd_val(pmd[2]) = _PAGE_TABLE + __pa(page+2048);
-        pmd_val(pmd[3]) = _PAGE_TABLE + __pa(page+3072);
-        return (pte_t *) page + address;
-}
-fix:
-        __bad_pte(pmd);
-        return NULL;
-}
-
-/*
- * allocating and freeing a pmd is trivial: the 1-entry pmd is
- * inside the pgd, so has no extra memory associated with it.
- */
-extern inline void pmd_free(pmd_t * pmd)
-{
-}
-
-extern inline pmd_t * pmd_alloc(pgd_t * pgd, unsigned long address)
-{
-        return (pmd_t *) pgd;
-}
-
-#define pmd_free_kernel         pmd_free
-#define pmd_alloc_kernel        pmd_alloc
-
-extern int do_check_pgt_cache(int, int);
-
-#define set_pgdir(addr,entry) do { } while(0)
-
-extern pgd_t swapper_pg_dir[] __attribute__ ((aligned (4096)));
+extern void __handle_bad_pmd(pmd_t *pmd);
+extern void __handle_bad_pmd_kernel(pmd_t *pmd);
 
 /*
  * The S390 doesn't have any external MMU info: the kernel page
@@ -693,13 +395,17 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
  * therefor, we zero out this bits
  */
 
-#define SWP_TYPE(entry) (((entry) >> 1) & 0x3f)
-#define SWP_OFFSET(entry) (((entry) >> 12) & 0x7FFFF )
-#define SWP_ENTRY(type,offset) ((((type) << 1) | ((offset) << 12) |  \
-				 _PAGE_INVALID | _PAGE_RO) & 0x7FFFF6FE)
+#define SWP_TYPE(entry) (((entry).val >> 1) & 0x3f)
+#define SWP_OFFSET(entry) (((entry).val >> 12) & 0x7FFFF )
+#define SWP_ENTRY(type,offset) ((swp_entry_t) { (((type) << 1) | \
+                                                 ((offset) << 12) | \
+                                                 _PAGE_INVALID | _PAGE_RO) \
+                                                 & 0x7ffff6fe })
 
-#define module_map      vmalloc
-#define module_unmap    vfree
+#define pte_to_swp_entry(pte)           ((swp_entry_t) { pte_val(pte) })
+#define swp_entry_to_pte(x)             ((pte_t) { (x).val })
+
+#include <asm-generic/pgtable.h>
 
 #endif /* !__ASSEMBLY__ */
 

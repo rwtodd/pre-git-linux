@@ -405,9 +405,9 @@ struct s_AC  {
 	SK_U32		AllocFlag;	/* flag allocation of resources */
 	struct pci_dev	PciDev;		/* for access to pci config space */
 	SK_U32		PciDevId;	/* pci device id */
-	struct device	*dev;		/* pointer to device struct */
+	struct net_device	*dev;		/* pointer to device struct */
 	char		Name[30];	/* driver name */
-	struct device	*Next;		/* link all devices (for clearing) */
+	struct net_device	*Next;		/* link all devices (for clearing) */
 	int		RxBufSize;	/* length of receive buffers */
         struct net_device_stats stats;	/* linux 'netstat -i' statistics */
 	int		Index;		/* internal board index number */
@@ -429,6 +429,8 @@ struct s_AC  {
 
 	
 	caddr_t		pDescrMem;	/* Pointer to the descriptor area */
+	dma_addr_t	pDescrMemDMA;	/* PCI DMA address of area */
+
 	/* the port structures with descriptor rings */
 	TX_PORT		TxPort[SK_MAX_MACS][2];
 	RX_PORT		RxPort[SK_MAX_MACS];

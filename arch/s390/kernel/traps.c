@@ -2,7 +2,7 @@
  *  arch/s390/kernel/traps.c
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  *               Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com),
  *
@@ -30,7 +30,6 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
-#include <asm/spinlock.h>
 #include <asm/atomic.h>
 #include <asm/mathemu.h>
 #if CONFIG_REMOTE_DEBUG
@@ -48,25 +47,14 @@ extern pgm_check_handler_t do_page_fault;
 
 asmlinkage int system_call(void);
 
-static inline void console_verbose(void)
-{
-        extern int console_loglevel;
-        console_loglevel = 15;
-}
-
 #define DO_ERROR(trapnr, signr, str, name, tsk) \
 asmlinkage void name(struct pt_regs * regs, long error_code) \
 { \
-        if (check_for_fixup(regs) == 0) { \
-                tsk->tss.error_code = error_code; \
-                tsk->tss.trap_no = trapnr; \
-                force_sig(signr, tsk); \
-	        die(str,regs,error_code); \
-        } \
+        tsk->thread.error_code = error_code; \
+        tsk->thread.trap_no = trapnr; \
+	die_if_no_fixup(str,regs,error_code); \
+        force_sig(signr, tsk); \
 }
-
-
-void page_exception(void);
 
 /* TODO: define these as 'pgm_check_handler_t xxx;'
 asmlinkage void divide_error(void);
@@ -203,7 +191,7 @@ int do_debugger_trap(struct pt_regs *regs,int signal)
 		if(current->flags & PF_PTRACED)
 			force_sig(signal,current);
 		else
-			return(TRUE);
+			return 1;
 	}
 	else
 	{
@@ -211,14 +199,34 @@ int do_debugger_trap(struct pt_regs *regs,int signal)
 		if(gdb_stub_initialised)
 		{
 			gdb_stub_handle_exception((gdb_pt_regs *)regs,signal);
-			return(FALSE);
+			return 0;
 		}
 #endif
-		return(TRUE);
+		return 1;
 	}
-	return(FALSE);
+	return 0;
 }
 
+static void die_if_no_fixup(const char * str, struct pt_regs * regs, long err)
+{
+	if (!(regs->psw.mask & PSW_PROBLEM_STATE)) {
+		unsigned long fixup;
+		fixup = search_exception_table(regs->psw.addr);
+		if (fixup) {
+			regs->psw.addr = fixup;
+			return;
+		}
+		die(str, regs, err);
+	}
+}
+
+asmlinkage void default_trap_handler(struct pt_regs * regs, long error_code)
+{
+        current->thread.error_code = error_code;
+        current->thread.trap_no = error_code;
+        die_if_no_fixup("Unknown program exception",regs,error_code);
+        force_sig(SIGSEGV, current);
+}
 
 DO_ERROR(2, SIGILL, "privileged operation", privileged_op, current)
 DO_ERROR(3, SIGILL, "execute exception", execute_exception, current)
@@ -255,7 +263,7 @@ asmlinkage void illegal_op(struct pt_regs * regs, long error_code)
 		get_user(*((__u16 *) opcode), location);
 	else
 		*((__u16 *)opcode)=*((__u16 *)location);
-	if(*((__u16 *)opcode)==BREAKPOINT_U16)
+	if(*((__u16 *)opcode)==S390_BREAKPOINT_U16)
         {
 		if(do_debugger_trap(regs,SIGTRAP))
 			do_sig=1;
@@ -283,12 +291,10 @@ asmlinkage void illegal_op(struct pt_regs * regs, long error_code)
         } else
 		do_sig = 1;
 	if (do_sig) {
-                if (check_for_fixup(regs) == 0) {
-                        current->tss.error_code = error_code;
-                        current->tss.trap_no = 1;
-                        force_sig(SIGILL, current);
-                        die("illegal operation", regs, error_code);
-                }
+		current->thread.error_code = error_code;
+		current->thread.trap_no = 1;
+		force_sig(SIGILL, current);
+		die_if_no_fixup("illegal operation", regs, error_code);
         }
         unlock_kernel();
 }
@@ -333,12 +339,10 @@ asmlinkage void specification_exception(struct pt_regs * regs, long error_code)
         } else
 		do_sig = 1;
 	if (do_sig) {
-                if (check_for_fixup(regs) == 0) {
-                        current->tss.error_code = error_code;
-                        current->tss.trap_no = 1;
-                        force_sig(SIGILL, current);
-                        die("illegal operation", regs, error_code);
-                }
+		current->thread.error_code = error_code;
+		current->thread.trap_no = 1;
+		force_sig(SIGILL, current);
+		die_if_no_fixup("illegal operation", regs, error_code);
         }
         unlock_kernel();
 }
@@ -405,12 +409,10 @@ asmlinkage void data_exception(struct pt_regs * regs, long error_code)
         } else
 		do_sig = 1;
 	if (do_sig) {
-                if (check_for_fixup(regs) == 0) {
-                        current->tss.error_code = error_code;
-                        current->tss.trap_no = 7;
-                        force_sig(SIGILL, current);
-                        die("data exception", regs, error_code);
-                }
+		current->thread.error_code = error_code;
+		current->thread.trap_no = 1;
+		force_sig(SIGILL, current);
+		die_if_no_fixup("illegal operation", regs, error_code);
         }
         unlock_kernel();
 }
@@ -424,7 +426,7 @@ DO_ERROR(7, SIGILL, "data exception", data_exception, current)
 
 /* init is done in lowcore.S and head.S */
 
-__initfunc(void trap_init(void))
+void __init trap_init(void)
 {
         int i;
 
@@ -443,6 +445,7 @@ __initfunc(void trap_init(void))
         pgm_check_table[4] = &do_page_fault;
         pgm_check_table[0x10] = &do_page_fault;
         pgm_check_table[0x11] = &do_page_fault;
+        pgm_check_table[0x1C] = &privileged_op;
 }
 
 
@@ -450,12 +453,19 @@ void handle_per_exception(struct pt_regs *regs)
 {
 	if(regs->psw.mask&PSW_PROBLEM_STATE)
 	{
-		per_struct *per_info=&current->tss.per_info;
+		per_struct *per_info=&current->thread.per_info;
 		per_info->lowcore.words.perc_atmid=S390_lowcore.per_perc_atmid;
 		per_info->lowcore.words.address=S390_lowcore.per_address;
 		per_info->lowcore.words.access_id=S390_lowcore.per_access_id;
 	}
 	if(do_debugger_trap(regs,SIGTRAP))
+	{
+		/* I've seen this possibly a task structure being reused ? */
 		printk("Spurious per exception detected\n");
+		printk("switching off per tracing for this task.\n");
+		show_crashed_task_info();
+		/* Hopefully switching off per tracing will help us survive */
+		regs->psw.mask &= ~PSW_PER_MASK;
+	}
 }
 

@@ -2,14 +2,14 @@
  *
  *                    Linux MegaRAID device driver
  *
- * Copyright 1998 American Megatrends Inc.
+ * Copyright 1999 American Megatrends Inc.
  *
  *              This program is free software; you can redistribute it and/or
  *              modify it under the terms of the GNU General Public License
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Version : 1.05
+ * Version : 1.07b
  * 
  * Description: Linux device driver for AMI MegaRAID controller
  *
@@ -120,6 +120,14 @@
  *      also enables the driver to handle large amount of I/O requests for
  *      long duration of time.
  *
+ * Version 1.07
+ *    Removed the usage of uaccess.h file for kernel versions less than
+ *    2.0.36, as this file is not present in those versions.
+ *
+ * Version 1.07b
+ *    The MegaRAID 466 cards with 3.00 firmware lockup and seem to very
+ *    occasionally hang. We check such cards and report them. You can
+ *    get firmware upgrades to flash the board to 3.10 for free.
  *
  * BUGS:
  *     Some older 2.1 kernels (eg. 2.1.90) have a bug in pci.c that
@@ -135,24 +143,22 @@
 #define CRLFSTR "\n"
 #define IOCTL_CMD_NEW  0x81
 
-#define MEGARAID_VERSION "v1.05 (October 27, 1999)"
+#define MEGARAID_VERSION "v107 (December 22, 1999)"
 
 
-#include <linux/config.h>
 #include <linux/version.h>
 
 #ifdef MODULE
 #include <linux/modversions.h>
 #include <linux/module.h>
 
-#if LINUX_VERSION_CODE >= 0x20100
 char kernel_version[] = UTS_RELEASE;
 
 MODULE_AUTHOR ("American Megatrends Inc.");
 MODULE_DESCRIPTION ("AMI MegaRAID driver");
 #endif
-#endif
 
+#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -166,19 +172,14 @@ MODULE_DESCRIPTION ("AMI MegaRAID driver");
 #include <linux/tqueue.h>
 #include <linux/interrupt.h>
 
-#include <linux/sched.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>	/* for kmalloc() */
-#include <linux/config.h>	/* for CONFIG_PCI */
-#if LINUX_VERSION_CODE < 0x20100
-#include <linux/bios32.h>
-#else
-#include <asm/spinlock.h>
-#endif
+#include <linux/spinlock.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
+#if LINUX_VERSION_CODE > 0x020024
 #include <asm/uaccess.h>
+#endif
 
 #include "sd.h"
 #include "scsi.h"
@@ -192,28 +193,6 @@ MODULE_DESCRIPTION ("AMI MegaRAID driver");
  *
  *================================================================
  */
-
-#if LINUX_VERSION_CODE < 0x020100
-#define ioremap vremap
-#define iounmap vfree
-
-/* simulate spin locks */
-typedef struct {
-  volatile char lock;
-} spinlock_t;
-
-#define spin_lock_init(x) { (x)->lock = 0;}
-#define spin_lock_irqsave(x,flags) { while ((x)->lock) barrier();\
-                                        (x)->lock=1; save_flags(flags);\
-                                        cli();}
-#define spin_unlock_irqrestore(x,flags) { (x)->lock=0; restore_flags(flags);}
-
-#endif
-
-#if LINUX_VERSION_CODE >= 0x020100
-#define queue_task_irq(a,b)     queue_task(a,b)
-#define queue_task_irq_off(a,b) queue_task(a,b)
-#endif
 
 #define MAX_SERBUF 160
 #define COM_BASE 0x2f8
@@ -245,6 +224,8 @@ void WROUTDOOR (mega_host_config * megaCfg, u32 value)
  *
  *================================================================
  */
+static int __init megaraid_setup(char *);
+
 static int megaIssueCmd (mega_host_config * megaCfg,
 			 u_char * mboxData,
 			 mega_scb * scb,
@@ -263,52 +244,17 @@ static void mega_Convert8ldTo40ld(  mega_RAIDINQ  *inquiry,
                                     megaRaidProductInfo *productInfo );
 
 
+#include <linux/smp.h>
 
 
-
-#if LINUX_VERSION_CODE > 0x020100
-#  include <asm/spinlock.h>
-#  include <linux/smp.h>
-#  define cpuid smp_processor_id()
-#  if LINUX_VERSION_CODE < 0x020195
-#    define DRIVER_LOCK_T unsigned long cpu_flags = 0;
-#    define DRIVER_LOCK_INIT(p) \
-       spin_lock_init(&p->mega_lock);
-#    define DRIVER_LOCK(p) \
-       if(!p->cpu_lock_count[cpuid]) { \
-         spin_lock_irqsave(&p->mega_lock, cpu_flags); \
-         p->cpu_lock_count[cpuid]++; \
-       } else { \
-         p->cpu_lock_count[cpuid]++; \
-       }
-#    define DRIVER_UNLOCK(p) \
-       if(--p->cpu_lock_count[cpuid] == 0) \
-         spin_unlock_irqrestore(&p->mega_lock, cpu_flags);
-#    define IO_LOCK(p)   spin_lock_irqsave(&io_request_lock,cpu_flags);
-#    define IO_UNLOCK(p) spin_unlock_irqrestore(&io_request_lock,cpu_flags);
-#  else
-#    define DRIVER_LOCK_T
-#    define DRIVER_LOCK_INIT(p)
-#    define DRIVER_LOCK(p)
-#    define DRIVER_UNLOCK(p)
-#    define IO_LOCK_T unsigned long io_flags = 0;
-#    define IO_LOCK spin_lock_irqsave(&io_request_lock,io_flags);
-#    define IO_UNLOCK spin_unlock_irqrestore(&io_request_lock,io_flags);
-#  endif
-#else
-#  define cpuid 0
-#  define DRIVER_LOCK_T long cpu_flags;
-#  define DRIVER_LOCK_INIT(p)
-#  define DRIVER_LOCK(p) \
-       save_flags(cpu_flags); \
-       cli();
-#  define DRIVER_UNLOCK(p) \
-       restore_flags(cpu_flags);
-#  define IO_LOCK(p)   DRIVER_LOCK(p)
-#  define IO_UNLOCK(p) DRIVER_UNLOCK(p)
-#  define le32_to_cpu(x) (x)
-#  define cpu_to_le32(x) (x)
-#endif
+#define cpuid smp_processor_id()
+#define DRIVER_LOCK_T
+#define DRIVER_LOCK_INIT(p)
+#define DRIVER_LOCK(p)
+#define DRIVER_UNLOCK(p)
+#define IO_LOCK_T unsigned long io_flags = 0;
+#define IO_LOCK spin_lock_irqsave(&io_request_lock,io_flags);
+#define IO_UNLOCK spin_unlock_irqrestore(&io_request_lock,io_flags);
 
 /* set SERDEBUG to 1 to enable serial debugging */
 #define SERDEBUG 0
@@ -329,11 +275,9 @@ static int ser_printk (const char *fmt,...);
 /*  Use "megaraid=skipXX" as LILO option to prohibit driver from scanning
     XX scsi id on each channel.  Used for Madrona motherboard, where SAF_TE
     processor id cannot be scanned */
-static char *megaraid;
-#if LINUX_VERSION_CODE > 0x20100
 #ifdef MODULE
+static char *megaraid = NULL;
 MODULE_PARM(megaraid, "s");
-#endif
 #endif
 static int skip_id;
 
@@ -348,15 +292,8 @@ static mega_scb *pLastScb = NULL;
 
 
 #if SERDEBUG
-volatile static spinlock_t serial_lock;
+static spinlock_t serial_lock = SPIN_LOCK_UNLOCKED;
 #endif
-//volatile static spinlock_t mega_lock;
-
-struct proc_dir_entry proc_scsi_megaraid =
-{
-  PROC_SCSI_MEGARAID, 8, "megaraid",
-  S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 #if SERDEBUG
 static char strbuf[MAX_SERBUF + 1];
@@ -593,7 +530,6 @@ mega_cmd_done (mega_host_config * megaCfg, mega_scb * pScb,
   }
 
   SCpnt = pScb->SCpnt;
-  /*freeSCB(megaCfg, pScb);*/ /*delay this to the end of this func.*/
   pthru = &pScb->pthru;
   mbox = (mega_mailbox *) &pScb->mboxData;
 
@@ -708,13 +644,11 @@ static mega_scb * mega_build_cmd (mega_host_config * megaCfg,
 
   if ( islogical ) {
 	lun = (SCpnt->target * 8) + lun;
-#if 1
         if ( lun > FC_MAX_LOGICAL_DRIVES ){
             SCpnt->result = (DID_BAD_TARGET << 16);
             callDone (SCpnt);
             return NULL;
         }
-#endif
   }
   /*-----------------------------------------------------
    *
@@ -878,7 +812,6 @@ static mega_scb * mega_ioctl (mega_host_config * megaCfg, Scsi_Cmnd * SCpnt)
     return NULL;
   }
 
-
   mboxdata = (u8 *) & pScb->mboxData;
   mbox = (mega_ioctl_mbox *) & pScb->mboxData;
   mailbox = (mega_mailbox *) & pScb->mboxData;
@@ -913,6 +846,14 @@ static mega_scb * mega_ioctl (mega_host_config * megaCfg, Scsi_Cmnd * SCpnt)
   }
   /* else normal (nonpassthru) command */
 
+#if LINUX_VERSION_CODE > 0x020024
+/*
+ * usage of the function copy from user is used in case of data more than
+ * 4KB.  This is used only with adapters which supports more than 8 logical
+ * drives.  This feature is disabled on kernels earlier or same as 2.0.36
+ * as the uaccess.h file is not available with those kernels.
+ */
+
   if (SCpnt->cmnd[0] == IOCTL_CMD_NEW) { 
             /* use external data area for large xfers  */
      /* If cmnd[0] is set to IOCTL_CMD_NEW then *
@@ -938,6 +879,7 @@ static mega_scb * mega_ioctl (mega_host_config * megaCfg, Scsi_Cmnd * SCpnt)
       copy_from_user(kern_area,user_area,xfer_size);
       pScb->kern_area = kern_area;
   }
+#endif
 
   mbox->cmd = data[0];
   mbox->channel = data[1];
@@ -998,7 +940,9 @@ static unsigned int cum_time_cnt = 0;
  *--------------------------------------------------------------------*/
 static void megaraid_isr (int irq, void *devp, struct pt_regs *regs)
 {
+#if LINUX_VERSION_CODE >= 0x20100
   IO_LOCK_T
+#endif
   mega_host_config    *megaCfg;
   u_char byte, idx, sIdx, tmpBox[MAILBOX_SIZE];
   u32 dword=0;
@@ -1011,12 +955,9 @@ static void megaraid_isr (int irq, void *devp, struct pt_regs *regs)
   megaCfg = (mega_host_config *) devp;
   mbox = (mega_mailbox *)tmpBox;
 
-
   if (megaCfg->host->irq == irq) {
-
     if (megaCfg->flag & IN_ISR) {
-      TRACE (("ISR called reentrantly!!\n"));
-      printk ("ISR called reentrantly!!\n");
+      printk(KERN_ERR "ISR called reentrantly!!\n");
     }
 
     megaCfg->flag |= IN_ISR;
@@ -1031,10 +972,6 @@ static void megaraid_isr (int irq, void *devp, struct pt_regs *regs)
       if (dword != 0x10001234) {
 	/* Spurious interrupt */
 	megaCfg->flag &= ~IN_ISR;
-//#if LINUX_VERSION_CODE >= 0x20100
-//        IO_UNLOCK;
-//#endif
-//	break;
 	return;
       }
     }
@@ -1043,10 +980,6 @@ static void megaraid_isr (int irq, void *devp, struct pt_regs *regs)
       if ((byte & VALID_INTR_BYTE) == 0) {
 	/* Spurious interrupt */
 	megaCfg->flag &= ~IN_ISR;
-//#if LINUX_VERSION_CODE >= 0x20100
-//	IO_UNLOCK;
-//#endif
-//	break;
 	return;
       }
       WRITE_PORT (megaCfg->host->io_port, INTR_PORT, byte);
@@ -1054,9 +987,7 @@ static void megaraid_isr (int irq, void *devp, struct pt_regs *regs)
 
     for(idx=0;idx<MAX_FIRMWARE_STATUS;idx++ ) completed[idx] = 0;
 
-#if LINUX_VERSION_CODE >= 0x20100
     IO_LOCK;
-#endif
 
     qCnt = 0xff;
     while ((qCnt = megaCfg->mbox->numstatus) == 0xFF) 
@@ -1110,9 +1041,6 @@ static void megaraid_isr (int irq, void *devp, struct pt_regs *regs)
  */
 	if (pScb->state == SCB_ABORTED) {
           SCpnt = pScb->SCpnt;
-#if DEBUG
-printk("megaraid_isr:fcnt=%d, pcnt=%d, qcnt=%d\n",megaCfg->qFcnt, megaCfg->qPcnt, megaCfg->qCcnt); 
-#endif
 	}
 	if (pScb->state == SCB_RESET) {
           SCpnt = pScb->SCpnt;
@@ -1139,14 +1067,14 @@ printk("megaraid_isr:fcnt=%d, pcnt=%d, qcnt=%d\n",megaCfg->qFcnt, megaCfg->qPcnt
 
       }
       else {
-        printk("megaraid: wrong cmd id completed from firmware:id=%x\n",sIdx);
-	for(;;);
+        printk(KERN_ERR "megaraid: wrong cmd id completed from firmware:id=%x\n",sIdx);
       }
     }
 
     mega_rundoneq(megaCfg);
 
     megaCfg->flag &= ~IN_ISR;
+
     /* Loop through any pending requests */
     mega_runpendq(megaCfg);
 #if LINUX_VERSION_CODE >= 0x20100
@@ -1154,7 +1082,6 @@ printk("megaraid_isr:fcnt=%d, pcnt=%d, qcnt=%d\n",megaCfg->qFcnt, megaCfg->qPcnt
 #endif
 
   }
-
 }
 
 /*==================================================*/
@@ -1211,9 +1138,6 @@ static int megaIssueCmd (mega_host_config * megaCfg,
 #endif
 
   /* Wait until mailbox is free */
-#if 0
-  while (mega_busyWaitMbox (megaCfg))
-#endif
   if (mega_busyWaitMbox (megaCfg)) {
     printk("Blocked mailbox......!!\n");
     udelay(1000);
@@ -1266,7 +1190,6 @@ static int megaIssueCmd (mega_host_config * megaCfg,
 
       if (pScb) {
 	mega_cmd_done (megaCfg, pScb, mbox->status);
-//	mega_rundoneq (megaCfg);
       }
 
       WRINDOOR (megaCfg, phys_mbox | 0x2);
@@ -1285,7 +1208,6 @@ static int megaIssueCmd (mega_host_config * megaCfg,
 
       if (pScb) {
 	mega_cmd_done (megaCfg, pScb, mbox->status);
-//	mega_rundoneq (megaCfg);
       }
       else {
 	TRACE (("Error: NULL pScb!\n"));
@@ -1424,7 +1346,6 @@ static int mega_i_query_adapter (mega_host_config * megaCfg)
   u32 paddr;
   u8 retval;
 
-
   /* Initialize adapter inquiry mailbox*/
   paddr = virt_to_bus (megaCfg->mega_buffer);
   mbox = (mega_mailbox *) mboxData;
@@ -1496,25 +1417,6 @@ static int mega_i_query_adapter (mega_host_config * megaCfg)
     megaCfg->host->can_queue = MAX_COMMANDS-1;
   }
 
-#if 0 
-  int i;
-  printk (KERN_DEBUG "---- Logical drive info from enquiry3 struct----\n");
-  for (i = 0; i < megaCfg->numldrv; i++) {
-    printk ("%d: size: %d prop: %x state: %x\n", i,
-	    enquiry3Pnt->lDrvSize[i],
-	    enquiry3Pnt->lDrvProp[i],
-	    enquiry3Pnt->lDrvState[i]);
-  }
-
-  printk (KERN_DEBUG "---- Physical drive info ----\n");
-  for (i = 0; i < FC_MAX_PHYSICAL_DEVICES; i++) {
-    if (i && !(i % 8))
-      printk ("\n");
-    printk ("%d: %x   ", i, enquiry3Pnt->pDrvState[i]);
-  }
-  printk ("\n");
-#endif
-
 #ifdef HP			/* use HP firmware and bios version encoding */
   sprintf (megaCfg->fwVer, "%c%d%d.%d%d",
 	   megaCfg->productInfo.FwVer[2],
@@ -1529,19 +1431,19 @@ static int mega_i_query_adapter (mega_host_config * megaCfg)
 	   megaCfg->productInfo.BiosVer[2] >> 8,
 	   megaCfg->productInfo.BiosVer[2] & 0x0f);
 #else
-  memcpy (megaCfg->fwVer, megaCfg->productInfo.FwVer, 4);
-  megaCfg->fwVer[4] = 0;
+	memcpy (megaCfg->fwVer, (void *)megaCfg->productInfo.FwVer, 4);
+	megaCfg->fwVer[4] = 0;
 
-  memcpy (megaCfg->biosVer, megaCfg->productInfo.BiosVer, 4);
-  megaCfg->biosVer[4] = 0;
+	memcpy (megaCfg->biosVer, (void *)megaCfg->productInfo.BiosVer, 4);
+	megaCfg->biosVer[4] = 0;
 #endif
 
-  printk ("megaraid: [%s:%s] detected %d logical drives" CRLFSTR,
-          megaCfg->fwVer,
-	  megaCfg->biosVer,
-	  megaCfg->numldrv);
+	printk ("megaraid: [%s:%s] detected %d logical drives" CRLFSTR,
+        	megaCfg->fwVer,
+		megaCfg->biosVer,
+		megaCfg->numldrv);
 
-  return 0;
+	return 0;
 }
 
 /*-------------------------------------------------------------------------
@@ -1566,68 +1468,39 @@ int mega_findCard (Scsi_Host_Template * pHostTmpl,
 {
   mega_host_config *megaCfg;
   struct Scsi_Host *host;
-  u_char pciBus, pciDevFun, megaIrq;
+  u_char megaIrq;
   u32 megaBase;
-  u16 pciIdx = 0;
   u16 numFound = 0;
 
-#if LINUX_VERSION_CODE < 0x20100
-  while (!pcibios_find_device (pciVendor, pciDev, pciIdx, &pciBus, &pciDevFun)) {
-
-#if 0
-  } /* keep auto-indenters happy */
-#endif
-#else
-  
-  struct pci_dev *pdev = pci_devices;
+  struct pci_dev *pdev = NULL;
   
   while ((pdev = pci_find_device (pciVendor, pciDev, pdev))) {
-    pciBus = pdev->bus->number;
-    pciDevFun = pdev->devfn;
-#endif
+    if (pci_enable_device(pdev))
+    	continue;
     if ((flag & BOARD_QUARTZ) && (skip_id == -1)) {
       u16 magic;
-      pcibios_read_config_word (pciBus, pciDevFun,
-				PCI_CONF_AMISIG,
-				&magic);
-      if (magic != AMI_SIGNATURE) {
-        pciIdx++;
+      pci_read_config_word(pdev, PCI_CONF_AMISIG, &magic);
+      if ((magic != AMI_SIGNATURE) && (magic != AMI_SIGNATURE_471))
 	continue;		/* not an AMI board */
-      }
     }
-    printk (KERN_INFO "megaraid: found 0x%4.04x:0x%4.04x:idx %d:bus %d:slot %d:func %d\n",
+    printk (KERN_INFO "megaraid: found 0x%4.04x:0x%4.04x: in %s\n",
 	    pciVendor,
 	    pciDev,
-	    pciIdx, pciBus,
-	    PCI_SLOT (pciDevFun),
-	    PCI_FUNC (pciDevFun));
+	    pdev->slot_name);
 
     /* Read the base port and IRQ from PCI */
-#if LINUX_VERSION_CODE < 0x20100
-    pcibios_read_config_dword (pciBus, pciDevFun,
-			       PCI_BASE_ADDRESS_0,
-			       (u_int *) & megaBase);
-    pcibios_read_config_byte (pciBus, pciDevFun,
-			      PCI_INTERRUPT_LINE,
-			      &megaIrq);
-#else
-    megaBase = pdev->base_address[0];
+    megaBase = pci_resource_start (pdev, 0);
     megaIrq  = pdev->irq;
-#endif
-    pciIdx++;
 
-    if (flag & BOARD_QUARTZ) {
-
-      megaBase &= PCI_BASE_ADDRESS_MEM_MASK;
+    if (flag & BOARD_QUARTZ)
       megaBase = (long) ioremap (megaBase, 128);
-    }
-    else {
-      megaBase &= PCI_BASE_ADDRESS_IO_MASK;
+    else
       megaBase += 0x10;
-    }
 
     /* Initialize SCSI Host structure */
     host = scsi_register (pHostTmpl, sizeof (mega_host_config));
+    if(host == NULL)
+    	continue;
     megaCfg = (mega_host_config *) host->hostdata;
     memset (megaCfg, 0, sizeof (mega_host_config));
 
@@ -1650,16 +1523,15 @@ int mega_findCard (Scsi_Host_Template * pHostTmpl,
     megaCfg->host->irq = megaIrq;
     megaCfg->host->io_port = megaBase;
     megaCfg->host->n_io_port = 16;
-    megaCfg->host->unique_id = (pciBus << 8) | pciDevFun;
+    megaCfg->host->unique_id = (pdev->bus->number << 8) | pdev->devfn;
     megaCtlrs[numCtlrs++] = megaCfg; 
     if (flag != BOARD_QUARTZ) {
       /* Request our IO Range */
-      if (check_region (megaBase, 16)) {
+      if (request_region (megaBase, 16, "megaraid")) {
 	printk (KERN_WARNING "megaraid: Couldn't register I/O range!" CRLFSTR);
 	scsi_unregister (host);
 	continue;
       }
-      request_region (megaBase, 16, "megaraid");
     }
 
     /* Request our IRQ */
@@ -1673,10 +1545,43 @@ int mega_findCard (Scsi_Host_Template * pHostTmpl,
 
     mega_register_mailbox (megaCfg, virt_to_bus ((void *) &megaCfg->mailbox64));
     mega_i_query_adapter (megaCfg);
-    
+   
+    if (flag == BOARD_QUARTZ) {
+      /* Check to see if this is a Dell PERC RAID controller model 466 */
+      u16 subsysid, subsysvid;
+#if LINUX_VERSION_CODE < 0x20100
+      pcibios_read_config_word (pciBus, pciDevFun,
+				PCI_SUBSYSTEM_VENDOR_ID,
+				&subsysvid);
+      pcibios_read_config_word (pciBus, pciDevFun,
+				PCI_SUBSYSTEM_ID,
+				&subsysid);
+#else
+      pci_read_config_word (pdev, PCI_SUBSYSTEM_VENDOR_ID, &subsysvid);
+      pci_read_config_word (pdev, PCI_SUBSYSTEM_ID, &subsysid);
+#endif
+      if ( (subsysid == 0x1111) && (subsysvid == 0x1111) &&
+           (!strcmp(megaCfg->fwVer,"3.00") || !strcmp(megaCfg->fwVer,"3.01"))) {
+	printk(KERN_WARNING
+"megaraid: Your card is a Dell PERC 2/SC RAID controller with firmware\n"
+"megaraid: 3.00 or 3.01.  This driver is known to have corruption issues\n"
+"megaraid: with those firmware versions on this specific card.  In order\n"
+"megaraid: to protect your data, please upgrade your firmware to version\n"
+"megaraid: 3.10 or later, available from the Dell Technical Support web\n"
+"megaraid: site at\n"
+"http://support.dell.com/us/en/filelib/download/index.asp?fileid=2940\n");
+	megaraid_release (host);
+#ifdef MODULE	
+	continue;
+#else
+	while(1) schedule_timeout(1 * HZ);
+#endif	
+      }
+    }
+
     /* Initialize SCBs */
     if (mega_initSCB (megaCfg)) {
-      scsi_unregister (host);
+      megaraid_release (host);
       continue;
     }
 
@@ -1692,24 +1597,12 @@ int megaraid_detect (Scsi_Host_Template * pHostTmpl)
 {
   int count = 0;
 
-  pHostTmpl->proc_dir = &proc_scsi_megaraid;
-
-#if LINUX_VERSION_CODE < 0x20100
-  if (!pcibios_present ()) {
-    printk (KERN_WARNING "megaraid: PCI bios not present." CRLFSTR);
-    return 0;
-  }
+#ifdef MODULE
+  if (megaraid)
+      megaraid_setup(megaraid);
 #endif
-  skip_id = -1;
-  if (megaraid && !strncmp(megaraid,"skip",strlen("skip"))) {
-      if (megaraid[4] != '\0') {
-          skip_id = megaraid[4] - '0';
-          if (megaraid[5] != '\0') {
-              skip_id = (skip_id * 10) + (megaraid[5] - '0');
-          }
-      }
-      skip_id = (skip_id > 15) ? -1 : skip_id;
-  }
+
+  pHostTmpl->proc_name = "megaraid";
 
   printk ("megaraid: " MEGARAID_VERSION CRLFSTR);
 
@@ -1824,9 +1717,6 @@ int megaraid_queue (Scsi_Cmnd * SCpnt, void (*pktComp) (Scsi_Cmnd *))
 
   /* If driver in abort or reset.. cancel this command */
   if (megaCfg->flag & IN_ABORT) {
-#if DEBUG
-printk("mq: got a request while in abort\n");
-#endif
     SCpnt->result = (DID_ABORT << 16);
     /* Add Scsi_Command to end of completed queue */
     if( megaCfg->qCompletedH == NULL ) {
@@ -1843,9 +1733,6 @@ printk("mq: got a request while in abort\n");
     return 0;
   }
   else if (megaCfg->flag & IN_RESET) {
-#if DEBUG
-printk("mq: got a request while in reset\n");
-#endif
     SCpnt->result = (DID_RESET << 16);
     /* Add Scsi_Command to end of completed queue */
     if( megaCfg->qCompletedH == NULL ) {
@@ -1878,22 +1765,15 @@ printk("mq: got a request while in reset\n");
     megaCfg->qPendingT->next = NULL;
     megaCfg->qPcnt++;
 
-
-    /* Issue any pending command to the card if not in ISR */
-//    if (!(megaCfg->flag & IN_ISR)) {
       mega_runpendq(megaCfg);
-//    }
-/* 
- * try running the pend queue, irrespective of the driver's context.
- * -cn 
- */
 
+#if LINUX_VERSION_CODE > 0x020024
     if ( SCpnt->cmnd[0]==IOCTL_CMD_NEW )
     {  /* user data from external user buffer */
           char *user_area;
           u32  xfer_size;
 
-          pScb->sem=MUTEX_LOCKED;
+          init_MUTEX_LOCKED(&pScb->sem);
           down(&pScb->sem);
 
           user_area = *((char **)&pScb->SCpnt->cmnd[4]);
@@ -1905,6 +1785,7 @@ printk("mq: got a request while in reset\n");
 
           mega_freeSCB(megaCfg, pScb);
     }
+#endif
   }
 
   megaCfg->flag &= ~IN_QUEUE;
@@ -1918,7 +1799,7 @@ printk("mq: got a request while in reset\n");
  *----------------------------------------------------------------------*/
 volatile static int internal_done_flag = 0;
 volatile static int internal_done_errcode = 0;
-static struct wait_queue *internal_wait = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(internal_wait);
 
 static void internal_done (Scsi_Cmnd * SCpnt)
 {
@@ -1959,9 +1840,6 @@ megaraid_abort (Scsi_Cmnd * SCpnt)
 
   megaCfg->flag |= IN_ABORT;
 
-#if DEBUG
-printk("ma:fcnt=%d, pcnt=%d, qcnt=%d\n",megaCfg->qFcnt, megaCfg->qPcnt, megaCfg->qCcnt); 
-#endif
   for(pScb=megaCfg->qPendingH; pScb; pScb=pScb->next) {
     if (pScb->SCpnt == SCpnt) {
       /* Found an aborting command */
@@ -2013,20 +1891,6 @@ printk("ma:fcnt=%d, pcnt=%d, qcnt=%d\n",megaCfg->qFcnt, megaCfg->qPcnt, megaCfg-
     }
   }
 
-#if 0
-  TRACE (("ABORT!!! %.08lx %.02x <%d.%d.%d>\n",
-	  SCpnt->serial_number, SCpnt->cmnd[0], SCpnt->channel, SCpnt->target,
-	  SCpnt->lun));
-  for(pScb=megaCfg->qPending; pScb; pScb=pScb->next) {
-    if (pScb->SCpnt == SCpnt) { 
-      ser_printk("** %d<%x>  %c\n", pScb->SCpnt->pid, pScb->idx+1,
-		 pScb->state == SCB_ACTIVE ? 'A' : 'I');
-#if DEBUG
-      showMbox(pScb);
-#endif
-    }
-  }
-#endif
   megaCfg->flag &= ~IN_ABORT;
 
 #if DEBUG
@@ -2044,12 +1908,11 @@ if(megaCfg->qCompletedH) {
   megaCfg->qCompletedH = (Scsi_Cmnd *)SCpnt->host_scribble;
   megaCfg->qCcnt--;
 
-  SCpnt->host_scribble = (unsigned char *) NULL ; // XC : sep 14
+  SCpnt->host_scribble = (unsigned char *) NULL ;
   /* Callback */
   callDone (SCpnt);
 }
   mega_rundoneq(megaCfg);
-
 
   return rc;
 }
@@ -2135,8 +1998,23 @@ int megaraid_biosparam (Disk * disk, kdev_t dev, int *geom)
   return 0;
 }
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = MEGARAID;
+static int __init megaraid_setup(char *str)
+{
+  skip_id = -1;
+  if (str && !strncmp(str, "skip", strlen("skip"))) {
+      if (str[4] != '\0') {
+          skip_id = str[4] - '0';
+          if (str[5] != '\0') {
+              skip_id = (skip_id * 10) + (str[5] - '0');
+          }
+      }
+      skip_id = (skip_id > 15) ? -1 : skip_id;
+  }
+  return 1;
+}
+
+__setup("megaraid=", megaraid_setup);
+
+static Scsi_Host_Template driver_template = MEGARAID;
 
 #include "scsi_module.c"
-#endif

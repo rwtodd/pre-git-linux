@@ -160,13 +160,6 @@
 #  define inb			inb_p
 #endif
 
-#ifdef LINUX20
-#  define __initfunc(f)				f
-#  define __initdata				/* nothing */
-#  define spin_lock_irqsave(junk,flags)		do { save_flags(flags); cli(); } while (0)
-#  define spin_unlock_irqrestore(junk,flags)	do { restore_flags(flags); } while (0)
-#endif
-
 /* JobQueueStruct */
 #define JQS_wStart		0x00
 #define JQS_wSize		0x02
@@ -189,7 +182,7 @@ typedef u8			BYTE;
 typedef u16			USHORT;
 typedef u16			WORD;
 typedef u32			DWORD;
-typedef volatile BYTE *		LPDAQD;
+typedef unsigned long		LPDAQD;
 
 /* Generic FIFO */
 typedef struct {
@@ -209,12 +202,12 @@ typedef struct multisound_dev {
 	int memid, irqid;
 	int irq, irq_ref;
 	unsigned char info;
-	volatile BYTE *base;
+	unsigned long base;
 
 	/* Motorola 56k DSP SMA */
-	volatile BYTE *SMA;
-	volatile BYTE *DAPQ, *DARQ, *MODQ, *MIDQ, *DSPQ;
-	volatile WORD *pwDSPQData, *pwMIDQData, *pwMODQData;
+	unsigned long SMA;
+	unsigned long DAPQ, DARQ, MODQ, MIDQ, DSPQ;
+	unsigned long pwDSPQData, pwMIDQData, pwMODQData;
 	int dspq_data_buff, dspq_buff_size;
 
 	/* State variables */
@@ -233,11 +226,10 @@ typedef struct multisound_dev {
 #define F_EXT_MIDI_INUSE		9
 #define F_HDR_MIDI_INUSE		10
 #define F_DISABLE_WRITE_NDELAY		11
-	struct wait_queue *writeblock, *readblock;
-	struct wait_queue *writeflush;
-#ifndef LINUX20
+	wait_queue_head_t writeblock;
+	wait_queue_head_t readblock;
+	wait_queue_head_t writeflush;
 	spinlock_t lock;
-#endif
 	int nresets;
 	unsigned long recsrc;
 	int left_levels[16];
@@ -249,8 +241,6 @@ typedef struct multisound_dev {
 	int rec_sample_size, rec_sample_rate, rec_channels;
 	int rec_ndelay;
 	BYTE bCurrentMidiPatch;
-	void (*inc_ref)(void);
-	void (*dec_ref)(void);
 
 	/* Digital audio FIFOs */
 	msnd_fifo DAPF, DARF;
@@ -270,7 +260,7 @@ void				msnd_unregister(multisound_dev_t *dev);
 int				msnd_get_num_devs(void);
 multisound_dev_t *		msnd_get_dev(int i);
 
-void				msnd_init_queue(volatile BYTE *base, int start, int size);
+void				msnd_init_queue(unsigned long, int start, int size);
 
 void				msnd_fifo_init(msnd_fifo *f);
 void				msnd_fifo_free(msnd_fifo *f);

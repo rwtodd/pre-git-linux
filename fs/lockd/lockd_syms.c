@@ -23,7 +23,6 @@
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/lockd/lockd.h>
-#include <linux/lockd/syscall.h>
 
 /* Start/stop the daemon */
 EXPORT_SYMBOL(lockd_up);
@@ -35,7 +34,6 @@ EXPORT_SYMBOL(nlmclnt_proc);
 /* NFS server entry points/hooks */
 EXPORT_SYMBOL(nlmsvc_invalidate_client);
 EXPORT_SYMBOL(nlmsvc_ops);
-EXPORT_SYMBOL(lockdctl);
 
 /* Configuration at insmod time */
 EXPORT_SYMBOL(nlmsvc_grace_period);

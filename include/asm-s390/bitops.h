@@ -12,6 +12,7 @@
  *    Copyright (C) 1992, Linus Torvalds
  *
  */
+#include <linux/config.h>
 
 /*
  * bit 0 is the LSB of *addr; bit 31 is the MSB of *addr;
@@ -61,7 +62,7 @@ extern int find_first_zero_bit(void * addr, unsigned size);
 extern int find_next_zero_bit (void * addr, int size, int offset);
 extern unsigned long ffz(unsigned long word);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 /*
  * SMP save set_bit routine based on compare and swap (CS)
  */
@@ -246,7 +247,7 @@ extern __inline__ int test_and_change_bit_cs(int nr, volatile void * addr)
              : "cc", "memory", "1", "2" );
         return nr;
 }
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 /*
  * fast, non-SMP set_bit routine
@@ -560,7 +561,7 @@ extern __inline__ int test_and_change_bit_simple(int nr, volatile void * addr)
         return oldbit;
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define set_bit             set_bit_cs
 #define clear_bit           clear_bit_cs
 #define change_bit          change_bit_cs
@@ -877,8 +878,9 @@ ext2_find_next_zero_bit(void *vaddr, unsigned size, unsigned offset)
 
 /* Bitmap functions for the minix filesystem.  */
 /* FIXME !!! */
-#define minix_set_bit(nr,addr) test_and_set_bit(nr,addr)
-#define minix_clear_bit(nr,addr) test_and_clear_bit(nr,addr)
+#define minix_test_and_set_bit(nr,addr) test_and_set_bit(nr,addr)
+#define minix_set_bit(nr,addr) set_bit(nr,addr)
+#define minix_test_and_clear_bit(nr,addr) test_and_clear_bit(nr,addr)
 #define minix_test_bit(nr,addr) test_bit(nr,addr)
 #define minix_find_first_zero_bit(addr,size) find_first_zero_bit(addr,size)
 

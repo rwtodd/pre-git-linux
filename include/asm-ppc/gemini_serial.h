@@ -1,7 +1,15 @@
+#ifdef __KERNEL__
 #ifndef __ASMPPC_GEMINI_SERIAL_H
 #define __ASMPPC_GEMINI_SERIAL_H
 
+#include <linux/config.h>
 #include <asm/gemini.h>
+
+#ifdef CONFIG_SERIAL_MANY_PORTS
+#define RS_TABLE_SIZE  64
+#else
+#define RS_TABLE_SIZE  4
+#endif
 
 /* Rate for the 24.576 Mhz clock for the onboard serial chip */
 #define BASE_BAUD  (24576000 / 16)
@@ -30,3 +38,4 @@
         PU32_SERIAL_PORT_DEFNS
 
 #endif
+#endif /* __KERNEL__ */

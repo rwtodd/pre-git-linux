@@ -2,7 +2,7 @@
  *  include/asm-s390/uaccess.h
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Hartmut Penner (hp@de.ibm.com),
  *               Martin Schwidefsky (schwidefsky@de.ibm.com)
  *
@@ -37,9 +37,9 @@
 #define USER_DS         MAKE_MM_SEG(PAGE_OFFSET,1)
 
 #define get_ds()        (KERNEL_DS)
-#define get_fs()        (current->tss.fs)
+#define get_fs()        (current->thread.fs)
 #define set_fs(x)       ({asm volatile("sar   4,%0"::"a" (x.acc4)); \
-                         current->tss.fs = (x);})
+                         current->thread.fs = (x);})
 
 #define segment_eq(a,b) ((a).acc4 == (b).acc4)
 
@@ -309,7 +309,7 @@ extern int __put_user_bad(void);
 #define get_user(x, ptr)                                        \
 ({                                                              \
         long __gu_err = -EFAULT;                                \
-        __typeof__(*(ptr)) *__gu_addr = (ptr);                  \
+        __typeof__(ptr) __gu_addr = (ptr);                      \
         __typeof__(x) __x;                                      \
         if (__access_ok((long)__gu_addr,sizeof(*(ptr)))) {      \
                 __gu_err = 0;                                   \
@@ -407,10 +407,6 @@ __copy_from_user_asm(void* to, const void* from,  long n)
         err;                                                    \
 })
 
-#define copy_from_user_ret(to,from,n,retval) ({ if (copy_from_user(to,from,n)) return retval; })
-
-#define copy_to_user_ret(to,from,n,retval) ({ if (copy_to_user(to,from,n)) return retval; })
-
 /*
  * Copy a null terminated string from userspace.
  */
@@ -427,30 +423,28 @@ strncpy_from_user(char *dst, const char *src, long count)
                                 "   sacf  512\n"
                                 "0: ic    3,0(%0,4)\n"
                                 "1: stc   3,0(%0,2)\n"
-                                "   ahi   %0,1\n"
-                                "   cr    %0,%3\n"
-                                "   je    2f\n"
                                 "   ltr   3,3\n"
-                                "   jne   0b\n"
+                                "   jz    2f\n"
+                                "   ahi   %0,1\n"
+                                "   clr   %0,%3\n"
+                                "   jl    0b\n"
                                 "2: sacf  0(1)\n"
-				"3:\n"
 				".section .fixup,\"ax\"\n"
-				"4: sacf  0(1)\n"
-                                "   lhi   %0,%h4\n"
-				"   bras  3,5f\n"
-				"   .long 3b\n"
-				"5: l     3,0(3)\n"
-				"   br    3\n"
+                                "3: lhi   %0,%h4\n"
+				"   basr  3,0\n"
+                                "   l     3,4f-.(3)\n"
+                                "   br    3\n"
+				"4: .long 2b\n"
 				".previous\n"
 				".section __ex_table,\"a\"\n"
 				"   .align 4\n"
-				"   .long  0b,4b\n"
-				"   .long  1b,4b\n"
+				"   .long  0b,3b\n"
+                                "   .long  1b,3b\n"
 				".previous"
                                 : "=&a" (len)
-                                : "a"  (dst), "d" (src), "d" (count),
+                                : "a" (dst), "d" (src), "d" (count),
                                   "K" (-EFAULT)
-                                : "1", "2" ,"3", "4" );
+                                : "1", "2", "3", "4", "memory" );
         return len;
 }
 
@@ -459,7 +453,8 @@ strncpy_from_user(char *dst, const char *src, long count)
  *
  * Return 0 for error
  */
-static inline long strnlen_user(const char * src, long n)
+static inline unsigned long
+strnlen_user(const char * src, unsigned long n)
 {
 	__asm__ __volatile__ ("   iac   1\n"
                               "   alr   %0,%1\n"
@@ -488,7 +483,7 @@ static inline long strnlen_user(const char * src, long n)
 			      : "cc", "0", "1", "4" );
         return n;
 }
-#define strlen_user(str) strnlen_user(str, ~0UL >> 1)
+#define strlen_user(str) strnlen_user(str, ~0UL)
 
 /*
  * Zero Userspace

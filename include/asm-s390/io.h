@@ -16,6 +16,8 @@
 #include <linux/vmalloc.h>
 #include <asm/page.h>
 
+#define IO_SPACE_LIMIT 0xffffffff
+
 #define __io_virt(x)            ((void *)(PAGE_OFFSET | (unsigned long)(x)))
 #define __io_phys(x)            ((unsigned long)(x) & ~PAGE_OFFSET)
 /*

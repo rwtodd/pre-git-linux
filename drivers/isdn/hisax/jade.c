@@ -1,18 +1,16 @@
-/* $Id: jade.c,v 1.2 1999/07/01 08:07:57 keil Exp $
+/* $Id: jade.c,v 1.6 2000/11/24 17:05:38 kai Exp $
  *
  * jade.c   JADE stuff (derived from original hscx.c)
  *
  * Author   Roland Klabunde (R.Klabunde@Berkom.de)
  *
- * $Log: jade.c,v $
- * Revision 1.2  1999/07/01 08:07:57  keil
- * Initial version
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "hscx.h"
 #include "jade.h"
@@ -20,8 +18,8 @@
 #include <linux/interrupt.h>
 
 
-HISAX_INITFUNC(int
-JadeVersion(struct IsdnCardState *cs, char *s))
+int __init
+JadeVersion(struct IsdnCardState *cs, char *s)
 {
     int ver,i;
     int to = 50;
@@ -214,7 +212,7 @@ close_jadestate(struct BCState *bcs)
 	discard_queue(&bcs->rqueue);
 	discard_queue(&bcs->squeue);
 	if (bcs->tx_skb) {
-		dev_kfree_skb(bcs->tx_skb);
+		dev_kfree_skb_any(bcs->tx_skb);
 		bcs->tx_skb = NULL;
 		test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
 	}
@@ -265,8 +263,8 @@ setstack_jade(struct PStack *st, struct BCState *bcs)
 	return (0);
 }
 
-HISAX_INITFUNC(void
-clear_pending_jade_ints(struct IsdnCardState *cs))
+void __init
+clear_pending_jade_ints(struct IsdnCardState *cs)
 {
 	int val;
 	char tmp[64];
@@ -291,8 +289,8 @@ clear_pending_jade_ints(struct IsdnCardState *cs))
 	cs->BC_Write_Reg(cs, 1, jade_HDLC_IMR, 0xF8);
 }
 
-HISAX_INITFUNC(void
-initjade(struct IsdnCardState *cs))
+void __init
+initjade(struct IsdnCardState *cs)
 {
 	cs->bcs[0].BC_SetStack = setstack_jade;
 	cs->bcs[1].BC_SetStack = setstack_jade;

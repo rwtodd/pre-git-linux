@@ -2,16 +2,16 @@
  *  arch/s390/kernel/irq.c
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Ingo Adlung (adlung@de.ibm.com)
  *
  *  Derived from "arch/i386/kernel/irq.c"
  *    Copyright (C) 1992, 1999 Linus Torvalds, Ingo Molnar
  *
  *  S/390 I/O interrupt processing and I/O request processing is
- *  implemented in linux/arch/s390/do_io.c
+ *   implemented in arch/s390/kernel/s390io.c
  */
-
+#include <linux/config.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
@@ -37,36 +37,13 @@
 #include <asm/delay.h>
 #include <asm/lowcore.h>
 
-#include "irq.h"
-
-
-void s390_init_IRQ(void);
-void s390_free_irq(unsigned int irq, void *dev_id);
-int  s390_request_irq( unsigned int   irq,
-                       void           (*handler)(int, void *, struct pt_regs *),
-                       unsigned long  irqflags,
-                       const char    *devname,
-                       void          *dev_id);
-
-atomic_t nmi_counter;
-spinlock_t s390_bh_lock = SPIN_LOCK_UNLOCKED;
-/*
- * Dummy controller type for unused interrupts
- */
-int  do_none(unsigned int irq, int cpu, struct pt_regs * regs) { return 0;}
-int  enable_none(unsigned int irq) { return(-ENODEV); }
-int  disable_none(unsigned int irq) { return(-ENODEV); }
-
-struct hw_interrupt_type no_irq_type = {
-	"none",
-	do_none,
-	enable_none,
-	disable_none
-};
-
-irq_desc_t irq_desc[NR_IRQS] = {
-	[0 ... (NR_IRQS-1)] = { 0, &no_irq_type, },
-};
+void          s390_init_IRQ   ( void );
+void          s390_free_irq   ( unsigned int irq, void *dev_id);
+int           s390_request_irq( unsigned int irq,
+                     void           (*handler)(int, void *, struct pt_regs *),
+                     unsigned long  irqflags,
+                     const char    *devname,
+                     void          *dev_id);
 
 #if 0
 /*
@@ -82,9 +59,6 @@ BUILD_SMP_INTERRUPT(spurious_interrupt)
 #endif
 
 #if 0
-static void no_action(int cpl, void *dev_id, struct pt_regs *regs) { }
-#endif
-
 int get_irq_list(char *buf)
 {
 	int i, j;
@@ -92,48 +66,61 @@ int get_irq_list(char *buf)
 	char *p = buf;
 
 	p += sprintf(p, "           ");
+
 	for (j=0; j<smp_num_cpus; j++)
 		p += sprintf(p, "CPU%d       ",j);
+
 	*p++ = '\n';
 
-	for (i = 0 ; i < NR_IRQS ; i++) {
-		action = irq_desc[i].action;
-		if (!action)
+	for (i = 0 ; i < NR_IRQS ; i++)
+	{
+		if (ioinfo[i] == INVALID_STORAGE_AREA)
 			continue;
+
+		action = ioinfo[i]->irq_desc.action;
+		
+  		if (!action)
+			continue;
+
 		p += sprintf(p, "%3d: ",i);
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		p += sprintf(p, "%10u ", kstat_irqs(i));
 #else
 		for (j=0; j<smp_num_cpus; j++)
-			p += sprintf(p, "%10u ",
-				     kstat.irqs[cpu_logical_map(j)][i]);
+			p += sprintf( p, "%10u ",
+			              kstat.irqs[cpu_logical_map(j)][i]);
 #endif
-		p += sprintf(p, " %14s", irq_desc[i].handler->typename);
+		p += sprintf(p, " %14s", ioinfo[i]->irq_desc.handler->typename);
 		p += sprintf(p, "  %s", action->name);
 
-		for (action=action->next; action; action = action->next) {
+		for (action=action->next; action; action = action->next)
+		{
 			p += sprintf(p, ", %s", action->name);
-		}
+
+		} /* endfor */
+
 		*p++ = '\n';
-	}
-	p += sprintf(p, "NMI: %10u\n", atomic_read(&nmi_counter));
-#ifdef __SMP__
+	
+	} /* endfor */
+
+	p += sprintf(p, "NMI: %10u\n", nmi_counter);
+#ifdef CONFIG_SMP
 	p += sprintf(p, "IPI: %10u\n", atomic_read(&ipi_count));
 #endif
+
 	return p - buf;
 }
+#endif
 
 /*
  * Global interrupt locks for SMP. Allow interrupts to come in on any
  * CPU, yet make cli/sti act globally to protect critical regions..
  */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 atomic_t global_irq_holder = ATOMIC_INIT(NO_PROC_ID);
 atomic_t global_irq_lock;
 atomic_t global_irq_count = ATOMIC_INIT(0);
-
 atomic_t global_bh_count;
-atomic_t global_bh_lock;
 
 /*
  * "global_cli()" is a special case, in that it can hold the
@@ -156,9 +143,9 @@ static void show(char * str)
 
 	printk("\n%s, CPU %d:\n", str, cpu);
 	printk("irq:  %d [%d]\n",
-	       atomic_read(&global_irq_count),atomic_read(&S390_lowcore.local_irq_count));
+	       atomic_read(&global_irq_count),local_irq_count(smp_processor_id()));
 	printk("bh:   %d [%d]\n",
-	       atomic_read(&global_bh_count),atomic_read(&S390_lowcore.local_bh_count));
+	       atomic_read(&global_bh_count),local_bh_count(smp_processor_id()));
 	stack = (unsigned long *) &str;
 	for (i = 40; i ; i--) {
 		unsigned long x = *++stack;
@@ -194,7 +181,7 @@ static inline void wait_on_irq(int cpu)
 		 * already executing in one..
 		 */
 		if (!atomic_read(&global_irq_count)) {
-			if (atomic_read(&safe_get_cpu_lowcore(cpu).local_bh_count)||
+			if (local_bh_count(cpu)||
 			    !atomic_read(&global_bh_count))
 				break;
 		}
@@ -215,7 +202,7 @@ static inline void wait_on_irq(int cpu)
 				continue;
 			if (atomic_read(&global_irq_lock))
 				continue;
-			if (!(atomic_read(&safe_get_cpu_lowcore(cpu).local_bh_count))
+			if (!local_bh_count(cpu)
 			    && atomic_read(&global_bh_count))
 				continue;
 			if (!test_and_set_bit(0,&global_irq_lock))
@@ -301,7 +288,7 @@ void __global_cli(void)
 	if (flags & (1 << EFLAGS_I_SHIFT)) {
 		int cpu = smp_processor_id();
 		__cli();
-		if (!atomic_read(&S390_lowcore.local_irq_count))
+		if (!in_irq())
 			get_irqlock(cpu);
 	}
 }
@@ -309,7 +296,7 @@ void __global_cli(void)
 void __global_sti(void)
 {
 
-	if (!atomic_read(&S390_lowcore.local_irq_count))
+	if (!in_irq())
 		release_irqlock(smp_processor_id());
 	__sti();
 }
@@ -333,7 +320,7 @@ unsigned long __global_save_flags(void)
 	retval = 2 + local_enabled;
 
 	/* check for global flags if we're not in an interrupt */
-	if (!atomic_read(&S390_lowcore.local_irq_count))
+	if (!in_irq())
 	{
 		if (local_enabled)
 			retval = 1;
@@ -370,43 +357,48 @@ void __global_restore_flags(unsigned long flags)
  * Note : This fuction should be eliminated as it doesn't comply with the
  *         S/390 irq scheme we have implemented ...
  */
-int handle_IRQ_event(unsigned int irq, int cpu, struct pt_regs * regs)
+int handle_IRQ_event( unsigned int irq, int cpu, struct pt_regs * regs)
 {
 	struct irqaction * action;
 	int                status;
 
 	status = 0;
-	action = irq_desc[irq].action;
 
-	if (action) {
+	if ( ioinfo[irq] == INVALID_STORAGE_AREA )
+		return( -ENODEV);
+
+	action = ioinfo[irq]->irq_desc.action;
+
+	if (action)
+	{
 		status |= 1;
 
 		if (!(action->flags & SA_INTERRUPT))
 			__sti();
 
-		do {
+		do
+		{
 			status |= action->flags;
 			action->handler(irq, action->dev_id, regs);
 			action = action->next;
 		} while (action);
+
 		if (status & SA_SAMPLE_RANDOM)
 			add_interrupt_randomness(irq);
 		__cli();
-	}
+
+	} /* endif */
 
 	return status;
 }
-
 
 void enable_nop(int irq)
 {
 }
 
-__initfunc(void init_IRQ(void))
+void __init init_IRQ(void)
 {
-
    s390_init_IRQ();
-
 }
 
 
@@ -424,5 +416,10 @@ int request_irq( unsigned int   irq,
 {
    return( s390_request_irq( irq, handler, irqflags, devname, dev_id ) );
 
+}
+
+void init_irq_proc(void)
+{
+        /* For now, nothing... */
 }
 

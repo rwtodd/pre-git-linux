@@ -10,7 +10,7 @@ Copyright, IBM Corp. 1999
 Introduction
 
 This document describes the common device support routines for Linux/390.
-Different than other hardware architectures, ESA/390 has defined a unified
+Different than other hardware architectures, ESA/390 hasdefined a unified
 I/O access method. This gives relief to the device drivers as they don't
 have to deal with different bus types, polling versus interrupt
 processing, shared versus non-shared interrupt processing, DMA versus port
@@ -419,7 +419,7 @@ therefore not rely on this parameter on function entry.
 free_irq() - Release Device Ownership
 
 A device driver may call free_irq() to release ownership of a previously
-aquired device.
+acquired device.
 
 void free_irq( unsigned int  irq,
                void         *dev_id);
@@ -778,7 +778,7 @@ flag    : 0 (zero) or DOIO_WAIT_FOR_INTERRUPT
 The halt_IO() function returns :
 
       0 - successful completion or request successfuly initiated
--EBUSY  - the device is currently performing a sysnchonous I/O
+-EBUSY  - the device is currently performing a synchronous I/O
           operation : do_IO() with flag DOIO_WAIT_FOR_INTERRUPT
           or an error was encountered and the device is currently
           be sensed

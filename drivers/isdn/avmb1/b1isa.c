@@ -1,11 +1,32 @@
 /*
- * $Id: b1isa.c,v 1.5 1999/11/05 16:38:01 calle Exp $
+ * $Id: b1isa.c,v 1.10 2000/11/23 20:45:14 kai Exp $
  * 
  * Module for AVM B1 ISA-card.
  * 
  * (c) Copyright 1999 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
  * $Log: b1isa.c,v $
+ * Revision 1.10  2000/11/23 20:45:14  kai
+ * fixed module_init/exit stuff
+ * Note: compiled-in kernel doesn't work pre 2.2.18 anymore.
+ *
+ * Revision 1.9  2000/11/01 14:05:02  calle
+ * - use module_init/module_exit from linux/init.h.
+ * - all static struct variables are initialized with "membername:" now.
+ * - avm_cs.c, let it work with newer pcmcia-cs.
+ *
+ * Revision 1.8  2000/04/03 13:29:24  calle
+ * make Tim Waugh happy (module unload races in 2.3.99-pre3).
+ * no real problem there, but now it is much cleaner ...
+ *
+ * Revision 1.7  2000/02/02 18:36:03  calle
+ * - Modules are now locked while init_module is running
+ * - fixed problem with memory mapping if address is not aligned
+ *
+ * Revision 1.6  2000/01/25 14:37:39  calle
+ * new message after successfull detection including card revision and
+ * used resources.
+ *
  * Revision 1.5  1999/11/05 16:38:01  calle
  * Cleanups before kernel 2.4:
  * - Changed all messages to use card->name or driver->name instead of
@@ -55,21 +76,18 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/capi.h>
+#include <linux/init.h>
 #include <asm/io.h>
 #include "capicmd.h"
 #include "capiutil.h"
 #include "capilli.h"
 #include "avmcard.h"
 
-static char *revision = "$Revision: 1.5 $";
+static char *revision = "$Revision: 1.10 $";
 
 /* ------------------------------------------------------------- */
 
 MODULE_AUTHOR("Carsten Paeth <calle@calle.in-berlin.de>");
-
-/* ------------------------------------------------------------- */
-
-static struct capi_driver_interface *di;
 
 /* ------------------------------------------------------------- */
 
@@ -94,6 +112,10 @@ static void b1isa_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 
 	card->interrupt = 0;
 }
+/* ------------------------------------------------------------- */
+
+static struct capi_driver_interface *di;
+
 /* ------------------------------------------------------------- */
 
 static void b1isa_remove_ctr(struct capi_ctr *ctrl)
@@ -122,10 +144,13 @@ static int b1isa_add_card(struct capi_driver *driver, struct capicardparams *p)
 	avmcard *card;
 	int retval;
 
+	MOD_INC_USE_COUNT;
+
 	card = (avmcard *) kmalloc(sizeof(avmcard), GFP_ATOMIC);
 
 	if (!card) {
 		printk(KERN_WARNING "b1isa: no memory.\n");
+	        MOD_DEC_USE_COUNT;
 		return -ENOMEM;
 	}
 	memset(card, 0, sizeof(avmcard));
@@ -133,6 +158,7 @@ static int b1isa_add_card(struct capi_driver *driver, struct capicardparams *p)
 	if (!cinfo) {
 		printk(KERN_WARNING "b1isa: no memory.\n");
 		kfree(card);
+	        MOD_DEC_USE_COUNT;
 		return -ENOMEM;
 	}
 	memset(cinfo, 0, sizeof(avmctrl_info));
@@ -149,12 +175,14 @@ static int b1isa_add_card(struct capi_driver *driver, struct capicardparams *p)
 		       card->port, card->port + AVMB1_PORTLEN);
 	        kfree(card->ctrlinfo);
 		kfree(card);
+	        MOD_DEC_USE_COUNT;
 		return -EBUSY;
 	}
 	if (b1_irq_table[card->irq & 0xf] == 0) {
 		printk(KERN_WARNING "b1isa: irq %d not valid.\n", card->irq);
 	        kfree(card->ctrlinfo);
 		kfree(card);
+	        MOD_DEC_USE_COUNT;
 		return -EINVAL;
 	}
 	if (   card->port != 0x150 && card->port != 0x250
@@ -162,6 +190,7 @@ static int b1isa_add_card(struct capi_driver *driver, struct capicardparams *p)
 		printk(KERN_WARNING "b1isa: illegal port 0x%x.\n", card->port);
 	        kfree(card->ctrlinfo);
 		kfree(card);
+	        MOD_DEC_USE_COUNT;
 		return -EINVAL;
 	}
 	b1_reset(card->port);
@@ -170,9 +199,11 @@ static int b1isa_add_card(struct capi_driver *driver, struct capicardparams *p)
 					card->port, retval);
 	        kfree(card->ctrlinfo);
 		kfree(card);
+	        MOD_DEC_USE_COUNT;
 		return -EIO;
 	}
 	b1_reset(card->port);
+	b1_getrevision(card);
 
 	request_region(p->port, AVMB1_PORTLEN, card->name);
 
@@ -182,6 +213,7 @@ static int b1isa_add_card(struct capi_driver *driver, struct capicardparams *p)
 		release_region(card->port, AVMB1_PORTLEN);
 	        kfree(card->ctrlinfo);
 		kfree(card);
+	        MOD_DEC_USE_COUNT;
 		return -EBUSY;
 	}
 
@@ -192,10 +224,14 @@ static int b1isa_add_card(struct capi_driver *driver, struct capicardparams *p)
 		release_region(card->port, AVMB1_PORTLEN);
 	        kfree(card->ctrlinfo);
 		kfree(card);
+	        MOD_DEC_USE_COUNT;
 		return -EBUSY;
 	}
 
-	MOD_INC_USE_COUNT;
+	printk(KERN_INFO
+		"%s: AVM B1 ISA at i/o %#x, irq %d, revision %d\n",
+		driver->name, card->port, card->irq, card->revision);
+
 	return 0;
 }
 
@@ -205,11 +241,12 @@ static char *b1isa_procinfo(struct capi_ctr *ctrl)
 
 	if (!cinfo)
 		return "";
-	sprintf(cinfo->infobuf, "%s %s 0x%x %d",
+	sprintf(cinfo->infobuf, "%s %s 0x%x %d r%d",
 		cinfo->cardname[0] ? cinfo->cardname : "-",
 		cinfo->version[VER_DRIVER] ? cinfo->version[VER_DRIVER] : "-",
 		cinfo->card ? cinfo->card->port : 0x0,
-		cinfo->card ? cinfo->card->irq : 0
+		cinfo->card ? cinfo->card->irq : 0,
+		cinfo->card ? cinfo->card->revision : 0
 		);
 	return cinfo->infobuf;
 }
@@ -217,31 +254,29 @@ static char *b1isa_procinfo(struct capi_ctr *ctrl)
 /* ------------------------------------------------------------- */
 
 static struct capi_driver b1isa_driver = {
-    "b1isa",
-    "0.0",
-    b1_load_firmware,
-    b1_reset_ctr,
-    b1isa_remove_ctr,
-    b1_register_appl,
-    b1_release_appl,
-    b1_send_message,
+    name: "b1isa",
+    revision: "0.0",
+    load_firmware: b1_load_firmware,
+    reset_ctr: b1_reset_ctr,
+    remove_ctr: b1isa_remove_ctr,
+    register_appl: b1_register_appl,
+    release_appl: b1_release_appl,
+    send_message: b1_send_message,
 
-    b1isa_procinfo,
-    b1ctl_read_proc,
-    0,	/* use standard driver_read_proc */
+    procinfo: b1isa_procinfo,
+    ctr_read_proc: b1ctl_read_proc,
+    driver_read_proc: 0,	/* use standard driver_read_proc */
 
-    b1isa_add_card,
+    add_card: b1isa_add_card,
 };
 
-#ifdef MODULE
-#define b1isa_init init_module
-void cleanup_module(void);
-#endif
-
-int b1isa_init(void)
+static int __init b1isa_init(void)
 {
 	struct capi_driver *driver = &b1isa_driver;
 	char *p;
+	int retval = 0;
+
+	MOD_INC_USE_COUNT;
 
 	if ((p = strchr(revision, ':'))) {
 		strncpy(driver->revision, p + 1, sizeof(driver->revision));
@@ -256,14 +291,16 @@ int b1isa_init(void)
 	if (!di) {
 		printk(KERN_ERR "%s: failed to attach capi_driver\n",
 				driver->name);
-		return -EIO;
+		retval = -EIO;
 	}
-	return 0;
+	MOD_DEC_USE_COUNT;
+	return retval;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit b1isa_exit(void)
 {
     detach_capi_driver(&b1isa_driver);
 }
-#endif
+
+module_init(b1isa_init);
+module_exit(b1isa_exit);

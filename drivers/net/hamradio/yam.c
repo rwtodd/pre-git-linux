@@ -60,7 +60,7 @@
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 /* prototypes for ax25_encapsulate and ax25_rebuild_header */
 #include <net/ax25.h>
-#endif							/* CONFIG_AX25 || CONFIG_AX25_MODULE */
+#endif	/* CONFIG_AX25 || CONFIG_AX25_MODULE */
 
 /* make genksyms happy */
 #include <linux/ip.h>
@@ -70,100 +70,44 @@
 #include <linux/kernel.h>
 #include <linux/proc_fs.h>
 
+#include <linux/version.h>
+#include <asm/uaccess.h>
+#include <linux/init.h>
+
 #include <linux/yam.h>
 #include "yam9600.h"
 #include "yam1200.h"
 
 /* --------------------------------------------------------------------- */
 
-/*
- * currently this module is supposed to support both module styles, i.e.
- * the old one present up to about 2.1.9, and the new one functioning
- * starting with 2.1.21. The reason is I have a kit allowing to compile
- * this module also under 2.0.x which was requested by several people.
- * This will go in 2.2
- */
-#include <linux/version.h>
-
-#if LINUX_VERSION_CODE >= 0x20100
-#include <asm/uaccess.h>
-#else
-#include <asm/segment.h>
-#include <linux/mm.h>
-
-#undef put_user
-#undef get_user
-
-#define put_user(x,ptr) ({ __put_user((unsigned long)(x),(ptr),sizeof(*(ptr))); 0; })
-#define get_user(x,ptr) ({ x = ((__typeof__(*(ptr)))__get_user((ptr),sizeof(*(ptr)))); 0; })
-
-extern inline int copy_from_user(void *to, const void *from, unsigned long n)
-{
-	int i = verify_area(VERIFY_READ, from, n);
-	if (i)
-		return i;
-	memcpy_fromfs(to, from, n);
-	return 0;
-}
-
-extern inline int copy_to_user(void *to, const void *from, unsigned long n)
-{
-	int i = verify_area(VERIFY_WRITE, to, n);
-	if (i)
-		return i;
-	memcpy_tofs(to, from, n);
-	return 0;
-}
-#endif
-
-#if LINUX_VERSION_CODE < 0x20115
-extern __inline__ void dev_init_buffers(struct device *dev)
-{
-	int i;
-	for (i = 0; i < DEV_NUMBUFFS; i++) {
-		skb_queue_head_init(&dev->buffs[i]);
-	}
-}
-#endif
-
-#if LINUX_VERSION_CODE >= 0x20123
-#include <linux/init.h>
-#else
-#define __init
-#define __initdata
-#define __initfunc(x) x
-#endif
-
-/* --------------------------------------------------------------------- */
-
 static const char yam_drvname[] = "yam";
-static const char yam_drvinfo[] = KERN_INFO "YAM driver version 0.8 by F1OAT/F6FBB\n";
+static const char yam_drvinfo[] __initdata = KERN_INFO "YAM driver version 0.8 by F1OAT/F6FBB\n";
 
 /* --------------------------------------------------------------------- */
 
 #define YAM_9600	1
 #define YAM_1200	2
 
-#define NR_PORTS 	4
+#define NR_PORTS	4
 #define YAM_MAGIC	0xF10A7654
 
 /* Transmitter states */
 
-#define TX_OFF  	0
+#define TX_OFF		0
 #define TX_HEAD		1
-#define TX_DATA  	2
-#define TX_CRC1  	3
-#define TX_CRC2  	4
-#define TX_TAIL  	5
+#define TX_DATA		2
+#define TX_CRC1		3
+#define TX_CRC2		4
+#define TX_TAIL		5
 
 #define YAM_MAX_FRAME	1024
 
-#define DEFAULT_BITRATE	9600	/* bps */
-#define DEFAULT_HOLDD   10		/* sec */
-#define DEFAULT_TXD	    300		/* ms */
-#define DEFAULT_TXTAIL  10		/* ms */
-#define DEFAULT_SLOT    100		/* ms */
-#define DEFAULT_PERS    64		/* 0->255 */
+#define DEFAULT_BITRATE	9600			/* bps */
+#define DEFAULT_HOLDD	10			/* sec */
+#define DEFAULT_TXD	300			/* ms */
+#define DEFAULT_TXTAIL	10			/* ms */
+#define DEFAULT_SLOT	100			/* ms */
+#define DEFAULT_PERS	64			/* 0->255 */
 
 struct yam_port {
 	int magic;
@@ -172,27 +116,23 @@ struct yam_port {
 	int iobase;
 	int irq;
 	int dupmode;
-	char name[16];
 
-	struct device dev;
+	struct net_device dev;
 
 	/* Stats section */
 
-#if LINUX_VERSION_CODE < 0x20119
-	struct enet_statistics stats;
-#else
 	struct net_device_stats stats;
-#endif
+
 	int nb_rxint;
 	int nb_mdint;
 
 	/* Parameters section */
 
-	int txd;					/* tx delay */
-	int holdd;					/* duplex ptt delay */
-	int txtail;					/* txtail delay */
-	int slot;					/* slottime */
-	int pers;					/* persistence */
+	int txd;				/* tx delay */
+	int holdd;				/* duplex ptt delay */
+	int txtail;				/* txtail delay */
+	int slot;				/* slottime */
+	int pers;				/* persistence */
 
 	/* Tx section */
 
@@ -220,9 +160,7 @@ struct yam_mcs {
 
 static struct yam_port yam_ports[NR_PORTS];
 
-static struct yam_mcs *yam_data = NULL;
-
-static unsigned irqs[16];
+static struct yam_mcs *yam_data;
 
 static char ax25_bcast[7] =
 {'Q' << 1, 'S' << 1, 'T' << 1, ' ' << 1, ' ' << 1, ' ' << 1, '0' << 1};
@@ -233,91 +171,89 @@ static struct timer_list yam_timer;
 
 /* --------------------------------------------------------------------- */
 
-#define RBR(iobase) (iobase+0)
-#define THR(iobase) (iobase+0)
-#define IER(iobase) (iobase+1)
-#define IIR(iobase) (iobase+2)
-#define FCR(iobase) (iobase+2)
-#define LCR(iobase) (iobase+3)
-#define MCR(iobase) (iobase+4)
-#define LSR(iobase) (iobase+5)
-#define MSR(iobase) (iobase+6)
-#define SCR(iobase) (iobase+7)
-#define DLL(iobase) (iobase+0)
-#define DLM(iobase) (iobase+1)
+#define RBR(iobase)	(iobase+0)
+#define THR(iobase)	(iobase+0)
+#define IER(iobase)	(iobase+1)
+#define IIR(iobase)	(iobase+2)
+#define FCR(iobase)	(iobase+2)
+#define LCR(iobase)	(iobase+3)
+#define MCR(iobase)	(iobase+4)
+#define LSR(iobase)	(iobase+5)
+#define MSR(iobase)	(iobase+6)
+#define SCR(iobase)	(iobase+7)
+#define DLL(iobase)	(iobase+0)
+#define DLM(iobase)	(iobase+1)
 
-#define YAM_EXTENT 8
+#define YAM_EXTENT	8
 
 /* Interrupt Identification Register Bit Masks */
-#define IIR_NOPEND 	1
-#define IIR_MSR  	0
-#define IIR_TX     	2
-#define IIR_RX     	4
-#define IIR_LSR   	6
+#define IIR_NOPEND	1
+#define IIR_MSR		0
+#define IIR_TX		2
+#define IIR_RX		4
+#define IIR_LSR		6
 #define IIR_TIMEOUT	12			/* Fifo mode only */
 
 #define IIR_MASK	0x0F
 
 /* Interrupt Enable Register Bit Masks */
-#define IER_RX  1				/* enable rx interrupt */
-#define IER_TX  2				/* enable tx interrupt */
-#define IER_LSR 4				/* enable line status interrupts */
-#define IER_MSR 8				/* enable modem status interrupts */
+#define IER_RX		1			/* enable rx interrupt */
+#define IER_TX		2			/* enable tx interrupt */
+#define IER_LSR		4			/* enable line status interrupts */
+#define IER_MSR		8			/* enable modem status interrupts */
 
 /* Modem Control Register Bit Masks */
-#define MCR_DTR  0x01			/* DTR output */
-#define MCR_RTS  0x02			/* RTS output */
-#define MCR_OUT1 0x04			/* OUT1 output (not accessible in RS232) */
-#define MCR_OUT2 0x08			/* Master Interrupt enable (must be set on PCs) */
-#define MCR_LOOP 0x10			/* Loopback enable */
+#define MCR_DTR		0x01			/* DTR output */
+#define MCR_RTS		0x02			/* RTS output */
+#define MCR_OUT1	0x04			/* OUT1 output (not accessible in RS232) */
+#define MCR_OUT2	0x08			/* Master Interrupt enable (must be set on PCs) */
+#define MCR_LOOP	0x10			/* Loopback enable */
 
 /* Modem Status Register Bit Masks */
-#define MSR_DCTS 0x01			/* Delta CTS input */
-#define MSR_DDSR 0x02			/* Delta DSR */
-#define MSR_DRIN 0x04			/* Delta RI */
-#define MSR_DDCD 0x08			/* Delta DCD */
-#define MSR_CTS  0x10			/* CTS input */
-#define MSR_DSR  0x20			/* DSR input */
-#define MSR_RING 0x40			/* RI  input */
-#define MSR_DCD  0x80			/* DCD input */
+#define MSR_DCTS	0x01			/* Delta CTS input */
+#define MSR_DDSR	0x02			/* Delta DSR */
+#define MSR_DRIN	0x04			/* Delta RI */
+#define MSR_DDCD	0x08			/* Delta DCD */
+#define MSR_CTS		0x10			/* CTS input */
+#define MSR_DSR		0x20			/* DSR input */
+#define MSR_RING	0x40			/* RI  input */
+#define MSR_DCD		0x80			/* DCD input */
 
 /* line status register bit mask */
-#define LSR_RXC	   0x01
-#define LSR_OE	   0x02
-#define LSR_PE	   0x04
-#define LSR_FE	   0x08
-#define LSR_BREAK  0x10
-#define LSR_THRE   0x20
-#define LSR_TSRE   0x40
+#define LSR_RXC		0x01
+#define LSR_OE		0x02
+#define LSR_PE		0x04
+#define LSR_FE		0x08
+#define LSR_BREAK	0x10
+#define LSR_THRE	0x20
+#define LSR_TSRE	0x40
 
 /* Line Control Register Bit Masks */
-#define LCR_DLAB    0x80
-#define LCR_BREAK   0x40
-#define LCR_PZERO   0x28
-#define LCR_PEVEN   0x18
-#define LCR_PODD    0x08
-#define LCR_STOP1   0x00
-#define LCR_STOP2   0x04
-#define LCR_BIT5    0x00
-#define LCR_BIT6    0x02
-#define LCR_BIT7    0x01
-#define LCR_BIT8    0x03
+#define LCR_DLAB	0x80
+#define LCR_BREAK	0x40
+#define LCR_PZERO	0x28
+#define LCR_PEVEN	0x18
+#define LCR_PODD	0x08
+#define LCR_STOP1	0x00
+#define LCR_STOP2	0x04
+#define LCR_BIT5	0x00
+#define LCR_BIT6	0x02
+#define LCR_BIT7	0x01
+#define LCR_BIT8	0x03
 
 /* YAM Modem <-> UART Port mapping */
 
-#define TX_RDY 	  MSR_DCTS		/* transmitter ready to send */
-#define RX_DCD    MSR_DCD		/* carrier detect */
-#define RX_FLAG   MSR_RING		/* hdlc flag received */
-#define FPGA_DONE MSR_DSR		/* FPGA is configured */
-#define PTT_ON    (MCR_RTS|MCR_OUT2)	/* activate PTT */
-#define PTT_OFF   (MCR_DTR|MCR_OUT2)	/* release PTT */
+#define TX_RDY		MSR_DCTS		/* transmitter ready to send */
+#define RX_DCD		MSR_DCD			/* carrier detect */
+#define RX_FLAG		MSR_RING		/* hdlc flag received */
+#define FPGA_DONE	MSR_DSR			/* FPGA is configured */
+#define PTT_ON		(MCR_RTS|MCR_OUT2)	/* activate PTT */
+#define PTT_OFF		(MCR_DTR|MCR_OUT2)	/* release PTT */
 
-#define ENABLE_RXINT   IER_RX	/* enable uart rx interrupt during rx */
-#define ENABLE_TXINT   IER_MSR	/* enable uart ms interrupt during tx */
-#define ENABLE_RTXINT  (IER_RX|IER_MSR)		/* full duplex operations */
+#define ENABLE_RXINT	IER_RX			/* enable uart rx interrupt during rx */
+#define ENABLE_TXINT	IER_MSR			/* enable uart ms interrupt during tx */
+#define ENABLE_RTXINT	(IER_RX|IER_MSR)	/* full duplex operations */
 
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
 /*************************************************************************
 * CRC Tables
@@ -417,21 +353,7 @@ static int fpga_write(int iobase, unsigned char wrd)
 	return 0;
 }
 
-#ifdef MODULE
-static void free_mcs(void)
-{
-	struct yam_mcs *p;
-
-	while (yam_data) {
-		p = yam_data;
-		yam_data = yam_data->next;
-		kfree(p);
-	}
-}
-#endif
-
-static unsigned char *
- add_mcs(unsigned char *bits, int bitrate)
+static unsigned char *add_mcs(unsigned char *bits, int bitrate)
 {
 	struct yam_mcs *p;
 
@@ -446,8 +368,7 @@ static unsigned char *
 	}
 
 	/* Allocate a new mcs */
-	p = kmalloc(sizeof(struct yam_mcs), GFP_ATOMIC);
-	if (p == NULL) {
+	if ((p = kmalloc(sizeof(struct yam_mcs), GFP_KERNEL)) == NULL) {
 		printk(KERN_WARNING "YAM: no memory to allocate mcs\n");
 		return NULL;
 	}
@@ -481,7 +402,7 @@ static unsigned char *get_mcs(int bitrate)
 
 /*
  * download bitstream to FPGA
- * data is contained in bits[] array in fpgaconf.h
+ * data is contained in bits[] array in yam1200.h resp. yam9600.h
  */
 
 static int fpga_download(int iobase, int bitrate)
@@ -496,7 +417,7 @@ static int fpga_download(int iobase, int bitrate)
 	fpga_reset(iobase);
 	for (i = 0; i < YAM_FPGA_SIZE; i++) {
 		if (fpga_write(iobase, pbits[i])) {
-			printk("yam: error in write cycle\n");
+			printk(KERN_ERR "yam: error in write cycle\n");
 			return -1;			/* write... */
 		}
 	}
@@ -515,7 +436,7 @@ static int fpga_download(int iobase, int bitrate)
 * Serial port init 
 ************************************************************************/
 
-static void yam_set_uart(struct device *dev)
+static void yam_set_uart(struct net_device *dev)
 {
 	struct yam_port *yp = (struct yam_port *) dev->priv;
 	int divisor = 115200 / yp->baudrate;
@@ -583,8 +504,7 @@ static enum uart yam_check_uart(unsigned int iobase)
 /******************************************************************************
 * Rx Section
 ******************************************************************************/
-static void inline
- yam_rx_flag(struct device *dev, struct yam_port *yp)
+static inline void yam_rx_flag(struct net_device *dev, struct yam_port *yp)
 {
 	if (yp->dcd && yp->rx_len >= 3 && yp->rx_len < YAM_MAX_FRAME) {
 		int pkt_len = yp->rx_len - 2 + 1;	/* -CRC + kiss */
@@ -594,7 +514,7 @@ static void inline
 			/* Bad crc */
 		} else {
 			if (!(skb = dev_alloc_skb(pkt_len))) {
-				printk("%s: memory squeeze, dropping packet\n", dev->name);
+				printk(KERN_WARNING "%s: memory squeeze, dropping packet\n", dev->name);
 				++yp->stats.rx_dropped;
 			} else {
 				unsigned char *cp;
@@ -614,8 +534,7 @@ static void inline
 	yp->rx_crch = 0xf3;
 }
 
-static void inline
- yam_rx_byte(struct device *dev, struct yam_port *yp, unsigned char rxb)
+static inline void yam_rx_byte(struct net_device *dev, struct yam_port *yp, unsigned char rxb)
 {
 	if (yp->rx_len < YAM_MAX_FRAME) {
 		unsigned char c = yp->rx_crcl;
@@ -629,29 +548,26 @@ static void inline
 * TX Section
 ********************************************************************************/
 
-static void ptt_on(struct device *dev)
+static void ptt_on(struct net_device *dev)
 {
 	outb(PTT_ON, MCR(dev->base_addr));
 }
 
-static void ptt_off(struct device *dev)
+static void ptt_off(struct net_device *dev)
 {
 	outb(PTT_OFF, MCR(dev->base_addr));
 }
 
-static int yam_send_packet(struct sk_buff *skb, struct device *dev)
+static int yam_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct yam_port *yp = dev->priv;
 
-	if (skb == NULL) {
-		return 0;
-	}
 	skb_queue_tail(&yp->send_queue, skb);
 	dev->trans_start = jiffies;
 	return 0;
 }
 
-static void yam_start_tx(struct device *dev, struct yam_port *yp)
+static void yam_start_tx(struct net_device *dev, struct yam_port *yp)
 {
 	if ((yp->tx_state == TX_TAIL) || (yp->txd == 0))
 		yp->tx_count = 1;
@@ -669,7 +585,7 @@ static inline unsigned short random_num(void)
 	return random_seed;
 }
 
-static void yam_arbitrate(struct device *dev)
+static void yam_arbitrate(struct net_device *dev)
 {
 	struct yam_port *yp = dev->priv;
 
@@ -707,15 +623,15 @@ static void yam_dotimer(unsigned long dummy)
 	int i;
 
 	for (i = 0; i < NR_PORTS; i++) {
-		struct device *dev = &yam_ports[i].dev;
-		if (dev->start)
+		struct net_device *dev = &yam_ports[i].dev;
+		if (netif_running(dev))
 			yam_arbitrate(dev);
 	}
 	yam_timer.expires = jiffies + HZ / 100;
 	add_timer(&yam_timer);
 }
 
-static void yam_tx_byte(struct device *dev, struct yam_port *yp)
+static void yam_tx_byte(struct net_device *dev, struct yam_port *yp)
 {
 	struct sk_buff *skb;
 	unsigned char b, temp;
@@ -795,7 +711,7 @@ static void yam_tx_byte(struct device *dev, struct yam_port *yp)
 
 static void yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct device *dev;
+	struct net_device *dev;
 	struct yam_port *yp;
 	unsigned char iir;
 	int counter = 100;
@@ -807,7 +723,7 @@ static void yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		yp = &yam_ports[i];
 		dev = &yp->dev;
 
-		if (!dev->start)
+		if (!netif_running(dev))
 			continue;
 
 		while ((iir = IIR_MASK & inb(IIR(dev->base_addr))) != IIR_NOPEND) {
@@ -821,7 +737,7 @@ static void yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			yp->dcd = (msr & RX_DCD) ? 1 : 0;
 
 			if (--counter <= 0) {
-				printk("%s: too many irq iir=%d\n", dev->name, iir);
+				printk(KERN_ERR "%s: too many irq iir=%d\n", dev->name, iir);
 				return;
 			}
 			if (msr & TX_RDY) {
@@ -840,7 +756,7 @@ static void yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 }
 
-static int yam_net_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+static int yam_net_get_info(char *buffer, char **start, off_t offset, int length)
 {
 	int len = 0;
 	int i;
@@ -852,8 +768,8 @@ static int yam_net_get_info(char *buffer, char **start, off_t offset, int length
 	for (i = 0; i < NR_PORTS; i++) {
 		if (yam_ports[i].iobase == 0 || yam_ports[i].irq == 0)
 			continue;
-		len += sprintf(buffer + len, "Device %s\n", yam_ports[i].name);
-		len += sprintf(buffer + len, "  Up       %d\n", yam_ports[i].dev.start);
+		len += sprintf(buffer + len, "Device yam%d\n", i);
+		len += sprintf(buffer + len, "  Up       %d\n", netif_running(&yam_ports[i].dev));
 		len += sprintf(buffer + len, "  Speed    %u\n", yam_ports[i].bitrate);
 		len += sprintf(buffer + len, "  IoBase   0x%x\n", yam_ports[i].iobase);
 		len += sprintf(buffer + len, "  BaudRate %u\n", yam_ports[i].baudrate);
@@ -893,39 +809,9 @@ static int yam_net_get_info(char *buffer, char **start, off_t offset, int length
 	return len;
 }
 
-#ifdef CONFIG_INET
-
-#ifndef PROC_NET_YAM
-#define PROC_NET_YAM (PROC_NET_LAST+10)		/* Sorry again... */
-#endif
-
-#ifdef CONFIG_PROC_FS
-struct proc_dir_entry yam_proc_dir_entry =
-{
-	PROC_NET_YAM, 3, "yam", S_IFREG | S_IRUGO, 1, 0, 0, 0,
-	&proc_net_inode_operations, yam_net_get_info
-};
-
-#define yam_net_procfs_init()   proc_net_register(&yam_proc_dir_entry);
-#define yam_net_procfs_remove() proc_net_unregister(PROC_NET_YAM);
-#else
-#define yam_net_procfs_init()
-#define yam_net_procfs_remove()
-#endif
-#else
-#define yam_net_procfs_init()
-#define yam_net_procfs_remove()
-#endif
-
 /* --------------------------------------------------------------------- */
 
-#if LINUX_VERSION_CODE >= 0x20119
-static struct net_device_stats *
- yam_get_stats(struct device *dev)
-#else
-static struct enet_statistics *
- yam_get_stats(struct device *dev)
-#endif
+static struct net_device_stats *yam_get_stats(struct net_device *dev)
 {
 	struct yam_port *yp;
 
@@ -945,7 +831,7 @@ static struct enet_statistics *
 
 /* --------------------------------------------------------------------- */
 
-static int yam_open(struct device *dev)
+static int yam_open(struct net_device *dev)
 {
 	struct yam_port *yp = (struct yam_port *) dev->priv;
 	enum uart u;
@@ -960,26 +846,28 @@ static int yam_open(struct device *dev)
 		return -ENXIO;
 	}
 	if (check_region(dev->base_addr, YAM_EXTENT)) {
-		printk("%s: cannot 0x%lx busy\n", dev->name, dev->base_addr);
+		printk(KERN_ERR "%s: cannot 0x%lx busy\n", dev->name, dev->base_addr);
 		return -EACCES;
 	}
 	if ((u = yam_check_uart(dev->base_addr)) == c_uart_unknown) {
-		printk("%s: cannot find uart type\n", dev->name);
+		printk(KERN_ERR "%s: cannot find uart type\n", dev->name);
 		return -EIO;
 	}
 	if (fpga_download(dev->base_addr, yp->bitrate)) {
-		printk("%s: cannot init FPGA\n", dev->name);
+		printk(KERN_ERR "%s: cannot init FPGA\n", dev->name);
 		return -EIO;
 	}
 	outb(0, IER(dev->base_addr));
 	if (request_irq(dev->irq, yam_interrupt, SA_INTERRUPT | SA_SHIRQ, dev->name, NULL)) {
-		printk("%s: irq %d busy\n", dev->name, dev->irq);
+		printk(KERN_ERR "%s: irq %d busy\n", dev->name, dev->irq);
 		return -EBUSY;
 	}
 	request_region(dev->base_addr, YAM_EXTENT, dev->name);
 
 	yam_set_uart(dev);
-	dev->start = 1;
+
+	netif_start_queue(dev);
+	
 	yp->slotcnt = yp->slot / 10;
 
 	/* Reset overruns for all ports - FPGA programming makes overruns */
@@ -996,7 +884,7 @@ static int yam_open(struct device *dev)
 
 /* --------------------------------------------------------------------- */
 
-static int yam_close(struct device *dev)
+static int yam_close(struct net_device *dev)
 {
 	struct sk_buff *skb;
 	struct yam_port *yp = (struct yam_port *) dev->priv;
@@ -1011,8 +899,7 @@ static int yam_close(struct device *dev)
 	/* Remove IRQ handler if last */
 	free_irq(dev->irq, NULL);
 	release_region(dev->base_addr, YAM_EXTENT);
-	dev->start = 0;
-	dev->tbusy = 1;
+	netif_stop_queue(dev);
 	while ((skb = skb_dequeue(&yp->send_queue)))
 		dev_kfree_skb(skb);
 
@@ -1024,7 +911,7 @@ static int yam_close(struct device *dev)
 
 /* --------------------------------------------------------------------- */
 
-static int yam_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
+static int yam_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct yam_port *yp = (struct yam_port *) dev->priv;
 	struct yamdrv_ioctl_cfg yi;
@@ -1037,7 +924,7 @@ static int yam_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 	if (yp == NULL || yp->magic != YAM_MAGIC)
 		return -EINVAL;
 
-	if (!suser())
+	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
 	if (cmd != SIOCDEVPRIVATE)
@@ -1049,9 +936,11 @@ static int yam_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 		return -EINVAL;			/* unused */
 
 	case SIOCYAMSMCS:
-		if (dev->start)
+		if (netif_running(dev))
 			return -EINVAL;		/* Cannot change this parameter when up */
-		ym = kmalloc(sizeof(struct yamdrv_ioctl_mcs), GFP_ATOMIC);
+		ym = kmalloc(sizeof(struct yamdrv_ioctl_mcs), GFP_KERNEL);
+		if(ym==NULL)
+			return -ENOBUFS;
 		ym->bitrate = 9600;
 		if (copy_from_user(ym, ifr->ifr_data, sizeof(struct yamdrv_ioctl_mcs)))
 			 return -EFAULT;
@@ -1062,16 +951,18 @@ static int yam_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case SIOCYAMSCFG:
+		if (!capable(CAP_SYS_RAWIO))
+			return -EPERM;
 		if (copy_from_user(&yi, ifr->ifr_data, sizeof(struct yamdrv_ioctl_cfg)))
 			 return -EFAULT;
 
-		if ((yi.cfg.mask & YAM_IOBASE) && dev->start)
+		if ((yi.cfg.mask & YAM_IOBASE) && netif_running(dev))
 			return -EINVAL;		/* Cannot change this parameter when up */
-		if ((yi.cfg.mask & YAM_IRQ) && dev->start)
+		if ((yi.cfg.mask & YAM_IRQ) && netif_running(dev))
 			return -EINVAL;		/* Cannot change this parameter when up */
-		if ((yi.cfg.mask & YAM_BITRATE) && dev->start)
+		if ((yi.cfg.mask & YAM_BITRATE) && netif_running(dev))
 			return -EINVAL;		/* Cannot change this parameter when up */
-		if ((yi.cfg.mask & YAM_BAUDRATE) && dev->start)
+		if ((yi.cfg.mask & YAM_BAUDRATE) && netif_running(dev))
 			return -EINVAL;		/* Cannot change this parameter when up */
 
 		if (yi.cfg.mask & YAM_IOBASE) {
@@ -1153,7 +1044,7 @@ static int yam_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 
 /* --------------------------------------------------------------------- */
 
-static int yam_set_mac_address(struct device *dev, void *addr)
+static int yam_set_mac_address(struct net_device *dev, void *addr)
 {
 	struct sockaddr *sa = (struct sockaddr *) addr;
 
@@ -1164,7 +1055,7 @@ static int yam_set_mac_address(struct device *dev, void *addr)
 
 /* --------------------------------------------------------------------- */
 
-static int yam_probe(struct device *dev)
+static int yam_probe(struct net_device *dev)
 {
 	struct yam_port *yp;
 
@@ -1207,18 +1098,15 @@ static int yam_probe(struct device *dev)
 
 /* --------------------------------------------------------------------- */
 
-__initfunc(int yam_init(struct device *dev))
+static int __init yam_init_driver(void)
 {
+	struct net_device *dev;
 	int i;
 
 	printk(yam_drvinfo);
 
-	/* Clears the IRQ table */
-	memset(irqs, 0, sizeof(irqs));
-	memset(yam_ports, 0, sizeof(yam_ports));
-
 	for (i = 0; i < NR_PORTS; i++) {
-		sprintf(yam_ports[i].name, "yam%d", i);
+		sprintf(yam_ports[i].dev.name, "yam%d", i);
 		yam_ports[i].magic = YAM_MAGIC;
 		yam_ports[i].bitrate = DEFAULT_BITRATE;
 		yam_ports[i].baudrate = DEFAULT_BITRATE * 2;
@@ -1234,16 +1122,13 @@ __initfunc(int yam_init(struct device *dev))
 		dev = &yam_ports[i].dev;
 
 		dev->priv = &yam_ports[i];
-		dev->name = yam_ports[i].name;
 		dev->base_addr = yam_ports[i].iobase;
 		dev->irq = yam_ports[i].irq;
 		dev->init = yam_probe;
 		dev->if_port = 0;
-		dev->start = 0;
-		dev->tbusy = 1;
 
 		if (register_netdev(dev)) {
-			printk(KERN_WARNING "yam: cannot register net  device %s\n", dev->name);
+			printk(KERN_WARNING "yam: cannot register net device %s\n", dev->name);
 			return -ENXIO;
 		}
 	}
@@ -1252,52 +1137,43 @@ __initfunc(int yam_init(struct device *dev))
 	yam_timer.expires = jiffies + HZ / 100;
 	add_timer(&yam_timer);
 
-	yam_net_procfs_init();
-
-	/* do not keep this device */
-	return 1;
+	proc_net_create("yam", 0, yam_net_get_info);
+	return 0;
 }
 
 /* --------------------------------------------------------------------- */
 
-#ifdef MODULE
-
-/*
- * command line settable parameters
- */
-
-#if LINUX_VERSION_CODE >= 0x20115
-
-MODULE_AUTHOR("Frederic Rible F1OAT frible@teaser.fr");
-MODULE_DESCRIPTION("Yam amateur radio modem driver");
-
-#endif
-
-__initfunc(int init_module(void))
+static void __exit yam_cleanup_driver(void)
 {
-	int ret = yam_init(NULL);
-
-	return (ret == 1) ? 0 : ret;
-}
-
-/* --------------------------------------------------------------------- */
-
-void cleanup_module(void)
-{
+	struct yam_mcs *p;
 	int i;
 
 	del_timer(&yam_timer);
 	for (i = 0; i < NR_PORTS; i++) {
-		struct device *dev = &yam_ports[i].dev;
+		struct net_device *dev = &yam_ports[i].dev;
 		if (!dev->priv)
 			continue;
-		if (dev->start)
+		if (netif_running(dev))
 			yam_close(dev);
 		unregister_netdev(dev);
 	}
-	free_mcs();
-	yam_net_procfs_remove();
+
+	while (yam_data) {
+		p = yam_data;
+		yam_data = yam_data->next;
+		kfree(p);
+	}
+
+	proc_net_remove("yam");
 }
 
-#endif							/* MODULE */
 /* --------------------------------------------------------------------- */
+
+MODULE_AUTHOR("Frederic Rible F1OAT frible@teaser.fr");
+MODULE_DESCRIPTION("Yam amateur radio modem driver");
+
+module_init(yam_init_driver);
+module_exit(yam_cleanup_driver);
+
+/* --------------------------------------------------------------------- */
+

@@ -2,16 +2,15 @@
  * File...........: linux/drivers/s390/block/dasd_ccwstuff.c
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999
+ * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
  */
 
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/malloc.h>
-#include <asm/spinlock.h>
+#include <linux/dasd.h>
 #include <asm/atomic.h>
 
-#include "dasd.h"
 #include "dasd_types.h"
 
 #define PRINTK_HEADER "dasd_ccw:"
@@ -33,10 +32,8 @@ static ccw1_t *ccwarea[CP_PER_PAGE_POWER + 1] =
 static int dasd_page_count = 0;
 static long dasd_page[MAX_DASD_PAGES];
 
-#ifdef __SMP__
 static spinlock_t ccw_lock=SPIN_LOCK_UNLOCKED;	/* spinlock for ccwareas */
 static spinlock_t cq_lock=SPIN_LOCK_UNLOCKED;	/* spinlock for cq_head */
-#endif				/* __SMP__ */
 
 void
 ccwarea_enq (int index, ccw1_t * area)
@@ -203,9 +200,7 @@ release_cp (int size, ccw1_t * area)
 /* ---------------------------------------------------------- */
 
 static cqr_t *cqrp = NULL;
-#ifdef __SMP__
 static spinlock_t cqr_lock=SPIN_LOCK_UNLOCKED;
-#endif				/* __SMP__ */
 
 void
 cqf_enq (cqr_t * cqf)
@@ -296,12 +291,10 @@ request_cqr (int cpsize, int datasize)
 		memset (cqr->data,0,datasize);
 	}
 	goto exit;
- nodata:
-	release_cp (cqr->cplength, cqr->cpaddr);
-      nocp:
+ nocp:
 	release_cq (cqr);
 	cqr = NULL;
-      exit:
+ exit:
 	return cqr;
 }
 
@@ -337,6 +330,7 @@ dasd_chanq_enq (dasd_chanq_t * q, cqr_t * cqr)
 		q->head = cqr;
 	cqr->next = NULL;
 	q->tail = cqr;
+	q->queued_requests ++;
 	if (atomic_compare_and_swap(CQR_STATUS_FILLED,
 				    CQR_STATUS_QUEUED,
 				    &cqr->status)) {
@@ -368,6 +362,7 @@ dasd_chanq_deq (dasd_chanq_t * q, cqr_t * cqr)
 			q->tail = prev;
 	}
 	cqr->next = NULL;
+	q->queued_requests --;
 	return release_cqr(cqr);
 }
 

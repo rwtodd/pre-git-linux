@@ -23,26 +23,26 @@ __strnlen_user:
 	andcc	%o0, 3, %g0
 	be,pt	%icc, 9f
 	 sethi	%hi(HI_MAGIC), %o4
-10:	lduba	[%o0] ASI_S, %o5
+10:	lduba	[%o0] %asi, %o5
 	brz,pn	%o5, 21f
 	 add	%o0, 1, %o0
 	andcc	%o0, 3, %g0
 	be,pn	%icc, 4f
 	 or	%o4, %lo(HI_MAGIC), %o3
-11:	lduba	[%o0] ASI_S, %o5
+11:	lduba	[%o0] %asi, %o5
 	brz,pn	%o5, 22f
 	 add	%o0, 1, %o0
 	andcc	%o0, 3, %g0
 	be,pt	%icc, 13f
 	 srl	%o3, 7, %o2
-12:	lduba	[%o0] ASI_S, %o5
+12:	lduba	[%o0] %asi, %o5
 	brz,pn	%o5, 23f
 	 add	%o0, 1, %o0
 	ba,pt	%icc, 2f
-15:	 lda	[%o0] ASI_S, %o5
+15:	 lda	[%o0] %asi, %o5
 9:	or	%o4, %lo(HI_MAGIC), %o3
 4:	srl	%o3, 7, %o2
-13:	lda	[%o0] ASI_S, %o5
+13:	lda	[%o0] %asi, %o5
 2:	sub	%o5, %o2, %o4
 	andcc	%o4, %o3, %g0
 	bne,pn	%icc, 82f

@@ -1,5 +1,5 @@
 
-# i386/Makefile
+# s390/Makefile
 #
 # This file is included by the global makefile so that you can add your own
 # architecture-specific flags and dependencies. Remember to do have actions
@@ -14,7 +14,6 @@
 #
 
 LD=$(CROSS_COMPILE)ld -m elf_s390
-CPP=$(CC) -E
 OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
 LDFLAGS=-e start
 LINKFLAGS =-T $(TOPDIR)/arch/s390/vmlinux.lds $(LDFLAGS)
@@ -22,11 +21,6 @@ LINKFLAGS =-T $(TOPDIR)/arch/s390/vmlinux.lds $(LDFLAGS)
 CFLAGS_PIPE := -pipe
 CFLAGS_NSR  := -fno-strength-reduce
 CFLAGS := $(CFLAGS) $(CFLAGS_PIPE) $(CFLAGS_NSR)
-
-
-ifdef SMP
-CFLAGS := $(CFLAGS) -D__SMP__
-endif
 
 HEAD := arch/s390/kernel/head.o arch/s390/kernel/init_task.o
 
@@ -52,11 +46,15 @@ drivers/s390: dummy
 
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 
+MAKESILO = $(MAKE) -C arch/$(ARCH)/tools/silo
+
+MAKEDASDFMT = $(MAKE) -C arch/$(ARCH)/tools/dasdfmt
+
 silo:
-	@$(MAKEBOOT) silo
+	@$(MAKESILO) silo
 
 dasdfmt:
-	@$(MAKEBOOT) dasdfmt
+	@$(MAKEDASDFMT) dasdfmt
 
 image: vmlinux 
 	@$(MAKEBOOT) image

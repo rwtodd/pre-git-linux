@@ -45,8 +45,13 @@
 #define SO_ATTACH_FILTER	26
 #define SO_DETACH_FILTER	27
 
+#define SO_PEERNAME		28
+#define SO_TIMESTAMP		29
+#define SCM_TIMESTAMP		SO_TIMESTAMP
+
+/* Nast libc5 fixup - bletch */
+#if defined(__KERNEL__)
 /* Socket types. */
-#ifdef __KERNEL__
 #define SOCK_STREAM	1		/* stream (connection) socket	*/
 #define SOCK_DGRAM	2		/* datagram (conn.less) socket	*/
 #define SOCK_RAW	3		/* raw socket			*/
@@ -58,4 +63,5 @@
 					/* other similar things on the	*/
 					/* user level.			*/
 #endif
+
 #endif /* _ASM_SOCKET_H */

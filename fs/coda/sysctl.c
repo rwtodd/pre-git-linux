@@ -76,9 +76,9 @@ int                             coda_upcall_timestamping = 0;
 /* keep this in sync with coda.h! */
 char *coda_upcall_names[] = {
 	"totals      ",   /*  0 */
-	"noop        ",   /*  1 */
+	"-           ",   /*  1 */
 	"root        ",   /*  2 */
-	"sync        ",   /*  3 */
+	"open_by_fd  ",   /*  3 */
 	"open        ",   /*  4 */
 	"close       ",   /*  5 */
 	"ioctl       ",   /*  6 */
@@ -96,7 +96,7 @@ char *coda_upcall_names[] = {
 	"symlink     ",   /* 18 */
 	"readlink    ",   /* 19 */
 	"fsync       ",   /* 20 */
-	"inactive    ",   /* 21 */
+	"-           ",   /* 21 */
 	"vget        ",   /* 22 */
 	"signal      ",   /* 23 */
 	"replace     ",   /* 24 */
@@ -104,7 +104,7 @@ char *coda_upcall_names[] = {
 	"purgeuser   ",   /* 26 */
 	"zapfile     ",   /* 27 */
 	"zapdir      ",   /* 28 */
-	"noop2       ",   /* 29 */
+	"-           ",   /* 29 */
 	"purgefid    ",   /* 30 */
 	"open_by_path",   /* 31 */
 	"resolve     ",   /* 32 */
@@ -214,8 +214,8 @@ unsigned long get_time_std_deviation( const struct coda_upcall_stats_entry * pen
 		return 0;
   
 	time_avg = get_time_average( pentry );
-	return 
-	        sqr_root( (pentry->time_squared_sum / pentry->count) - 
+
+	return sqr_root( (pentry->time_squared_sum / pentry->count) - 
 			    time_avg * time_avg );
 }
 
@@ -285,7 +285,7 @@ int do_reset_coda_cache_inv_stats( ctl_table * table, int write,
 }
 
 int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
-			     int length, int dummy )
+			     int length)
 {
 	int len=0;
 	off_t begin;
@@ -296,9 +296,6 @@ int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
 			"Coda VFS statistics\n"
 			"===================\n\n"
 			"File Operations:\n"
-			"\tfile_read\t%9d\n"
-			"\tfile_write\t%9d\n"
-			"\tfile_mmap\t%9d\n"
 			"\topen\t\t%9d\n"
 			"\trelase\t\t%9d\n"
 			"\tfsync\t\t%9d\n\n"
@@ -313,13 +310,9 @@ int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
 			"\tmkdir\t\t%9d\n"
 			"\trmdir\t\t%9d\n"
 			"\trename\t\t%9d\n"
-			"\tpermission\t%9d\n"
-			"\treadpage\t%9d\n",
+			"\tpermission\t%9d\n",
 
 			/* file operations */
-			ps->file_read,
-			ps->file_write,
-			ps->file_mmap,
 			ps->open,
 			ps->release,
 			ps->fsync,
@@ -336,9 +329,8 @@ int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
 			ps->mkdir,
 			ps->rmdir,
 			ps->rename,
-			ps->permission,
-			ps->readpage );
-  
+			ps->permission); 
+
 	begin = offset;
 	*start = buffer + begin;
 	len -= begin;
@@ -352,7 +344,7 @@ int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
 }
 
 int coda_upcall_stats_get_info( char * buffer, char ** start, off_t offset,
-				int length, int dummy )
+				int length)
 {
 	int len=0;
 	int i;
@@ -399,7 +391,7 @@ int coda_upcall_stats_get_info( char * buffer, char ** start, off_t offset,
 }
 
 int coda_permission_stats_get_info( char * buffer, char ** start, off_t offset,
-				    int length, int dummy )
+				    int length)
 {
 	int len=0;
 	off_t begin;
@@ -428,7 +420,7 @@ int coda_permission_stats_get_info( char * buffer, char ** start, off_t offset,
 }
 
 int coda_cache_inv_stats_get_info( char * buffer, char ** start, off_t offset,
-				   int length, int dummy )
+				   int length)
 {
 	int len=0;
 	off_t begin;
@@ -476,55 +468,12 @@ int coda_cache_inv_stats_get_info( char * buffer, char ** start, off_t offset,
 
 */
 
-struct proc_dir_entry proc_fs_coda = {
-        PROC_FS_CODA, 4, "coda",
-        S_IFDIR | S_IRUGO | S_IXUGO, 2, 0, 0,
-        0, &proc_dir_inode_operations,
-	NULL, NULL,
-	NULL,
-	NULL, NULL
-};
-
-struct proc_dir_entry proc_coda_vfs =  {
-                PROC_VFS_STATS , 9, "vfs_stats",
-                S_IFREG | S_IRUGO, 1, 0, 0,
-                0, &proc_net_inode_operations,
-                coda_vfs_stats_get_info
-        };
-
-struct proc_dir_entry proc_coda_upcall =  {
-                PROC_UPCALL_STATS , 12, "upcall_stats",
-                S_IFREG | S_IRUGO, 1, 0, 0,
-                0, &proc_net_inode_operations,
-                coda_upcall_stats_get_info
-        };
-
-struct proc_dir_entry proc_coda_permission =  {
-                PROC_PERMISSION_STATS , 16, "permission_stats",
-                S_IFREG | S_IRUGO, 1, 0, 0,
-                0, &proc_net_inode_operations,
-                coda_permission_stats_get_info
-        };
-
-
-struct proc_dir_entry proc_coda_cache_inv =  {
-                PROC_CACHE_INV_STATS , 15, "cache_inv_stats",
-                S_IFREG | S_IRUGO, 1, 0, 0,
-                0, &proc_net_inode_operations,
-                coda_cache_inv_stats_get_info
-        };
-
-static void coda_proc_modcount(struct inode *inode, int fill)
-{
-	if (fill)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
-			
-}
+struct proc_dir_entry* proc_fs_coda;
 
 #endif
 
+#define coda_proc_create(name,get_info) \
+	create_proc_info_entry(name, 0, proc_fs_coda, get_info)
 
 void coda_sysctl_init()
 {
@@ -535,12 +484,12 @@ void coda_sysctl_init()
 	reset_coda_cache_inv_stats();
 
 #ifdef CONFIG_PROC_FS
-	proc_register(&proc_root_fs,&proc_fs_coda);
-	proc_fs_coda.fill_inode = &coda_proc_modcount;
-	proc_register(&proc_fs_coda,&proc_coda_vfs);
-	proc_register(&proc_fs_coda,&proc_coda_upcall);
-	proc_register(&proc_fs_coda,&proc_coda_permission);
-	proc_register(&proc_fs_coda,&proc_coda_cache_inv);
+	proc_fs_coda = proc_mkdir("coda", proc_root_fs);
+	proc_fs_coda->owner = THIS_MODULE;
+	coda_proc_create("vfs_stats", coda_vfs_stats_get_info);
+	coda_proc_create("upcall_stats", coda_upcall_stats_get_info);
+	coda_proc_create("permission_stats", coda_permission_stats_get_info);
+	coda_proc_create("cache_inv_stats", coda_cache_inv_stats_get_info);
 #endif
 
 #ifdef CONFIG_SYSCTL
@@ -560,10 +509,10 @@ void coda_sysctl_clean()
 #endif
 
 #if CONFIG_PROC_FS
-        proc_unregister(&proc_fs_coda, proc_coda_cache_inv.low_ino);
-        proc_unregister(&proc_fs_coda, proc_coda_permission.low_ino);
-        proc_unregister(&proc_fs_coda, proc_coda_upcall.low_ino);
-        proc_unregister(&proc_fs_coda, proc_coda_vfs.low_ino);
-	proc_unregister(&proc_root_fs, proc_fs_coda.low_ino);
+        remove_proc_entry("cache_inv_stats", proc_fs_coda);
+        remove_proc_entry("permission_stats", proc_fs_coda);
+        remove_proc_entry("upcall_stats", proc_fs_coda);
+        remove_proc_entry("vfs_stats", proc_fs_coda);
+	remove_proc_entry("coda", proc_root_fs);
 #endif 
 }

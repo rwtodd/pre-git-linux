@@ -1,6 +1,6 @@
 #ifndef __MEGARAID_H__
 #define __MEGARAID_H__
- 
+
 #ifndef LINUX_VERSION_CODE
 #include <linux/version.h>
 #endif
@@ -109,6 +109,7 @@
 #define PCI_CONF_IRQ_OFFSET        0x3c
 #define PCI_CONF_AMISIG            0xa0
 #define AMI_SIGNATURE              0x3344
+#define AMI_SIGNATURE_471          0xCCCC
 
 #if LINUX_VERSION_CODE < 0x20100
 #define MEGARAID \
@@ -153,7 +154,7 @@
     cmd_per_lun:      MAX_CMD_PER_LUN,         /* SCSI Commands per LUN     */\
     present:          0,                       /* Present                   */\
     unchecked_isa_dma:0,                       /* Default Unchecked ISA DMA */\
-    use_clustering:   ENABLE_CLUSTERING       /* Enable Clustering         */\
+    use_clustering:   ENABLE_CLUSTERING        /* Enable Clustering         */\
   }
 #endif
 
@@ -622,8 +623,6 @@ typedef struct _mega_host_config {
     u8 max_cmds;
     mega_scb scbList[MAX_COMMANDS];
 } mega_host_config;
-
-extern struct proc_dir_entry proc_scsi_megaraid;
 
 const char *megaraid_info(struct Scsi_Host *);
 int megaraid_detect(Scsi_Host_Template *);

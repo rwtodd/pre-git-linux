@@ -1,7 +1,7 @@
 /**********************************************************************
  * iph5526.c: IP/SCSI driver for the Interphase 5526 PCI Fibre Channel
  *			  Card.
- * Copyright (C) 1999 Vineet M Abraham <vma@iol.unh.edu>
+ * Copyright (C) 1999 Vineet M Abraham <vmabraham@hotmail.com>
  *
  * This program is free software; you can redistribute it and/or 
  * modify it under the terms of the GNU General Public License as 
@@ -33,10 +33,9 @@ Vineet M Abraham
 */	
 
 static const char *version =
-    "iph5526.c:v1.0 07.08.99 Vineet Abraham (vma@iol.unh.edu)\n";
+    "iph5526.c:v1.0 07.08.99 Vineet Abraham (vmabraham@hotmail.com)\n";
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
@@ -47,9 +46,9 @@ static const char *version =
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/timer.h>
+#include <linux/spinlock.h>
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/spinlock.h>
 
 #include <linux/netdevice.h>
 #include <linux/fcdevice.h> /* had the declarations for init_fcdev among others + includes if_fcdevice.h */
@@ -112,9 +111,16 @@ static const char *version =
 #define ALIGNED_ADDR(addr, len) ((((unsigned long)(addr) + (len - 1)) & ~(len - 1)) - (unsigned long)(addr))
 
 
+static struct pci_device_id iph5526_pci_tbl[] __initdata = {
+	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_5526, PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_55x6, PCI_ANY_ID, PCI_ANY_ID, },
+	{ }			/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, iph5526_pci_tbl);
+
 #define MAX_FC_CARDS 2
 static struct fc_info *fc[MAX_FC_CARDS+1];
-static unsigned int pci_irq_line = 0;
+static unsigned int pci_irq_line;
 static struct {
 	unsigned short vendor_id;
 	unsigned short device_id;
@@ -218,33 +224,25 @@ static void update_scsi_oxid(struct fc_info *fi);
 
 Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
 
+static void iph5526_timeout(struct net_device *dev);
 
-#ifdef CONFIG_PCI
-static int iph5526_probe_pci(struct device *dev);
-#endif
+static int iph5526_probe_pci(struct net_device *dev);
 
-
-__initfunc(int iph5526_probe(struct device *dev))
+int __init iph5526_probe(struct net_device *dev)
 {
-#ifdef CONFIG_PCI
 	if (pci_present() && (iph5526_probe_pci(dev) == 0))
 		return 0;
-#endif
     return -ENODEV;
 }
 
-#ifdef CONFIG_PCI
-__initfunc(static int iph5526_probe_pci(struct device *dev))
+static int __init iph5526_probe_pci(struct net_device *dev)
 {
-#ifndef MODULE
-struct fc_info *fi;
-static int count = 0;
-#endif
 #ifdef MODULE
-struct fc_info *fi = (struct fc_info *)dev->priv;
-#endif
-
-#ifndef MODULE
+	struct fc_info *fi = (struct fc_info *)dev->priv;
+#else
+	struct fc_info *fi;
+	static int count = 0;
+ 
 	if(fc[count] != NULL) {
 		if (dev == NULL) {
 			dev = init_fcdev(NULL, 0);
@@ -276,9 +274,8 @@ struct fc_info *fi = (struct fc_info *)dev->priv;
 	display_cache(fi);
 	return 0;
 }
-#endif  /* CONFIG_PCI */
 
-__initfunc(static int fcdev_init(struct device *dev))
+static int __init fcdev_init(struct net_device *dev)
 {
 	dev->open = iph5526_open;
 	dev->stop = iph5526_close;
@@ -286,6 +283,8 @@ __initfunc(static int fcdev_init(struct device *dev))
 	dev->get_stats = iph5526_get_stats;
 	dev->set_multicast_list = NULL;
 	dev->change_mtu = iph5526_change_mtu; 
+	dev->tx_timeout = iph5526_timeout;
+	dev->watchdog_timeo = 5*HZ;
 #ifndef MODULE
 	fc_setup(dev);
 #endif
@@ -919,7 +918,8 @@ u_int tag;
 				/* An IP frame was transmitted to a Bad AL_PA. Free up
 			 	 * the skb used.
 			 	 */
-				dev_kfree_skb((struct sk_buff *)(bus_to_virt(transaction_id)));
+				dev_kfree_skb_irq((struct sk_buff *)(bus_to_virt(transaction_id)));
+				netif_wake_queue(fi->dev);
 			}
 		} /* End of IP frame timing out. */
 	} /* End of frame timing out. */
@@ -977,7 +977,8 @@ u_int tag;
 			 * Free the skb that was used for this IP frame.
 			 */
 			if ((status == 0) && (seq_count > 1)) {
-				dev_kfree_skb((struct sk_buff *)(bus_to_virt(transaction_id)));
+				dev_kfree_skb_irq((struct sk_buff *)(bus_to_virt(transaction_id)));
+				netif_wake_queue(fi->dev);
 			}
 		}
 	}
@@ -2242,7 +2243,7 @@ static void reset_ichip(struct fc_info *fi)
 	/* (i)chip reset */
 	writel(ICHIP_HCR_RESET, fi->i_r.ptr_ichip_hw_control_reg);
 	/*wait for chip to get reset */
-	udelay(10000);
+	mdelay(10);
 	/*de-assert reset */
 	writel(ICHIP_HCR_DERESET, fi->i_r.ptr_ichip_hw_control_reg);
 	
@@ -2912,67 +2913,61 @@ static void update_EDB_indx(struct fc_info *fi)
 		fi->q.edb_buffer_indx = 0;
 }
 
-static int iph5526_open(struct device *dev)
+static int iph5526_open(struct net_device *dev)
 {
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
+	netif_start_queue(dev);
 	MOD_INC_USE_COUNT;
 	return 0;
 }
 
-static int iph5526_close(struct device *dev)
+static int iph5526_close(struct net_device *dev)
 {
-	dev->tbusy = 1;
-	dev->start = 0;
+	netif_stop_queue(dev);
 	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
-static int iph5526_send_packet(struct sk_buff *skb, struct device *dev)
+static void iph5526_timeout(struct net_device *dev)
 {
-struct fc_info *fi = (struct fc_info*)dev->priv;
-int status = 0;
-short type = 0;
-u_long flags;
-	ENTER("iph5526_send_packet");
-	if (dev->tbusy) {
-		printk(KERN_WARNING "%s: DEVICE BUSY\n", dev->name);
-		dev->tbusy = 0;
-		fi->fc_stats.rx_dropped++;
-		dev->trans_start = jiffies;
-		return 0;
-	}
-	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0) {
-		printk(KERN_WARNING "%s: Transmitter access conflict.\n", 
-dev->name);
-		fi->fc_stats.rx_dropped++;
-		return 1;
-	}
-	else {
-		struct fcllc *fcllc;
-		/* Strip off the pseudo header.
-		 */
-		skb->data = skb->data + 2*FC_ALEN; 
-		skb->len = skb->len - 2*FC_ALEN;
-		fcllc = (struct fcllc *)skb->data;
-		type = ntohs(fcllc->ethertype);
+	struct fc_info *fi = (struct fc_info*)dev->priv;
+	printk(KERN_WARNING "%s: timed out on send.\n", dev->name);
+	fi->fc_stats.rx_dropped++;
+	dev->trans_start = jiffies;
+	netif_wake_queue(dev);
+}
 
-		spin_lock_irqsave(&fi->fc_lock, flags);
-		switch(type) {
-			case ETH_P_IP:
-				status = tx_ip_packet(skb, skb->len, fi);
-				break;
-			case ETH_P_ARP:
-				status = tx_arp_packet(skb->data, skb->len, fi);
-				break;
-			default:
-				T_MSG("WARNING!!! Received Unknown Packet Type... Discarding...");
-				fi->fc_stats.rx_dropped++;
-				break;
-		}
-		spin_unlock_irqrestore(&fi->fc_lock, flags);
+static int iph5526_send_packet(struct sk_buff *skb, struct net_device *dev)
+{
+	struct fc_info *fi = (struct fc_info*)dev->priv;
+	int status = 0;
+	short type = 0;
+	u_long flags;
+	struct fcllc *fcllc;
+	
+	ENTER("iph5526_send_packet");
+	
+	netif_stop_queue(dev);
+	/* Strip off the pseudo header.
+	 */
+	skb->data = skb->data + 2*FC_ALEN; 
+	skb->len = skb->len - 2*FC_ALEN;
+	fcllc = (struct fcllc *)skb->data;
+	type = ntohs(fcllc->ethertype);
+
+	spin_lock_irqsave(&fi->fc_lock, flags);
+	switch(type) {
+		case ETH_P_IP:
+			status = tx_ip_packet(skb, skb->len, fi);
+			break;
+		case ETH_P_ARP:
+			status = tx_arp_packet(skb->data, skb->len, fi);
+			break;
+		default:
+			T_MSG("WARNING!!! Received Unknown Packet Type... Discarding...");
+			fi->fc_stats.rx_dropped++;
+			break;
 	}
+	spin_unlock_irqrestore(&fi->fc_lock, flags);
 
 	if (status) {
 		fi->fc_stats.tx_bytes += skb->len;
@@ -2981,19 +2976,19 @@ dev->name);
 	else
 		fi->fc_stats.rx_dropped++;
 	dev->trans_start = jiffies;
-	dev->tbusy = 0;
 	/* We free up the IP buffers in the OCI_interrupt handler.
 	 * status == 0 implies that the frame was not transmitted. So the
 	 * skb is freed here.
 	 */
 	if ((type == ETH_P_ARP) || (status == 0))
 		dev_kfree_skb(skb);
-	mark_bh(NET_BH);
+	else
+		netif_wake_queue(dev);
 	LEAVE("iph5526_send_packet");
 	return 0;
 }
 
-static int iph5526_change_mtu(struct device *dev, int mtu)
+static int iph5526_change_mtu(struct net_device *dev, int mtu)
 {
 	return 0;
 }
@@ -3119,7 +3114,7 @@ u_int my_mtu = fi->g.my_mtu;
 
 static void rx_net_packet(struct fc_info *fi, u_char *buff_addr, int payload_size)
 {
-struct device *dev = fi->dev;
+struct net_device *dev = fi->dev;
 struct sk_buff *skb;
 u_int skb_size = 0;
 struct fch_hdr fch;
@@ -3160,7 +3155,7 @@ struct fch_hdr fch;
 
 static void rx_net_mfs_packet(struct fc_info *fi, struct sk_buff *skb)
 {
-struct device *dev = fi->dev;
+struct net_device *dev = fi->dev;
 struct fch_hdr fch;
 	ENTER("rx_net_mfs_packet");
 	/* Construct your Hard Header */
@@ -3176,7 +3171,7 @@ struct fch_hdr fch;
 	LEAVE("rx_net_mfs_packet");
 }
 
-unsigned short fc_type_trans(struct sk_buff *skb, struct device *dev) 
+unsigned short fc_type_trans(struct sk_buff *skb, struct net_device *dev) 
 {
 struct fch_hdr *fch=(struct fch_hdr *)skb->data;
 struct fcllc *fcllc;
@@ -3743,7 +3738,7 @@ int count = 0, j;
 	return 0;
 }
 
-static struct net_device_stats * iph5526_get_stats(struct device *dev)
+static struct net_device_stats * iph5526_get_stats(struct net_device *dev)
 {	
 struct fc_info *fi = (struct fc_info*)dev->priv; 
 	return (struct net_device_stats *) &fi->fc_stats;
@@ -3751,11 +3746,6 @@ struct fc_info *fi = (struct fc_info*)dev->priv;
 
 
 /* SCSI stuff starts here */
-
-static struct proc_dir_entry proc_scsi_iph5526 =  {
-	PROC_SCSI_IPH5526_FC, 7, "iph5526", S_IFDIR, S_IRUGO | S_IXUGO, 2
-};
-
 
 int iph5526_detect(Scsi_Host_Template *tmpt)
 {
@@ -3766,7 +3756,7 @@ int no_of_hosts = 0, timeout, i, j, count = 0;
 u_int pci_maddr = 0;
 struct pci_dev *pdev = NULL;
 
-	tmpt->proc_dir = &proc_scsi_iph5526;
+	tmpt->proc_name = "iph5526";
 	if (pci_present() == 0) {
 		printk("iph5526: PCI not present\n");
 		return 0;
@@ -3777,7 +3767,9 @@ struct pci_dev *pdev = NULL;
 
 	for (i = 0; i < clone_list[i].vendor_id != 0; i++)
 	while ((pdev = pci_find_device(clone_list[i].vendor_id, clone_list[i].device_id, pdev))) {
-	unsigned short pci_command;
+		unsigned short pci_command;
+		if (pci_enable_device(pdev))
+			continue;
 		if (count < MAX_FC_CARDS) {
 			fc[count] = kmalloc(sizeof(struct fc_info), GFP_ATOMIC);
 			if (fc[count] == NULL) {
@@ -3795,6 +3787,9 @@ struct pci_dev *pdev = NULL;
 		sprintf(fi->name, "fc%d", count);
 
 		host = scsi_register(tmpt, sizeof(struct iph5526_hostdata));
+		if(host==NULL)
+			return no_of_hosts;
+			
 		hostdata = (struct iph5526_hostdata *)host->hostdata;
 		memset(hostdata, 0 , sizeof(struct iph5526_hostdata));
 		for (j = 0; j < MAX_SCSI_TARGETS; j++)
@@ -3806,8 +3801,8 @@ struct pci_dev *pdev = NULL;
 		host->hostt->use_new_eh_code = 1;
 		host->this_id = tmpt->this_id;
 
-		pci_maddr = pdev->base_address[0];
-		if ( (pci_maddr & PCI_BASE_ADDRESS_SPACE) != PCI_BASE_ADDRESS_SPACE_MEMORY) {
+		pci_maddr = pci_resource_start(pdev, 0);
+		if (pci_resource_flags(pdev, 0) & IORESOURCE_IO) {
 			printk("iph5526.c : Cannot find proper PCI device base address.\n");
 			scsi_unregister(host);
 			kfree(fc[count]);
@@ -3815,7 +3810,6 @@ struct pci_dev *pdev = NULL;
 			continue;
 		}
 		
-		pci_maddr &= PCI_BASE_ADDRESS_MEM_MASK;
 		DPRINTK("pci_maddr = %x", pci_maddr);
 		pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
 			
@@ -3884,7 +3878,7 @@ struct pci_dev *pdev = NULL;
 	/* This is to make sure that the ACC to the PRLI comes in 
 	 * for the last ALPA. 
 	 */
-	udelay(1000000); /* Ugly! Let the Gods forgive me */
+	mdelay(1000); /* Ugly! Let the Gods forgive me */
 
 	DPRINTK1("leaving iph5526_detect\n");
 	return no_of_hosts;
@@ -3957,8 +3951,10 @@ u_long flags;
 
 	/* Get an used OX_ID. We could have pending commands.
 	 */
-	if (get_scsi_oxid(fi))
+	if (get_scsi_oxid(fi)) {
+		spin_unlock_irqrestore(&fi->fc_lock, flags);
 		return 1;
+	}
 	fi->q.free_scsi_oxid[fi->g.scsi_oxid] = OXID_INUSE;	
 
 	/* Maintain a handler so that we can associate the done() function
@@ -4523,7 +4519,7 @@ static char buf[80];
 
 #define NAMELEN		8	/* # of chars for storing dev->name */
 
-static struct device *dev_fc[MAX_FC_CARDS];
+static struct net_device *dev_fc[MAX_FC_CARDS];
 
 static int io =  0;
 static int irq  = 0;
@@ -4559,7 +4555,7 @@ int i = 0;
 		dev_fc[i]->priv = fc[i];
 		fc[i]->dev = dev_fc[i];
 		if (register_fcdev(dev_fc[i]) != 0) {
-			kfree_s(dev_fc[i], sizeof(struct device));
+			kfree(dev_fc[i]);
 			dev_fc[i] = NULL;
 			if (i == 0) {
 				printk("iph5526.c: IP registeration failed!!!\n");
@@ -4578,7 +4574,7 @@ void cleanup_module(void)
 {
 int i = 0;
 	while(fc[i] != NULL) {
-	struct device *dev = fc[i]->dev;
+	struct net_device *dev = fc[i]->dev;
 	void *priv = dev->priv;
 		fc[i]->g.dont_init = TRUE;
 		take_tachyon_offline(fc[i]);

@@ -1,4 +1,4 @@
-/* $Id: ttable.h,v 1.11.2.3 1999/10/07 20:48:25 davem Exp $ */
+/* $Id: ttable.h,v 1.15 2000/04/03 10:36:42 davem Exp $ */
 #ifndef _SPARC64_TTABLE_H
 #define _SPARC64_TTABLE_H
 
@@ -85,7 +85,7 @@
 	sethi	%hi(109f), %g7;				\
 	ba,pt	%xcc, scetrap;				\
 109:	 or	%g7, %lo(109b), %g7;			\
-	call	routine;				\
+	ba,pt	%xcc, routine;				\
 	 sethi	%hi(systbl), %l7;			\
 	nop; nop; nop;
 	
@@ -98,7 +98,7 @@
 	nop;nop;nop;
 	
 #define TRAP_UTRAP(handler,lvl)						\
-	ldx	[%g6 + AOFF_task_tss + AOFF_thread_utraps], %g1;	\
+	ldx	[%g6 + AOFF_task_thread + AOFF_thread_utraps], %g1;	\
 	sethi	%hi(109f), %g7;						\
 	brz,pn	%g1, utrap;						\
 	 or	%g7, %lo(109f), %g7;					\
@@ -165,7 +165,7 @@
  * see how arch/sparc64/kernel/winfixup.S works... -DaveM
  *
  * For the user cases we used to use the %asi register, but
- * it turns out that the "wr xxx, %asi" costs ~30 cycles, so
+ * it turns out that the "wr xxx, %asi" costs ~5 cycles, so
  * now we use immediate ASI loads and stores instead.  Kudos
  * to Greg Onufer for pointing out this performance anomaly.
  *

@@ -21,12 +21,9 @@ int sim710_release(struct Scsi_Host *);
 #define sim710_release	NULL
 #endif
 
-#if defined(HOSTS_C) || defined(MODULE)
 #include <scsi/scsicam.h>
 
-extern struct proc_dir_entry proc_scsi_sim710;
-
-#define SIM710_SCSI { proc_dir:			&proc_scsi_sim710,	\
+#define SIM710_SCSI { proc_name:		"sim710",	\
 		      name:			"Simple 53c710", 	\
 		      detect:			sim710_detect,		\
 		      release:			sim710_release,		\
@@ -42,8 +39,6 @@ extern struct proc_dir_entry proc_scsi_sim710;
 		      cmd_per_lun:		1,		 	\
 		      use_clustering:		DISABLE_CLUSTERING,	\
 		      use_new_eh_code:		1}
-
-#endif
 
 #ifndef HOSTS_C
 

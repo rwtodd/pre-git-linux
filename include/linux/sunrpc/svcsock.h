@@ -10,7 +10,6 @@
 #define SUNRPC_SVCSOCK_H
 
 #include <linux/sunrpc/svc.h>
-#include <asm/atomic.h>
 
 /*
  * RPC server socket.
@@ -22,9 +21,10 @@ struct svc_sock {
 	struct svc_sock *	sk_list;	/* list of all sockets */
 	struct socket *		sk_sock;	/* berkeley socket layer */
 	struct sock *		sk_sk;		/* INET layer */
+	spinlock_t		sk_lock;
 
 	struct svc_serv *	sk_server;	/* service for this socket */
-	atomic_t		sk_inuse;	/* use count */
+	unsigned char		sk_inuse;	/* use count */
 	unsigned char		sk_busy;	/* enqueued/receiving */
 	unsigned char		sk_conn;	/* conn pending */
 	unsigned char		sk_close;	/* dead or dying */
