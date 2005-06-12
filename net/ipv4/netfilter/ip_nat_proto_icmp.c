@@ -1,3 +1,11 @@
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/netfilter.h>
@@ -6,6 +14,7 @@
 #include <linux/if.h>
 
 #include <linux/netfilter_ipv4/ip_nat.h>
+#include <linux/netfilter_ipv4/ip_nat_core.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_nat_protocol.h>
 
@@ -25,7 +34,7 @@ icmp_unique_tuple(struct ip_conntrack_tuple *tuple,
 		  enum ip_nat_manip_type maniptype,
 		  const struct ip_conntrack *conntrack)
 {
-	static u_int16_t id = 0;
+	static u_int16_t id;
 	unsigned int range_size
 		= (unsigned int)range->max.icmp.id - range->min.icmp.id + 1;
 	unsigned int i;
@@ -42,17 +51,26 @@ icmp_unique_tuple(struct ip_conntrack_tuple *tuple,
 	return 0;
 }
 
-static void
-icmp_manip_pkt(struct iphdr *iph, size_t len,
-	       const struct ip_conntrack_manip *manip,
+static int
+icmp_manip_pkt(struct sk_buff **pskb,
+	       unsigned int iphdroff,
+	       const struct ip_conntrack_tuple *tuple,
 	       enum ip_nat_manip_type maniptype)
 {
-	struct icmphdr *hdr = (struct icmphdr *)((u_int32_t *)iph + iph->ihl);
+	struct iphdr *iph = (struct iphdr *)((*pskb)->data + iphdroff);
+	struct icmphdr *hdr;
+	unsigned int hdroff = iphdroff + iph->ihl*4;
+
+	if (!skb_ip_make_writable(pskb, hdroff + sizeof(*hdr)))
+		return 0;
+
+	hdr = (struct icmphdr *)((*pskb)->data + hdroff);
 
 	hdr->checksum = ip_nat_cheat_check(hdr->un.echo.id ^ 0xFFFF,
-					   manip->u.icmp.id,
-					   hdr->checksum);
-	hdr->un.echo.id = manip->u.icmp.id;
+					    tuple->src.u.icmp.id,
+					    hdr->checksum);
+	hdr->un.echo.id = tuple->src.u.icmp.id;
+	return 1;
 }
 
 static unsigned int
@@ -88,7 +106,7 @@ icmp_print_range(char *buffer, const struct ip_nat_range *range)
 }
 
 struct ip_nat_protocol ip_nat_protocol_icmp
-= { { NULL, NULL }, "ICMP", IPPROTO_ICMP,
+= { "ICMP", IPPROTO_ICMP,
     icmp_manip_pkt,
     icmp_in_range,
     icmp_unique_tuple,

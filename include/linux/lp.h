@@ -98,6 +98,9 @@
 
 #ifdef __KERNEL__
 
+#include <linux/wait.h>
+#include <asm/semaphore.h>
+
 /* Magic numbers for defining port-device mappings */
 #define LP_PARPORT_UNSPEC -4
 #define LP_PARPORT_AUTO -3
@@ -145,6 +148,9 @@ struct lp_struct {
 	struct semaphore port_mutex;
 	wait_queue_head_t dataq;
 	long timeout;
+	unsigned int best_mode;
+	unsigned int current_mode;
+	unsigned long bits;
 };
 
 /*
@@ -179,12 +185,6 @@ struct lp_struct {
  * It is used only in the lp_init() and lp_reset() routine.
  */
 #define LP_DELAY 	50
-
-/*
- * function prototypes
- */
-
-extern int lp_init(void);
 
 #endif
 

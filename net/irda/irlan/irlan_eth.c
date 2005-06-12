@@ -30,7 +30,7 @@
 #include <linux/etherdevice.h>
 #include <linux/inetdevice.h>
 #include <linux/if_arp.h>
-#include <linux/random.h>
+#include <linux/module.h>
 #include <net/arp.h>
 
 #include <net/irda/irda.h>
@@ -40,27 +40,28 @@
 #include <net/irda/irlan_event.h>
 #include <net/irda/irlan_eth.h>
 
+static int  irlan_eth_open(struct net_device *dev);
+static int  irlan_eth_close(struct net_device *dev);
+static int  irlan_eth_xmit(struct sk_buff *skb, struct net_device *dev);
+static void irlan_eth_set_multicast_list( struct net_device *dev);
+static struct net_device_stats *irlan_eth_get_stats(struct net_device *dev);
+
 /*
- * Function irlan_eth_init (dev)
+ * Function irlan_eth_setup (dev)
  *
  *    The network device initialization function.
  *
  */
-int irlan_eth_init(struct net_device *dev)
+static void irlan_eth_setup(struct net_device *dev)
 {
-	struct irlan_cb *self;
-
-	IRDA_DEBUG(2, __FUNCTION__"()\n");
-
-	ASSERT(dev != NULL, return -1;);
-       
-	self = (struct irlan_cb *) dev->priv;
-
 	dev->open               = irlan_eth_open;
 	dev->stop               = irlan_eth_close;
 	dev->hard_start_xmit    = irlan_eth_xmit; 
 	dev->get_stats	        = irlan_eth_get_stats;
 	dev->set_multicast_list = irlan_eth_set_multicast_list;
+	dev->destructor		= free_netdev;
+
+	SET_MODULE_OWNER(dev);
 
 	ether_setup(dev);
 	
@@ -69,22 +70,30 @@ int irlan_eth_init(struct net_device *dev)
 	 * Queueing here as well can introduce some strange latency
 	 * problems, which we will avoid by setting the queue size to 0.
 	 */
-	dev->tx_queue_len = 0;
+	/*
+	 * The bugs in IrTTP and IrLAN that created this latency issue
+	 * have now been fixed, and we can propagate flow control properly
+	 * to the network layer. However, this requires a minimal queue of
+	 * packets for the device.
+	 * Without flow control, the Tx Queue is 14 (ttp) + 0 (dev) = 14
+	 * With flow control, the Tx Queue is 7 (ttp) + 4 (dev) = 11
+	 * See irlan_eth_flow_indication()...
+	 * Note : this number was randomly selected and would need to
+	 * be adjusted.
+	 * Jean II */
+	dev->tx_queue_len = 4;
+}
 
-	if (self->provider.access_type == ACCESS_DIRECT) {
-		/*  
-		 * Since we are emulating an IrLAN sever we will have to
-		 * give ourself an ethernet address!  
-		 */
-		dev->dev_addr[0] = 0x40;
-		dev->dev_addr[1] = 0x00;
-		dev->dev_addr[2] = 0x00;
-		dev->dev_addr[3] = 0x00;
-		get_random_bytes(dev->dev_addr+4, 1);
-		get_random_bytes(dev->dev_addr+5, 1);
-	}
-
-	return 0;
+/*
+ * Function alloc_irlandev
+ *
+ *    Allocate network device and control block
+ *
+ */
+struct net_device *alloc_irlandev(const char *name)
+{
+	return alloc_netdev(sizeof(struct irlan_cb), name,
+			    irlan_eth_setup);
 }
 
 /*
@@ -93,17 +102,11 @@ int irlan_eth_init(struct net_device *dev)
  *    Network device has been opened by user
  *
  */
-int irlan_eth_open(struct net_device *dev)
+static int irlan_eth_open(struct net_device *dev)
 {
-	struct irlan_cb *self;
+	struct irlan_cb *self = netdev_priv(dev);
 	
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
-
-	ASSERT(dev != NULL, return -1;);
-
-	self = (struct irlan_cb *) dev->priv;
-
-	ASSERT(self != NULL, return -1;);
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
 	/* Ready to play! */
  	netif_stop_queue(dev); /* Wait until data link is ready */
@@ -112,12 +115,10 @@ int irlan_eth_open(struct net_device *dev)
 	self->disconnect_reason = 0;
 	irlan_client_wakeup(self, self->saddr, self->daddr);
 
-	irlan_mod_inc_use_count();
-
-	/* Make sure we have a hardware address before we return, so DHCP clients gets happy */
-	interruptible_sleep_on(&self->open_wait);
-	
-	return 0;
+	/* Make sure we have a hardware address before we return, 
+	   so DHCP clients gets happy */
+	return wait_event_interruptible(self->open_wait,
+					!self->tsap_data->connected);
 }
 
 /*
@@ -128,18 +129,15 @@ int irlan_eth_open(struct net_device *dev)
  *    close timer, so that the instance will be removed if we are unable
  *    to discover the remote device after the disconnect.
  */
-int irlan_eth_close(struct net_device *dev)
+static int irlan_eth_close(struct net_device *dev)
 {
-	struct irlan_cb *self = (struct irlan_cb *) dev->priv;
-	struct sk_buff *skb;
+	struct irlan_cb *self = netdev_priv(dev);
 	
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 	
 	/* Stop device */
 	netif_stop_queue(dev);
 	
-	irlan_mod_dec_use_count();
-
 	irlan_close_data_channel(self);
 	irlan_close_tsaps(self);
 
@@ -147,8 +145,7 @@ int irlan_eth_close(struct net_device *dev)
 	irlan_do_provider_event(self, IRLAN_LMP_DISCONNECT, NULL);	
 	
 	/* Remove frames queued on the control channel */
-	while ((skb = skb_dequeue(&self->client.txq)))
-			dev_kfree_skb(skb);
+	skb_queue_purge(&self->client.txq);
 
 	self->client.tx_busy = 0;
 	
@@ -161,15 +158,10 @@ int irlan_eth_close(struct net_device *dev)
  *    Transmits ethernet frames over IrDA link.
  *
  */
-int irlan_eth_xmit(struct sk_buff *skb, struct net_device *dev)
+static int irlan_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct irlan_cb *self;
+	struct irlan_cb *self = netdev_priv(dev);
 	int ret;
-
-	self = (struct irlan_cb *) dev->priv;
-
-	ASSERT(self != NULL, return 0;);
-	ASSERT(self->magic == IRLAN_MAGIC, return 0;);
 
 	/* skb headroom large enough to contain all IrDA-headers? */
 	if ((skb_headroom(skb) < self->max_header_size) || (skb_shared(skb))) {
@@ -206,7 +198,7 @@ int irlan_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 		 * confuse do_dev_queue_xmit() in dev.c! I have
 		 * tried :-) DB 
 		 */
-		dev_kfree_skb(skb);
+		/* irttp_data_request already free the packet */
 		self->stats.tx_dropped++;
 	} else {
 		self->stats.tx_packets++;
@@ -224,9 +216,7 @@ int irlan_eth_xmit(struct sk_buff *skb, struct net_device *dev)
  */
 int irlan_eth_receive(void *instance, void *sap, struct sk_buff *skb)
 {
-	struct irlan_cb *self;
-
-	self = (struct irlan_cb *) instance;
+	struct irlan_cb *self = instance;
 
 	if (skb == NULL) {
 		++self->stats.rx_dropped; 
@@ -239,7 +229,7 @@ int irlan_eth_receive(void *instance, void *sap, struct sk_buff *skb)
 	 * might have been previously set by the low level IrDA network
 	 * device driver 
 	 */
-	skb->dev = &self->dev;
+	skb->dev = self->dev;
 	skb->protocol=eth_type_trans(skb, skb->dev); /* Remove eth header */
 	
 	self->stats.rx_packets++;
@@ -255,6 +245,14 @@ int irlan_eth_receive(void *instance, void *sap, struct sk_buff *skb)
  *
  *    Do flow control between IP/Ethernet and IrLAN/IrTTP. This is done by 
  *    controlling the queue stop/start.
+ *
+ * The IrDA link layer has the advantage to have flow control, and
+ * IrTTP now properly handles that. Flow controlling the higher layers
+ * prevent us to drop Tx packets in here (up to 15% for a TCP socket,
+ * more for UDP socket).
+ * Also, this allow us to reduce the overall transmit queue, which means
+ * less latency in case of mixed traffic.
+ * Jean II
  */
 void irlan_eth_flow_indication(void *instance, void *sap, LOCAL_FLOW flow)
 {
@@ -266,38 +264,26 @@ void irlan_eth_flow_indication(void *instance, void *sap, LOCAL_FLOW flow)
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == IRLAN_MAGIC, return;);
 	
-	dev = &self->dev;
+	dev = self->dev;
 
 	ASSERT(dev != NULL, return;);
 	
+	IRDA_DEBUG(0, "%s() : flow %s ; running %d\n", __FUNCTION__,
+		   flow == FLOW_STOP ? "FLOW_STOP" : "FLOW_START",
+		   netif_running(dev));
+
 	switch (flow) {
 	case FLOW_STOP:
+		/* IrTTP is full, stop higher layers */
 		netif_stop_queue(dev);
 		break;
 	case FLOW_START:
 	default:
 		/* Tell upper layers that its time to transmit frames again */
 		/* Schedule network layer */
-		netif_start_queue(dev);
+		netif_wake_queue(dev);
 		break;
 	}
-}
-
-/*
- * Function irlan_eth_rebuild_header (buff, dev, dest, skb)
- *
- *    If we don't want to use ARP. Currently not used!!
- *
- */
-void irlan_eth_rebuild_header(void *buff, struct net_device *dev, 
-			      unsigned long dest, struct sk_buff *skb)
-{
-	struct ethhdr *eth = (struct ethhdr *) buff;
-
-	memcpy(eth->h_source, dev->dev_addr, dev->addr_len);
-	memcpy(eth->h_dest, dev->dev_addr, dev->addr_len);
-
-	/* return 0; */
 }
 
 /*
@@ -317,10 +303,10 @@ void irlan_eth_send_gratuitous_arp(struct net_device *dev)
 	 */
 #ifdef CONFIG_INET
 	IRDA_DEBUG(4, "IrLAN: Sending gratuitous ARP\n");
-	in_dev = in_dev_get(dev);
+	rcu_read_lock();
+	in_dev = __in_dev_get(dev);
 	if (in_dev == NULL)
-		return;
-	read_lock(&in_dev->lock);
+		goto out;
 	if (in_dev->ifa_list)
 		
 	arp_send(ARPOP_REQUEST, ETH_P_ARP, 
@@ -328,8 +314,8 @@ void irlan_eth_send_gratuitous_arp(struct net_device *dev)
 		 dev, 
 		 in_dev->ifa_list->ifa_address,
 		 NULL, dev->dev_addr, NULL);
-	read_unlock(&in_dev->lock);
-	in_dev_put(in_dev);
+out:
+	rcu_read_unlock();
 #endif /* CONFIG_INET */
 }
 
@@ -340,20 +326,15 @@ void irlan_eth_send_gratuitous_arp(struct net_device *dev)
  *
  */
 #define HW_MAX_ADDRS 4 /* Must query to get it! */
-void irlan_eth_set_multicast_list(struct net_device *dev) 
+static void irlan_eth_set_multicast_list(struct net_device *dev) 
 {
- 	struct irlan_cb *self;
+ 	struct irlan_cb *self = netdev_priv(dev);
 
- 	self = dev->priv; 
-
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
-
- 	ASSERT(self != NULL, return;); 
- 	ASSERT(self->magic == IRLAN_MAGIC, return;);
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
 	/* Check if data channel has been connected yet */
 	if (self->client.state != IRLAN_DATA) {
-		IRDA_DEBUG(1, __FUNCTION__ "(), delaying!\n");
+		IRDA_DEBUG(1, "%s(), delaying!\n", __FUNCTION__ );
 		return;
 	}
 
@@ -363,20 +344,20 @@ void irlan_eth_set_multicast_list(struct net_device *dev)
 	} 
 	else if ((dev->flags & IFF_ALLMULTI) || dev->mc_count > HW_MAX_ADDRS) {
 		/* Disable promiscuous mode, use normal mode. */
-		IRDA_DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
+		IRDA_DEBUG(4, "%s(), Setting multicast filter\n", __FUNCTION__ );
 		/* hardware_set_filter(NULL); */
 
 		irlan_set_multicast_filter(self, TRUE);
 	}
 	else if (dev->mc_count) {
-		IRDA_DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
+		IRDA_DEBUG(4, "%s(), Setting multicast filter\n", __FUNCTION__ );
 		/* Walk the address list, and load the filter */
 		/* hardware_set_filter(dev->mc_list); */
 
 		irlan_set_multicast_filter(self, TRUE);
 	}
 	else {
-		IRDA_DEBUG(4, __FUNCTION__ "(), Clearing multicast filter\n");
+		IRDA_DEBUG(4, "%s(), Clearing multicast filter\n", __FUNCTION__ );
 		irlan_set_multicast_filter(self, FALSE);
 	}
 
@@ -392,12 +373,9 @@ void irlan_eth_set_multicast_list(struct net_device *dev)
  *    Get the current statistics for this device
  *
  */
-struct net_device_stats *irlan_eth_get_stats(struct net_device *dev) 
+static struct net_device_stats *irlan_eth_get_stats(struct net_device *dev) 
 {
-	struct irlan_cb *self = (struct irlan_cb *) dev->priv;
-
-	ASSERT(self != NULL, return NULL;);
-	ASSERT(self->magic == IRLAN_MAGIC, return NULL;);
+	struct irlan_cb *self = netdev_priv(dev);
 
 	return &self->stats;
 }

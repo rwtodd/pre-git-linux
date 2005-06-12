@@ -1,4 +1,4 @@
-/* $Id: btfixupprep.c,v 1.5 1998/09/16 12:24:55 jj Exp $
+/* $Id: btfixupprep.c,v 1.6 2001/08/22 15:27:47 davem Exp $
    Simple utility to prepare vmlinux image for sparc.
    Resolves all BTFIXUP uses and settings and creates
    a special .s object to link to the image.
@@ -88,6 +88,16 @@ btfixup *find(int type, char *name)
 	return array + last - 1;
 }
 
+void set_mode (char *buffer)
+{
+  	for (mode = 0;; mode++)
+		if (buffer[mode] < '0' || buffer[mode] > '9')
+			break;
+	if (mode != 8 && mode != 16)
+		fatal();
+}
+
+
 int main(int argc,char **argv)
 {
 	char *p, *q;
@@ -106,14 +116,6 @@ int main(int argc,char **argv)
 			goto main0;
 	fatal();
 main0:
-	if (fgets (buffer, 1024, stdin) == NULL || buffer[0] < '0' || buffer[0] > '9')
-		fatal();
-	for (mode = 0;; mode++)
-		if (buffer[mode] < '0' || buffer[mode] > '9')
-			break;
-	if (mode != 8 && mode != 16)
-		fatal();
-	
 	rellen = strlen(relrec);
 	while (fgets (buffer, 1024, stdin) != NULL)
 		if (!strncmp (buffer, relrec, rellen))
@@ -132,6 +134,8 @@ main1:
 		int nbase;
 		if (!strncmp (buffer, relrec, rellen))
 			goto main1;
+		if (mode == 0)
+			set_mode (buffer);
 		p = strchr (buffer, '\n');
 		if (p) *p = 0;
 		if (strlen (buffer) < 22+mode)
@@ -157,17 +161,33 @@ main1:
 		shift = nbase + 5;
 		if (buffer[nbase+4] == 's' && buffer[nbase+5] == '_') {
 			shift = nbase + 6;
-			if (strcmp (sect, ".text.init")) {
-				fprintf(stderr, "Wrong use of '%s' BTFIXUPSET.\nBTFIXUPSET_CALL can be used only in __init sections\n", buffer+shift);
+			if (strcmp (sect, ".init.text")) {
+				fprintf(stderr,
+				    "Wrong use of '%s' BTFIXUPSET in '%s' section.\n"
+				    "BTFIXUPSET_CALL can be used only in"
+				    " __init sections\n",
+				    buffer + shift, sect);
 				exit(1);
 			}
 		} else if (buffer[nbase+4] != '_')
 			continue;
-		if (strcmp (sect, ".text") && strcmp (sect, ".text.init") && strcmp (sect, ".fixup") && (strcmp (sect, "__ksymtab") || buffer[nbase+3] != 'f')) {
+		if (!strcmp (sect, ".text.exit"))
+			continue;
+		if (strcmp (sect, ".text") &&
+		    strcmp (sect, ".init.text") &&
+		    strcmp (sect, ".fixup") &&
+		    (strcmp (sect, "__ksymtab") || buffer[nbase+3] != 'f')) {
 			if (buffer[nbase+3] == 'f')
-				fprintf(stderr, "Wrong use of '%s' in '%s' section. It can be only used in .text, .text.init, .fixup and __ksymtab\n", buffer + shift, sect);
+				fprintf(stderr,
+				    "Wrong use of '%s' in '%s' section.\n"
+				    " It can be used only in .text, .init.text,"
+				    " .fixup and __ksymtab\n",
+				    buffer + shift, sect);
 			else
-				fprintf(stderr, "Wrong use of '%s' in '%s' section. It can be only used in .text, .fixup and .text.init\n", buffer + shift, sect);
+				fprintf(stderr,
+				    "Wrong use of '%s' in '%s' section.\n"
+				    " It can be only used in .text, .init.text,"
+				    " and .fixup\n", buffer + shift, sect);
 			exit(1);
 		}
 		p = strstr (buffer + shift, "__btset_");
@@ -322,7 +342,7 @@ main1:
 		for (r = f->rel, j--; r != NULL; j--, r = r->next) {
 			if (!strcmp (r->sect, ".text"))
 				printf ("_stext+0x%08lx", r->offset);
-			else if (!strcmp (r->sect, ".text.init"))
+			else if (!strcmp (r->sect, ".init.text"))
 				printf ("__init_begin+0x%08lx", r->offset);
 			else if (!strcmp (r->sect, "__ksymtab"))
 				printf ("__start___ksymtab+0x%08lx", r->offset);

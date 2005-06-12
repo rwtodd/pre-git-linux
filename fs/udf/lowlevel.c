@@ -7,7 +7,7 @@
  * CONTACTS
  *	E-mail regarding any portion of the Linux UDF file system should be
  *	directed to the development team mailing list (run by majordomo):
- *		linux_udf@hootie.lvld.hp.com
+ *		linux_udf@hpesjro.fc.hp.com
  *
  * COPYRIGHT
  *	This file is distributed under the terms of the GNU General Public
@@ -15,7 +15,7 @@
  *		ftp://prep.ai.mit.edu/pub/gnu/GPL
  *	Each contributing author retains all rights to their own work.
  *
- *  (C) 1999-2000 Ben Fennema
+ *  (C) 1999-2001 Ben Fennema
  *
  * HISTORY
  *
@@ -27,12 +27,6 @@
 #include <linux/blkdev.h>
 #include <linux/cdrom.h>
 #include <asm/uaccess.h>
-#include <scsi/scsi.h>
-
-typedef struct scsi_device Scsi_Device;
-typedef struct scsi_cmnd   Scsi_Cmnd;
-
-#include <scsi/scsi_ioctl.h>
 
 #include <linux/udf_fs.h>
 #include "udf_sb.h"
@@ -67,24 +61,16 @@ udf_get_last_session(struct super_block *sb)
 	return vol_desc_start;
 }
 
-unsigned int
+unsigned long
 udf_get_last_block(struct super_block *sb)
 {
 	struct block_device *bdev = sb->s_bdev;
-	int ret;
 	unsigned long lblock = 0;
 
-	ret = ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock);
+	if (ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock))
+		lblock = bdev->bd_inode->i_size >> sb->s_blocksize_bits;
 
-	if (ret) /* Hard Disk */
-	{
-		ret = ioctl_by_bdev(bdev, BLKGETSIZE, (unsigned long) &lblock);
-
-		if (!ret && lblock != 0x7FFFFFFF)
-			lblock = ((512 * lblock) / sb->s_blocksize);
-	}
-
-	if (!ret && lblock)
+	if (lblock)
 		return lblock - 1;
 	else
 		return 0;

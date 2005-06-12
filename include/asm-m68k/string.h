@@ -73,25 +73,28 @@ static inline char * strncat(char *dest, const char *src, size_t count)
 static inline char * strchr(const char * s, int c)
 {
   const char ch = c;
-  
+
   for(; *s != ch; ++s)
     if (*s == '\0')
       return( NULL );
   return( (char *) s);
 }
 
+#if 0
 #define __HAVE_ARCH_STRPBRK
-static inline char * strpbrk(const char * cs,const char * ct)
+static inline char *strpbrk(const char *cs,const char *ct)
 {
   const char *sc1,*sc2;
-  
+
   for( sc1 = cs; *sc1 != '\0'; ++sc1)
     for( sc2 = ct; *sc2 != '\0'; ++sc2)
       if (*sc1 == *sc2)
 	return((char *) sc1);
   return( NULL );
 }
+#endif
 
+#if 0
 #define __HAVE_ARCH_STRSPN
 static inline size_t strspn(const char *s, const char *accept)
 {
@@ -112,27 +115,7 @@ static inline size_t strspn(const char *s, const char *accept)
 
   return count;
 }
-
-#define __HAVE_ARCH_STRTOK
-static inline char * strtok(char * s,const char * ct)
-{
-  char *sbegin, *send;
-  
-  sbegin  = s ? s : ___strtok;
-  if (!sbegin) {
-	  return NULL;
-  }
-  sbegin += strspn(sbegin,ct);
-  if (*sbegin == '\0') {
-    ___strtok = NULL;
-    return( NULL );
-  }
-  send = strpbrk( sbegin, ct);
-  if (send && *send != '\0')
-    *send++ = '\0';
-  ___strtok = send;
-  return (sbegin);
-}
+#endif
 
 /* strstr !! */
 
@@ -307,9 +290,7 @@ static inline void * __memset_g(void * s, int c, size_t count)
 static inline void * __memset_page(void * s,int c,size_t count)
 {
   unsigned long data, tmp;
-  void *xs, *sp;
-
-  xs = sp = s;
+  void *xs = s;
 
   c = c & 255;
   data = c | (c << 8);
@@ -318,12 +299,13 @@ static inline void * __memset_page(void * s,int c,size_t count)
 #ifdef CPU_M68040_OR_M68060_ONLY
 
   if (((unsigned long) s) & 0x0f)
-	  memset(s, c, count);
+	  __memset_g(s, c, count);
   else{
-	  *((unsigned long *)(s))++ = data;
-	  *((unsigned long *)(s))++ = data;
-	  *((unsigned long *)(s))++ = data;
-	  *((unsigned long *)(s))++ = data;
+	  unsigned long *sp = s;
+	  *sp++ = data;
+	  *sp++ = data;
+	  *sp++ = data;
+	  *sp++ = data;
 
 	  __asm__ __volatile__("1:\t"
 			       ".chip 68040\n\t"
@@ -332,8 +314,8 @@ static inline void * __memset_page(void * s,int c,size_t count)
 			       "subqw  #8,%2\n\t"
 			       "subqw  #8,%2\n\t"
 			       "dbra   %1,1b\n\t"
-			       : "=a" (s), "=d" (tmp)
-			       : "a" (sp), "0" (s), "1" ((count - 16) / 16 - 1)
+			       : "=a" (sp), "=d" (tmp)
+			       : "a" (s), "0" (sp), "1" ((count - 16) / 16 - 1)
 			       );
   }
 
@@ -356,6 +338,8 @@ static inline void * __memset_page(void * s,int c,size_t count)
   return xs;
 }
 
+extern void *memset(void *,int,__kernel_size_t);
+
 #define __memset_const(s,c,count) \
 ((count==PAGE_SIZE) ? \
   __memset_page((s),(c),(count)) : \
@@ -364,9 +348,10 @@ static inline void * __memset_page(void * s,int c,size_t count)
 #define memset(s, c, count) \
 (__builtin_constant_p(count) ? \
  __memset_const((s),(c),(count)) : \
- memset((s),(c),(count)))
+ __memset_g((s),(c),(count)))
 
 #define __HAVE_ARCH_MEMCPY
+extern void * memcpy(void *, const void *, size_t );
 /*
  * __builtin_memcpy() does not handle page-sized memcpys very well,
  * thus following the same assumptions as for page-sized memsets, this
@@ -537,9 +522,21 @@ static inline void * memmove(void * dest,const void * src, size_t n)
 }
 
 #define __HAVE_ARCH_MEMCMP
+extern int memcmp(const void * ,const void * ,size_t );
 #define memcmp(cs, ct, n) \
 (__builtin_constant_p(n) ? \
  __builtin_memcmp((cs),(ct),(n)) : \
  memcmp((cs),(ct),(n)))
+
+#define __HAVE_ARCH_MEMCHR
+static inline void *memchr(const void *cs, int c, size_t count)
+{
+	/* Someone else can optimize this, I don't care - tonym@mac.linux-m68k.org */
+	unsigned char *ret = (unsigned char *)cs;
+	for(;count>0;count--,ret++)
+		if(*ret == c) return ret;
+
+	return NULL;
+}
 
 #endif /* _M68K_STRING_H_ */

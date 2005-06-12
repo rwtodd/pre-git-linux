@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.106 2000/11/08 04:49:24 davem Exp $ */
+/* $Id: pgtable.h,v 1.110 2001/12/21 04:56:17 davem Exp $ */
 #ifndef _SPARC_PGTABLE_H
 #define _SPARC_PGTABLE_H
 
@@ -9,9 +9,12 @@
  *  Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
+#include <asm-generic/4level-fixup.h>
+
 #include <linux/config.h>
 #include <linux/spinlock.h>
-#include <asm/asi.h>
+#include <linux/swap.h>
+#include <asm/types.h>
 #ifdef CONFIG_SUN4
 #include <asm/pgtsun4.h>
 #else
@@ -20,73 +23,24 @@
 #include <asm/pgtsrmmu.h>
 #include <asm/vac-ops.h>
 #include <asm/oplib.h>
-#include <asm/sbus.h>
 #include <asm/btfixup.h>
 #include <asm/system.h>
 
 #ifndef __ASSEMBLY__
 
+struct vm_area_struct;
+struct page;
+
 extern void load_mmu(void);
-			       
-BTFIXUPDEF_CALL(void, quick_kernel_fault, unsigned long)
-
-#define quick_kernel_fault(addr) BTFIXUP_CALL(quick_kernel_fault)(addr)
-
-/* Routines for data transfer buffers. */
-BTFIXUPDEF_CALL(char *, mmu_lockarea, char *, unsigned long)
-BTFIXUPDEF_CALL(void,   mmu_unlockarea, char *, unsigned long)
-
-#define mmu_lockarea(vaddr,len) BTFIXUP_CALL(mmu_lockarea)(vaddr,len)
-#define mmu_unlockarea(vaddr,len) BTFIXUP_CALL(mmu_unlockarea)(vaddr,len)
-
-/* These are implementations for sbus_map_sg/sbus_unmap_sg... collapse later */
-BTFIXUPDEF_CALL(__u32, mmu_get_scsi_one, char *, unsigned long, struct sbus_bus *sbus)
-BTFIXUPDEF_CALL(void,  mmu_get_scsi_sgl, struct scatterlist *, int, struct sbus_bus *sbus)
-BTFIXUPDEF_CALL(void,  mmu_release_scsi_one, __u32, unsigned long, struct sbus_bus *sbus)
-BTFIXUPDEF_CALL(void,  mmu_release_scsi_sgl, struct scatterlist *, int, struct sbus_bus *sbus)
-
-#define mmu_get_scsi_one(vaddr,len,sbus) BTFIXUP_CALL(mmu_get_scsi_one)(vaddr,len,sbus)
-#define mmu_get_scsi_sgl(sg,sz,sbus) BTFIXUP_CALL(mmu_get_scsi_sgl)(sg,sz,sbus)
-#define mmu_release_scsi_one(vaddr,len,sbus) BTFIXUP_CALL(mmu_release_scsi_one)(vaddr,len,sbus)
-#define mmu_release_scsi_sgl(sg,sz,sbus) BTFIXUP_CALL(mmu_release_scsi_sgl)(sg,sz,sbus)
-
-/*
- * mmu_map/unmap are provided by iommu/iounit; Invalid to call on IIep.
- */
-BTFIXUPDEF_CALL(void,  mmu_map_dma_area, unsigned long va, __u32 addr, int len)
-BTFIXUPDEF_CALL(unsigned long /*phys*/, mmu_translate_dvma, unsigned long busa)
-BTFIXUPDEF_CALL(void,  mmu_unmap_dma_area, unsigned long busa, int len)
-
-#define mmu_map_dma_area(va, ba,len) BTFIXUP_CALL(mmu_map_dma_area)(va,ba,len)
-#define mmu_unmap_dma_area(ba,len) BTFIXUP_CALL(mmu_unmap_dma_area)(ba,len)
-#define mmu_translate_dvma(ba)     BTFIXUP_CALL(mmu_translate_dvma)(ba)
-
-BTFIXUPDEF_SIMM13(pmd_shift)
-BTFIXUPDEF_SETHI(pmd_size)
-BTFIXUPDEF_SETHI(pmd_mask)
-
-extern unsigned int pmd_align(unsigned int addr) __attribute__((const));
-extern __inline__ unsigned int pmd_align(unsigned int addr)
-{
-	return ((addr + ~BTFIXUP_SETHI(pmd_mask)) & BTFIXUP_SETHI(pmd_mask));
-}
+extern unsigned long calc_highpages(void);
 
 BTFIXUPDEF_SIMM13(pgdir_shift)
 BTFIXUPDEF_SETHI(pgdir_size)
 BTFIXUPDEF_SETHI(pgdir_mask)
 
-extern unsigned int pgdir_align(unsigned int addr) __attribute__((const));
-extern __inline__ unsigned int pgdir_align(unsigned int addr)
-{
-	return ((addr + ~BTFIXUP_SETHI(pgdir_mask)) & BTFIXUP_SETHI(pgdir_mask));
-}
-
-BTFIXUPDEF_SIMM13(ptrs_per_pte)
 BTFIXUPDEF_SIMM13(ptrs_per_pmd)
 BTFIXUPDEF_SIMM13(ptrs_per_pgd)
 BTFIXUPDEF_SIMM13(user_ptrs_per_pgd)
-
-#define VMALLOC_VMADDR(x) ((unsigned long)(x))
 
 #define pte_ERROR(e)   __builtin_trap()
 #define pmd_ERROR(e)   __builtin_trap()
@@ -98,19 +52,19 @@ BTFIXUPDEF_INT(page_copy)
 BTFIXUPDEF_INT(page_readonly)
 BTFIXUPDEF_INT(page_kernel)
 
-#define PMD_SHIFT       	BTFIXUP_SIMM13(pmd_shift)
-#define PMD_SIZE        	BTFIXUP_SETHI(pmd_size)
-#define PMD_MASK        	BTFIXUP_SETHI(pmd_mask)
-#define PMD_ALIGN(addr) 	pmd_align(addr)
+#define PMD_SHIFT		SUN4C_PMD_SHIFT
+#define PMD_SIZE        	(1UL << PMD_SHIFT)
+#define PMD_MASK        	(~(PMD_SIZE-1))
+#define PMD_ALIGN(__addr) 	(((__addr) + ~PMD_MASK) & PMD_MASK)
 #define PGDIR_SHIFT     	BTFIXUP_SIMM13(pgdir_shift)
 #define PGDIR_SIZE      	BTFIXUP_SETHI(pgdir_size)
 #define PGDIR_MASK      	BTFIXUP_SETHI(pgdir_mask)
-#define PGDIR_ALIGN     	pgdir_align(addr)
-#define PTRS_PER_PTE    	BTFIXUP_SIMM13(ptrs_per_pte)
+#define PTRS_PER_PTE    	1024
 #define PTRS_PER_PMD    	BTFIXUP_SIMM13(ptrs_per_pmd)
 #define PTRS_PER_PGD    	BTFIXUP_SIMM13(ptrs_per_pgd)
 #define USER_PTRS_PER_PGD	BTFIXUP_SIMM13(user_ptrs_per_pgd)
 #define FIRST_USER_PGD_NR	0
+#define PTE_SIZE		(PTRS_PER_PTE*4)
 
 #define PAGE_NONE      __pgprot(BTFIXUP_INT(page_none))
 #define PAGE_SHARED    __pgprot(BTFIXUP_INT(page_shared))
@@ -168,6 +122,7 @@ extern int num_contexts;
  * hit for all __pa()/__va() operations.
  */
 extern unsigned long phys_base;
+extern unsigned long pfn_base;
 
 /*
  * BAD_PAGETABLE is used when we need a bogus page-table, while
@@ -182,17 +137,11 @@ extern unsigned long empty_zero_page;
 
 #define BAD_PAGETABLE __bad_pagetable()
 #define BAD_PAGE __bad_page()
-#define ZERO_PAGE(vaddr) (mem_map + (((unsigned long)&empty_zero_page - PAGE_OFFSET + phys_base) >> PAGE_SHIFT))
+#define ZERO_PAGE(vaddr) (virt_to_page(&empty_zero_page))
 
-/* number of bits that fit into a memory pointer */
-#define BITS_PER_PTR      (8*sizeof(unsigned long))
-
-/* to align the pointer to a pointer address */
-#define PTR_MASK          (~(sizeof(void*)-1))
-
-#define SIZEOF_PTR_LOG2   2
-
-BTFIXUPDEF_CALL_CONST(unsigned long, pmd_page, pmd_t)
+/*
+ */
+BTFIXUPDEF_CALL_CONST(struct page *, pmd_page, pmd_t)
 BTFIXUPDEF_CALL_CONST(unsigned long, pgd_page, pgd_t)
 
 #define pmd_page(pmd) BTFIXUP_CALL(pmd_page)(pmd)
@@ -237,45 +186,79 @@ BTFIXUPDEF_CALL(void, pgd_clear, pgd_t *)
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
  */
+BTFIXUPDEF_HALF(pte_readi)
 BTFIXUPDEF_HALF(pte_writei)
 BTFIXUPDEF_HALF(pte_dirtyi)
 BTFIXUPDEF_HALF(pte_youngi)
 
-extern int pte_write(pte_t pte) __attribute__((const));
+extern int pte_read(pte_t pte) __attribute_const__;
+extern __inline__ int pte_read(pte_t pte)
+{
+	switch (sparc_cpu_model){
+	case sun4:
+	case sun4c:
+		return pte_val(pte) & BTFIXUP_HALF(pte_readi);
+	case sun4d:
+	case sun4e:
+	case sun4m:
+		return !(pte_val(pte) & BTFIXUP_HALF(pte_readi));
+	/* pacify gcc warnings */
+	case sun4u:
+	case sun_unknown:
+	case ap1000:
+	default:
+		return 0;
+	}
+}
+
+extern int pte_write(pte_t pte) __attribute_const__;
 extern __inline__ int pte_write(pte_t pte)
 {
 	return pte_val(pte) & BTFIXUP_HALF(pte_writei);
 }
 
-extern int pte_dirty(pte_t pte) __attribute__((const));
+extern int pte_dirty(pte_t pte) __attribute_const__;
 extern __inline__ int pte_dirty(pte_t pte)
 {
 	return pte_val(pte) & BTFIXUP_HALF(pte_dirtyi);
 }
 
-extern int pte_young(pte_t pte) __attribute__((const));
+extern int pte_young(pte_t pte) __attribute_const__;
 extern __inline__ int pte_young(pte_t pte)
 {
 	return pte_val(pte) & BTFIXUP_HALF(pte_youngi);
 }
 
+/*
+ * The following only work if pte_present() is not true.
+ */
+BTFIXUPDEF_HALF(pte_filei)
+
+extern int pte_file(pte_t pte) __attribute_const__;
+extern __inline__ int pte_file(pte_t pte)
+{
+	return pte_val(pte) & BTFIXUP_HALF(pte_filei);
+}
+
+/*
+ */
 BTFIXUPDEF_HALF(pte_wrprotecti)
 BTFIXUPDEF_HALF(pte_mkcleani)
 BTFIXUPDEF_HALF(pte_mkoldi)
 
-extern pte_t pte_wrprotect(pte_t pte) __attribute__((const));
+extern pte_t pte_wrprotect(pte_t pte) __attribute_const__;
 extern __inline__ pte_t pte_wrprotect(pte_t pte)
 {
 	return __pte(pte_val(pte) & ~BTFIXUP_HALF(pte_wrprotecti));
 }
 
-extern pte_t pte_mkclean(pte_t pte) __attribute__((const));
+extern pte_t pte_mkclean(pte_t pte) __attribute_const__;
 extern __inline__ pte_t pte_mkclean(pte_t pte)
 {
 	return __pte(pte_val(pte) & ~BTFIXUP_HALF(pte_mkcleani));
 }
 
-extern pte_t pte_mkold(pte_t pte) __attribute__((const));
+extern pte_t pte_mkold(pte_t pte) __attribute_const__;
 extern __inline__ pte_t pte_mkold(pte_t pte)
 {
 	return __pte(pte_val(pte) & ~BTFIXUP_HALF(pte_mkoldi));
@@ -290,13 +273,12 @@ BTFIXUPDEF_CALL_CONST(pte_t, pte_mkyoung, pte_t)
 #define pte_mkyoung(pte) BTFIXUP_CALL(pte_mkyoung)(pte)
 
 #define page_pte_prot(page, prot)	mk_pte(page, prot)
-#define page_pte(page)			page_pte_prot(page, __pgprot(0))
+#define page_pte(page)			mk_pte(page, __pgprot(0))
+#define pfn_pte(pfn, prot)		mk_pte(pfn_to_page(pfn), prot)
 
-/* Permanent address of a page. */
-#define page_address(page)  ((page)->virtual)
-
-BTFIXUPDEF_CALL(struct page *, pte_page, pte_t)
-#define pte_page(pte) BTFIXUP_CALL(pte_page)(pte)
+BTFIXUPDEF_CALL(unsigned long,	 pte_pfn, pte_t)
+#define pte_pfn(pte) BTFIXUP_CALL(pte_pfn)(pte)
+#define pte_page(pte)	pfn_to_page(pte_pfn(pte))
 
 /*
  * Conversion functions: convert a page and protection to a page entry,
@@ -311,15 +293,9 @@ BTFIXUPDEF_CALL_CONST(pte_t, mk_pte_io, unsigned long, pgprot_t, int)
 #define mk_pte_phys(page,pgprot) BTFIXUP_CALL(mk_pte_phys)(page,pgprot)
 #define mk_pte_io(page,pgprot,space) BTFIXUP_CALL(mk_pte_io)(page,pgprot,space)
 
-BTFIXUPDEF_CALL(void, pgd_set, pgd_t *, pmd_t *)
-BTFIXUPDEF_CALL(void, pmd_set, pmd_t *, pte_t *)
-
-#define pgd_set(pgdp,pmdp) BTFIXUP_CALL(pgd_set)(pgdp,pmdp)
-#define pmd_set(pmdp,ptep) BTFIXUP_CALL(pmd_set)(pmdp,ptep)
-
 BTFIXUPDEF_INT(pte_modify_mask)
 
-extern pte_t pte_modify(pte_t pte, pgprot_t newprot) __attribute__((const));
+extern pte_t pte_modify(pte_t pte, pgprot_t newprot) __attribute_const__;
 extern __inline__ pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
 	return __pte((pte_val(pte) & BTFIXUP_INT(pte_modify_mask)) |
@@ -334,19 +310,26 @@ extern __inline__ pte_t pte_modify(pte_t pte, pgprot_t newprot)
 /* to find an entry in a kernel page-table-directory */
 #define pgd_offset_k(address) pgd_offset(&init_mm, address)
 
-BTFIXUPDEF_CALL(pmd_t *, pmd_offset, pgd_t *, unsigned long)
-BTFIXUPDEF_CALL(pte_t *, pte_offset, pmd_t *, unsigned long)
-
 /* Find an entry in the second-level page table.. */
+BTFIXUPDEF_CALL(pmd_t *, pmd_offset, pgd_t *, unsigned long)
 #define pmd_offset(dir,addr) BTFIXUP_CALL(pmd_offset)(dir,addr)
 
 /* Find an entry in the third-level page table.. */ 
-#define pte_offset(dir,addr) BTFIXUP_CALL(pte_offset)(dir,addr)
+BTFIXUPDEF_CALL(pte_t *, pte_offset_kernel, pmd_t *, unsigned long)
+#define pte_offset_kernel(dir,addr) BTFIXUP_CALL(pte_offset_kernel)(dir,addr)
+
+/*
+ * This shortcut works on sun4m (and sun4d) because the nocache area is static,
+ * and sun4c is guaranteed to have no highmem anyway.
+ */
+#define pte_offset_map(d, a)		pte_offset_kernel(d,a)
+#define pte_offset_map_nested(d, a)	pte_offset_kernel(d,a)
+
+#define pte_unmap(pte)		do{}while(0)
+#define pte_unmap_nested(pte)	do{}while(0)
 
 /* The permissions for pgprot_val to make a page mapped on the obio space */
 extern unsigned int pg_iobits;
-
-#define flush_icache_page(vma, pg)      do { } while(0)
 
 /* Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
@@ -357,7 +340,8 @@ BTFIXUPDEF_CALL(void, set_pte, pte_t *, pte_t)
 
 #define set_pte(ptep,pteval) BTFIXUP_CALL(set_pte)(ptep,pteval)
 
-BTFIXUPDEF_CALL(int, mmu_info, char *)
+struct seq_file;
+BTFIXUPDEF_CALL(void, mmu_info, struct seq_file *)
 
 #define mmu_info(p) BTFIXUP_CALL(mmu_info)(p)
 
@@ -370,15 +354,41 @@ BTFIXUPDEF_CALL(void, update_mmu_cache, struct vm_area_struct *, unsigned long, 
 
 #define update_mmu_cache(vma,addr,pte) BTFIXUP_CALL(update_mmu_cache)(vma,addr,pte)
 
+BTFIXUPDEF_CALL(void, sparc_mapiorange, unsigned int, unsigned long,
+    unsigned long, unsigned int)
+BTFIXUPDEF_CALL(void, sparc_unmapiorange, unsigned long, unsigned int)
+#define sparc_mapiorange(bus,pa,va,len) BTFIXUP_CALL(sparc_mapiorange)(bus,pa,va,len)
+#define sparc_unmapiorange(va,len) BTFIXUP_CALL(sparc_unmapiorange)(va,len)
+
 extern int invalid_segment;
 
 /* Encode and de-code a swap entry */
-#define SWP_TYPE(x)			(((x).val >> 2) & 0x7f)
-#define SWP_OFFSET(x)			(((x).val >> 9) & 0x3ffff)
-#define SWP_ENTRY(type,offset)		((swp_entry_t) { (((type) & 0x7f) << 2) | (((offset) & 0x3ffff) << 9) })
-#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
-#define swp_entry_to_pte(x)		((pte_t) { (x).val })
+BTFIXUPDEF_CALL(unsigned long, __swp_type, swp_entry_t)
+BTFIXUPDEF_CALL(unsigned long, __swp_offset, swp_entry_t)
+BTFIXUPDEF_CALL(swp_entry_t, __swp_entry, unsigned long, unsigned long)
 
+#define __swp_type(__x)			BTFIXUP_CALL(__swp_type)(__x)
+#define __swp_offset(__x)		BTFIXUP_CALL(__swp_offset)(__x)
+#define __swp_entry(__type,__off)	BTFIXUP_CALL(__swp_entry)(__type,__off)
+
+#define __pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
+#define __swp_entry_to_pte(x)		((pte_t) { (x).val })
+
+/* file-offset-in-pte helpers */
+BTFIXUPDEF_CALL(unsigned long, pte_to_pgoff, pte_t pte);
+BTFIXUPDEF_CALL(pte_t, pgoff_to_pte, unsigned long pgoff);
+
+#define pte_to_pgoff(pte) BTFIXUP_CALL(pte_to_pgoff)(pte)
+#define pgoff_to_pte(off) BTFIXUP_CALL(pgoff_to_pte)(off)
+
+/*
+ * This is made a constant because mm/fremap.c required a constant.
+ * Note that layout of these bits is different between sun4c.c and srmmu.c.
+ */
+#define PTE_FILE_MAX_BITS 24
+
+/*
+ */
 struct ctx_list {
 	struct ctx_list *next;
 	struct ctx_list *prev;
@@ -443,7 +453,7 @@ extern unsigned long *sparc_valid_addr_bitmap;
 #define kern_addr_valid(addr) \
 	(test_bit(__pa((unsigned long)(addr))>>20, sparc_valid_addr_bitmap))
 
-extern int io_remap_page_range(unsigned long from, unsigned long to,
+extern int io_remap_page_range(struct vm_area_struct *vma, unsigned long from, unsigned long to,
 			       unsigned long size, pgprot_t prot, int space);
 
 #include <asm-generic/pgtable.h>
@@ -452,5 +462,10 @@ extern int io_remap_page_range(unsigned long from, unsigned long to,
 
 /* We provide our own get_unmapped_area to cope with VA holes for userland */
 #define HAVE_ARCH_UNMAPPED_AREA
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
 
 #endif /* !(_SPARC_PGTABLE_H) */

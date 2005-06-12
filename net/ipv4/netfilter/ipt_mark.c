@@ -1,9 +1,21 @@
 /* Kernel module to match NFMARK values. */
+
+/* (C) 1999-2001 Marc Boucher <marc@mbsi.ca>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 
 #include <linux/netfilter_ipv4/ipt_mark.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Marc Boucher <marc@mbsi.ca>");
+MODULE_DESCRIPTION("iptables mark matching module");
 
 static int
 match(const struct sk_buff *skb,
@@ -11,8 +23,6 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
-      const void *hdr,
-      u_int16_t datalen,
       int *hotdrop)
 {
 	const struct ipt_mark_info *info = matchinfo;
@@ -33,8 +43,12 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match mark_match
-= { { NULL, NULL }, "mark", &match, &checkentry, NULL, THIS_MODULE };
+static struct ipt_match mark_match = {
+	.name		= "mark",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

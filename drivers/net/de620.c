@@ -13,7 +13,7 @@
  *
  *	Adapted to the sample network driver core for linux,
  *	written by: Donald Becker <becker@super.org>
- *		(Now at <becker@cesdis.gsfc.nasa.gov>
+ *		(Now at <becker@scyld.com>)
  *
  *	Valuable assistance from:
  *		J. Joshua Kopper <kopper@rtsg.mot.com>
@@ -38,7 +38,7 @@
  *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  *****************************************************************************/
-static const char *version =
+static const char version[] =
 	"de620.c: $Revision: 1.40 $,  Bjorn Ekwall <bj0rn@blox.se>\n";
 
 /***********************************************************************
@@ -117,25 +117,22 @@ static const char *version =
 #endif
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
-#include <asm/io.h>
 #include <linux/in.h>
-#include <linux/ptrace.h>
-#include <asm/system.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+
+#include <asm/io.h>
+#include <asm/system.h>
 
 /* Constant definitions for the DE-620 registers, commands and bits */
 #include "de620.h"
@@ -183,20 +180,28 @@ typedef unsigned char byte;
  * Make a clone skip the Ethernet-address range check:
  *	insmod de620.o clone=1
  */
-static int bnc = 0;
-static int utp = 0;
+static int bnc;
+static int utp;
 static int io  = DE620_IO;
 static int irq = DE620_IRQ;
 static int clone = DE620_CLONE;
 
 static unsigned int de620_debug = DE620_DEBUG;
 
-MODULE_PARM(bnc, "i");
-MODULE_PARM(utp, "i");
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(clone, "i");
-MODULE_PARM(de620_debug, "i");
+static spinlock_t de620_lock;
+
+module_param(bnc, int, 0);
+module_param(utp, int, 0);
+module_param(io, int, 0);
+module_param(irq, int, 0);
+module_param(clone, int, 0);
+module_param(de620_debug, int, 0);
+MODULE_PARM_DESC(bnc, "DE-620 set BNC medium (0-1)");
+MODULE_PARM_DESC(utp, "DE-620 set UTP medium (0-1)");
+MODULE_PARM_DESC(io, "DE-620 I/O base address,required");
+MODULE_PARM_DESC(irq, "DE-620 IRQ number,required");
+MODULE_PARM_DESC(clone, "Check also for non-D-Link DE-620 clones (0-1)");
+MODULE_PARM_DESC(de620_debug, "DE-620 debug level (0-2)");
 
 /***********************************************
  *                                             *
@@ -216,12 +221,11 @@ static void	de620_set_multicast_list(struct net_device *);
 static int	de620_start_xmit(struct sk_buff *, struct net_device *);
 
 /* Dispatch from interrupts. */
-static void	de620_interrupt(int, void *, struct pt_regs *);
+static irqreturn_t de620_interrupt(int, void *, struct pt_regs *);
 static int	de620_rx_intr(struct net_device *);
 
 /* Initialization */
 static int	adapter_init(struct net_device *);
-int		de620_probe(struct net_device *);
 static int	read_eeprom(struct net_device *);
 
 
@@ -310,7 +314,7 @@ de620_read_byte(struct net_device *dev)
 }
 
 static inline void
-de620_write_block(struct net_device *dev, byte *buffer, int count)
+de620_write_block(struct net_device *dev, byte *buffer, int count, int pad)
 {
 #ifndef LOWSPEED
 	byte uflip = NIC_Cmd ^ (DS0 | DS1);
@@ -328,6 +332,9 @@ de620_write_block(struct net_device *dev, byte *buffer, int count)
 	/* No further optimization useful, the limit is in the adapter. */
 	for ( ; count > 0; --count, ++buffer) {
 		de620_put_byte(dev,*buffer);
+	}
+	for ( count = pad ; count > 0; --count, ++buffer) {
+		de620_put_byte(dev, 0);
 	}
 	de620_send_command(dev,W_DUMMY);
 #ifdef COUNT_LOOPS
@@ -443,11 +450,17 @@ static int de620_open(struct net_device *dev)
 		return ret;
 	}
 
-	if (adapter_init(dev))
-		return -EIO;
+	if (adapter_init(dev)) {
+		ret = -EIO;
+		goto out_free_irq;
+	}
 
 	netif_start_queue(dev);
 	return 0;
+
+out_free_irq:
+	free_irq(dev->irq, dev);
+	return ret;
 }
 
 /************************************************
@@ -508,10 +521,7 @@ static void de620_set_multicast_list(struct net_device *dev)
  
 static void de620_timeout(struct net_device *dev)
 {
-	printk("%s: transmit timed out, %s?\n",
-		dev->name,
-		"network cable problem"
-		);
+	printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name, "network cable problem");
 	/* Restart the adapter. */
 	if (!adapter_init(dev)) /* maybe close it */
 		netif_wake_queue(dev);
@@ -540,9 +550,8 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		++len;
 
 	/* Start real output */
-	save_flags(flags);
-	cli();
 
+	spin_lock_irqsave(&de620_lock, flags)
 	PRINTK(("de620_start_xmit: len=%d, bufs 0x%02x\n",
 		(int)skb->len, using_txbuf));
 
@@ -561,18 +570,17 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	case (TXBF0 | TXBF1): /* NONE!!! */
 		printk(KERN_WARNING "%s: No tx-buffer available!\n", dev->name);
-		restore_flags(flags);
+		spin_unlock_irqrestore(&de620_lock, flags);
 		return 1;
-		break;
 	}
-	de620_write_block(dev, buffer, len);
+	de620_write_block(dev, buffer, skb->len, len-skb->len);
 
 	dev->trans_start = jiffies;
 	if(!(using_txbuf == (TXBF0 | TXBF1)))
 		netif_wake_queue(dev);
 
 	((struct net_device_stats *)(dev->priv))->tx_packets++;
-	restore_flags(flags); /* interrupts maybe back on */
+	spin_unlock_irqrestore(&de620_lock, flags);
 	dev_kfree_skb (skb);
 	return 0;
 }
@@ -582,19 +590,16 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * Handle the network interface interrupts.
  *
  */
-static void de620_interrupt(int irq_in, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+de620_interrupt(int irq_in, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	byte irq_status;
 	int bogus_count = 0;
 	int again = 0;
 
-	/* This might be deleted now, no crummy drivers present :-) Or..? */
-	if ((dev == NULL) || (irq != irq_in)) {
-		printk("%s: bogus interrupt %d\n", dev?dev->name:"de620", irq_in);
-		return;
-	}
-
+	spin_lock(&de620_lock);
+	
 	/* Read the status register (_not_ the status port) */
 	irq_status = de620_get_register(dev, R_STS);
 
@@ -610,6 +615,9 @@ static void de620_interrupt(int irq_in, void *dev_id, struct pt_regs *regs)
 
 	if(de620_tx_buffs(dev) != (TXBF0 | TXBF1))
 		netif_wake_queue(dev);
+		
+	spin_unlock(&de620_lock);
+	return IRQ_HANDLED;
 }
 
 /**************************************
@@ -684,14 +692,12 @@ static int de620_rx_intr(struct net_device *dev)
 	else { /* Good packet? */
 		skb = dev_alloc_skb(size+2);
 		if (skb == NULL) { /* Yeah, but no place to put it... */
-			printk(KERN_WARNING "%s: Couldn't allocate a sk_buff of size %d.\n",
-				dev->name, size);
+			printk(KERN_WARNING "%s: Couldn't allocate a sk_buff of size %d.\n", dev->name, size);
 			((struct net_device_stats *)(dev->priv))->rx_dropped++;
 		}
 		else { /* Yep! Go get it! */
 			skb_reserve(skb,2);	/* Align */
 			skb->dev = dev;
-			skb->used = 0;
 			/* skb->data points to the start of sk_buff data area */
 			buffer = skb_put(skb,size);
 			/* copy the packet into the buffer */
@@ -699,8 +705,10 @@ static int de620_rx_intr(struct net_device *dev)
 			PRINTK(("Read %d bytes\n", size));
 			skb->protocol=eth_type_trans(skb,dev);
 			netif_rx(skb); /* deliver it "upstairs" */
+			dev->last_rx = jiffies;
 			/* count all receives */
 			((struct net_device_stats *)(dev->priv))->rx_packets++;
+			((struct net_device_stats *)(dev->priv))->rx_bytes += size;
 		}
 	}
 
@@ -721,7 +729,7 @@ static int de620_rx_intr(struct net_device *dev)
 static int adapter_init(struct net_device *dev)
 {
 	int i;
-	static int was_down = 0;
+	static int was_down;
 
 	if ((nic_data.Model == 3) || (nic_data.Model == 0)) { /* CT */
 		EIPRegister = NCTL0;
@@ -805,14 +813,21 @@ static int adapter_init(struct net_device *dev)
  *
  * Check if there is a DE-620 connected
  */
-int __init de620_probe(struct net_device *dev)
+struct net_device * __init de620_probe(int unit)
 {
-	static struct net_device_stats de620_netstats;
-	int i;
 	byte checkbyte = 0xa5;
+	struct net_device *dev;
+	int err = -ENOMEM;
+	int i;
+
+	dev = alloc_etherdev(sizeof(struct net_device_stats));
+	if (!dev)
+		goto out;
 
 	SET_MODULE_OWNER(dev);
 
+	spin_lock_init(&de620_lock);
+	
 	/*
 	 * This is where the base_addr and irq gets set.
 	 * Tunable at compile-time and insmod-time
@@ -820,10 +835,22 @@ int __init de620_probe(struct net_device *dev)
 	dev->base_addr = io;
 	dev->irq       = irq;
 
+	/* allow overriding parameters on command line */
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+	}
+	
 	if (de620_debug)
 		printk(version);
 
 	printk(KERN_INFO "D-Link DE-620 pocket adapter");
+
+	if (!request_region(dev->base_addr, 3, "de620")) {
+		printk(" io 0x%3lX, which is busy.\n", dev->base_addr);
+		err = -EBUSY;
+		goto out1;
+	}
 
 	/* Initially, configure basic nibble mode, so we can read the EEPROM */
 	NIC_Cmd = DEF_NIC_CMD;
@@ -835,16 +862,9 @@ int __init de620_probe(struct net_device *dev)
 
 	if ((checkbyte != 0xa5) || (read_eeprom(dev) != 0)) {
 		printk(" not identified in the printer port\n");
-		return -ENODEV;
+		err = -ENODEV;
+		goto out2;
 	}
-
-#if 0 /* Not yet */
-	if (check_region(dev->base_addr, 3)) {
-		printk(", port 0x%x busy\n", dev->base_addr);
-		return -EBUSY;
-	}
-#endif
-	request_region(dev->base_addr, 3, "de620");
 
 	/* else, got it! */
 	printk(", Ethernet Address: %2.2X",
@@ -862,10 +882,6 @@ int __init de620_probe(struct net_device *dev)
 	else
 		printk(" UTP)\n");
 
-	/* Initialize the device structure. */
-	dev->priv = &de620_netstats;
-
-	memset(dev->priv, 0, sizeof(struct net_device_stats));
 	dev->get_stats 		= get_stats;
 	dev->open 		= de620_open;
 	dev->stop 		= de620_close;
@@ -875,8 +891,6 @@ int __init de620_probe(struct net_device *dev)
 	dev->set_multicast_list = de620_set_multicast_list;
 	
 	/* base_addr and irq are already set, see above! */
-
-	ether_setup(dev);
 
 	/* dump eeprom */
 	if (de620_debug) {
@@ -891,7 +905,17 @@ int __init de620_probe(struct net_device *dev)
 		printk("SCR = 0x%02x\n", nic_data.SCR);
 	}
 
-	return 0;
+	err = register_netdev(dev);
+	if (err)
+		goto out2;
+	return dev;
+
+out2:
+	release_region(dev->base_addr, 3);
+out1:
+	free_netdev(dev);
+out:
+	return ERR_PTR(err);
 }
 
 /**********************************
@@ -986,22 +1010,25 @@ static int __init read_eeprom(struct net_device *dev)
  *
  */
 #ifdef MODULE
-static struct net_device de620_dev;
+static struct net_device *de620_dev;
 
 int init_module(void)
 {
-	de620_dev.init = de620_probe;
-	if (register_netdev(&de620_dev) != 0)
-		return -EIO;
+	de620_dev = de620_probe(-1);
+	if (IS_ERR(de620_dev))
+		return PTR_ERR(de620_dev);
 	return 0;
 }
 
 void cleanup_module(void)
 {
-	unregister_netdev(&de620_dev);
-	release_region(de620_dev.base_addr, 3);
+	unregister_netdev(de620_dev);
+	release_region(de620_dev->base_addr, 3);
+	free_netdev(de620_dev);
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * (add '-DMODULE' when compiling as loadable module)

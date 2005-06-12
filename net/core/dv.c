@@ -5,13 +5,12 @@
  *
  *		Generic frame diversion
  *
- * Version:	@(#)eth.c	0.41	09/09/2000
- *
  * Authors:	
  * 		Benoit LOCHER:	initial integration within the kernel with support for ethernet
  * 		Dave Miller:	improvement on the code (correctness, performance and source files)
  *
  */
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -40,11 +39,11 @@
 
 const char sysctl_divert_version[32]="0.46";	/* Current version */
 
-int __init dv_init(void)
+static int __init dv_init(void)
 {
-	printk(KERN_INFO "NET4: Frame Diverter %s\n", sysctl_divert_version);
 	return 0;
 }
+module_init(dv_init);
 
 /*
  * Allocate a divert_blk for a device. This must be an ethernet nic.
@@ -53,25 +52,20 @@ int alloc_divert_blk(struct net_device *dev)
 {
 	int alloc_size = (sizeof(struct divert_blk) + 3) & ~3;
 
-	if (!strncmp(dev->name, "eth", 3)) {
-		printk(KERN_DEBUG "divert: allocating divert_blk for %s\n",
-		       dev->name);
-
+	dev->divert = NULL;
+	if (dev->type == ARPHRD_ETHER) {
 		dev->divert = (struct divert_blk *)
 			kmalloc(alloc_size, GFP_KERNEL);
 		if (dev->divert == NULL) {
-			printk(KERN_DEBUG "divert: unable to allocate divert_blk for %s\n",
+			printk(KERN_INFO "divert: unable to allocate divert_blk for %s\n",
 			       dev->name);
 			return -ENOMEM;
-		} else {
-			memset(dev->divert, 0, sizeof(struct divert_blk));
 		}
-	} else {
-		printk(KERN_DEBUG "divert: not allocating divert_blk for non-ethernet device %s\n",
-		       dev->name);
 
-		dev->divert = NULL;
+		memset(dev->divert, 0, sizeof(struct divert_blk));
+		dev_hold(dev);
 	}
+
 	return 0;
 } 
 
@@ -84,18 +78,14 @@ void free_divert_blk(struct net_device *dev)
 	if (dev->divert) {
 		kfree(dev->divert);
 		dev->divert=NULL;
-		printk(KERN_DEBUG "divert: freeing divert_blk for %s\n",
-		       dev->name);
-	} else {
-		printk(KERN_DEBUG "divert: no divert_blk to free, %s not ethernet\n",
-		       dev->name);
+		dev_put(dev);
 	}
 }
 
 /*
  * Adds a tcp/udp (source or dest) port to an array
  */
-int add_port(u16 ports[], u16 port)
+static int add_port(u16 ports[], u16 port)
 {
 	int i;
 
@@ -125,7 +115,7 @@ int add_port(u16 ports[], u16 port)
 /*
  * Removes a port from an array tcp/udp (source or dest)
  */
-int remove_port(u16 ports[], u16 port)
+static int remove_port(u16 ports[], u16 port)
 {
 	int i;
 
@@ -148,10 +138,11 @@ int remove_port(u16 ports[], u16 port)
 }
 
 /* Some basic sanity checks on the arguments passed to divert_ioctl() */
-int check_args(struct divert_cf *div_cf, struct net_device **dev)
+static int check_args(struct divert_cf *div_cf, struct net_device **dev)
 {
 	char devname[32];
-		
+	int ret;
+
 	if (dev == NULL)
 		return -EFAULT;
 	
@@ -170,25 +161,34 @@ int check_args(struct divert_cf *div_cf, struct net_device **dev)
 	/* dev should NOT be null */
 	if (*dev == NULL)
 		return -EINVAL;
-	
+
+	ret = 0;
+
 	/* user issuing the ioctl must be a super one :) */
-	if (!suser())
-		return -EPERM;
+	if (!capable(CAP_SYS_ADMIN)) {
+		ret = -EPERM;
+		goto out;
+	}
 
 	/* Device must have a divert_blk member NOT null */
 	if ((*dev)->divert == NULL)
-		return -EFAULT;
-
-	return 0;
+		ret = -EINVAL;
+out:
+	dev_put(*dev);
+	return ret;
 }
 
 /*
  * control function of the diverter
  */
+#if 0
 #define	DVDBG(a)	\
 	printk(KERN_DEBUG "divert_ioctl() line %d %s\n", __LINE__, (a))
+#else
+#define	DVDBG(a)
+#endif
 
-int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
+int divert_ioctl(unsigned int cmd, struct divert_cf __user *arg)
 {
 	struct divert_cf	div_cf;
 	struct divert_blk	*div_blk;
@@ -231,7 +231,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 		default:
 			return -EINVAL;
-		};
+		}
 
 		break;
 
@@ -275,7 +275,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -295,7 +295,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -315,7 +315,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -331,7 +331,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -347,7 +347,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -367,7 +367,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -383,7 +383,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -399,7 +399,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -419,19 +419,19 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
 		default:
 			return -EINVAL;
-		};
+		}
 
 		break;
 
 	default:
 		return -EINVAL;
-	};
+	}
 
 	return 0;
 }
@@ -443,12 +443,12 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
  */
 
 #define	ETH_DIVERT_FRAME(skb) \
-	memcpy(skb->mac.ethernet, skb->dev->dev_addr, ETH_ALEN); \
+	memcpy(eth_hdr(skb), skb->dev->dev_addr, ETH_ALEN); \
 	skb->pkt_type=PACKET_HOST
 		
 void divert_frame(struct sk_buff *skb)
 {
-	struct ethhdr			*eth = skb->mac.ethernet;
+	struct ethhdr			*eth = eth_hdr(skb);
 	struct iphdr			*iph;
 	struct tcphdr			*tcph;
 	struct udphdr			*udph;
@@ -544,8 +544,5 @@ void divert_frame(struct sk_buff *skb)
 			}
 		}
 		break;
-	};
-
-	return;
+	}
 }
-

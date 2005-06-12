@@ -10,10 +10,10 @@
  */
 
 #include <linux/module.h>
-
+#include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/a.out.h>
@@ -24,19 +24,23 @@
 #include <linux/file.h>
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/shm.h>
 #include <linux/personality.h>
 #include <linux/elfcore.h>
 #include <linux/init.h>
 #include <linux/highuid.h>
+#include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/compiler.h>
+#include <linux/highmem.h>
+#include <linux/pagemap.h>
+#include <linux/security.h>
+#include <linux/syscalls.h>
 
 #include <asm/uaccess.h>
 #include <asm/param.h>
-#include <asm/pgalloc.h>
-
-#define DLINFO_ITEMS 13
+#include <asm/page.h>
 
 #include <linux/elf.h>
 
@@ -44,11 +48,9 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs);
 static int load_elf_library(struct file*);
 static unsigned long elf_map (struct file *, unsigned long, struct elf_phdr *, int, int);
 extern int dump_fpu (struct pt_regs *, elf_fpregset_t *);
-extern void dump_thread(struct pt_regs *, struct user *);
 
 #ifndef elf_addr_t
 #define elf_addr_t unsigned long
-#define elf_caddr_t char *
 #endif
 
 /*
@@ -67,21 +69,38 @@ static int elf_core_dump(long signr, struct pt_regs * regs, struct file * file);
 # define ELF_MIN_ALIGN	PAGE_SIZE
 #endif
 
+#ifndef ELF_CORE_EFLAGS
+#define ELF_CORE_EFLAGS	0
+#endif
+
 #define ELF_PAGESTART(_v) ((_v) & ~(unsigned long)(ELF_MIN_ALIGN-1))
 #define ELF_PAGEOFFSET(_v) ((_v) & (ELF_MIN_ALIGN-1))
 #define ELF_PAGEALIGN(_v) (((_v) + ELF_MIN_ALIGN - 1) & ~(ELF_MIN_ALIGN - 1))
 
 static struct linux_binfmt elf_format = {
-	NULL, THIS_MODULE, load_elf_binary, load_elf_library, elf_core_dump, ELF_EXEC_PAGESIZE
+		.module		= THIS_MODULE,
+		.load_binary	= load_elf_binary,
+		.load_shlib	= load_elf_library,
+		.core_dump	= elf_core_dump,
+		.min_coredump	= ELF_EXEC_PAGESIZE
 };
 
-static void set_brk(unsigned long start, unsigned long end)
+#define BAD_ADDR(x)	((unsigned long)(x) > TASK_SIZE)
+
+static int set_brk(unsigned long start, unsigned long end)
 {
 	start = ELF_PAGEALIGN(start);
 	end = ELF_PAGEALIGN(end);
-	if (end <= start)
-		return;
-	do_brk(start, end - start);
+	if (end > start) {
+		unsigned long addr;
+		down_write(&current->mm->mmap_sem);
+		addr = do_brk(start, end - start);
+		up_write(&current->mm->mmap_sem);
+		if (BAD_ADDR(addr))
+			return addr;
+	}
+	current->mm->start_brk = current->mm->brk = end;
+	return 0;
 }
 
 
@@ -91,134 +110,196 @@ static void set_brk(unsigned long start, unsigned long end)
    be in memory */
 
 
-static void padzero(unsigned long elf_bss)
+static int padzero(unsigned long elf_bss)
 {
 	unsigned long nbyte;
 
 	nbyte = ELF_PAGEOFFSET(elf_bss);
 	if (nbyte) {
 		nbyte = ELF_MIN_ALIGN - nbyte;
-		clear_user((void *) elf_bss, nbyte);
+		if (clear_user((void __user *) elf_bss, nbyte))
+			return -EFAULT;
 	}
+	return 0;
 }
 
-static elf_addr_t * 
-create_elf_tables(char *p, int argc, int envc,
-		  struct elfhdr * exec,
-		  unsigned long load_addr,
-		  unsigned long load_bias,
-		  unsigned long interp_load_addr, int ibcs)
+/* Let's use some macros to make this stack manipulation a litle clearer */
+#ifdef CONFIG_STACK_GROWSUP
+#define STACK_ADD(sp, items) ((elf_addr_t __user *)(sp) + (items))
+#define STACK_ROUND(sp, items) \
+	((15 + (unsigned long) ((sp) + (items))) &~ 15UL)
+#define STACK_ALLOC(sp, len) ({ elf_addr_t __user *old_sp = (elf_addr_t __user *)sp; sp += len; old_sp; })
+#else
+#define STACK_ADD(sp, items) ((elf_addr_t __user *)(sp) - (items))
+#define STACK_ROUND(sp, items) \
+	(((unsigned long) (sp - items)) &~ 15UL)
+#define STACK_ALLOC(sp, len) ({ sp -= len ; sp; })
+#endif
+
+static int
+create_elf_tables(struct linux_binprm *bprm, struct elfhdr * exec,
+		int interp_aout, unsigned long load_addr,
+		unsigned long interp_load_addr)
 {
-	elf_caddr_t *argv;
-	elf_caddr_t *envp;
-	elf_addr_t *sp, *csp;
-	char *k_platform, *u_platform;
-	long hwcap;
-	size_t platform_len = 0;
+	unsigned long p = bprm->p;
+	int argc = bprm->argc;
+	int envc = bprm->envc;
+	elf_addr_t __user *argv;
+	elf_addr_t __user *envp;
+	elf_addr_t __user *sp;
+	elf_addr_t __user *u_platform;
+	const char *k_platform = ELF_PLATFORM;
+	int items;
+	elf_addr_t *elf_info;
+	int ei_index = 0;
+	struct task_struct *tsk = current;
 
 	/*
-	 * Get hold of platform and hardware capabilities masks for
-	 * the machine we are running on.  In some cases (Sparc), 
-	 * this info is impossible to get, in others (i386) it is
+	 * If this architecture has a platform capability string, copy it
+	 * to userspace.  In some cases (Sparc), this info is impossible
+	 * for userspace to get any other way, in others (i386) it is
 	 * merely difficult.
 	 */
 
-	hwcap = ELF_HWCAP;
-	k_platform = ELF_PLATFORM;
-
+	u_platform = NULL;
 	if (k_platform) {
-		platform_len = strlen(k_platform) + 1;
-		u_platform = p - platform_len;
-		__copy_to_user(u_platform, k_platform, platform_len);
-	} else
-		u_platform = p;
+		size_t len = strlen(k_platform) + 1;
 
-	/*
-	 * Force 16 byte _final_ alignment here for generality.
-	 * Leave an extra 16 bytes free so that on the PowerPC we
-	 * can move the aux table up to start on a 16-byte boundary.
-	 */
-	sp = (elf_addr_t *)((~15UL & (unsigned long)(u_platform)) - 16UL);
-	csp = sp;
-	csp -= ((exec ? DLINFO_ITEMS*2 : 4) + (k_platform ? 2 : 0));
-	csp -= envc+1;
-	csp -= argc+1;
-	csp -= (!ibcs ? 3 : 1);	/* argc itself */
-	if ((unsigned long)csp & 15UL)
-		sp -= ((unsigned long)csp & 15UL) / sizeof(*sp);
-
-	/*
-	 * Put the ELF interpreter info on the stack
-	 */
-#define NEW_AUX_ENT(nr, id, val) \
-	  __put_user ((id), sp+(nr*2)); \
-	  __put_user ((val), sp+(nr*2+1)); \
-
-	sp -= 2;
-	NEW_AUX_ENT(0, AT_NULL, 0);
-	if (k_platform) {
-		sp -= 2;
-		NEW_AUX_ENT(0, AT_PLATFORM, (elf_addr_t)(unsigned long) u_platform);
+#ifdef CONFIG_X86_HT
+		/*
+		 * In some cases (e.g. Hyper-Threading), we want to avoid L1
+		 * evictions by the processes running on the same package. One
+		 * thing we can do is to shuffle the initial stack for them.
+		 *
+		 * The conditionals here are unneeded, but kept in to make the
+		 * code behaviour the same as pre change unless we have
+		 * hyperthreaded processors. This should be cleaned up
+		 * before 2.6
+		 */
+	 
+		if (smp_num_siblings > 1)
+			STACK_ALLOC(p, ((current->pid % 64) << 7));
+#endif
+		u_platform = (elf_addr_t __user *)STACK_ALLOC(p, len);
+		if (__copy_to_user(u_platform, k_platform, len))
+			return -EFAULT;
 	}
-	sp -= 3*2;
-	NEW_AUX_ENT(0, AT_HWCAP, hwcap);
-	NEW_AUX_ENT(1, AT_PAGESZ, ELF_EXEC_PAGESIZE);
-	NEW_AUX_ENT(2, AT_CLKTCK, CLOCKS_PER_SEC);
 
-	if (exec) {
-		sp -= 10*2;
+	/* Create the ELF interpreter info */
+	elf_info = (elf_addr_t *) current->mm->saved_auxv;
+#define NEW_AUX_ENT(id, val) \
+	do { elf_info[ei_index++] = id; elf_info[ei_index++] = val; } while (0)
 
-		NEW_AUX_ENT(0, AT_PHDR, load_addr + exec->e_phoff);
-		NEW_AUX_ENT(1, AT_PHENT, sizeof (struct elf_phdr));
-		NEW_AUX_ENT(2, AT_PHNUM, exec->e_phnum);
-		NEW_AUX_ENT(3, AT_BASE, interp_load_addr);
-		NEW_AUX_ENT(4, AT_FLAGS, 0);
-		NEW_AUX_ENT(5, AT_ENTRY, load_bias + exec->e_entry);
-		NEW_AUX_ENT(6, AT_UID, (elf_addr_t) current->uid);
-		NEW_AUX_ENT(7, AT_EUID, (elf_addr_t) current->euid);
-		NEW_AUX_ENT(8, AT_GID, (elf_addr_t) current->gid);
-		NEW_AUX_ENT(9, AT_EGID, (elf_addr_t) current->egid);
+#ifdef ARCH_DLINFO
+	/* 
+	 * ARCH_DLINFO must come first so PPC can do its special alignment of
+	 * AUXV.
+	 */
+	ARCH_DLINFO;
+#endif
+	NEW_AUX_ENT(AT_HWCAP, ELF_HWCAP);
+	NEW_AUX_ENT(AT_PAGESZ, ELF_EXEC_PAGESIZE);
+	NEW_AUX_ENT(AT_CLKTCK, CLOCKS_PER_SEC);
+	NEW_AUX_ENT(AT_PHDR, load_addr + exec->e_phoff);
+	NEW_AUX_ENT(AT_PHENT, sizeof (struct elf_phdr));
+	NEW_AUX_ENT(AT_PHNUM, exec->e_phnum);
+	NEW_AUX_ENT(AT_BASE, interp_load_addr);
+	NEW_AUX_ENT(AT_FLAGS, 0);
+	NEW_AUX_ENT(AT_ENTRY, exec->e_entry);
+	NEW_AUX_ENT(AT_UID, (elf_addr_t) tsk->uid);
+	NEW_AUX_ENT(AT_EUID, (elf_addr_t) tsk->euid);
+	NEW_AUX_ENT(AT_GID, (elf_addr_t) tsk->gid);
+	NEW_AUX_ENT(AT_EGID, (elf_addr_t) tsk->egid);
+ 	NEW_AUX_ENT(AT_SECURE, (elf_addr_t) security_bprm_secureexec(bprm));
+	if (k_platform) {
+		NEW_AUX_ENT(AT_PLATFORM, (elf_addr_t)(unsigned long)u_platform);
+	}
+	if (bprm->interp_flags & BINPRM_FLAGS_EXECFD) {
+		NEW_AUX_ENT(AT_EXECFD, (elf_addr_t) bprm->interp_data);
 	}
 #undef NEW_AUX_ENT
+	/* AT_NULL is zero; clear the rest too */
+	memset(&elf_info[ei_index], 0,
+	       sizeof current->mm->saved_auxv - ei_index * sizeof elf_info[0]);
 
-	sp -= envc+1;
-	envp = (elf_caddr_t *) sp;
-	sp -= argc+1;
-	argv = (elf_caddr_t *) sp;
-	if (!ibcs) {
-		__put_user((elf_addr_t)(unsigned long) envp,--sp);
-		__put_user((elf_addr_t)(unsigned long) argv,--sp);
+	/* And advance past the AT_NULL entry.  */
+	ei_index += 2;
+
+	sp = STACK_ADD(p, ei_index);
+
+	items = (argc + 1) + (envc + 1);
+	if (interp_aout) {
+		items += 3; /* a.out interpreters require argv & envp too */
+	} else {
+		items += 1; /* ELF interpreters only put argc on the stack */
+	}
+	bprm->p = STACK_ROUND(sp, items);
+
+	/* Point sp at the lowest address on the stack */
+#ifdef CONFIG_STACK_GROWSUP
+	sp = (elf_addr_t __user *)bprm->p - items - ei_index;
+	bprm->exec = (unsigned long) sp; /* XXX: PARISC HACK */
+#else
+	sp = (elf_addr_t __user *)bprm->p;
+#endif
+
+	/* Now, let's put argc (and argv, envp if appropriate) on the stack */
+	if (__put_user(argc, sp++))
+		return -EFAULT;
+	if (interp_aout) {
+		argv = sp + 2;
+		envp = argv + argc + 1;
+		__put_user((elf_addr_t)(unsigned long)argv, sp++);
+		__put_user((elf_addr_t)(unsigned long)envp, sp++);
+	} else {
+		argv = sp;
+		envp = argv + argc + 1;
 	}
 
-	__put_user((elf_addr_t)argc,--sp);
-	current->mm->arg_start = (unsigned long) p;
-	while (argc-->0) {
-		__put_user((elf_caddr_t)(unsigned long)p,argv++);
-		p += strlen_user(p);
+	/* Populate argv and envp */
+	p = current->mm->arg_end = current->mm->arg_start;
+	while (argc-- > 0) {
+		size_t len;
+		__put_user((elf_addr_t)p, argv++);
+		len = strnlen_user((void __user *)p, PAGE_SIZE*MAX_ARG_PAGES);
+		if (!len || len > PAGE_SIZE*MAX_ARG_PAGES)
+			return 0;
+		p += len;
 	}
-	__put_user(NULL, argv);
-	current->mm->arg_end = current->mm->env_start = (unsigned long) p;
-	while (envc-->0) {
-		__put_user((elf_caddr_t)(unsigned long)p,envp++);
-		p += strlen_user(p);
+	if (__put_user(0, argv))
+		return -EFAULT;
+	current->mm->arg_end = current->mm->env_start = p;
+	while (envc-- > 0) {
+		size_t len;
+		__put_user((elf_addr_t)p, envp++);
+		len = strnlen_user((void __user *)p, PAGE_SIZE*MAX_ARG_PAGES);
+		if (!len || len > PAGE_SIZE*MAX_ARG_PAGES)
+			return 0;
+		p += len;
 	}
-	__put_user(NULL, envp);
-	current->mm->env_end = (unsigned long) p;
-	return sp;
+	if (__put_user(0, envp))
+		return -EFAULT;
+	current->mm->env_end = p;
+
+	/* Put the elf_info on the stack in the right place.  */
+	sp = (elf_addr_t __user *)envp + 1;
+	if (copy_to_user(sp, elf_info, ei_index * sizeof(elf_addr_t)))
+		return -EFAULT;
+	return 0;
 }
 
 #ifndef elf_map
 
-static inline unsigned long
-elf_map (struct file *filep, unsigned long addr, struct elf_phdr *eppnt, int prot, int type)
+static unsigned long elf_map(struct file *filep, unsigned long addr,
+			struct elf_phdr *eppnt, int prot, int type)
 {
 	unsigned long map_addr;
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	map_addr = do_mmap(filep, ELF_PAGESTART(addr),
 			   eppnt->p_filesz + ELF_PAGEOFFSET(eppnt->p_vaddr), prot, type,
 			   eppnt->p_offset - ELF_PAGEOFFSET(eppnt->p_vaddr));
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	return(map_addr);
 }
 
@@ -256,6 +337,9 @@ static unsigned long load_elf_interp(struct elfhdr * interp_elf_ex,
 	 */
 	if (interp_elf_ex->e_phentsize != sizeof(struct elf_phdr))
 		goto out;
+	if (interp_elf_ex->e_phnum < 1 ||
+		interp_elf_ex->e_phnum > 65536U / sizeof(struct elf_phdr))
+		goto out;
 
 	/* Now read in all of the header information */
 
@@ -267,9 +351,12 @@ static unsigned long load_elf_interp(struct elfhdr * interp_elf_ex,
 		goto out;
 
 	retval = kernel_read(interpreter,interp_elf_ex->e_phoff,(char *)elf_phdata,size);
-	error = retval;
-	if (retval < 0)
+	error = -EIO;
+	if (retval != size) {
+		if (retval < 0)
+			error = retval;	
 		goto out_close;
+	}
 
 	eppnt = elf_phdata;
 	for (i=0; i<interp_elf_ex->e_phnum; i++, eppnt++) {
@@ -287,10 +374,25 @@ static unsigned long load_elf_interp(struct elfhdr * interp_elf_ex,
 	    	elf_type |= MAP_FIXED;
 
 	    map_addr = elf_map(interpreter, load_addr + vaddr, eppnt, elf_prot, elf_type);
+	    error = map_addr;
+	    if (BAD_ADDR(map_addr))
+	    	goto out_close;
 
 	    if (!load_addr_set && interp_elf_ex->e_type == ET_DYN) {
 		load_addr = map_addr - ELF_PAGESTART(vaddr);
 		load_addr_set = 1;
+	    }
+
+	    /*
+	     * Check to see if the section's size will overflow the
+	     * allowed task size. Note that p_filesz must always be
+	     * <= p_memsize so it is only necessary to check p_memsz.
+	     */
+	    k = load_addr + eppnt->p_vaddr;
+	    if (k > TASK_SIZE || eppnt->p_filesz > eppnt->p_memsz ||
+		eppnt->p_memsz > TASK_SIZE || TASK_SIZE - eppnt->p_memsz < k) {
+	        error = -ENOMEM;
+		goto out_close;
 	    }
 
 	    /*
@@ -311,20 +413,27 @@ static unsigned long load_elf_interp(struct elfhdr * interp_elf_ex,
 	  }
 	}
 
-	/* Now use mmap to map the library into memory. */
-
 	/*
 	 * Now fill out the bss section.  First pad the last page up
 	 * to the page boundary, and then perform a mmap to make sure
 	 * that there are zero-mapped pages up to and including the 
 	 * last bss page.
 	 */
-	padzero(elf_bss);
+	if (padzero(elf_bss)) {
+		error = -EFAULT;
+		goto out_close;
+	}
+
 	elf_bss = ELF_PAGESTART(elf_bss + ELF_MIN_ALIGN - 1);	/* What we have mapped so far */
 
 	/* Map the last of the bss segment */
-	if (last_bss > elf_bss)
-		do_brk(elf_bss, last_bss - elf_bss);
+	if (last_bss > elf_bss) {
+		down_write(&current->mm->mmap_sem);
+		error = do_brk(elf_bss, last_bss - elf_bss);
+		up_write(&current->mm->mmap_sem);
+		if (BAD_ADDR(error))
+			goto out_close;
+	}
 
 	*interp_load_addr = load_addr;
 	error = ((unsigned long) interp_elf_ex->e_entry) + load_addr;
@@ -339,9 +448,8 @@ static unsigned long load_aout_interp(struct exec * interp_ex,
 			     struct file * interpreter)
 {
 	unsigned long text_data, elf_entry = ~0UL;
-	char * addr;
+	char __user * addr;
 	loff_t offset;
-	int retval;
 
 	current->mm->end_code = interp_ex->a_text;
 	text_data = interp_ex->a_text + interp_ex->a_data;
@@ -351,29 +459,32 @@ static unsigned long load_aout_interp(struct exec * interp_ex,
 	switch (N_MAGIC(*interp_ex)) {
 	case OMAGIC:
 		offset = 32;
-		addr = (char *) 0;
+		addr = (char __user *)0;
 		break;
 	case ZMAGIC:
 	case QMAGIC:
 		offset = N_TXTOFF(*interp_ex);
-		addr = (char *) N_TXTADDR(*interp_ex);
+		addr = (char __user *) N_TXTADDR(*interp_ex);
 		break;
 	default:
 		goto out;
 	}
 
+	down_write(&current->mm->mmap_sem);	
 	do_brk(0, text_data);
-	retval = -ENOEXEC;
+	up_write(&current->mm->mmap_sem);
 	if (!interpreter->f_op || !interpreter->f_op->read)
 		goto out;
-	retval = interpreter->f_op->read(interpreter, addr, text_data, &offset);
-	if (retval < 0)
+	if (interpreter->f_op->read(interpreter, addr, text_data, &offset) < 0)
 		goto out;
 	flush_icache_range((unsigned long)addr,
 	                   (unsigned long)addr + text_data);
 
+
+	down_write(&current->mm->mmap_sem);	
 	do_brk(ELF_PAGESTART(text_data + ELF_MIN_ALIGN - 1),
 		interp_ex->a_bss);
+	up_write(&current->mm->mmap_sem);
 	elf_entry = interp_ex->a_entry;
 
 out:
@@ -393,56 +504,86 @@ out:
 static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
 	struct file *interpreter = NULL; /* to shut gcc up */
- 	unsigned long load_addr = 0, load_bias;
+ 	unsigned long load_addr = 0, load_bias = 0;
 	int load_addr_set = 0;
 	char * elf_interpreter = NULL;
 	unsigned int interpreter_type = INTERPRETER_NONE;
 	unsigned char ibcs2_interpreter = 0;
-	mm_segment_t old_fs;
 	unsigned long error;
 	struct elf_phdr * elf_ppnt, *elf_phdata;
-	unsigned long elf_bss, k, elf_brk;
+	unsigned long elf_bss, elf_brk;
 	int elf_exec_fileno;
-	int retval, size, i;
+	int retval, i;
+	unsigned int size;
 	unsigned long elf_entry, interp_load_addr = 0;
 	unsigned long start_code, end_code, start_data, end_data;
-	struct elfhdr elf_ex;
-	struct elfhdr interp_elf_ex;
-  	struct exec interp_ex;
+	unsigned long reloc_func_desc = 0;
 	char passed_fileno[6];
+	struct files_struct *files;
+	int have_pt_gnu_stack, executable_stack = EXSTACK_DEFAULT;
+	unsigned long def_flags = 0;
+	struct {
+		struct elfhdr elf_ex;
+		struct elfhdr interp_elf_ex;
+  		struct exec interp_ex;
+	} *loc;
 
+	loc = kmalloc(sizeof(*loc), GFP_KERNEL);
+	if (!loc) {
+		retval = -ENOMEM;
+		goto out_ret;
+	}
+	
 	/* Get the exec-header */
-	elf_ex = *((struct elfhdr *) bprm->buf);
+	loc->elf_ex = *((struct elfhdr *) bprm->buf);
 
 	retval = -ENOEXEC;
 	/* First of all, some simple consistency checks */
-	if (memcmp(elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
+	if (memcmp(loc->elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
 		goto out;
 
-	if (elf_ex.e_type != ET_EXEC && elf_ex.e_type != ET_DYN)
+	if (loc->elf_ex.e_type != ET_EXEC && loc->elf_ex.e_type != ET_DYN)
 		goto out;
-	if (!elf_check_arch(&elf_ex))
+	if (!elf_check_arch(&loc->elf_ex))
 		goto out;
 	if (!bprm->file->f_op||!bprm->file->f_op->mmap)
 		goto out;
 
 	/* Now read in all of the header information */
 
-	retval = -ENOMEM;
-	size = elf_ex.e_phentsize * elf_ex.e_phnum;
-	if (size > 65536)
+	if (loc->elf_ex.e_phentsize != sizeof(struct elf_phdr))
 		goto out;
+	if (loc->elf_ex.e_phnum < 1 ||
+	 	loc->elf_ex.e_phnum > 65536U / sizeof(struct elf_phdr))
+		goto out;
+	size = loc->elf_ex.e_phnum * sizeof(struct elf_phdr);
+	retval = -ENOMEM;
 	elf_phdata = (struct elf_phdr *) kmalloc(size, GFP_KERNEL);
 	if (!elf_phdata)
 		goto out;
 
-	retval = kernel_read(bprm->file, elf_ex.e_phoff, (char *) elf_phdata, size);
+	retval = kernel_read(bprm->file, loc->elf_ex.e_phoff, (char *) elf_phdata, size);
+	if (retval != size) {
+		if (retval >= 0)
+			retval = -EIO;
+		goto out_free_ph;
+	}
+
+	files = current->files;		/* Refcounted so ok */
+	retval = unshare_files();
 	if (retval < 0)
 		goto out_free_ph;
+	if (files == current->files) {
+		put_files_struct(files);
+		files = NULL;
+	}
+
+	/* exec will make our files private anyway, but for the a.out
+	   loader stuff we need to do it earlier */
 
 	retval = get_unused_fd();
 	if (retval < 0)
-		goto out_free_ph;
+		goto out_free_fh;
 	get_file(bprm->file);
 	fd_install(elf_exec_fileno = retval, bprm->file);
 
@@ -455,16 +596,17 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	start_data = 0;
 	end_data = 0;
 
-	for (i = 0; i < elf_ex.e_phnum; i++) {
+	for (i = 0; i < loc->elf_ex.e_phnum; i++) {
 		if (elf_ppnt->p_type == PT_INTERP) {
-			retval = -EINVAL;
-		  	if (elf_interpreter)
-				goto out_free_dentry;
-
 			/* This is the program interpreter used for
 			 * shared libraries - for now assume that this
 			 * is an a.out format binary
 			 */
+
+			retval = -ENOEXEC;
+			if (elf_ppnt->p_filesz > PATH_MAX || 
+			    elf_ppnt->p_filesz < 2)
+				goto out_free_file;
 
 			retval = -ENOMEM;
 			elf_interpreter = (char *) kmalloc(elf_ppnt->p_filesz,
@@ -475,8 +617,16 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			retval = kernel_read(bprm->file, elf_ppnt->p_offset,
 					   elf_interpreter,
 					   elf_ppnt->p_filesz);
-			if (retval < 0)
+			if (retval != elf_ppnt->p_filesz) {
+				if (retval >= 0)
+					retval = -EIO;
 				goto out_free_interp;
+			}
+			/* make sure path is NULL terminated */
+			retval = -ENOEXEC;
+			if (elf_interpreter[elf_ppnt->p_filesz - 1] != '\0')
+				goto out_free_interp;
+
 			/* If the program interpreter is one of these two,
 			 * then assume an iBCS2 image. Otherwise assume
 			 * a native linux image.
@@ -484,58 +634,69 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			if (strcmp(elf_interpreter,"/usr/lib/libc.so.1") == 0 ||
 			    strcmp(elf_interpreter,"/usr/lib/ld.so.1") == 0)
 				ibcs2_interpreter = 1;
-#if 0
-			printk("Using ELF interpreter %s\n", elf_interpreter);
-#endif
-#ifdef __sparc__
-			if (ibcs2_interpreter) {
-				unsigned long old_pers = current->personality;
-				struct exec_domain *old_domain = current->exec_domain;
-				struct exec_domain *new_domain;
-				struct fs_struct *old_fs = current->fs, *new_fs;
-				get_exec_domain(old_domain);
-				atomic_inc(&old_fs->count);
 
-				set_personality(PER_SVR4);
-				interpreter = open_exec(elf_interpreter);
+			/*
+			 * The early SET_PERSONALITY here is so that the lookup
+			 * for the interpreter happens in the namespace of the 
+			 * to-be-execed image.  SET_PERSONALITY can select an
+			 * alternate root.
+			 *
+			 * However, SET_PERSONALITY is NOT allowed to switch
+			 * this task into the new images's memory mapping
+			 * policy - that is, TASK_SIZE must still evaluate to
+			 * that which is appropriate to the execing application.
+			 * This is because exit_mmap() needs to have TASK_SIZE
+			 * evaluate to the size of the old image.
+			 *
+			 * So if (say) a 64-bit application is execing a 32-bit
+			 * application it is the architecture's responsibility
+			 * to defer changing the value of TASK_SIZE until the
+			 * switch really is going to happen - do this in
+			 * flush_thread().	- akpm
+			 */
+			SET_PERSONALITY(loc->elf_ex, ibcs2_interpreter);
 
-				new_domain = current->exec_domain;
-				new_fs = current->fs;
-				current->personality = old_pers;
-				current->exec_domain = old_domain;
-				current->fs = old_fs;
-				put_exec_domain(new_domain);
-				put_fs_struct(new_fs);
-			} else
-#endif
-			{
-				interpreter = open_exec(elf_interpreter);
-			}
+			interpreter = open_exec(elf_interpreter);
 			retval = PTR_ERR(interpreter);
 			if (IS_ERR(interpreter))
 				goto out_free_interp;
 			retval = kernel_read(interpreter, 0, bprm->buf, BINPRM_BUF_SIZE);
-			if (retval < 0)
+			if (retval != BINPRM_BUF_SIZE) {
+				if (retval >= 0)
+					retval = -EIO;
 				goto out_free_dentry;
+			}
 
 			/* Get the exec headers */
-			interp_ex = *((struct exec *) bprm->buf);
-			interp_elf_ex = *((struct elfhdr *) bprm->buf);
+			loc->interp_ex = *((struct exec *) bprm->buf);
+			loc->interp_elf_ex = *((struct elfhdr *) bprm->buf);
+			break;
 		}
 		elf_ppnt++;
 	}
+
+	elf_ppnt = elf_phdata;
+	for (i = 0; i < loc->elf_ex.e_phnum; i++, elf_ppnt++)
+		if (elf_ppnt->p_type == PT_GNU_STACK) {
+			if (elf_ppnt->p_flags & PF_X)
+				executable_stack = EXSTACK_ENABLE_X;
+			else
+				executable_stack = EXSTACK_DISABLE_X;
+			break;
+		}
+	have_pt_gnu_stack = (i < loc->elf_ex.e_phnum);
 
 	/* Some simple consistency checks for the interpreter */
 	if (elf_interpreter) {
 		interpreter_type = INTERPRETER_ELF | INTERPRETER_AOUT;
 
 		/* Now figure out which format our binary is */
-		if ((N_MAGIC(interp_ex) != OMAGIC) &&
-		    (N_MAGIC(interp_ex) != ZMAGIC) &&
-		    (N_MAGIC(interp_ex) != QMAGIC))
+		if ((N_MAGIC(loc->interp_ex) != OMAGIC) &&
+		    (N_MAGIC(loc->interp_ex) != ZMAGIC) &&
+		    (N_MAGIC(loc->interp_ex) != QMAGIC))
 			interpreter_type = INTERPRETER_ELF;
 
-		if (memcmp(interp_elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
+		if (memcmp(loc->interp_elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
 			interpreter_type &= ~INTERPRETER_ELF;
 
 		retval = -ELIBBAD;
@@ -545,27 +706,31 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		/* Make sure only one type was selected */
 		if ((interpreter_type & INTERPRETER_ELF) &&
 		     interpreter_type != INTERPRETER_ELF) {
-			printk(KERN_WARNING "ELF: Ambiguous type, using ELF\n");
+	     		// FIXME - ratelimit this before re-enabling
+			// printk(KERN_WARNING "ELF: Ambiguous type, using ELF\n");
 			interpreter_type = INTERPRETER_ELF;
 		}
+		/* Verify the interpreter has a valid arch */
+		if ((interpreter_type == INTERPRETER_ELF) &&
+		    !elf_check_arch(&loc->interp_elf_ex))
+			goto out_free_dentry;
+	} else {
+		/* Executables without an interpreter also need a personality  */
+		SET_PERSONALITY(loc->elf_ex, ibcs2_interpreter);
 	}
 
 	/* OK, we are done with that, now set up the arg stuff,
 	   and then start this sucker up */
 
-	if (!bprm->sh_bang) {
-		char * passed_p;
+	if ((!bprm->sh_bang) && (interpreter_type == INTERPRETER_AOUT)) {
+		char *passed_p = passed_fileno;
+		sprintf(passed_fileno, "%d", elf_exec_fileno);
 
-		if (interpreter_type == INTERPRETER_AOUT) {
-		  sprintf(passed_fileno, "%d", elf_exec_fileno);
-		  passed_p = passed_fileno;
-
-		  if (elf_interpreter) {
-		    retval = copy_strings_kernel(1,&passed_p,bprm);
+		if (elf_interpreter) {
+			retval = copy_strings_kernel(1, &passed_p, bprm);
 			if (retval)
 				goto out_free_dentry; 
-		    bprm->argc++;
-		  }
+			bprm->argc++;
 		}
 	}
 
@@ -574,43 +739,80 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	if (retval)
 		goto out_free_dentry;
 
+	/* Discard our unneeded old files struct */
+	if (files) {
+		steal_locks(files);
+		put_files_struct(files);
+		files = NULL;
+	}
+
 	/* OK, This is the point of no return */
 	current->mm->start_data = 0;
 	current->mm->end_data = 0;
 	current->mm->end_code = 0;
 	current->mm->mmap = NULL;
 	current->flags &= ~PF_FORKNOEXEC;
-	elf_entry = (unsigned long) elf_ex.e_entry;
+	current->mm->def_flags = def_flags;
 
 	/* Do this immediately, since STACK_TOP as used in setup_arg_pages
 	   may depend on the personality.  */
-	SET_PERSONALITY(elf_ex, ibcs2_interpreter);
+	SET_PERSONALITY(loc->elf_ex, ibcs2_interpreter);
+	if (elf_read_implies_exec(loc->elf_ex, executable_stack))
+		current->personality |= READ_IMPLIES_EXEC;
+
+	arch_pick_mmap_layout(current->mm);
 
 	/* Do this so that we can load the interpreter, if need be.  We will
 	   change some of these later */
 	current->mm->rss = 0;
-	setup_arg_pages(bprm); /* XXX: check error */
+	current->mm->free_area_cache = current->mm->mmap_base;
+	retval = setup_arg_pages(bprm, STACK_TOP, executable_stack);
+	if (retval < 0) {
+		send_sig(SIGKILL, current, 0);
+		goto out_free_dentry;
+	}
+	
 	current->mm->start_stack = bprm->p;
-
-	/* Try and get dynamic programs out of the way of the default mmap
-	   base, as well as whatever program they might try to exec.  This
-	   is because the brk will follow the loader, and is not movable.  */
-
-	load_bias = ELF_PAGESTART(elf_ex.e_type==ET_DYN ? ELF_ET_DYN_BASE : 0);
 
 	/* Now we do a little grungy work by mmaping the ELF image into
 	   the correct location in memory.  At this point, we assume that
 	   the image should be loaded at fixed address, not at a variable
 	   address. */
 
-	old_fs = get_fs();
-	set_fs(get_ds());
-	for(i = 0, elf_ppnt = elf_phdata; i < elf_ex.e_phnum; i++, elf_ppnt++) {
+	for(i = 0, elf_ppnt = elf_phdata; i < loc->elf_ex.e_phnum; i++, elf_ppnt++) {
 		int elf_prot = 0, elf_flags;
-		unsigned long vaddr;
+		unsigned long k, vaddr;
 
 		if (elf_ppnt->p_type != PT_LOAD)
 			continue;
+
+		if (unlikely (elf_brk > elf_bss)) {
+			unsigned long nbyte;
+	            
+			/* There was a PT_LOAD segment with p_memsz > p_filesz
+			   before this one. Map anonymous pages, if needed,
+			   and clear the area.  */
+			retval = set_brk (elf_bss + load_bias,
+					  elf_brk + load_bias);
+			if (retval) {
+				send_sig(SIGKILL, current, 0);
+				goto out_free_dentry;
+			}
+			nbyte = ELF_PAGEOFFSET(elf_bss);
+			if (nbyte) {
+				nbyte = ELF_MIN_ALIGN - nbyte;
+				if (nbyte > elf_brk - elf_bss)
+					nbyte = elf_brk - elf_bss;
+				if (clear_user((void __user *)elf_bss +
+							load_bias, nbyte)) {
+					/*
+					 * This bss-zeroing can fail if the ELF
+					 * file specifies odd protections.  So
+					 * we don't check the return value
+					 */
+				}
+			}
+		}
 
 		if (elf_ppnt->p_flags & PF_R) elf_prot |= PROT_READ;
 		if (elf_ppnt->p_flags & PF_W) elf_prot |= PROT_WRITE;
@@ -619,30 +821,53 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		elf_flags = MAP_PRIVATE|MAP_DENYWRITE|MAP_EXECUTABLE;
 
 		vaddr = elf_ppnt->p_vaddr;
-		if (elf_ex.e_type == ET_EXEC || load_addr_set) {
+		if (loc->elf_ex.e_type == ET_EXEC || load_addr_set) {
 			elf_flags |= MAP_FIXED;
+		} else if (loc->elf_ex.e_type == ET_DYN) {
+			/* Try and get dynamic programs out of the way of the default mmap
+			   base, as well as whatever program they might try to exec.  This
+			   is because the brk will follow the loader, and is not movable.  */
+			load_bias = ELF_PAGESTART(ELF_ET_DYN_BASE - vaddr);
 		}
 
 		error = elf_map(bprm->file, load_bias + vaddr, elf_ppnt, elf_prot, elf_flags);
+		if (BAD_ADDR(error)) {
+			send_sig(SIGKILL, current, 0);
+			goto out_free_dentry;
+		}
 
 		if (!load_addr_set) {
 			load_addr_set = 1;
 			load_addr = (elf_ppnt->p_vaddr - elf_ppnt->p_offset);
-			if (elf_ex.e_type == ET_DYN) {
+			if (loc->elf_ex.e_type == ET_DYN) {
 				load_bias += error -
 				             ELF_PAGESTART(load_bias + vaddr);
-				load_addr += error;
+				load_addr += load_bias;
+				reloc_func_desc = load_bias;
 			}
 		}
 		k = elf_ppnt->p_vaddr;
 		if (k < start_code) start_code = k;
 		if (start_data < k) start_data = k;
 
+		/*
+		 * Check to see if the section's size will overflow the
+		 * allowed task size. Note that p_filesz must always be
+		 * <= p_memsz so it is only necessary to check p_memsz.
+		 */
+		if (k > TASK_SIZE || elf_ppnt->p_filesz > elf_ppnt->p_memsz ||
+		    elf_ppnt->p_memsz > TASK_SIZE ||
+		    TASK_SIZE - elf_ppnt->p_memsz < k) {
+			/* set_brk can never work.  Avoid overflows.  */
+			send_sig(SIGKILL, current, 0);
+			goto out_free_dentry;
+		}
+
 		k = elf_ppnt->p_vaddr + elf_ppnt->p_filesz;
 
 		if (k > elf_bss)
 			elf_bss = k;
-		if ((elf_ppnt->p_flags & PF_X) && end_code <  k)
+		if ((elf_ppnt->p_flags & PF_X) && end_code < k)
 			end_code = k;
 		if (end_data < k)
 			end_data = k;
@@ -650,9 +875,8 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		if (k > elf_brk)
 			elf_brk = k;
 	}
-	set_fs(old_fs);
 
-	elf_entry += load_bias;
+	loc->elf_ex.e_entry += load_bias;
 	elf_bss += load_bias;
 	elf_brk += load_bias;
 	start_code += load_bias;
@@ -660,25 +884,44 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	start_data += load_bias;
 	end_data += load_bias;
 
+	/* Calling set_brk effectively mmaps the pages that we need
+	 * for the bss and break sections.  We must do this before
+	 * mapping in the interpreter, to make sure it doesn't wind
+	 * up getting placed where the bss needs to go.
+	 */
+	retval = set_brk(elf_bss, elf_brk);
+	if (retval) {
+		send_sig(SIGKILL, current, 0);
+		goto out_free_dentry;
+	}
+	if (padzero(elf_bss)) {
+		send_sig(SIGSEGV, current, 0);
+		retval = -EFAULT; /* Nobody gets to see this, but.. */
+		goto out_free_dentry;
+	}
+
 	if (elf_interpreter) {
 		if (interpreter_type == INTERPRETER_AOUT)
-			elf_entry = load_aout_interp(&interp_ex,
+			elf_entry = load_aout_interp(&loc->interp_ex,
 						     interpreter);
 		else
-			elf_entry = load_elf_interp(&interp_elf_ex,
+			elf_entry = load_elf_interp(&loc->interp_elf_ex,
 						    interpreter,
 						    &interp_load_addr);
+		if (BAD_ADDR(elf_entry)) {
+			printk(KERN_ERR "Unable to load interpreter %.128s\n",
+				elf_interpreter);
+			force_sig(SIGSEGV, current);
+			retval = -ENOEXEC; /* Nobody gets to see this, but.. */
+			goto out_free_dentry;
+		}
+		reloc_func_desc = interp_load_addr;
 
 		allow_write_access(interpreter);
 		fput(interpreter);
 		kfree(elf_interpreter);
-
-		if (elf_entry == ~0UL) {
-			printk(KERN_ERR "Unable to load interpreter\n");
-			kfree(elf_phdata);
-			send_sig(SIGSEGV, current, 0);
-			return 0;
-		}
+	} else {
+		elf_entry = loc->elf_ex.e_entry;
 	}
 
 	kfree(elf_phdata);
@@ -690,80 +933,70 @@ static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 	compute_creds(bprm);
 	current->flags &= ~PF_FORKNOEXEC;
-	bprm->p = (unsigned long)
-	  create_elf_tables((char *)bprm->p,
-			bprm->argc,
-			bprm->envc,
-			(interpreter_type == INTERPRETER_ELF ? &elf_ex : NULL),
-			load_addr, load_bias,
-			interp_load_addr,
-			(interpreter_type == INTERPRETER_AOUT ? 0 : 1));
+	create_elf_tables(bprm, &loc->elf_ex, (interpreter_type == INTERPRETER_AOUT),
+			load_addr, interp_load_addr);
 	/* N.B. passed_fileno might not be initialized? */
 	if (interpreter_type == INTERPRETER_AOUT)
 		current->mm->arg_start += strlen(passed_fileno) + 1;
-	current->mm->start_brk = current->mm->brk = elf_brk;
 	current->mm->end_code = end_code;
 	current->mm->start_code = start_code;
 	current->mm->start_data = start_data;
 	current->mm->end_data = end_data;
 	current->mm->start_stack = bprm->p;
 
-	/* Calling set_brk effectively mmaps the pages that we need
-	 * for the bss and break sections
-	 */
-	set_brk(elf_bss, elf_brk);
-
-	padzero(elf_bss);
-
-#if 0
-	printk("(start_brk) %lx\n" , (long) current->mm->start_brk);
-	printk("(end_code) %lx\n" , (long) current->mm->end_code);
-	printk("(start_code) %lx\n" , (long) current->mm->start_code);
-	printk("(start_data) %lx\n" , (long) current->mm->start_data);
-	printk("(end_data) %lx\n" , (long) current->mm->end_data);
-	printk("(start_stack) %lx\n" , (long) current->mm->start_stack);
-	printk("(brk) %lx\n" , (long) current->mm->brk);
-#endif
-
-	if ( current->personality == PER_SVR4 )
-	{
+	if (current->personality & MMAP_PAGE_ZERO) {
 		/* Why this, you ask???  Well SVr4 maps page 0 as read-only,
 		   and some applications "depend" upon this behavior.
 		   Since we do not have the power to recompile these, we
 		   emulate the SVr4 behavior.  Sigh.  */
-		/* N.B. Shouldn't the size here be PAGE_SIZE?? */
-		down(&current->mm->mmap_sem);
-		error = do_mmap(NULL, 0, 4096, PROT_READ | PROT_EXEC,
+		down_write(&current->mm->mmap_sem);
+		error = do_mmap(NULL, 0, PAGE_SIZE, PROT_READ | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE, 0);
-		up(&current->mm->mmap_sem);
+		up_write(&current->mm->mmap_sem);
 	}
 
 #ifdef ELF_PLAT_INIT
 	/*
 	 * The ABI may specify that certain registers be set up in special
 	 * ways (on i386 %edx is the address of a DT_FINI function, for
-	 * example.  This macro performs whatever initialization to
-	 * the regs structure is required.
+	 * example.  In addition, it may also specify (eg, PowerPC64 ELF)
+	 * that the e_entry field is the address of the function descriptor
+	 * for the startup routine, rather than the address of the startup
+	 * routine itself.  This macro performs whatever initialization to
+	 * the regs structure is required as well as any relocations to the
+	 * function descriptor entries when executing dynamically links apps.
 	 */
-	ELF_PLAT_INIT(regs);
+	ELF_PLAT_INIT(regs, reloc_func_desc);
 #endif
 
 	start_thread(regs, elf_entry, bprm->p);
-	if (current->ptrace & PT_PTRACED)
-		send_sig(SIGTRAP, current, 0);
+	if (unlikely(current->ptrace & PT_PTRACED)) {
+		if (current->ptrace & PT_TRACE_EXEC)
+			ptrace_notify ((PTRACE_EVENT_EXEC << 8) | SIGTRAP);
+		else
+			send_sig(SIGTRAP, current, 0);
+	}
 	retval = 0;
 out:
+	kfree(loc);
+out_ret:
 	return retval;
 
 	/* error cleanup */
 out_free_dentry:
 	allow_write_access(interpreter);
-	fput(interpreter);
+	if (interpreter)
+		fput(interpreter);
 out_free_interp:
 	if (elf_interpreter)
 		kfree(elf_interpreter);
 out_free_file:
 	sys_close(elf_exec_fileno);
+out_free_fh:
+	if (files) {
+		put_files_struct(current->files);
+		current->files = files;
+	}
 out_free_ph:
 	kfree(elf_phdata);
 	goto out;
@@ -775,7 +1008,8 @@ out_free_ph:
 static int load_elf_library(struct file *file)
 {
 	struct elf_phdr *elf_phdata;
-	unsigned long elf_bss = 0, bss, len, k;
+	struct elf_phdr *eppnt;
+	unsigned long elf_bss, bss, len;
 	int retval, error, i, j;
 	struct elfhdr elf_ex;
 
@@ -795,49 +1029,55 @@ static int load_elf_library(struct file *file)
 	/* Now read in all of the header information */
 
 	j = sizeof(struct elf_phdr) * elf_ex.e_phnum;
-	if (j > ELF_MIN_ALIGN)
-		goto out;
+	/* j < ELF_MIN_ALIGN because elf_ex.e_phnum <= 2 */
 
 	error = -ENOMEM;
-	elf_phdata = (struct elf_phdr *) kmalloc(j, GFP_KERNEL);
+	elf_phdata = kmalloc(j, GFP_KERNEL);
 	if (!elf_phdata)
 		goto out;
 
-	/* N.B. check for error return?? */
-	retval = kernel_read(file, elf_ex.e_phoff, (char *) elf_phdata,
-			   sizeof(struct elf_phdr) * elf_ex.e_phnum);
-
+	eppnt = elf_phdata;
 	error = -ENOEXEC;
+	retval = kernel_read(file, elf_ex.e_phoff, (char *)eppnt, j);
+	if (retval != j)
+		goto out_free_ph;
+
 	for (j = 0, i = 0; i<elf_ex.e_phnum; i++)
-		if ((elf_phdata + i)->p_type == PT_LOAD) j++;
+		if ((eppnt + i)->p_type == PT_LOAD)
+			j++;
 	if (j != 1)
 		goto out_free_ph;
 
-	while (elf_phdata->p_type != PT_LOAD) elf_phdata++;
+	while (eppnt->p_type != PT_LOAD)
+		eppnt++;
 
 	/* Now use mmap to map the library into memory. */
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	error = do_mmap(file,
-			ELF_PAGESTART(elf_phdata->p_vaddr),
-			(elf_phdata->p_filesz +
-			 ELF_PAGEOFFSET(elf_phdata->p_vaddr)),
+			ELF_PAGESTART(eppnt->p_vaddr),
+			(eppnt->p_filesz +
+			 ELF_PAGEOFFSET(eppnt->p_vaddr)),
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
-			(elf_phdata->p_offset -
-			 ELF_PAGEOFFSET(elf_phdata->p_vaddr)));
-	up(&current->mm->mmap_sem);
-	if (error != ELF_PAGESTART(elf_phdata->p_vaddr))
+			(eppnt->p_offset -
+			 ELF_PAGEOFFSET(eppnt->p_vaddr)));
+	up_write(&current->mm->mmap_sem);
+	if (error != ELF_PAGESTART(eppnt->p_vaddr))
 		goto out_free_ph;
 
-	k = elf_phdata->p_vaddr + elf_phdata->p_filesz;
-	if (k > elf_bss)
-		elf_bss = k;
-	padzero(elf_bss);
+	elf_bss = eppnt->p_vaddr + eppnt->p_filesz;
+	if (padzero(elf_bss)) {
+		error = -EFAULT;
+		goto out_free_ph;
+	}
 
-	len = ELF_PAGESTART(elf_phdata->p_filesz + elf_phdata->p_vaddr + ELF_MIN_ALIGN - 1);
-	bss = elf_phdata->p_memsz + elf_phdata->p_vaddr;
-	if (bss > len)
+	len = ELF_PAGESTART(eppnt->p_filesz + eppnt->p_vaddr + ELF_MIN_ALIGN - 1);
+	bss = eppnt->p_memsz + eppnt->p_vaddr;
+	if (bss > len) {
+		down_write(&current->mm->mmap_sem);
 		do_brk(len, bss - len);
+		up_write(&current->mm->mmap_sem);
+	}
 	error = 0;
 
 out_free_ph:
@@ -884,20 +1124,16 @@ static int dump_seek(struct file *file, off_t off)
  *
  * I think we should skip something. But I am not sure how. H.J.
  */
-static inline int maydump(struct vm_area_struct *vma)
+static int maydump(struct vm_area_struct *vma)
 {
-	if (!(vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC)))
+	/* Do not dump I/O mapped devices, shared memory, or special mappings */
+	if (vma->vm_flags & (VM_IO | VM_SHARED | VM_RESERVED))
 		return 0;
 
-	/* Do not dump I/O mapped devices! -DaveM */
-	if(vma->vm_flags & VM_IO)
+	/* If it hasn't been written to, don't write it out */
+	if (!vma->anon_vma)
 		return 0;
-#if 1
-	if (vma->vm_flags & (VM_WRITE|VM_GROWSUP|VM_GROWSDOWN))
-		return 1;
-	if (vma->vm_flags & (VM_READ|VM_EXEC|VM_EXECUTABLE|VM_SHARED))
-		return 0;
-#endif
+
 	return 1;
 }
 
@@ -917,31 +1153,11 @@ static int notesize(struct memelfnote *en)
 	int sz;
 
 	sz = sizeof(struct elf_note);
-	sz += roundup(strlen(en->name), 4);
+	sz += roundup(strlen(en->name) + 1, 4);
 	sz += roundup(en->datasz, 4);
 
 	return sz;
 }
-
-/* #define DEBUG */
-
-#ifdef DEBUG
-static void dump_regs(const char *str, elf_greg_t *r)
-{
-	int i;
-	static const char *regs[] = { "ebx", "ecx", "edx", "esi", "edi", "ebp",
-					      "eax", "ds", "es", "fs", "gs",
-					      "orig_eax", "eip", "cs",
-					      "efl", "uesp", "ss"};
-	printk("Registers: %s\n", str);
-
-	for(i = 0; i < ELF_NGREG; i++)
-	{
-		unsigned long val = r[i];
-		printk("   %-2d %-5s=%08lx %lu\n", i, regs[i], val, val);
-	}
-}
-#endif
 
 #define DUMP_WRITE(addr, nr)	\
 	do { if (!dump_write(file, (addr), (nr))) return 0; } while(0)
@@ -952,7 +1168,7 @@ static int writenote(struct memelfnote *men, struct file *file)
 {
 	struct elf_note en;
 
-	en.n_namesz = strlen(men->name);
+	en.n_namesz = strlen(men->name) + 1;
 	en.n_descsz = men->datasz;
 	en.n_type = men->type;
 
@@ -974,6 +1190,177 @@ static int writenote(struct memelfnote *men, struct file *file)
 #define DUMP_SEEK(off)	\
 	if (!dump_seek(file, (off))) \
 		goto end_coredump;
+
+static inline void fill_elf_header(struct elfhdr *elf, int segs)
+{
+	memcpy(elf->e_ident, ELFMAG, SELFMAG);
+	elf->e_ident[EI_CLASS] = ELF_CLASS;
+	elf->e_ident[EI_DATA] = ELF_DATA;
+	elf->e_ident[EI_VERSION] = EV_CURRENT;
+	elf->e_ident[EI_OSABI] = ELF_OSABI;
+	memset(elf->e_ident+EI_PAD, 0, EI_NIDENT-EI_PAD);
+
+	elf->e_type = ET_CORE;
+	elf->e_machine = ELF_ARCH;
+	elf->e_version = EV_CURRENT;
+	elf->e_entry = 0;
+	elf->e_phoff = sizeof(struct elfhdr);
+	elf->e_shoff = 0;
+	elf->e_flags = ELF_CORE_EFLAGS;
+	elf->e_ehsize = sizeof(struct elfhdr);
+	elf->e_phentsize = sizeof(struct elf_phdr);
+	elf->e_phnum = segs;
+	elf->e_shentsize = 0;
+	elf->e_shnum = 0;
+	elf->e_shstrndx = 0;
+	return;
+}
+
+static inline void fill_elf_note_phdr(struct elf_phdr *phdr, int sz, off_t offset)
+{
+	phdr->p_type = PT_NOTE;
+	phdr->p_offset = offset;
+	phdr->p_vaddr = 0;
+	phdr->p_paddr = 0;
+	phdr->p_filesz = sz;
+	phdr->p_memsz = 0;
+	phdr->p_flags = 0;
+	phdr->p_align = 0;
+	return;
+}
+
+static void fill_note(struct memelfnote *note, const char *name, int type, 
+		unsigned int sz, void *data)
+{
+	note->name = name;
+	note->type = type;
+	note->datasz = sz;
+	note->data = data;
+	return;
+}
+
+/*
+ * fill up all the fields in prstatus from the given task struct, except registers
+ * which need to be filled up separately.
+ */
+static void fill_prstatus(struct elf_prstatus *prstatus,
+			struct task_struct *p, long signr) 
+{
+	prstatus->pr_info.si_signo = prstatus->pr_cursig = signr;
+	prstatus->pr_sigpend = p->pending.signal.sig[0];
+	prstatus->pr_sighold = p->blocked.sig[0];
+	prstatus->pr_pid = p->pid;
+	prstatus->pr_ppid = p->parent->pid;
+	prstatus->pr_pgrp = process_group(p);
+	prstatus->pr_sid = p->signal->session;
+	if (thread_group_leader(p)) {
+		/*
+		 * This is the record for the group leader.  Add in the
+		 * cumulative times of previous dead threads.  This total
+		 * won't include the time of each live thread whose state
+		 * is included in the core dump.  The final total reported
+		 * to our parent process when it calls wait4 will include
+		 * those sums as well as the little bit more time it takes
+		 * this and each other thread to finish dying after the
+		 * core dump synchronization phase.
+		 */
+		cputime_to_timeval(cputime_add(p->utime, p->signal->utime),
+				   &prstatus->pr_utime);
+		cputime_to_timeval(cputime_add(p->stime, p->signal->stime),
+				   &prstatus->pr_stime);
+	} else {
+		cputime_to_timeval(p->utime, &prstatus->pr_utime);
+		cputime_to_timeval(p->stime, &prstatus->pr_stime);
+	}
+	cputime_to_timeval(p->signal->cutime, &prstatus->pr_cutime);
+	cputime_to_timeval(p->signal->cstime, &prstatus->pr_cstime);
+}
+
+static int fill_psinfo(struct elf_prpsinfo *psinfo, struct task_struct *p,
+		       struct mm_struct *mm)
+{
+	unsigned int i, len;
+	
+	/* first copy the parameters from user space */
+	memset(psinfo, 0, sizeof(struct elf_prpsinfo));
+
+	len = mm->arg_end - mm->arg_start;
+	if (len >= ELF_PRARGSZ)
+		len = ELF_PRARGSZ-1;
+	if (copy_from_user(&psinfo->pr_psargs,
+		           (const char __user *)mm->arg_start, len))
+		return -EFAULT;
+	for(i = 0; i < len; i++)
+		if (psinfo->pr_psargs[i] == 0)
+			psinfo->pr_psargs[i] = ' ';
+	psinfo->pr_psargs[len] = 0;
+
+	psinfo->pr_pid = p->pid;
+	psinfo->pr_ppid = p->parent->pid;
+	psinfo->pr_pgrp = process_group(p);
+	psinfo->pr_sid = p->signal->session;
+
+	i = p->state ? ffz(~p->state) + 1 : 0;
+	psinfo->pr_state = i;
+	psinfo->pr_sname = (i < 0 || i > 5) ? '.' : "RSDTZW"[i];
+	psinfo->pr_zomb = psinfo->pr_sname == 'Z';
+	psinfo->pr_nice = task_nice(p);
+	psinfo->pr_flag = p->flags;
+	SET_UID(psinfo->pr_uid, p->uid);
+	SET_GID(psinfo->pr_gid, p->gid);
+	strncpy(psinfo->pr_fname, p->comm, sizeof(psinfo->pr_fname));
+	
+	return 0;
+}
+
+/* Here is the structure in which status of each thread is captured. */
+struct elf_thread_status
+{
+	struct list_head list;
+	struct elf_prstatus prstatus;	/* NT_PRSTATUS */
+	elf_fpregset_t fpu;		/* NT_PRFPREG */
+	struct task_struct *thread;
+#ifdef ELF_CORE_COPY_XFPREGS
+	elf_fpxregset_t xfpu;		/* NT_PRXFPREG */
+#endif
+	struct memelfnote notes[3];
+	int num_notes;
+};
+
+/*
+ * In order to add the specific thread information for the elf file format,
+ * we need to keep a linked list of every threads pr_status and then
+ * create a single section for them in the final core file.
+ */
+static int elf_dump_thread_status(long signr, struct elf_thread_status *t)
+{
+	int sz = 0;
+	struct task_struct *p = t->thread;
+	t->num_notes = 0;
+
+	fill_prstatus(&t->prstatus, p, signr);
+	elf_core_copy_task_regs(p, &t->prstatus.pr_reg);	
+	
+	fill_note(&t->notes[0], "CORE", NT_PRSTATUS, sizeof(t->prstatus), &(t->prstatus));
+	t->num_notes++;
+	sz += notesize(&t->notes[0]);
+
+	if ((t->prstatus.pr_fpvalid = elf_core_copy_task_fpregs(p, NULL, &t->fpu))) {
+		fill_note(&t->notes[1], "CORE", NT_PRFPREG, sizeof(t->fpu), &(t->fpu));
+		t->num_notes++;
+		sz += notesize(&t->notes[1]);
+	}
+
+#ifdef ELF_CORE_COPY_XFPREGS
+	if (elf_core_copy_task_xfpregs(p, &t->xfpu)) {
+		fill_note(&t->notes[2], "LINUX", NT_PRXFPREG, sizeof(t->xfpu), &t->xfpu);
+		t->num_notes++;
+		sz += notesize(&t->notes[2]);
+	}
+#endif	
+	return sz;
+}
+
 /*
  * Actual dumper
  *
@@ -983,174 +1370,158 @@ static int writenote(struct memelfnote *men, struct file *file)
  */
 static int elf_core_dump(long signr, struct pt_regs * regs, struct file * file)
 {
+#define	NUM_NOTES	6
 	int has_dumped = 0;
 	mm_segment_t fs;
 	int segs;
 	size_t size = 0;
 	int i;
 	struct vm_area_struct *vma;
-	struct elfhdr elf;
+	struct elfhdr *elf = NULL;
 	off_t offset = 0, dataoff;
-	unsigned long limit = current->rlim[RLIMIT_CORE].rlim_cur;
-	int numnote = 4;
-	struct memelfnote notes[4];
-	struct elf_prstatus prstatus;	/* NT_PRSTATUS */
-	elf_fpregset_t fpu;		/* NT_PRFPREG */
-	struct elf_prpsinfo psinfo;	/* NT_PRPSINFO */
+	unsigned long limit = current->signal->rlim[RLIMIT_CORE].rlim_cur;
+	int numnote;
+	struct memelfnote *notes = NULL;
+	struct elf_prstatus *prstatus = NULL;	/* NT_PRSTATUS */
+	struct elf_prpsinfo *psinfo = NULL;	/* NT_PRPSINFO */
+ 	struct task_struct *g, *p;
+ 	LIST_HEAD(thread_list);
+ 	struct list_head *t;
+	elf_fpregset_t *fpu = NULL;
+#ifdef ELF_CORE_COPY_XFPREGS
+	elf_fpxregset_t *xfpu = NULL;
+#endif
+	int thread_status_size = 0;
+	elf_addr_t *auxv;
 
+	/*
+	 * We no longer stop all VM operations.
+	 * 
+	 * This is because those proceses that could possibly change map_count or
+	 * the mmap / vma pages are now blocked in do_exit on current finishing
+	 * this core dump.
+	 *
+	 * Only ptrace can touch these memory addresses, but it doesn't change
+	 * the map_count or the pages allocated.  So no possibility of crashing
+	 * exists while dumping the mm->vm_next areas to the core file.
+	 */
+  
+	/* alloc memory for large data structures: too large to be on stack */
+	elf = kmalloc(sizeof(*elf), GFP_KERNEL);
+	if (!elf)
+		goto cleanup;
+	prstatus = kmalloc(sizeof(*prstatus), GFP_KERNEL);
+	if (!prstatus)
+		goto cleanup;
+	psinfo = kmalloc(sizeof(*psinfo), GFP_KERNEL);
+	if (!psinfo)
+		goto cleanup;
+	notes = kmalloc(NUM_NOTES * sizeof(struct memelfnote), GFP_KERNEL);
+	if (!notes)
+		goto cleanup;
+	fpu = kmalloc(sizeof(*fpu), GFP_KERNEL);
+	if (!fpu)
+		goto cleanup;
+#ifdef ELF_CORE_COPY_XFPREGS
+	xfpu = kmalloc(sizeof(*xfpu), GFP_KERNEL);
+	if (!xfpu)
+		goto cleanup;
+#endif
+
+	if (signr) {
+		struct elf_thread_status *tmp;
+		read_lock(&tasklist_lock);
+		do_each_thread(g,p)
+			if (current->mm == p->mm && current != p) {
+				tmp = kmalloc(sizeof(*tmp), GFP_ATOMIC);
+				if (!tmp) {
+					read_unlock(&tasklist_lock);
+					goto cleanup;
+				}
+				memset(tmp, 0, sizeof(*tmp));
+				INIT_LIST_HEAD(&tmp->list);
+				tmp->thread = p;
+				list_add(&tmp->list, &thread_list);
+			}
+		while_each_thread(g,p);
+		read_unlock(&tasklist_lock);
+		list_for_each(t, &thread_list) {
+			struct elf_thread_status *tmp;
+			int sz;
+
+			tmp = list_entry(t, struct elf_thread_status, list);
+			sz = elf_dump_thread_status(signr, tmp);
+			thread_status_size += sz;
+		}
+	}
+	/* now collect the dump for the current */
+	memset(prstatus, 0, sizeof(*prstatus));
+	fill_prstatus(prstatus, current, signr);
+	elf_core_copy_regs(&prstatus->pr_reg, regs);
+	
 	segs = current->mm->map_count;
-
-#ifdef DEBUG
-	printk("elf_core_dump: %d segs %lu limit\n", segs, limit);
+#ifdef ELF_CORE_EXTRA_PHDRS
+	segs += ELF_CORE_EXTRA_PHDRS;
 #endif
 
 	/* Set up header */
-	memcpy(elf.e_ident, ELFMAG, SELFMAG);
-	elf.e_ident[EI_CLASS] = ELF_CLASS;
-	elf.e_ident[EI_DATA] = ELF_DATA;
-	elf.e_ident[EI_VERSION] = EV_CURRENT;
-	memset(elf.e_ident+EI_PAD, 0, EI_NIDENT-EI_PAD);
-
-	elf.e_type = ET_CORE;
-	elf.e_machine = ELF_ARCH;
-	elf.e_version = EV_CURRENT;
-	elf.e_entry = 0;
-	elf.e_phoff = sizeof(elf);
-	elf.e_shoff = 0;
-	elf.e_flags = 0;
-	elf.e_ehsize = sizeof(elf);
-	elf.e_phentsize = sizeof(struct elf_phdr);
-	elf.e_phnum = segs+1;		/* Include notes */
-	elf.e_shentsize = 0;
-	elf.e_shnum = 0;
-	elf.e_shstrndx = 0;
-
-	fs = get_fs();
-	set_fs(KERNEL_DS);
+	fill_elf_header(elf, segs+1);	/* including notes section */
 
 	has_dumped = 1;
 	current->flags |= PF_DUMPCORE;
-
-	DUMP_WRITE(&elf, sizeof(elf));
-	offset += sizeof(elf);				/* Elf header */
-	offset += (segs+1) * sizeof(struct elf_phdr);	/* Program headers */
 
 	/*
 	 * Set up the notes in similar form to SVR4 core dumps made
 	 * with info from their /proc.
 	 */
-	memset(&psinfo, 0, sizeof(psinfo));
-	memset(&prstatus, 0, sizeof(prstatus));
 
-	notes[0].name = "CORE";
-	notes[0].type = NT_PRSTATUS;
-	notes[0].datasz = sizeof(prstatus);
-	notes[0].data = &prstatus;
-	prstatus.pr_info.si_signo = prstatus.pr_cursig = signr;
-	prstatus.pr_sigpend = current->pending.signal.sig[0];
-	prstatus.pr_sighold = current->blocked.sig[0];
-	psinfo.pr_pid = prstatus.pr_pid = current->pid;
-	psinfo.pr_ppid = prstatus.pr_ppid = current->p_pptr->pid;
-	psinfo.pr_pgrp = prstatus.pr_pgrp = current->pgrp;
-	psinfo.pr_sid = prstatus.pr_sid = current->session;
-	prstatus.pr_utime.tv_sec = CT_TO_SECS(current->times.tms_utime);
-	prstatus.pr_utime.tv_usec = CT_TO_USECS(current->times.tms_utime);
-	prstatus.pr_stime.tv_sec = CT_TO_SECS(current->times.tms_stime);
-	prstatus.pr_stime.tv_usec = CT_TO_USECS(current->times.tms_stime);
-	prstatus.pr_cutime.tv_sec = CT_TO_SECS(current->times.tms_cutime);
-	prstatus.pr_cutime.tv_usec = CT_TO_USECS(current->times.tms_cutime);
-	prstatus.pr_cstime.tv_sec = CT_TO_SECS(current->times.tms_cstime);
-	prstatus.pr_cstime.tv_usec = CT_TO_USECS(current->times.tms_cstime);
-
-	/*
-	 * This transfers the registers from regs into the standard
-	 * coredump arrangement, whatever that is.
-	 */
-#ifdef ELF_CORE_COPY_REGS
-	ELF_CORE_COPY_REGS(prstatus.pr_reg, regs)
-#else
-	if (sizeof(elf_gregset_t) != sizeof(struct pt_regs))
-	{
-		printk("sizeof(elf_gregset_t) (%ld) != sizeof(struct pt_regs) (%ld)\n",
-			(long)sizeof(elf_gregset_t), (long)sizeof(struct pt_regs));
-	}
-	else
-		*(struct pt_regs *)&prstatus.pr_reg = *regs;
-#endif
-
-#ifdef DEBUG
-	dump_regs("Passed in regs", (elf_greg_t *)regs);
-	dump_regs("prstatus regs", (elf_greg_t *)&prstatus.pr_reg);
-#endif
-
-	notes[1].name = "CORE";
-	notes[1].type = NT_PRPSINFO;
-	notes[1].datasz = sizeof(psinfo);
-	notes[1].data = &psinfo;
-	i = current->state ? ffz(~current->state) + 1 : 0;
-	psinfo.pr_state = i;
-	psinfo.pr_sname = (i < 0 || i > 5) ? '.' : "RSDZTD"[i];
-	psinfo.pr_zomb = psinfo.pr_sname == 'Z';
-	psinfo.pr_nice = current->nice;
-	psinfo.pr_flag = current->flags;
-	psinfo.pr_uid = NEW_TO_OLD_UID(current->uid);
-	psinfo.pr_gid = NEW_TO_OLD_GID(current->gid);
-	{
-		int i, len;
-
-		set_fs(fs);
-
-		len = current->mm->arg_end - current->mm->arg_start;
-		if (len >= ELF_PRARGSZ)
-			len = ELF_PRARGSZ-1;
-		copy_from_user(&psinfo.pr_psargs,
-			      (const char *)current->mm->arg_start, len);
-		for(i = 0; i < len; i++)
-			if (psinfo.pr_psargs[i] == 0)
-				psinfo.pr_psargs[i] = ' ';
-		psinfo.pr_psargs[len] = 0;
-
-		set_fs(KERNEL_DS);
-	}
-	strncpy(psinfo.pr_fname, current->comm, sizeof(psinfo.pr_fname));
-
-	notes[2].name = "CORE";
-	notes[2].type = NT_TASKSTRUCT;
-	notes[2].datasz = sizeof(*current);
-	notes[2].data = current;
-
-	/* Try to dump the FPU. */
-	prstatus.pr_fpvalid = dump_fpu (regs, &fpu);
-	if (!prstatus.pr_fpvalid)
-	{
-		numnote--;
-	}
-	else
-	{
-		notes[3].name = "CORE";
-		notes[3].type = NT_PRFPREG;
-		notes[3].datasz = sizeof(fpu);
-		notes[3].data = &fpu;
-	}
+	fill_note(notes +0, "CORE", NT_PRSTATUS, sizeof(*prstatus), prstatus);
 	
+	fill_psinfo(psinfo, current->group_leader, current->mm);
+	fill_note(notes +1, "CORE", NT_PRPSINFO, sizeof(*psinfo), psinfo);
+	
+	fill_note(notes +2, "CORE", NT_TASKSTRUCT, sizeof(*current), current);
+  
+	numnote = 3;
+
+	auxv = (elf_addr_t *) current->mm->saved_auxv;
+
+	i = 0;
+	do
+		i += 2;
+	while (auxv[i - 2] != AT_NULL);
+	fill_note(&notes[numnote++], "CORE", NT_AUXV,
+		  i * sizeof (elf_addr_t), auxv);
+
+  	/* Try to dump the FPU. */
+	if ((prstatus->pr_fpvalid = elf_core_copy_task_fpregs(current, regs, fpu)))
+		fill_note(notes + numnote++,
+			  "CORE", NT_PRFPREG, sizeof(*fpu), fpu);
+#ifdef ELF_CORE_COPY_XFPREGS
+	if (elf_core_copy_task_xfpregs(current, xfpu))
+		fill_note(notes + numnote++,
+			  "LINUX", NT_PRXFPREG, sizeof(*xfpu), xfpu);
+#endif	
+  
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	DUMP_WRITE(elf, sizeof(*elf));
+	offset += sizeof(*elf);				/* Elf header */
+	offset += (segs+1) * sizeof(struct elf_phdr);	/* Program headers */
+
 	/* Write notes phdr entry */
 	{
 		struct elf_phdr phdr;
 		int sz = 0;
 
-		for(i = 0; i < numnote; i++)
-			sz += notesize(&notes[i]);
+		for (i = 0; i < numnote; i++)
+			sz += notesize(notes + i);
+		
+		sz += thread_status_size;
 
-		phdr.p_type = PT_NOTE;
-		phdr.p_offset = offset;
-		phdr.p_vaddr = 0;
-		phdr.p_paddr = 0;
-		phdr.p_filesz = sz;
-		phdr.p_memsz = 0;
-		phdr.p_flags = 0;
-		phdr.p_align = 0;
-
-		offset += phdr.p_filesz;
+		fill_elf_note_phdr(&phdr, sz, offset);
+		offset += sz;
 		DUMP_WRITE(&phdr, sizeof(phdr));
 	}
 
@@ -1158,7 +1529,7 @@ static int elf_core_dump(long signr, struct pt_regs * regs, struct file * file)
 	dataoff = offset = roundup(offset, ELF_EXEC_PAGESIZE);
 
 	/* Write program headers for segments dump */
-	for(vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
+	for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
 		struct elf_phdr phdr;
 		size_t sz;
 
@@ -1179,45 +1550,64 @@ static int elf_core_dump(long signr, struct pt_regs * regs, struct file * file)
 		DUMP_WRITE(&phdr, sizeof(phdr));
 	}
 
-	for(i = 0; i < numnote; i++)
-		if (!writenote(&notes[i], file))
+#ifdef ELF_CORE_WRITE_EXTRA_PHDRS
+	ELF_CORE_WRITE_EXTRA_PHDRS;
+#endif
+
+ 	/* write out the notes section */
+	for (i = 0; i < numnote; i++)
+		if (!writenote(notes + i, file))
 			goto end_coredump;
 
-	set_fs(fs);
-
+	/* write out the thread status notes section */
+	list_for_each(t, &thread_list) {
+		struct elf_thread_status *tmp = list_entry(t, struct elf_thread_status, list);
+		for (i = 0; i < tmp->num_notes; i++)
+			if (!writenote(&tmp->notes[i], file))
+				goto end_coredump;
+	}
+ 
 	DUMP_SEEK(dataoff);
 
-	for(vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
+	for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
 		unsigned long addr;
 
 		if (!maydump(vma))
 			continue;
-#ifdef DEBUG
-		printk("elf_core_dump: writing %08lx %lx\n", addr, len);
-#endif
+
 		for (addr = vma->vm_start;
 		     addr < vma->vm_end;
 		     addr += PAGE_SIZE) {
-			pgd_t *pgd;
-			pmd_t *pmd;
-			pte_t *pte;
+			struct page* page;
+			struct vm_area_struct *vma;
 
-			pgd = pgd_offset(vma->vm_mm, addr);
-			pmd = pmd_alloc(pgd, addr);
-	
-			if (!pmd)
-				goto end_coredump;
-			pte = pte_alloc(pmd, addr);
-			if (!pte)
-				goto end_coredump;
-			if (!pte_present(*pte) &&
-			    pte_none(*pte)) {
+			if (get_user_pages(current, current->mm, addr, 1, 0, 1,
+						&page, &vma) <= 0) {
 				DUMP_SEEK (file->f_pos + PAGE_SIZE);
 			} else {
-				DUMP_WRITE((void*)addr, PAGE_SIZE);
+				if (page == ZERO_PAGE(addr)) {
+					DUMP_SEEK (file->f_pos + PAGE_SIZE);
+				} else {
+					void *kaddr;
+					flush_cache_page(vma, addr);
+					kaddr = kmap(page);
+					if ((size += PAGE_SIZE) > limit ||
+					    !dump_write(file, kaddr,
+					    PAGE_SIZE)) {
+						kunmap(page);
+						page_cache_release(page);
+						goto end_coredump;
+					}
+					kunmap(page);
+				}
+				page_cache_release(page);
 			}
 		}
 	}
+
+#ifdef ELF_CORE_WRITE_EXTRA_DATA
+	ELF_CORE_WRITE_EXTRA_DATA;
+#endif
 
 	if ((off_t) file->f_pos != offset) {
 		/* Sanity check */
@@ -1225,10 +1615,28 @@ static int elf_core_dump(long signr, struct pt_regs * regs, struct file * file)
 		       (off_t) file->f_pos, offset);
 	}
 
- end_coredump:
+end_coredump:
 	set_fs(fs);
+
+cleanup:
+	while(!list_empty(&thread_list)) {
+		struct list_head *tmp = thread_list.next;
+		list_del(tmp);
+		kfree(list_entry(tmp, struct elf_thread_status, list));
+	}
+
+	kfree(elf);
+	kfree(prstatus);
+	kfree(psinfo);
+	kfree(notes);
+	kfree(fpu);
+#ifdef ELF_CORE_COPY_XFPREGS
+	kfree(xfpu);
+#endif
 	return has_dumped;
+#undef NUM_NOTES
 }
+
 #endif		/* USE_ELF_CORE_DUMP */
 
 static int __init init_elf_binfmt(void)
@@ -1242,5 +1650,6 @@ static void __exit exit_elf_binfmt(void)
 	unregister_binfmt(&elf_format);
 }
 
-module_init(init_elf_binfmt)
-module_exit(exit_elf_binfmt)
+core_initcall(init_elf_binfmt);
+module_exit(exit_elf_binfmt);
+MODULE_LICENSE("GPL");

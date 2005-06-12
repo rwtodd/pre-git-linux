@@ -5,7 +5,6 @@
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <asm/cprefix.h>
 #include <asm/head.h>
 #include <asm/asi.h>
 #include <asm/contregs.h>
@@ -14,6 +13,7 @@
 #include <asm/ptrace.h>
 #include <asm/winmacro.h>
 #include <asm/asmmacro.h>
+#include <asm/thread_info.h>
 
 /* Registers to not touch at all. */
 #define t_psr        l0 /* Set by caller */
@@ -55,7 +55,7 @@ tsetup_7win_patch6:	and	%g2, 0x7f, %g2
 	 *
 	 * sethi	%hi(trap_setup), %l4
 	 * jmpl		%l4 + %lo(trap_setup), %l6
-	 * mov		1, %l4
+	 * nop
 	 */
 
 	/* 2 3 4  window number
@@ -86,7 +86,7 @@ trap_setup:
 	/* From kernel, allocate more kernel stack and
 	 * build a pt_regs trap frame.
 	 */
-	sub	%fp, (REGWIN_SZ + TRACEREG_SZ), %t_kstack
+	sub	%fp, (STACKFRAME_SZ + TRACEREG_SZ), %t_kstack
 	STORE_PT_ALL(t_kstack, t_psr, t_pc, t_npc, g2)
 
 	/* See if we are in the trap window. */
@@ -101,7 +101,7 @@ trap_setup:
 	 mov	%t_kstack, %sp		! jump onto new stack
 
 trap_setup_kernel_spill:
-	ld	[%curptr + AOFF_task_thread + AOFF_thread_uwinmask], %g1
+	ld	[%curptr + TI_UWINMASK], %g1
 	orcc	%g0, %g1, %g0
 	bne	trap_setup_user_spill	! there are some user windows, yuck
 	/* Spill from kernel, but only kernel windows, adjust
@@ -127,7 +127,8 @@ tsetup_patch2:
 	jmpl	%t_retpc + 0x8, %g0	! return to caller
 	 mov	%t_kstack, %sp		! and onto new kernel stack
 
-#define STACK_OFFSET (TASK_UNION_SIZE - (TRACEREG_SZ + REGWIN_SZ))
+#define STACK_OFFSET (THREAD_SIZE - TRACEREG_SZ - STACKFRAME_SZ)
+
 trap_setup_from_user:
 	/* We can't use %curptr yet. */
 	LOAD_CURRENT(t_kstack, t_twinmask)
@@ -143,18 +144,18 @@ trap_setup_from_user:
 	STORE_PT_ALL(t_kstack, t_psr, t_pc, t_npc, g2)
 
 #if 0
-	/* If we're sure every task_struct is TASK_UNION_SIZE aligned,
+	/* If we're sure every task_struct is THREAD_SIZE aligned,
 	   we can speed this up. */
 	sethi	%hi(STACK_OFFSET), %curptr
 	or	%curptr, %lo(STACK_OFFSET), %curptr
 	sub	%t_kstack, %curptr, %curptr
 #else
-	sethi	%hi(~(TASK_UNION_SIZE - 1)), %curptr
+	sethi	%hi(~(THREAD_SIZE - 1)), %curptr
 	and	%t_kstack, %curptr, %curptr
 #endif
 
-	/* Clear current->thread.w_saved */
-	st	%g0, [%curptr + AOFF_task_thread + AOFF_thread_w_saved]
+	/* Clear current_thread_info->w_saved */
+	st	%g0, [%curptr + TI_W_SAVED]
 
 	/* See if we are in the trap window. */
 	andcc	%t_twinmask, %t_wim, %g0
@@ -185,7 +186,7 @@ trap_setup_from_user:
 	andn	%g2, %t_twinmask, %g2
 tsetup_patch3:
 	and	%g2, 0xff, %g2			! patched on 7win Sparcs
-	st	%g2, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]	! store new umask
+	st	%g2, [%curptr + TI_UWINMASK]	! store new umask
 
 	jmpl	%t_retpc + 0x8, %g0		! return to caller
 	 mov	%t_kstack, %sp			! and onto kernel stack
@@ -206,7 +207,7 @@ tsetup_patch5:
 tsetup_patch6:
 	and	%g2, 0xff, %g2		! patched on 7win Sparcs
 	andn	%g1, %g2, %g1		! clear this bit in %g1
-	st	%g1, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]
+	st	%g1, [%curptr + TI_UWINMASK]
 
 	save	%g0, %g0, %g0
 
@@ -215,9 +216,9 @@ tsetup_patch6:
 	/* Call MMU-architecture dependent stack checking
 	 * routine.
 	 */
-	.globl	C_LABEL(tsetup_mmu_patchme)
-C_LABEL(tsetup_mmu_patchme):
-	b	C_LABEL(tsetup_sun4c_stackchk)
+	.globl	tsetup_mmu_patchme
+tsetup_mmu_patchme:
+	b	tsetup_sun4c_stackchk
 	 andcc	%sp, 0x7, %g0
 
 	/* Architecture specific stack checking routines.  When either
@@ -227,8 +228,8 @@ C_LABEL(tsetup_mmu_patchme):
 	 */
 #define glob_tmp     g1
 
-	.globl	C_LABEL(tsetup_sun4c_stackchk)
-C_LABEL(tsetup_sun4c_stackchk):
+	.globl	tsetup_sun4c_stackchk
+tsetup_sun4c_stackchk:
 	/* Done by caller: andcc %sp, 0x7, %g0 */
 	bne	trap_setup_user_stack_is_bolixed
 	 sra	%sp, 29, %glob_tmp
@@ -274,8 +275,8 @@ tsetup_sun4c_onepage:
 	jmpl	%t_retpc + 0x8, %g0
 	 mov	%t_kstack, %sp
 
-	.globl	C_LABEL(tsetup_srmmu_stackchk)
-C_LABEL(tsetup_srmmu_stackchk):
+	.globl	tsetup_srmmu_stackchk
+tsetup_srmmu_stackchk:
 	/* Check results of callers andcc %sp, 0x7, %g0 */
 	bne	trap_setup_user_stack_is_bolixed
 	 sethi   %hi(PAGE_OFFSET), %glob_tmp

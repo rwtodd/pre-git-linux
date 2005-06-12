@@ -3,7 +3,7 @@
 
 #include <linux/config.h>
 
-static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk, unsigned cpu)
+static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 {
 }
 
@@ -13,8 +13,8 @@ static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk,
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 
-extern inline int
-init_new_context(struct task_struct *tsk, struct mm_struct *mm)
+static inline int init_new_context(struct task_struct *tsk,
+				   struct mm_struct *mm)
 {
 	mm->context = virt_to_phys(mm->pgd);
 	return 0;
@@ -22,7 +22,7 @@ init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 
 #define destroy_context(mm)		do { } while(0)
 
-extern inline void switch_mm_0230(struct mm_struct *mm)
+static inline void switch_mm_0230(struct mm_struct *mm)
 {
 	unsigned long crp[2] = {
 		0x80000000 | _PAGE_TABLE, mm->context
@@ -55,7 +55,7 @@ extern inline void switch_mm_0230(struct mm_struct *mm)
 	asm volatile (".chip 68k");
 }
 
-extern inline void switch_mm_0460(struct mm_struct *mm)
+static inline void switch_mm_0460(struct mm_struct *mm)
 {
 	asm volatile (".chip 68040");
 
@@ -79,7 +79,7 @@ extern inline void switch_mm_0460(struct mm_struct *mm)
 	asm volatile (".chip 68k");
 }
 
-static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next, struct task_struct *tsk, unsigned cpu)
+static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next, struct task_struct *tsk)
 {
 	if (prev != next) {
 		if (CPU_IS_020_OR_030)
@@ -89,7 +89,9 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next, str
 	}
 }
 
-extern inline void activate_mm(struct mm_struct *prev_mm,
+#define deactivate_mm(tsk,mm)	do { } while (0)
+
+static inline void activate_mm(struct mm_struct *prev_mm,
 			       struct mm_struct *next_mm)
 {
 	next_mm->context = virt_to_phys(next_mm->pgd);
@@ -122,7 +124,7 @@ static inline void get_mmu_context(struct mm_struct *mm)
 		mm->context = get_free_context(mm);
 }
 
-/* flush context if allocated... */	
+/* flush context if allocated... */
 static inline void destroy_context(struct mm_struct *mm)
 {
 	if(mm->context != SUN3_INVALID_CONTEXT)
@@ -135,16 +137,18 @@ static inline void activate_context(struct mm_struct *mm)
 	sun3_put_context(mm->context);
 }
 
-static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next, struct task_struct *tsk, unsigned cpu)
+static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next, struct task_struct *tsk)
 {
 	activate_context(tsk->mm);
 }
 
-extern inline void activate_mm(struct mm_struct *prev_mm,
+#define deactivate_mm(tsk,mm)	do { } while (0)
+
+static inline void activate_mm(struct mm_struct *prev_mm,
 			       struct mm_struct *next_mm)
 {
 	activate_context(next_mm);
 }
 
-#endif 
+#endif
 #endif

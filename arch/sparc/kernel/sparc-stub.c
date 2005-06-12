@@ -1,4 +1,4 @@
-/* $Id: sparc-stub.c,v 1.27 2000/10/03 07:28:49 anton Exp $
+/* $Id: sparc-stub.c,v 1.28 2001/10/30 04:54:21 davem Exp $
  * sparc-stub.c:  KGDB support for the Linux kernel.
  *
  * Modifications to run under Linux
@@ -109,6 +109,8 @@
 #include <asm/kgdb.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
+#include <asm/cacheflush.h>
+
 /*
  *
  * external low-level support routines
@@ -186,22 +188,16 @@ static inline void copy_ttentry(struct tt_entry *src, struct tt_entry *dest)
 /* Initialize the kgdb_savettable so that debugging can commence */
 static void eh_init(void)
 {
-	int i, flags;
+	int i;
 
-	save_and_cli(flags);
 	for(i=0; i < 256; i++)
 		copy_ttentry(&sparc_ttable[i], &kgdb_savettable[i]);
-	restore_flags(flags);
 }
 
 /* Install an exception handler for kgdb */
 static void exceptionHandler(int tnum, trapfunc_t trap_entry)
 {
 	unsigned long te_addr = (unsigned long) trap_entry;
-	int flags;
-
-	/* We are dorking with a live trap table, all irqs off */
-	save_and_cli(flags);
 
 	/* Make new vector */
 	sparc_ttable[tnum].inst_one =
@@ -210,8 +206,6 @@ static void exceptionHandler(int tnum, trapfunc_t trap_entry)
 	sparc_ttable[tnum].inst_two = SPARC_RD_PSR_L0;
 	sparc_ttable[tnum].inst_three = SPARC_NOP;
 	sparc_ttable[tnum].inst_four = SPARC_NOP;
-
-	restore_flags(flags);
 }
 
 /* Convert ch from a hex digit to an int */
@@ -330,17 +324,19 @@ mem2hex(char *mem, char *buf, int count)
 		 * to arrange for a "return 0" upon a memory fault
 		 */
 		__asm__(
-			"1:	ldub [%0], %1
-				inc %0
-				.section .fixup,#alloc,#execinstr
-				.align 4
-			 2:	retl
-				 mov 0, %%o0
-				.section __ex_table, #alloc
-				.align 4
-				.word 1b, 2b
-				.text"
-					: "=r" (mem), "=r" (ch) : "0" (mem));
+			"\n1:\n\t"
+			"ldub [%0], %1\n\t"
+			"inc %0\n\t"
+			".section .fixup,#alloc,#execinstr\n\t"
+			".align 4\n"
+			"2:\n\t"
+			"retl\n\t"
+			" mov 0, %%o0\n\t"
+			".section __ex_table, #alloc\n\t"
+			".align 4\n\t"
+			".word 1b, 2b\n\t"
+			".text\n"
+			: "=r" (mem), "=r" (ch) : "0" (mem));
 		*buf++ = hexchars[ch >> 4];
 		*buf++ = hexchars[ch & 0xf];
 	}
@@ -364,17 +360,19 @@ hex2mem(char *buf, char *mem, int count)
 		ch |= hex(*buf++);
 		/* Assembler code is   *mem++ = ch;   with return 0 on fault */
 		__asm__(
-			"1:	stb %1, [%0]
-				inc %0
-				.section .fixup,#alloc,#execinstr
-				.align 4
-			 2:	retl
-				 mov 0, %%o0
-				.section __ex_table, #alloc
-				.align 4
-				.word 1b, 2b
-				.text"
-					: "=r" (mem) : "r" (ch) , "0" (mem));
+			"\n1:\n\t"
+			"stb %1, [%0]\n\t"
+			"inc %0\n\t"
+			".section .fixup,#alloc,#execinstr\n\t"
+			".align 4\n"
+			"2:\n\t"
+			"retl\n\t"
+			" mov 0, %%o0\n\t"
+			".section __ex_table, #alloc\n\t"
+			".align 4\n\t"
+			".word 1b, 2b\n\t"
+			".text\n"
+			: "=r" (mem) : "r" (ch) , "0" (mem));
 	}
 	return mem;
 }
@@ -400,7 +398,7 @@ set_debug_traps(void)
 	struct hard_trap_info *ht;
 	unsigned long flags;
 
-	save_and_cli(flags);
+	local_irq_save(flags);
 #if 0	
 /* Have to sort this out. This cannot be done after initialization. */
 	BTFIXUPSET_CALL(flush_cache_all, flush_cache_all_nop, BTFIXUPCALL_NOP);
@@ -432,7 +430,7 @@ set_debug_traps(void)
 #endif
 
 	initialized = 1; /* connect! */
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 /* Convert the SPARC hardware trap type code to a unix signal number. */
@@ -715,14 +713,12 @@ breakpoint(void)
 
 	/* Again, watch those c-prefixes for ELF kernels */
 #if defined(__svr4__) || defined(__ELF__)
-	asm("	.globl breakinst
-
-	     breakinst: ta 1
-            ");
+	asm(".globl breakinst\n"
+	    "breakinst:\n\t"
+	    "ta 1\n");
 #else
-	asm("	.globl _breakinst
-
-	     _breakinst: ta 1
-            ");
+	asm(".globl _breakinst\n"
+	    "_breakinst:\n\t"
+	    "ta 1\n");
 #endif
 }

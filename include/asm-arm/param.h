@@ -10,16 +10,20 @@
 #ifndef __ASM_PARAM_H
 #define __ASM_PARAM_H
 
-#include <asm/arch/param.h>	/* for HZ */
-#include <asm/proc/page.h>	/* for EXEC_PAGE_SIZE */
+#ifdef __KERNEL__
+# include <asm/arch/param.h>		/* for kernel version of HZ */
 
-#ifndef HZ
-#define HZ 100
+# ifndef HZ
+#  define HZ		100		/* Internal kernel timer frequency */
+# endif
+
+# define USER_HZ	100		/* User interfaces are in "ticks" */
+# define CLOCKS_PER_SEC	(USER_HZ)	/* like times() */
+#else
+# define HZ		100
 #endif
 
-#ifndef NGROUPS
-#define NGROUPS         32
-#endif
+#define EXEC_PAGESIZE	4096
 
 #ifndef NOGROUP
 #define NOGROUP         (-1)

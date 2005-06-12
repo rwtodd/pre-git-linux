@@ -16,8 +16,6 @@
 #include <asm/io.h>
 #include <asm/semaphore.h>
 #include <asm/checksum.h>
-#include <asm/hardirq.h>
-#include <asm/softirq.h>
 
 asmlinkage long long __ashldi3 (long long, int);
 asmlinkage long long __ashrdi3 (long long, int);
@@ -26,7 +24,6 @@ asmlinkage long long __muldi3 (long long, long long);
 extern char m68k_debug_device[];
 
 extern void dump_thread(struct pt_regs *, struct user *);
-extern int dump_fpu(elf_fpregset_t *);
 
 /* platform dependent support */
 
@@ -42,19 +39,27 @@ EXPORT_SYMBOL(cache_clear);
 EXPORT_SYMBOL(mm_vtop);
 EXPORT_SYMBOL(mm_ptov);
 EXPORT_SYMBOL(mm_end_of_chunk);
+#else
+EXPORT_SYMBOL(m68k_memoffset);
 #endif /* !CONFIG_SINGLE_MEMORY_CHUNK */
-EXPORT_SYMBOL(mm_vtop_fallback);
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(iounmap);
 EXPORT_SYMBOL(kernel_set_cachemode);
 #endif /* !CONFIG_SUN3 */
 EXPORT_SYMBOL(m68k_debug_device);
+EXPORT_SYMBOL(mach_hwclk);
+EXPORT_SYMBOL(mach_get_ss);
+EXPORT_SYMBOL(mach_get_rtc_pll);
+EXPORT_SYMBOL(mach_set_rtc_pll);
+#ifdef CONFIG_INPUT_M68K_BEEP_MODULE
+EXPORT_SYMBOL(mach_beep);
+#endif
 EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(strstr);
-EXPORT_SYMBOL(strtok);
+EXPORT_SYMBOL(strpbrk);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
 EXPORT_SYMBOL(kernel_thread);
@@ -62,25 +67,22 @@ EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(vme_brdtype);
 #endif
 
-/* Networking helper routines. */
-EXPORT_SYMBOL(csum_partial_copy);
-
 /* The following are special because they're not called
    explicitly (the C compiler generates them).  Fortunately,
    their interface isn't gonna change any time soon now, so
    it's OK to leave it out of version control.  */
-EXPORT_SYMBOL_NOVERS(__ashldi3);
-EXPORT_SYMBOL_NOVERS(__ashrdi3);
-EXPORT_SYMBOL_NOVERS(__lshrdi3);
-EXPORT_SYMBOL_NOVERS(memcpy);
-EXPORT_SYMBOL_NOVERS(memset);
-EXPORT_SYMBOL_NOVERS(memcmp);
-EXPORT_SYMBOL_NOVERS(memscan);
-EXPORT_SYMBOL_NOVERS(__muldi3);
+EXPORT_SYMBOL(__ashldi3);
+EXPORT_SYMBOL(__ashrdi3);
+EXPORT_SYMBOL(__lshrdi3);
+EXPORT_SYMBOL(memcpy);
+EXPORT_SYMBOL(memset);
+EXPORT_SYMBOL(memcmp);
+EXPORT_SYMBOL(memscan);
+EXPORT_SYMBOL(__muldi3);
 
-EXPORT_SYMBOL_NOVERS(__down_failed);
-EXPORT_SYMBOL_NOVERS(__down_failed_interruptible);
-EXPORT_SYMBOL_NOVERS(__down_failed_trylock);
-EXPORT_SYMBOL_NOVERS(__up_wakeup);
+EXPORT_SYMBOL(__down_failed);
+EXPORT_SYMBOL(__down_failed_interruptible);
+EXPORT_SYMBOL(__down_failed_trylock);
+EXPORT_SYMBOL(__up_wakeup);
 
 EXPORT_SYMBOL(get_wchan);

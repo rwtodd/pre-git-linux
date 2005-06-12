@@ -10,38 +10,39 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
+#include <linux/slab.h>
+#include <linux/thread_info.h>
 
 /* Set EXTENT bits starting at BASE in BITMAP to value TURN_ON. */
-static void set_bitmap(unsigned long *bitmap, short base, short extent, int new_value)
+static void set_bitmap(unsigned long *bitmap, unsigned int base, unsigned int extent, int new_value)
 {
-	int mask;
-	unsigned long *bitmap_base = bitmap + (base >> 5);
-	unsigned short low_index = base & 0x1f;
+	unsigned long mask;
+	unsigned long *bitmap_base = bitmap + (base / BITS_PER_LONG);
+	unsigned int low_index = base & (BITS_PER_LONG-1);
 	int length = low_index + extent;
 
 	if (low_index != 0) {
-		mask = (~0 << low_index);
-		if (length < 32)
-				mask &= ~(~0 << length);
+		mask = (~0UL << low_index);
+		if (length < BITS_PER_LONG)
+			mask &= ~(~0UL << length);
 		if (new_value)
 			*bitmap_base++ |= mask;
 		else
 			*bitmap_base++ &= ~mask;
-		length -= 32;
+		length -= BITS_PER_LONG;
 	}
 
-	mask = (new_value ? ~0 : 0);
-	while (length >= 32) {
+	mask = (new_value ? ~0UL : 0UL);
+	while (length >= BITS_PER_LONG) {
 		*bitmap_base++ = mask;
-		length -= 32;
+		length -= BITS_PER_LONG;
 	}
 
 	if (length > 0) {
-		mask = ~(~0 << length);
+		mask = ~(~0UL << length);
 		if (new_value)
 			*bitmap_base++ |= mask;
 		else
@@ -49,40 +50,68 @@ static void set_bitmap(unsigned long *bitmap, short base, short extent, int new_
 	}
 }
 
+
 /*
  * this changes the io permissions bitmap in the current task.
  */
-asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int turn_on)
+asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 {
+	unsigned long i, max_long, bytes, bytes_updated;
 	struct thread_struct * t = &current->thread;
-	struct tss_struct * tss = init_tss + smp_processor_id();
+	struct tss_struct * tss;
+	unsigned long *bitmap;
 
-	if ((from + num <= from) || (from + num > IO_BITMAP_SIZE*32))
+	if ((from + num <= from) || (from + num > IO_BITMAP_BITS))
 		return -EINVAL;
 	if (turn_on && !capable(CAP_SYS_RAWIO))
 		return -EPERM;
+
 	/*
 	 * If it's the first ioperm() call in this thread's lifetime, set the
 	 * IO bitmap up. ioperm() is much less timing critical than clone(),
 	 * this is why we delay this operation until now:
 	 */
-	if (!t->ioperm) {
-		/*
-		 * just in case ...
-		 */
-		memset(t->io_bitmap,0xff,(IO_BITMAP_SIZE+1)*4);
-		t->ioperm = 1;
-		/*
-		 * this activates it in the TSS
-		 */
-		tss->bitmap = IO_BITMAP_OFFSET;
+	if (!t->io_bitmap_ptr) {
+		bitmap = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
+		if (!bitmap)
+			return -ENOMEM;
+
+		memset(bitmap, 0xff, IO_BITMAP_BYTES);
+		t->io_bitmap_ptr = bitmap;
 	}
 
 	/*
 	 * do it in the per-thread copy and in the TSS ...
+	 *
+	 * Disable preemption via get_cpu() - we must not switch away
+	 * because the ->io_bitmap_max value must match the bitmap
+	 * contents:
 	 */
-	set_bitmap(t->io_bitmap, from, num, !turn_on);
-	set_bitmap(tss->io_bitmap, from, num, !turn_on);
+	tss = &per_cpu(init_tss, get_cpu());
+
+	set_bitmap(t->io_bitmap_ptr, from, num, !turn_on);
+
+	/*
+	 * Search for a (possibly new) maximum. This is simple and stupid,
+	 * to keep it obviously correct:
+	 */
+	max_long = 0;
+	for (i = 0; i < IO_BITMAP_LONGS; i++)
+		if (t->io_bitmap_ptr[i] != ~0UL)
+			max_long = i;
+
+	bytes = (max_long + 1) * sizeof(long);
+	bytes_updated = max(bytes, t->io_bitmap_max);
+
+	t->io_bitmap_max = bytes;
+
+	/*
+	 * Sets the lazy trigger so that the next I/O operation will
+	 * reload the correct bitmap.
+	 */
+	tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET_LAZY;
+
+	put_cpu();
 
 	return 0;
 }
@@ -98,9 +127,9 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int turn_on)
  * code.
  */
 
-asmlinkage int sys_iopl(unsigned long unused)
+asmlinkage long sys_iopl(unsigned long unused)
 {
-	struct pt_regs * regs = (struct pt_regs *) &unused;
+	volatile struct pt_regs * regs = (struct pt_regs *) &unused;
 	unsigned int level = regs->ebx;
 	unsigned int old = (regs->eflags >> 12) & 3;
 
@@ -111,6 +140,8 @@ asmlinkage int sys_iopl(unsigned long unused)
 		if (!capable(CAP_SYS_RAWIO))
 			return -EPERM;
 	}
-	regs->eflags = (regs->eflags & 0xffffcfff) | (level << 12);
+	regs->eflags = (regs->eflags &~ 0x3000UL) | (level << 12);
+	/* Make sure we return the long way (not sysenter) */
+	set_thread_flag(TIF_IRET);
 	return 0;
 }

@@ -8,10 +8,10 @@
  *  by James Banks
  *
  *  (C) 1997-1998 Caldera, Inc.
- *  (C) 1999-2000 Torben Mathiasen
+ *  (C) 1999-2001 Torben Mathiasen
  * 
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  ** This file is best viewed/edited with tabstop=4, colums>=132
  *
@@ -36,11 +36,11 @@
 #define FALSE			0
 #define TRUE			1
 
-#define TLAN_MIN_FRAME_SIZE	60
-#define TLAN_MAX_FRAME_SIZE	1536
+#define TLAN_MIN_FRAME_SIZE	64
+#define TLAN_MAX_FRAME_SIZE	1600
 
-#define TLAN_NUM_RX_LISTS	4
-#define TLAN_NUM_TX_LISTS	8
+#define TLAN_NUM_RX_LISTS	32
+#define TLAN_NUM_TX_LISTS	64
 
 #define TLAN_IGNORE		0
 #define TLAN_RECORD		1
@@ -53,7 +53,7 @@
 #define TLAN_DEBUG_PROBE	0x0010
 
 #define TX_TIMEOUT		(10*HZ)	 /* We need time for auto-neg */
-
+#define MAX_TLAN_BOARDS		8	 /* Max number of boards installed at a time */
 
 
 	/*****************************************************************
@@ -61,14 +61,6 @@
 	 *
 	 ****************************************************************/
 		
-#define PCI_DEVICE_ID_NETELLIGENT_10			0xAE34
-#define PCI_DEVICE_ID_NETELLIGENT_10_100		0xAE32
-#define PCI_DEVICE_ID_NETFLEX_3P_INTEGRATED		0xAE35
-#define PCI_DEVICE_ID_NETFLEX_3P			0xF130
-#define PCI_DEVICE_ID_NETFLEX_3P_BNC			0xF150
-#define PCI_DEVICE_ID_NETELLIGENT_10_100_PROLIANT	0xAE43
-#define PCI_DEVICE_ID_NETELLIGENT_10_100_DUAL		0xAE40
-#define PCI_DEVICE_ID_DESKPRO_4000_5233MMX		0xB011
 #define PCI_DEVICE_ID_NETELLIGENT_10_T2			0xB012
 #define PCI_DEVICE_ID_NETELLIGENT_10_100_WS_5100	0xB030
 #ifndef PCI_DEVICE_ID_OLICOM_OC2183
@@ -177,15 +169,22 @@ typedef u8 TLanBuffer[TLAN_MAX_FRAME_SIZE];
 
 typedef struct tlan_private_tag {
 	struct net_device       *nextDevice;
+	struct pci_dev		*pciDev;
 	void			*dmaStorage;
+	dma_addr_t		dmaStorageDMA;
+	unsigned int		dmaSize;
 	u8			*padBuffer;
 	TLanList                *rxList;
+	dma_addr_t		rxListDMA;
 	u8			*rxBuffer;
+	dma_addr_t		rxBufferDMA;
 	u32                     rxHead;
 	u32                     rxTail;
 	u32			rxEocCount;
 	TLanList                *txList;
+	dma_addr_t		txListDMA;
 	u8			*txBuffer;
+	dma_addr_t		txBufferDMA;
 	u32                     txHead;
 	u32                     txInProgress;
 	u32                     txTail;
@@ -209,6 +208,8 @@ typedef struct tlan_private_tag {
 	spinlock_t		lock;
 	u8			link;
 	u8			is_eisa;
+	struct work_struct			tlan_tqueue;
+	u8			neg_be_verbose;
 } TLanPrivateInfo;
 
 
@@ -442,7 +443,7 @@ typedef struct tlan_private_tag {
 
 /* Routines to access internal registers. */
 
-inline u8 TLan_DioRead8(u16 base_addr, u16 internal_addr)
+static inline u8 TLan_DioRead8(u16 base_addr, u16 internal_addr)
 {
 	outw(internal_addr, base_addr + TLAN_DIO_ADR);
 	return (inb((base_addr + TLAN_DIO_DATA) + (internal_addr & 0x3)));
@@ -452,7 +453,7 @@ inline u8 TLan_DioRead8(u16 base_addr, u16 internal_addr)
 
 
 
-inline u16 TLan_DioRead16(u16 base_addr, u16 internal_addr)
+static inline u16 TLan_DioRead16(u16 base_addr, u16 internal_addr)
 {
 	outw(internal_addr, base_addr + TLAN_DIO_ADR);
 	return (inw((base_addr + TLAN_DIO_DATA) + (internal_addr & 0x2)));
@@ -462,7 +463,7 @@ inline u16 TLan_DioRead16(u16 base_addr, u16 internal_addr)
 
 
 
-inline u32 TLan_DioRead32(u16 base_addr, u16 internal_addr)
+static inline u32 TLan_DioRead32(u16 base_addr, u16 internal_addr)
 {
 	outw(internal_addr, base_addr + TLAN_DIO_ADR);
 	return (inl(base_addr + TLAN_DIO_DATA));
@@ -472,7 +473,7 @@ inline u32 TLan_DioRead32(u16 base_addr, u16 internal_addr)
 
 
 
-inline void TLan_DioWrite8(u16 base_addr, u16 internal_addr, u8 data)
+static inline void TLan_DioWrite8(u16 base_addr, u16 internal_addr, u8 data)
 {
 	outw(internal_addr, base_addr + TLAN_DIO_ADR);
 	outb(data, base_addr + TLAN_DIO_DATA + (internal_addr & 0x3));
@@ -482,7 +483,7 @@ inline void TLan_DioWrite8(u16 base_addr, u16 internal_addr, u8 data)
 
 
 
-inline void TLan_DioWrite16(u16 base_addr, u16 internal_addr, u16 data)
+static inline void TLan_DioWrite16(u16 base_addr, u16 internal_addr, u16 data)
 {
 	outw(internal_addr, base_addr + TLAN_DIO_ADR);
 	outw(data, base_addr + TLAN_DIO_DATA + (internal_addr & 0x2));
@@ -492,46 +493,38 @@ inline void TLan_DioWrite16(u16 base_addr, u16 internal_addr, u16 data)
 
 
 
-inline void TLan_DioWrite32(u16 base_addr, u16 internal_addr, u32 data)
+static inline void TLan_DioWrite32(u16 base_addr, u16 internal_addr, u32 data)
 {
 	outw(internal_addr, base_addr + TLAN_DIO_ADR);
 	outl(data, base_addr + TLAN_DIO_DATA + (internal_addr & 0x2));
 
 }
 
-
-
-#if 0
-inline void TLan_ClearBit(u8 bit, u16 port)
-{
-	outb_p(inb_p(port) & ~bit, port);
-}
-
-
-
-
-inline int TLan_GetBit(u8 bit, u16 port)
-{
-	return ((int) (inb_p(port) & bit));
-}
-
-
-
-
-inline void TLan_SetBit(u8 bit, u16 port)
-{
-	outb_p(inb_p(port) | bit, port);
-}
-#endif
-
 #define TLan_ClearBit( bit, port )	outb_p(inb_p(port) & ~bit, port)
 #define TLan_GetBit( bit, port )	((int) (inb_p(port) & bit))
 #define TLan_SetBit( bit, port )	outb_p(inb_p(port) | bit, port)
 
-#ifdef I_LIKE_A_FAST_HASH_FUNCTION
-/* given 6 bytes, view them as 8 6-bit numbers and return the XOR of those */
-/* the code below is about seven times as fast as the original code */
-inline u32 TLan_HashFunc( u8 *a )
+/*
+ * given 6 bytes, view them as 8 6-bit numbers and return the XOR of those 
+ * the code below is about seven times as fast as the original code 
+ *
+ * The original code was:
+ *
+ * u32	xor( u32 a, u32 b ) {	return ( ( a && ! b ) || ( ! a && b ) ); }
+ *
+ * #define XOR8( a, b, c, d, e, f, g, h )	\
+ * 	xor( a, xor( b, xor( c, xor( d, xor( e, xor( f, xor( g, h ) ) ) ) ) ) )
+ * #define DA( a, bit )		( ( (u8) a[bit/8] ) & ( (u8) ( 1 << bit%8 ) ) )
+ *
+ * 	hash  = XOR8( DA(a,0), DA(a, 6), DA(a,12), DA(a,18), DA(a,24), DA(a,30), DA(a,36), DA(a,42) );
+ * 	hash |= XOR8( DA(a,1), DA(a, 7), DA(a,13), DA(a,19), DA(a,25), DA(a,31), DA(a,37), DA(a,43) ) << 1;
+ * 	hash |= XOR8( DA(a,2), DA(a, 8), DA(a,14), DA(a,20), DA(a,26), DA(a,32), DA(a,38), DA(a,44) ) << 2;
+ * 	hash |= XOR8( DA(a,3), DA(a, 9), DA(a,15), DA(a,21), DA(a,27), DA(a,33), DA(a,39), DA(a,45) ) << 3;
+ * 	hash |= XOR8( DA(a,4), DA(a,10), DA(a,16), DA(a,22), DA(a,28), DA(a,34), DA(a,40), DA(a,46) ) << 4;
+ * 	hash |= XOR8( DA(a,5), DA(a,11), DA(a,17), DA(a,23), DA(a,29), DA(a,35), DA(a,41), DA(a,47) ) << 5;
+ *
+ */
+static inline u32 TLan_HashFunc( const u8 *a )
 {
         u8     hash;
 
@@ -544,30 +537,4 @@ inline u32 TLan_HashFunc( u8 *a )
 
         return (hash & 077);
 }
-
-#else /* original code */
-
-inline	u32	xor( u32 a, u32 b )
-{
-	return ( ( a && ! b ) || ( ! a && b ) );
-}
-#define XOR8( a, b, c, d, e, f, g, h )	xor( a, xor( b, xor( c, xor( d, xor( e, xor( f, xor( g, h ) ) ) ) ) ) )
-#define DA( a, bit )					( ( (u8) a[bit/8] ) & ( (u8) ( 1 << bit%8 ) ) )
-
-inline u32 TLan_HashFunc( u8 *a )
-{
-	u32	hash;
-
-	hash  = XOR8( DA(a,0), DA(a, 6), DA(a,12), DA(a,18), DA(a,24), DA(a,30), DA(a,36), DA(a,42) );
-	hash |= XOR8( DA(a,1), DA(a, 7), DA(a,13), DA(a,19), DA(a,25), DA(a,31), DA(a,37), DA(a,43) ) << 1;
-	hash |= XOR8( DA(a,2), DA(a, 8), DA(a,14), DA(a,20), DA(a,26), DA(a,32), DA(a,38), DA(a,44) ) << 2;
-	hash |= XOR8( DA(a,3), DA(a, 9), DA(a,15), DA(a,21), DA(a,27), DA(a,33), DA(a,39), DA(a,45) ) << 3;
-	hash |= XOR8( DA(a,4), DA(a,10), DA(a,16), DA(a,22), DA(a,28), DA(a,34), DA(a,40), DA(a,46) ) << 4;
-	hash |= XOR8( DA(a,5), DA(a,11), DA(a,17), DA(a,23), DA(a,29), DA(a,35), DA(a,41), DA(a,47) ) << 5;
-
-	return hash;
-
-} 
-
-#endif /* I_LIKE_A_FAST_HASH_FUNCTION */
 #endif

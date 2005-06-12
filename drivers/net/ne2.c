@@ -4,7 +4,7 @@
    modified by Wim Dumon (Apr 1996)
 
    This software may be used and distributed according to the terms
-   of the GNU Public License, incorporated herein by reference.
+   of the GNU General Public License, incorporated herein by reference.
 
    The author may be reached as wimpie@linux.cc.kuleuven.ac.be
 
@@ -45,6 +45,9 @@
 
    Mon Nov 16 15:28:23 CET 1998 (Wim Dumon)
    - pass 'dev' as last parameter of request_irq in stead of 'NULL'   
+
+   Wed Feb  7 21:24:00 CET 2001 (Alfred Arnold)
+   - added support for the D-Link DE-320CT
    
    *    WARNING
 	-------
@@ -57,32 +60,29 @@
 static const char *version = "ne2.c:v0.91 Nov 16 1998 Wim Dumon <wimpie@kotnet.org>\n";
 
 #include <linux/module.h>
-#include <linux/version.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <linux/mca.h>
-
+#include <linux/mca-legacy.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+#include <linux/bitops.h>
+
+#include <asm/system.h>
+#include <asm/io.h>
+#include <asm/dma.h>
+
 #include "8390.h"
 
-
+#define DRV_NAME "ne2"
 
 /* Some defines that people can play with if so inclined. */
 
@@ -114,6 +114,11 @@ static unsigned int addresses[7] __initdata =
 		{0x1000, 0x2020, 0x8020, 0xa0a0, 0xb0b0, 0xc0c0, 0xc3d0};
 static int irqs[4] __initdata = {3, 4, 5, 9};
 
+/* From the D-Link ADF file: */
+static unsigned int dlink_addresses[4] __initdata =
+                {0x300, 0x320, 0x340, 0x360};
+static int dlink_irqs[8] __initdata = {3, 4, 5, 9, 10, 11, 14, 15};
+
 struct ne2_adapters_t {
 	unsigned int	id;
 	char		*name;
@@ -123,6 +128,7 @@ static struct ne2_adapters_t ne2_adapters[] __initdata = {
 	{ 0x6354, "Arco Ethernet Adapter AE/2" },
 	{ 0x70DE, "Compex ENET-16 MC/P" },
 	{ 0x7154, "Novell Ethernet Adapter NE/2" },
+        { 0x56ea, "D-Link DE-320CT" },
 	{ 0x0000, NULL }
 };
 
@@ -143,10 +149,102 @@ static void ne_block_output(struct net_device *dev, const int count,
 
 
 /*
+ * special code to read the DE-320's MAC address EEPROM.  In contrast to a 
+ * standard NE design, this is a serial EEPROM (93C46) that has to be read
+ * bit by bit.  The EEPROM cotrol port at base + 0x1e has the following 
+ * layout:
+ *
+ * Bit 0 = Data out (read from EEPROM)
+ * Bit 1 = Data in  (write to EEPROM)
+ * Bit 2 = Clock
+ * Bit 3 = Chip Select
+ * Bit 7 = ~50 kHz clock for defined delays
+ *
+ */
+
+static void __init dlink_put_eeprom(unsigned char value, unsigned int addr)
+{
+	int z;
+	unsigned char v1, v2;
+
+	/* write the value to the NIC EEPROM register */
+
+	outb(value, addr + 0x1e);
+
+	/* now wait the clock line to toggle twice.  Effectively, we are
+	   waiting (at least) for one clock cycle */
+
+	for (z = 0; z < 2; z++) {
+		do {
+			v1 = inb(addr + 0x1e);
+			v2 = inb(addr + 0x1e);
+		}
+		while (!((v1 ^ v2) & 0x80));
+	}
+}
+
+static void __init dlink_send_eeprom_bit(unsigned int bit, unsigned int addr)
+{
+	/* shift data bit into correct position */
+
+	bit = bit << 1;
+
+	/* write value, keep clock line high for two cycles */
+
+	dlink_put_eeprom(0x09 | bit, addr);
+	dlink_put_eeprom(0x0d | bit, addr);
+	dlink_put_eeprom(0x0d | bit, addr);
+	dlink_put_eeprom(0x09 | bit, addr);
+}
+
+static void __init dlink_send_eeprom_word(unsigned int value, unsigned int len, unsigned int addr)
+{
+	int z;
+
+	/* adjust bits so that they are left-aligned in a 16-bit-word */
+
+	value = value << (16 - len);
+
+	/* shift bits out to the EEPROM */
+
+	for (z = 0; z < len; z++) {
+		dlink_send_eeprom_bit((value & 0x8000) >> 15, addr);
+		value = value << 1;
+	}
+}
+
+static unsigned int __init dlink_get_eeprom(unsigned int eeaddr, unsigned int addr)
+{
+	int z;
+	unsigned int value = 0;
+ 
+	/* pull the CS line low for a moment.  This resets the EEPROM-
+	   internal logic, and makes it ready for a new command. */
+
+	dlink_put_eeprom(0x01, addr);
+	dlink_put_eeprom(0x09, addr);
+
+	/* send one start bit, read command (1 - 0), plus the address to
+           the EEPROM */
+
+	dlink_send_eeprom_word(0x0180 | (eeaddr & 0x3f), 9, addr);
+
+	/* get the data word.  We clock by sending 0s to the EEPROM, which
+	   get ignored during the read process */
+
+	for (z = 0; z < 16; z++) {
+		dlink_send_eeprom_bit(0, addr);
+		value = (value << 1) | (inb(addr + 0x1e) & 0x01);
+	}
+
+	return value;
+}
+
+/*
  * Note that at boot, this probe only picks up one card at a time.
  */
 
-int __init ne2_probe(struct net_device *dev)
+static int __init do_ne2_probe(struct net_device *dev)
 {
 	static int current_mca_slot = -1;
 	int i;
@@ -166,16 +264,54 @@ int __init ne2_probe(struct net_device *dev)
 			mca_find_unused_adapter(ne2_adapters[i].id, 0);
 
 		if((current_mca_slot != MCA_NOTFOUND) && !adapter_found) {
+			int res;
 			mca_set_adapter_name(current_mca_slot, 
 					ne2_adapters[i].name);
 			mca_mark_as_used(current_mca_slot);
 			
-			return ne2_probe1(dev, current_mca_slot);
+			res = ne2_probe1(dev, current_mca_slot);
+			if (res)
+				mca_mark_as_unused(current_mca_slot);
+			return res;
 		}
 	}
 	return -ENODEV;
 }
 
+static void cleanup_card(struct net_device *dev)
+{
+	mca_mark_as_unused(ei_status.priv);
+	mca_set_adapter_procfn( ei_status.priv, NULL, NULL);
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, NE_IO_EXTENT);
+}
+
+#ifndef MODULE
+struct net_device * __init ne2_probe(int unit)
+{
+	struct net_device *dev = alloc_ei_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_ne2_probe(dev);
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	cleanup_card(dev);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
 
 static int ne2_procinfo(char *buf, int slot, struct net_device *dev)
 {
@@ -221,14 +357,22 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 		return -ENODEV;
 	}
 
-	i = (POS & 0xE)>>1;
-	/* printk("Halleluja sdog, als er na de pijl een 1 staat is 1 - 1 == 0"
-	   " en zou het moeten werken -> %d\n", i);
-	   The above line was for remote testing, thanx to sdog ... */
-	base_addr = addresses[i - 1];
-	irq = irqs[(POS & 0x60)>>5];
+	/* handle different POS register structure for D-Link card */
 
-	if (!request_region(base_addr, NE_IO_EXTENT, dev->name))
+	if (mca_read_stored_pos(slot, 0) == 0xea) {
+		base_addr = dlink_addresses[(POS >> 5) & 0x03];
+		irq = dlink_irqs[(POS >> 2) & 0x07];
+	}
+        else {
+		i = (POS & 0xE)>>1;
+		/* printk("Halleluja sdog, als er na de pijl een 1 staat is 1 - 1 == 0"
+	   	" en zou het moeten werken -> %d\n", i);
+	   	The above line was for remote testing, thanx to sdog ... */
+		base_addr = addresses[i - 1];
+		irq = irqs[(POS & 0x60)>>5];
+	}
+
+	if (!request_region(base_addr, NE_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
 
 #ifdef DEBUG
@@ -309,6 +453,20 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 		SA_prom[i] = inb(base_addr + NE_DATAPORT);
 	}
 
+	/* I don't know whether the previous sequence includes the general
+           board reset procedure, so better don't omit it and just overwrite
+           the garbage read from a DE-320 with correct stuff. */
+
+	if (mca_read_stored_pos(slot, 0) == 0xea) {
+		unsigned int v;
+
+		for (i = 0; i < 3; i++) {
+ 			v = dlink_get_eeprom(i, base_addr);
+			SA_prom[(i << 1)    ] = v & 0xff;
+			SA_prom[(i << 1) + 1] = (v >> 8) & 0xff;
+		}
+	}
+
 	start_page = NESM_START_PG;
 	stop_page = NESM_STOP_PG;
 
@@ -316,7 +474,7 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 
 	/* Snarf the interrupt now.  There's no point in waiting since we cannot
 	   share and the board will usually be enabled. */
-	retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev);
+	retval = request_irq(dev->irq, ei_interrupt, 0, DRV_NAME, dev);
 	if (retval) {
 		printk (" unable to get IRQ %d (irqval=%d).\n", 
 				dev->irq, retval);
@@ -324,14 +482,6 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	}
 
 	dev->base_addr = base_addr;
-
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk (" unable to get memory for dev->priv.\n");
-		free_irq(dev->irq, dev);
-		retval = -ENOMEM;
-		goto out;
-	}
 
 	for(i = 0; i < ETHER_ADDR_LEN; i++) {
 		printk(" %2.2x", SA_prom[i]);
@@ -363,6 +513,9 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	
 	dev->open = &ne_open;
 	dev->stop = &ne_close;
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	dev->poll_controller = ei_poll;
+#endif
 	NS8390_init(dev, 0);
 	return 0;
 out:
@@ -617,38 +770,47 @@ retry:
 
 #ifdef MODULE
 #define MAX_NE_CARDS	4	/* Max number of NE cards per module */
-static struct net_device dev_ne[MAX_NE_CARDS];
+static struct net_device *dev_ne[MAX_NE_CARDS];
 static int io[MAX_NE_CARDS];
 static int irq[MAX_NE_CARDS];
 static int bad[MAX_NE_CARDS];	/* 0xbad = bad sig or no reset ack */
+MODULE_LICENSE("GPL");
 
-#ifdef MODULE_PARM
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
-MODULE_PARM(bad, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
-#endif
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(bad, int, NULL, 0);
+MODULE_PARM_DESC(io, "(ignored)");
+MODULE_PARM_DESC(irq, "(ignored)");
+MODULE_PARM_DESC(bad, "(ignored)");
 
 /* Module code fixed by David Weinehall */
 
 int init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_ne[this_dev];
+		dev = alloc_ei_netdev();
+		if (!dev)
+			break;
 		dev->irq = irq[this_dev];
 		dev->mem_end = bad[this_dev];
 		dev->base_addr = io[this_dev];
-		dev->init = ne2_probe;
-		if (register_netdev(dev) != 0) {
-			if (found != 0) return 0;   /* Got at least one. */
-
-			printk(KERN_WARNING "ne2.c: No NE/2 card found.\n");
-			return -ENXIO;
+		if (do_ne2_probe(dev) == 0) {
+			if (register_netdev(dev) == 0) {
+				dev_ne[found++] = dev;
+				continue;
+			}
+			cleanup_card(dev);
 		}
-		found++;
+		free_netdev(dev);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	printk(KERN_WARNING "ne2.c: No NE/2 card found\n");
+	return -ENXIO;
 }
 
 void cleanup_module(void)
@@ -656,23 +818,12 @@ void cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_ne[this_dev];
-		if (dev->priv != NULL) {
-			mca_mark_as_unused(ei_status.priv);
-			mca_set_adapter_procfn( ei_status.priv, NULL, NULL);
-			kfree(dev->priv);
-			free_irq(dev->irq, dev);
-			release_region(dev->base_addr, NE_IO_EXTENT);
+		struct net_device *dev = dev_ne[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "gcc -DKERNEL -Wall -O6 -fomit-frame-pointer -I/usr/src/linux/net/tcp -c ne2.c"
- *  version-control: t
- *  kept-new-versions: 5
- * End:
- */

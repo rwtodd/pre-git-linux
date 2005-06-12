@@ -1,10 +1,10 @@
-/* $Id: socket.h,v 1.8 2000/07/08 00:20:43 davem Exp $ */
+/* $Id: socket.h,v 1.10 2001/06/13 16:25:03 davem Exp $ */
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
 #include <asm/sockios.h>
 
-/* For setsockoptions(2) */
+/* For setsockopt(2) */
 #define SOL_SOCKET	0xffff
 
 #define SO_DEBUG	0x0001
@@ -22,6 +22,7 @@
 #define SO_SNDLOWAT     0x1000
 #define SO_RCVTIMEO     0x2000
 #define SO_SNDTIMEO     0x4000
+#define SO_ACCEPTCONN	0x8000
 
 /* wha!??? */
 #define SO_DONTLINGER   (~SO_LINGER)  /* Older SunOS compat. hack */
@@ -44,24 +45,11 @@
 #define SO_TIMESTAMP		0x001d
 #define SCM_TIMESTAMP		SO_TIMESTAMP
 
+#define SO_PEERSEC		0x001e
+
 /* Security levels - as per NRL IPv6 - don't actually do anything */
 #define SO_SECURITY_AUTHENTICATION		0x5001
 #define SO_SECURITY_ENCRYPTION_TRANSPORT	0x5002
 #define SO_SECURITY_ENCRYPTION_NETWORK		0x5004
-
-/* Nast libc5 fixup - bletch */
-#if defined(__KERNEL__)
-/* Socket types. */
-#define SOCK_STREAM	1		/* stream (connection) socket	*/
-#define SOCK_DGRAM	2		/* datagram (conn.less) socket	*/
-#define SOCK_RAW	3		/* raw socket			*/
-#define SOCK_RDM	4		/* reliably-delivered message	*/
-#define SOCK_SEQPACKET	5		/* sequential packet socket	*/
-#define SOCK_PACKET	10		/* linux specific way of	*/
-					/* getting packets at the dev	*/
-					/* level.  For writing rarp and	*/
-					/* other similar things on the	*/
-					/* user level.			*/
-#endif
 
 #endif /* _ASM_SOCKET_H */

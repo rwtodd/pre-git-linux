@@ -11,16 +11,15 @@
 
 #include <linux/types.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
 #include <asm/pbm.h>
 
 struct linux_pcic {
-        unsigned long           pcic_regs;
+        void * __iomem          pcic_regs;
         unsigned long           pcic_io;
-        unsigned long           pcic_config_space_addr;
-        unsigned long           pcic_config_space_data;
+        void * __iomem          pcic_config_space_addr;
+        void * __iomem          pcic_config_space_data;
 	struct resource		pcic_res_regs;
 	struct resource		pcic_res_io;
 	struct resource		pcic_res_cfg_addr;

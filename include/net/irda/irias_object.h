@@ -78,12 +78,11 @@ struct ias_attrib {
 	struct ias_value *value; /* Attribute value */
 };
 
-char *strdup(char *str);
-
 struct ias_object *irias_new_object(char *name, int id);
 void irias_insert_object(struct ias_object *obj);
 int  irias_delete_object(struct ias_object *obj);
-int  irias_delete_attrib(struct ias_object *obj, struct ias_attrib *attrib);
+int  irias_delete_attrib(struct ias_object *obj, struct ias_attrib *attrib,
+			 int cleanobject);
 void __irias_delete_object(struct ias_object *obj);
 
 void irias_add_integer_attrib(struct ias_object *obj, char *name, int value,
@@ -103,7 +102,7 @@ struct ias_value *irias_new_octseq_value(__u8 *octseq , int len);
 struct ias_value *irias_new_missing_value(void);
 void irias_delete_value(struct ias_value *value);
 
-extern struct ias_value missing;
-extern hashbin_t *objects;
+extern struct ias_value irias_missing;
+extern hashbin_t *irias_objects;
 
 #endif

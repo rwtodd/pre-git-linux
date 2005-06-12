@@ -25,20 +25,9 @@
     All we do here is set the card up enough so that the real ibmtr.c
     driver can find it and work with it properly.
 
-    i.e. We set up the io port, irq, mmio memory and shared ram memory.
-    This enables ibmtr_probe in ibmtr.c to find the card and configure it
-    as though it was a normal ISA and/or PnP card.
-
-    There is some confusion with the difference between available shared
-    ram and the amount actually reserved from memory.  ibmtr.c sets up
-    several offsets depending upon the actual on-board memory, not the
-    reserved memory.  We need to get around this to allow the cards to 
-    work with other cards in restricted memory space.  Therefore the 
-    pcmcia_reality_check function.
-
-    TODO
-	- Write the suspend / resume functions. 
-	- Fix Kernel Oops when removing card before ifconfig down
+    i.e. We set up the io port, irq, mmio memory and shared ram
+    memory.  This enables ibmtr_probe in ibmtr.c to find the card and
+    configure it as though it was a normal ISA and/or PnP card.
 
     CHANGES
 
@@ -49,20 +38,21 @@
     Updated to version 2.2.7 to match the first version of the kernel
     that the modification to ibmtr.c were incorporated into.
     
+    v2.2.17 July 2000 Burt Silverman (burts@us.ibm.com)
+    Address translation feature of PCMCIA controller is usable so
+    memory windows can be placed in High memory (meaning above
+    0xFFFFF.)
+
 ======================================================================*/
 
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
-#include <linux/delay.h>
 #include <linux/module.h>
-#include <asm/io.h>
-#include <asm/system.h>
-
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/trdevice.h>
 #include <linux/ibmtr.h>
@@ -73,13 +63,21 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 
+#include <asm/uaccess.h>
+#include <asm/io.h>
+#include <asm/system.h>
+
+#define PCMCIA
+#include "../tokenring/ibmtr.c"
+
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+module_param(pc_debug, int, 0);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-"ibmtr_cs.c 1.10 1996/01/06 05:19:00 (Steve Kipisz)\n"
-"           2.2.7 1999/05/03 12:00:00 (Mike Phillips)\n" ;
+"ibmtr_cs.c 1.10   1996/01/06 05:19:00 (Steve Kipisz)\n"
+"           2.2.7  1999/05/03 12:00:00 (Mike Phillips)\n"
+"           2.4.2  2001/30/28 Midnight (Burt Silverman)\n";
 #else
 #define DEBUG(n, args...)
 #endif
@@ -88,34 +86,29 @@ static char *version =
 
 /* Parameters that can be set with 'insmod' */
 
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0xdeb8;
-static int irq_list[4] = { -1 };
-
 /* MMIO base address */
-static u_long mmiobase = 0;
+static u_long mmiobase = 0xce000;
 
 /* SRAM base address */
-static u_long srambase = 0;
+static u_long srambase = 0xd0000;
 
 /* SRAM size 8,16,32,64 */
-static u_long sramsize = 16;
+static u_long sramsize = 64;
 
 /* Ringspeed 4,16 */
 static int ringspeed = 16;
 
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-MODULE_PARM(mmiobase, "i");
-MODULE_PARM(srambase, "i");
-MODULE_PARM(sramsize, "i");
-MODULE_PARM(ringspeed, "i");
+module_param(mmiobase, ulong, 0);
+module_param(srambase, ulong, 0);
+module_param(sramsize, ulong, 0);
+module_param(ringspeed, int, 0);
+MODULE_LICENSE("GPL");
 
 /*====================================================================*/
 
 static void ibmtr_config(dev_link_t *link);
-static void ibmtr_hw_setup(struct net_device *dev);
-static void ibmtr_release(u_long arg);
+static void ibmtr_hw_setup(struct net_device *dev, u_int mmiobase);
+static void ibmtr_release(dev_link_t *link);
 static int ibmtr_event(event_t event, int priority,
                        event_callback_args_t *args);
 
@@ -124,51 +117,30 @@ static dev_info_t dev_info = "ibmtr_cs";
 static dev_link_t *ibmtr_attach(void);
 static void ibmtr_detach(dev_link_t *);
 
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
-extern int ibmtr_probe(struct net_device *dev);
-unsigned char pcmcia_reality_check(unsigned char gss);
-
-extern int trdev_init(struct net_device *dev);
-extern void tok_interrupt(int irq, struct pt_regs *regs);
-extern int tok_init_card(struct net_device *dev);
-extern unsigned char get_sram_size(struct tok_info *ti);
+extern int ibmtr_probe_card(struct net_device *dev);
+extern irqreturn_t tok_interrupt (int irq, void *dev_id, struct pt_regs *regs);
 
 /*====================================================================*/
 
 typedef struct ibmtr_dev_t {
     dev_link_t		link;
-    struct net_device	*dev; /* Changed for 2.2.0 */
+    struct net_device	*dev;
     dev_node_t          node;
     window_handle_t     sram_win_handle;
-    struct tok_info	ti;
+    struct tok_info	*ti;
 } ibmtr_dev_t;
 
-/*======================================================================
-
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    ibmtr_detach(link);
-    }
+	strcpy(info->driver, "ibmtr_cs");
 }
 
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
-}
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 /*======================================================================
 
@@ -184,51 +156,43 @@ static dev_link_t *ibmtr_attach(void)
     dev_link_t *link;
     struct net_device *dev;
     client_reg_t client_reg;
-    int i, ret;
+    int ret;
     
     DEBUG(0, "ibmtr_attach()\n");
-    flush_stale_links();
 
     /* Create new token-ring device */
-    info = kmalloc(sizeof(*info), GFP_KERNEL);
+    info = kmalloc(sizeof(*info), GFP_KERNEL); 
     if (!info) return NULL;
-    memset(info, 0, sizeof(*info));
-    link = &info->link; link->priv = info;
+    memset(info,0,sizeof(*info));
+    dev = alloc_trdev(sizeof(struct tok_info));
+    if (!dev) { 
+	kfree(info); 
+	return NULL;
+    } 
 
-    link->release.function = &ibmtr_release;
-    link->release.data = (u_long)link;
+    link = &info->link;
+    link->priv = info;
+    info->ti = netdev_priv(dev);
+
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
     link->io.NumPorts1 = 4;
     link->io.IOAddrLines = 16;
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] == -1)
-	link->irq.IRQInfo2 = irq_mask;
-    else
-	for (i = 0; i < 4; i++)
-	    link->irq.IRQInfo2 |= 1 << irq_list[i];
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->irq.Handler = &tok_interrupt;
     link->conf.Attributes = CONF_ENABLE_IRQ;
     link->conf.Vcc = 50;
     link->conf.IntType = INT_MEMORY_AND_IO;
     link->conf.Present = PRESENT_OPTION;
 
-    dev = init_trdev(NULL,0);
-    dev->priv = &info->ti;
     link->irq.Instance = info->dev = dev;
     
-    if (dev == NULL) {
-	ibmtr_detach(link);
-        return NULL;
-    }
-
-    dev->init = &ibmtr_probe;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     /* Register with Card Services */
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.EventMask =
         CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
         CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -236,14 +200,19 @@ static dev_link_t *ibmtr_attach(void)
     client_reg.event_handler = &ibmtr_event;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != 0) {
         cs_error(link->handle, RegisterClient, ret);
-        ibmtr_detach(link);
-        return NULL;
+	goto out_detach;
     }
 
+out:
     return link;
+
+out_detach:
+    ibmtr_detach(link);
+    link = NULL;
+    goto out;
 } /* ibmtr_attach */
 
 /*======================================================================
@@ -259,7 +228,7 @@ static void ibmtr_detach(dev_link_t *link)
 {
     struct ibmtr_dev_t *info = link->priv;
     dev_link_t **linkp;
-    struct net_device *dev; 
+    struct net_device *dev;
 
     DEBUG(0, "ibmtr_detach(0x%p)\n", link);
 
@@ -270,28 +239,24 @@ static void ibmtr_detach(dev_link_t *link)
         return;
 
     dev = info->dev;
+
+    if (link->dev)
+	unregister_netdev(dev);
+
     {
-	struct tok_info *ti = (struct tok_info *)dev->priv;
-	del_timer(&(ti->tr_timer));
+	struct tok_info *ti = netdev_priv(dev);
+	del_timer_sync(&(ti->tr_timer));
     }
-    del_timer(&link->release);
-    if (link->state & DEV_CONFIG) {
-        ibmtr_release((u_long)link);
-        if (link->state & DEV_STALE_CONFIG) {
-            link->state |= DEV_STALE_LINK;
-            return;
-        }
-    }
+    if (link->state & DEV_CONFIG)
+        ibmtr_release(link);
 
     if (link->handle)
-        CardServices(DeregisterClient, link->handle);
+        pcmcia_deregister_client(link->handle);
 
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (link->dev)
-	unregister_trdev(info->dev);
-    kfree(info);
-
+    free_netdev(dev);
+    kfree(info); 
 } /* ibmtr_detach */
 
 /*======================================================================
@@ -302,22 +267,21 @@ static void ibmtr_detach(dev_link_t *link)
 
 ======================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 static void ibmtr_config(dev_link_t *link)
 {
     client_handle_t handle = link->handle;
     ibmtr_dev_t *info = link->priv;
     struct net_device *dev = info->dev;
-    struct tok_info *ti = dev->priv;
+    struct tok_info *ti = netdev_priv(dev);
     tuple_t tuple;
     cisparse_t parse;
     win_req_t req;
     memreq_t mem;
     int i, last_ret, last_fn;
     u_char buf[64];
-    unsigned char Shared_Ram_Base;
 
     DEBUG(0, "ibmtr_config(0x%p)\n", link);
 
@@ -326,9 +290,9 @@ static void ibmtr_config(dev_link_t *link)
     tuple.TupleDataMax = 64;
     tuple.TupleOffset = 0;
     tuple.DesiredTuple = CISTPL_CONFIG;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
-    CS_CHECK(GetTupleData, handle, &tuple);
-    CS_CHECK(ParseTuple, handle, &tuple, &parse);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
+    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+    CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
     link->conf.ConfigBase = parse.config.base;
 
     /* Configure card */
@@ -340,69 +304,66 @@ static void ibmtr_config(dev_link_t *link)
 
     /* Try PRIMARY card at 0xA20-0xA23 */
     link->io.BasePort1 = 0xA20;
-    i = CardServices(RequestIO, link->handle, &link->io);
-    if (i == CS_SUCCESS) {
-	memcpy(info->node.dev_name, "tr0\0", 4);
-    } else {
+    i = pcmcia_request_io(link->handle, &link->io);
+    if (i != CS_SUCCESS) {
 	/* Couldn't get 0xA20-0xA23.  Try ALTERNATE at 0xA24-0xA27. */
 	link->io.BasePort1 = 0xA24;
-	CS_CHECK(RequestIO, link->handle, &link->io);
-	memcpy(info->node.dev_name, "tr1\0", 4);
+	CS_CHECK(RequestIO, pcmcia_request_io(link->handle, &link->io));
     }
     dev->base_addr = link->io.BasePort1;
 
-    CS_CHECK(RequestIRQ, link->handle, &link->irq);
+    CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
     dev->irq = link->irq.AssignedIRQ;
     ti->irq = link->irq.AssignedIRQ;
     ti->global_int_enable=GLOBAL_INT_ENABLE+((dev->irq==9) ? 2 : dev->irq);
 
     /* Allocate the MMIO memory window */
     req.Attributes = WIN_DATA_WIDTH_16|WIN_MEMORY_TYPE_CM|WIN_ENABLE;
-    req.Attributes |= WIN_USE_WAIT|WIN_STRICT_ALIGN;
-    req.Base = mmiobase;
+    req.Attributes |= WIN_USE_WAIT;
+    req.Base = 0; 
     req.Size = 0x2000;
     req.AccessSpeed = 250;
-    link->win = (window_handle_t)link->handle;
-    CS_CHECK(RequestWindow, &link->win, &req);
+    CS_CHECK(RequestWindow, pcmcia_request_window(&link->handle, &req, &link->win));
 
-    mem.CardOffset = req.Base;
+    mem.CardOffset = mmiobase;
     mem.Page = 0;
-    CS_CHECK(MapMemPage, link->win, &mem);
-    ti->mmio = (u_long)ioremap(req.Base, req.Size);
+    CS_CHECK(MapMemPage, pcmcia_map_mem_page(link->win, &mem));
+    ti->mmio = ioremap(req.Base, req.Size);
 
     /* Allocate the SRAM memory window */
     req.Attributes = WIN_DATA_WIDTH_16|WIN_MEMORY_TYPE_CM|WIN_ENABLE;
-    req.Attributes |= WIN_USE_WAIT|WIN_MAP_BELOW_1MB;
-    req.Base = srambase;
+    req.Attributes |= WIN_USE_WAIT;
+    req.Base = 0;
     req.Size = sramsize * 1024;
     req.AccessSpeed = 250;
-    info->sram_win_handle = (window_handle_t)link->handle;
-    CS_CHECK(RequestWindow, &info->sram_win_handle, &req);
+    CS_CHECK(RequestWindow, pcmcia_request_window(&link->handle, &req, &info->sram_win_handle));
 
-    mem.CardOffset = req.Base;
+    mem.CardOffset = srambase;
     mem.Page = 0;
-    CS_CHECK(MapMemPage, info->sram_win_handle, &mem);
-    Shared_Ram_Base = req.Base >> 12;
-   
-    ti->sram = 0;
-    ti->sram_base = Shared_Ram_Base;
-    
-    CS_CHECK(RequestConfiguration, link->handle, &link->conf);
+    CS_CHECK(MapMemPage, pcmcia_map_mem_page(info->sram_win_handle, &mem));
+
+    ti->sram_base = mem.CardOffset >> 12;
+    ti->sram_virt = (u_long)ioremap(req.Base, req.Size);
+
+    CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
 
     /*  Set up the Token-Ring Controller Configuration Register and
         turn on the card.  Check the "Local Area Network Credit Card
         Adapters Technical Reference"  SC30-3585 for this info.  */
-    ibmtr_hw_setup(dev);
-
-    i = register_trdev(dev);
-    
-    if (i != 0) {
-	printk(KERN_NOTICE "ibmtr_cs: register_trdev() failed\n");
-	goto failed;
-    }
+    ibmtr_hw_setup(dev, mmiobase);
 
     link->dev = &info->node;
     link->state &= ~DEV_CONFIG_PENDING;
+    SET_NETDEV_DEV(dev, &handle_to_dev(handle));
+
+    i = ibmtr_probe_card(dev);
+    if (i != 0) {
+	printk(KERN_NOTICE "ibmtr_cs: register_netdev() failed\n");
+	link->dev = NULL;
+	goto failed;
+    }
+
+    strcpy(info->node.dev_name, dev->name);
 
     printk(KERN_INFO "%s: port %#3lx, irq %d,",
            dev->name, dev->base_addr, dev->irq);
@@ -417,7 +378,7 @@ static void ibmtr_config(dev_link_t *link)
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    ibmtr_release((u_long)link);
+    ibmtr_release(link);
 } /* ibmtr_config */
 
 /*======================================================================
@@ -428,34 +389,25 @@ failed:
 
 ======================================================================*/
 
-static void ibmtr_release(u_long arg)
+static void ibmtr_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
     ibmtr_dev_t *info = link->priv;
     struct net_device *dev = info->dev;
 
     DEBUG(0, "ibmtr_release(0x%p)\n", link);
 
-    if (link->open) {
-	DEBUG(1, "ibmtr_cs: release postponed, '%s' "
-	      "still open\n", info->node.dev_name);
-        link->state |= DEV_STALE_CONFIG;
-        return;
-    }
-
-    CardServices(ReleaseConfiguration, link->handle);
-    CardServices(ReleaseIO, link->handle, &link->io);
-    CardServices(ReleaseIRQ, link->handle, &link->irq);
+    pcmcia_release_configuration(link->handle);
+    pcmcia_release_io(link->handle, &link->io);
+    pcmcia_release_irq(link->handle, &link->irq);
     if (link->win) {
-	struct tok_info *ti = dev->priv;
+	struct tok_info *ti = netdev_priv(dev);
 	iounmap((void *)ti->mmio);
-	CardServices(ReleaseWindow, link->win);
-	CardServices(ReleaseWindow, info->sram_win_handle);
+	pcmcia_release_window(link->win);
+	pcmcia_release_window(info->sram_win_handle);
     }
 
     link->state &= ~DEV_CONFIG;
-
-} /* ibmtr_release */
+}
 
 /*======================================================================
 
@@ -474,18 +426,20 @@ static int ibmtr_event(event_t event, int priority,
     struct net_device *dev = info->dev;
 
     DEBUG(1, "ibmtr_event(0x%06x)\n", event);
-    
+
     switch (event) {
     case CS_EVENT_CARD_REMOVAL:
         link->state &= ~DEV_PRESENT;
         if (link->state & DEV_CONFIG) {
+	    /* set flag to bypass normal interrupt code */
+	    struct tok_info *priv = netdev_priv(dev);
+	    priv->sram_virt |= 1;
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
         }
         break;
     case CS_EVENT_CARD_INSERTION:
         link->state |= DEV_PRESENT;
-	ibmtr_config(link); 
+	ibmtr_config(link);
 	break;
     case CS_EVENT_PM_SUSPEND:
         link->state |= DEV_SUSPEND;
@@ -494,7 +448,7 @@ static int ibmtr_event(event_t event, int priority,
         if (link->state & DEV_CONFIG) {
             if (link->open)
 		netif_device_detach(dev);
-            CardServices(ReleaseConfiguration, link->handle);
+            pcmcia_release_configuration(link->handle);
         }
         break;
     case CS_EVENT_PM_RESUME:
@@ -502,9 +456,9 @@ static int ibmtr_event(event_t event, int priority,
         /* Fall through... */
     case CS_EVENT_CARD_RESET:
         if (link->state & DEV_CONFIG) {
-            CardServices(RequestConfiguration, link->handle, &link->conf);
+            pcmcia_request_configuration(link->handle, &link->conf);
             if (link->open) {
-		(dev->init)(dev);
+		ibmtr_probe(dev);	/* really? */
 		netif_device_attach(dev);
             }
         }
@@ -515,10 +469,9 @@ static int ibmtr_event(event_t event, int priority,
 
 /*====================================================================*/
 
-static void ibmtr_hw_setup(struct net_device *dev)
+static void ibmtr_hw_setup(struct net_device *dev, u_int mmiobase)
 {
-    struct tok_info *ti = dev->priv;
-    int i; 
+    int i;
 
     /* Bizarre IBM behavior, there are 16 bits of information we
        need to set, but the card only allows us to send 4 bits at a 
@@ -527,11 +480,11 @@ static void ibmtr_hw_setup(struct net_device *dev)
        the actual information */
 
     /* First nibble provides 4 bits of mmio */
-    i = ((int)ti->mmio >> 16) & 0x0F;
+    i = (mmiobase >> 16) & 0x0F;
     outb(i, dev->base_addr);
 
     /* Second nibble provides 3 bits of mmio */
-    i = 0x10 | (((int)ti->mmio >> 12) & 0x0E);
+    i = 0x10 | ((mmiobase >> 12) & 0x0E);
     outb(i, dev->base_addr);
 
     /* Third nibble, hard-coded values */
@@ -541,8 +494,7 @@ static void ibmtr_hw_setup(struct net_device *dev)
     /* Fourth nibble sets shared ram page size */
 
     /* 8 = 00, 16 = 01, 32 = 10, 64 = 11 */          
-        
-    i = (sramsize >> 4) & 0x07; 
+    i = (sramsize >> 4) & 0x07;
     i = ((i == 4) ? 3 : i) << 2;
     i |= 0x30;
 
@@ -552,52 +504,30 @@ static void ibmtr_hw_setup(struct net_device *dev)
 	i |= 1;
     outb(i, dev->base_addr);
 
-    /* X40 will release the card for use */
-
+    /* 0x40 will release the card for use */
     outb(0x40, dev->base_addr);
-    
+
     return;
 }
 
-/*======================================================================
-  
-    A sweet little function that circumvents the problem with
-    ibmtr.c trying to use more memory than we can allocate for
-    the PCMCIA card.  ibmtr.c just assumes that if a card has 
-    64K of shared ram, the entire 64K must be mapped into memory,
-    whereas resources are sometimes a little tight in card services
-    so we fool ibmtr.c into thinking the card has less memory on
-    it than it has.
-    
-======================================================================*/
-
-unsigned char pcmcia_reality_check(unsigned char gss)
-{
-    return (gss < sramsize) ? sramsize : gss;
-}
-
-/*====================================================================*/
+static struct pcmcia_driver ibmtr_cs_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "ibmtr_cs",
+	},
+	.attach		= ibmtr_attach,
+	.detach		= ibmtr_detach,
+};
 
 static int __init init_ibmtr_cs(void)
 {
-    servinfo_t serv;
-    DEBUG(0, "%s\n", version);
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-        printk(KERN_NOTICE "ibmtr_cs: Card Services release "
-	       "does not match!\n");
-        return -1;
-    }
-    register_pccard_driver(&dev_info, &ibmtr_attach, &ibmtr_detach);
-    return 0;
+	return pcmcia_register_driver(&ibmtr_cs_driver);
 }
 
 static void __exit exit_ibmtr_cs(void)
 {
-    DEBUG(0, "ibmtr_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list != NULL)
-        ibmtr_detach(dev_list);
+	pcmcia_unregister_driver(&ibmtr_cs_driver);
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_ibmtr_cs);

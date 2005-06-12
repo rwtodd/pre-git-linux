@@ -37,9 +37,9 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/ptrace.h>
 #include <linux/kernel_stat.h>
 #include <linux/init.h>
+#include <linux/seq_file.h>
 
 #include <asm/system.h>
 #include <asm/traps.h>
@@ -54,14 +54,14 @@
 /*
  * Atari interrupt handling scheme:
  * --------------------------------
- * 
+ *
  * All interrupt source have an internal number (defined in
  * <asm/atariints.h>): Autovector interrupts are 1..7, then follow ST-MFP,
  * TT-MFP, SCC, and finally VME interrupts. Vector numbers for the latter can
  * be allocated by atari_register_vme_int().
  *
  * Each interrupt can be of three types:
- * 
+ *
  *  - SLOW: The handler runs with all interrupts enabled, except the one it
  *    was called by (to avoid reentering). This should be the usual method.
  *    But it is currently possible only for MFP ints, since only the MFP
@@ -110,7 +110,7 @@
 typedef void (*asm_irq_handler)(void);
 
 struct irqhandler {
-	void	(*handler)(int, void *, struct pt_regs *);
+	irqreturn_t (*handler)(int, void *, struct pt_regs *);
 	void	*dev_id;
 };
 
@@ -138,7 +138,7 @@ static struct irqparam irq_param[NUM_INT_SOURCES];
  * (new vectors starting from 0x70 can be allocated by
  * atari_register_vme_int())
  */
-static int free_vme_vec_bitmap = 0;
+static int free_vme_vec_bitmap;
 
 /* check for valid int number (complex, sigh...) */
 #define	IS_VALID_INTNO(n)											\
@@ -167,8 +167,8 @@ asmlinkage void IRQ_NAME(n);						   \
 /* Dummy function to allow asm with operands.  */			   \
 void atari_slow_irq_##n##_dummy (void) {				   \
 __asm__ (__ALIGN_STR "\n"						   \
-SYMBOL_NAME_STR(atari_slow_irq_) #n "_handler:\t"			   \
-"	addql	#1,"SYMBOL_NAME_STR(irq_stat)"+8\n" /* local_irq_count */  \
+"atari_slow_irq_" #n "_handler:\t"					   \
+"	addl	%6,%5\n"	/* preempt_count() += HARDIRQ_OFFSET */	   \
 	SAVE_ALL_INT "\n"						   \
 	GET_CURRENT(%%d0) "\n"						   \
 "	andb	#~(1<<(%c3&7)),%a4:w\n"	/* mask this interrupt */	   \
@@ -179,22 +179,24 @@ SYMBOL_NAME_STR(atari_slow_irq_) #n "_handler:\t"			   \
 "	movew	%%d1,%%sr\n"		/* set IPL = previous value */	   \
 "	addql	#1,%a0\n"						   \
 "	lea	%a1,%%a0\n"						   \
-"	pea 	%%sp@\n"		/* push addr of frame */	   \
+"	pea	%%sp@\n"		/* push addr of frame */	   \
 "	movel	%%a0@(4),%%sp@-\n"	/* push handler data */		   \
-"	pea 	(%c3+8)\n"		/* push int number */		   \
+"	pea	(%c3+8)\n"		/* push int number */		   \
 "	movel	%%a0@,%%a0\n"						   \
 "	jbsr	%%a0@\n"		/* call the handler */		   \
 "	addql	#8,%%sp\n"						   \
 "	addql	#4,%%sp\n"						   \
 "	orw	#0x0600,%%sr\n"						   \
 "	andw	#0xfeff,%%sr\n"		/* set IPL = 6 again */		   \
-"	orb 	#(1<<(%c3&7)),%a4:w\n"	/* now unmask the int again */	   \
-"	jbra	"SYMBOL_NAME_STR(ret_from_interrupt)"\n"		   \
-	 : : "i" (&kstat.irqs[0][n+8]), "i" (&irq_handler[n+8]),	   \
+"	orb	#(1<<(%c3&7)),%a4:w\n"	/* now unmask the int again */	   \
+"	jbra	ret_from_interrupt\n"					   \
+	 : : "i" (&kstat_cpu(0).irqs[n+8]), "i" (&irq_handler[n+8]),	   \
 	     "n" (PT_OFF_SR), "n" (n),					   \
 	     "i" (n & 8 ? (n & 16 ? &tt_mfp.int_mk_a : &mfp.int_mk_a)	   \
-		        : (n & 16 ? &tt_mfp.int_mk_b : &mfp.int_mk_b))	   \
+		        : (n & 16 ? &tt_mfp.int_mk_b : &mfp.int_mk_b)),	   \
+	     "m" (preempt_count()), "di" (HARDIRQ_OFFSET)		   \
 );									   \
+	for (;;);			/* fake noreturn */		   \
 }
 
 BUILD_SLOW_IRQ(0);
@@ -231,38 +233,38 @@ BUILD_SLOW_IRQ(30);
 BUILD_SLOW_IRQ(31);
 
 asm_irq_handler slow_handlers[32] = {
-	atari_slow_irq_0_handler,
-	atari_slow_irq_1_handler,
-	atari_slow_irq_2_handler,
-	atari_slow_irq_3_handler,
-	atari_slow_irq_4_handler,
-	atari_slow_irq_5_handler,
-	atari_slow_irq_6_handler,
-	atari_slow_irq_7_handler,
-	atari_slow_irq_8_handler,
-	atari_slow_irq_9_handler,
-	atari_slow_irq_10_handler,
-	atari_slow_irq_11_handler,
-	atari_slow_irq_12_handler,
-	atari_slow_irq_13_handler,
-	atari_slow_irq_14_handler,
-	atari_slow_irq_15_handler,
-	atari_slow_irq_16_handler,
-	atari_slow_irq_17_handler,
-	atari_slow_irq_18_handler,
-	atari_slow_irq_19_handler,
-	atari_slow_irq_20_handler,
-	atari_slow_irq_21_handler,
-	atari_slow_irq_22_handler,
-	atari_slow_irq_23_handler,
-	atari_slow_irq_24_handler,
-	atari_slow_irq_25_handler,
-	atari_slow_irq_26_handler,
-	atari_slow_irq_27_handler,
-	atari_slow_irq_28_handler,
-	atari_slow_irq_29_handler,
-	atari_slow_irq_30_handler,
-	atari_slow_irq_31_handler
+	[0]	= atari_slow_irq_0_handler,
+	[1]	= atari_slow_irq_1_handler,
+	[2]	= atari_slow_irq_2_handler,
+	[3]	= atari_slow_irq_3_handler,
+	[4]	= atari_slow_irq_4_handler,
+	[5]	= atari_slow_irq_5_handler,
+	[6]	= atari_slow_irq_6_handler,
+	[7]	= atari_slow_irq_7_handler,
+	[8]	= atari_slow_irq_8_handler,
+	[9]	= atari_slow_irq_9_handler,
+	[10]	= atari_slow_irq_10_handler,
+	[11]	= atari_slow_irq_11_handler,
+	[12]	= atari_slow_irq_12_handler,
+	[13]	= atari_slow_irq_13_handler,
+	[14]	= atari_slow_irq_14_handler,
+	[15]	= atari_slow_irq_15_handler,
+	[16]	= atari_slow_irq_16_handler,
+	[17]	= atari_slow_irq_17_handler,
+	[18]	= atari_slow_irq_18_handler,
+	[19]	= atari_slow_irq_19_handler,
+	[20]	= atari_slow_irq_20_handler,
+	[21]	= atari_slow_irq_21_handler,
+	[22]	= atari_slow_irq_22_handler,
+	[23]	= atari_slow_irq_23_handler,
+	[24]	= atari_slow_irq_24_handler,
+	[25]	= atari_slow_irq_25_handler,
+	[26]	= atari_slow_irq_26_handler,
+	[27]	= atari_slow_irq_27_handler,
+	[28]	= atari_slow_irq_28_handler,
+	[29]	= atari_slow_irq_29_handler,
+	[30]	= atari_slow_irq_30_handler,
+	[31]	= atari_slow_irq_31_handler
 };
 
 asmlinkage void atari_fast_irq_handler( void );
@@ -271,31 +273,33 @@ asmlinkage void atari_prio_irq_handler( void );
 /* Dummy function to allow asm with operands.  */
 void atari_fast_prio_irq_dummy (void) {
 __asm__ (__ALIGN_STR "\n"
-SYMBOL_NAME_STR(atari_fast_irq_handler) ":
-	orw 	#0x700,%%sr		/* disable all interrupts */
-"SYMBOL_NAME_STR(atari_prio_irq_handler) ":\t
-	addql	#1,"SYMBOL_NAME_STR(irq_stat)"+8\n" /* local_irq_count */
-	SAVE_ALL_INT "\n"
-	GET_CURRENT(%%d0) "
+"atari_fast_irq_handler:\n\t"
+	"orw	#0x700,%%sr\n"		/* disable all interrupts */
+"atari_prio_irq_handler:\n\t"
+	"addl	%3,%2\n\t"		/* preempt_count() += HARDIRQ_OFFSET */
+	SAVE_ALL_INT "\n\t"
+	GET_CURRENT(%%d0) "\n\t"
 	/* get vector number from stack frame and convert to source */
-	bfextu	%%sp@(%c1){#4,#10},%%d0
-	subw	#(0x40-8),%%d0
-	jpl 	1f
-	addw	#(0x40-8-0x18),%%d0
-1:	lea	%a0,%%a0
-	addql	#1,%%a0@(%%d0:l:4)
-	lea	"SYMBOL_NAME_STR(irq_handler)",%%a0
-	lea	%%a0@(%%d0:l:8),%%a0
-	pea 	%%sp@			/* push frame address */
-	movel	%%a0@(4),%%sp@-		/* push handler data */
-	movel	%%d0,%%sp@-		/* push int number */
-	movel	%%a0@,%%a0
-	jsr	%%a0@			/* and call the handler */
-	addql	#8,%%sp
-	addql	#4,%%sp
-	jbra	"SYMBOL_NAME_STR(ret_from_interrupt)
-	 : : "i" (&kstat.irqs[0]), "n" (PT_OFF_FORMATVEC)
+	"bfextu	%%sp@(%c1){#4,#10},%%d0\n\t"
+	"subw	#(0x40-8),%%d0\n\t"
+	"jpl	1f\n\t"
+	"addw	#(0x40-8-0x18),%%d0\n"
+    "1:\tlea	%a0,%%a0\n\t"
+	"addql	#1,%%a0@(%%d0:l:4)\n\t"
+	"lea	irq_handler,%%a0\n\t"
+	"lea	%%a0@(%%d0:l:8),%%a0\n\t"
+	"pea	%%sp@\n\t"		/* push frame address */
+	"movel	%%a0@(4),%%sp@-\n\t"	/* push handler data */
+	"movel	%%d0,%%sp@-\n\t"	/* push int number */
+	"movel	%%a0@,%%a0\n\t"
+	"jsr	%%a0@\n\t"		/* and call the handler */
+	"addql	#8,%%sp\n\t"
+	"addql	#4,%%sp\n\t"
+	"jbra	ret_from_interrupt"
+	 : : "i" (&kstat_cpu(0).irqs), "n" (PT_OFF_FORMATVEC),
+	     "m" (preempt_count()), "di" (HARDIRQ_OFFSET)
 );
+	for (;;);
 }
 
 /* GK:
@@ -304,10 +308,10 @@ SYMBOL_NAME_STR(atari_fast_irq_handler) ":
  */
 asmlinkage void falcon_hblhandler(void);
 asm(".text\n"
-__ALIGN_STR "\n"
-SYMBOL_NAME_STR(falcon_hblhandler) ":
-	orw	#0x200,%sp@	/* set saved ipl to 2 */
-	rte");
+__ALIGN_STR "\n\t"
+"falcon_hblhandler:\n\t"
+	"orw	#0x200,%sp@\n\t"	/* set saved ipl to 2 */
+	"rte");
 
 /* Defined in entry.S; only increments 'num_spurious' */
 asmlinkage void bad_interrupt(void);
@@ -391,7 +395,7 @@ void __init atari_init_IRQ(void)
 		   be in an atasound_init(), that doesn't exist yet. */
 		atari_microwire_cmd(MW_LM1992_PSG_HIGH);
 	}
-	
+
 	stdma_init();
 
 	/* Initialize the PSG: all sounds off, both ports output */
@@ -400,12 +404,13 @@ void __init atari_init_IRQ(void)
 }
 
 
-static void atari_call_irq_list( int irq, void *dev_id, struct pt_regs *fp )
+static irqreturn_t atari_call_irq_list( int irq, void *dev_id, struct pt_regs *fp )
 {
 	irq_node_t *node;
 
 	for (node = (irq_node_t *)dev_id; node; node = node->next)
 		node->handler(irq, node->dev_id, fp);
+	return IRQ_HANDLED;
 }
 
 
@@ -415,7 +420,7 @@ static void atari_call_irq_list( int irq, void *dev_id, struct pt_regs *fp )
  *                     If the addition was successful, it returns 0.
  */
 
-int atari_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+int atari_request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *),
                       unsigned long flags, const char *devname, void *dev_id)
 {
 	int vector;
@@ -455,7 +460,7 @@ int atari_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_r
 		        __FUNCTION__, irq, devname);
 		return -EINVAL;
 	}
-		
+
 	if (vectors[vector] == bad_interrupt) {
 		/* int has no handler yet */
 		irq_handler[irq].handler = handler;
@@ -477,8 +482,7 @@ int atari_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_r
 		irq_node_t *node;
 		unsigned long flags;
 
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 
 		if (irq_handler[irq].handler != atari_call_irq_list) {
 			/* Only one handler yet, make a node for this first one */
@@ -503,7 +507,7 @@ int atari_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_r
 		node->next = irq_handler[irq].dev_id;
 		irq_handler[irq].dev_id = node;
 
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return 0;
 	} else {
 		printk ("%s: Irq %d allocated by other type int (call from %s)\n",
@@ -527,13 +531,12 @@ void atari_free_irq(unsigned int irq, void *dev_id)
 	if (vectors[vector] == bad_interrupt)
 		goto not_found;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	if (irq_handler[irq].handler != atari_call_irq_list) {
 		/* It's the only handler for the interrupt */
 		if (irq_handler[irq].dev_id != dev_id) {
-			restore_flags(flags);
+			local_irq_restore(flags);
 			goto not_found;
 		}
 		irq_handler[irq].handler = NULL;
@@ -544,7 +547,7 @@ void atari_free_irq(unsigned int irq, void *dev_id)
 		atari_disable_irq(irq);
 		atari_turnoff_irq(irq);
 
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return;
 	}
 
@@ -553,7 +556,7 @@ void atari_free_irq(unsigned int irq, void *dev_id)
 		if ((*list)->dev_id == dev_id) break;
 	}
 	if (!*list) {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		goto not_found;
 	}
 
@@ -570,7 +573,7 @@ void atari_free_irq(unsigned int irq, void *dev_id)
 		node->handler = NULL; /* Mark it as free for reallocation */
 	}
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 	return;
 
 not_found:
@@ -591,7 +594,7 @@ unsigned long atari_register_vme_int(void)
 	for(i = 0; i < 32; i++)
 		if((free_vme_vec_bitmap & (1 << i)) == 0)
 			break;
-	
+
 	if(i == 16)
 		return 0;
 
@@ -609,37 +612,37 @@ void atari_unregister_vme_int(unsigned long irq)
 }
 
 
-int atari_get_irq_list(char *buf)
+int show_atari_interrupts(struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 
 	for (i = 0; i < NUM_INT_SOURCES; ++i) {
 		if (vectors[IRQ_SOURCE_TO_VECTOR(i)] == bad_interrupt)
 			continue;
 		if (i < STMFP_SOURCE_BASE)
-			len += sprintf(buf+len, "auto %2d: %10u ",
-				       i, kstat.irqs[0][i]);
+			seq_printf(p, "auto %2d: %10u ",
+				       i, kstat_cpu(0).irqs[i]);
 		else
-			len += sprintf(buf+len, "vec $%02x: %10u ",
+			seq_printf(p, "vec $%02x: %10u ",
 				       IRQ_SOURCE_TO_VECTOR(i),
-				       kstat.irqs[0][i]);
+				       kstat_cpu(0).irqs[i]);
 
 		if (irq_handler[i].handler != atari_call_irq_list) {
-			len += sprintf(buf+len, "%s\n", irq_param[i].devname);
+			seq_printf(p, "%s\n", irq_param[i].devname);
 		}
 		else {
-			irq_node_t *p;
-			for( p = (irq_node_t *)irq_handler[i].dev_id; p; p = p->next ) {
-				len += sprintf(buf+len, "%s\n", p->devname);
-				if (p->next)
-					len += sprintf( buf+len, "                    " );
+			irq_node_t *n;
+			for( n = (irq_node_t *)irq_handler[i].dev_id; n; n = n->next ) {
+				seq_printf(p, "%s\n", n->devname);
+				if (n->next)
+					seq_puts(p, "                    " );
 			}
 		}
 	}
 	if (num_spurious)
-		len += sprintf(buf+len, "spurio.: %10u\n", num_spurious);
-	
-	return len;
+		seq_printf(p, "spurio.: %10u\n", num_spurious);
+
+	return 0;
 }
 
 

@@ -21,18 +21,42 @@
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 #define PTE_MASK	PAGE_MASK
 
+#if defined(CONFIG_HUGETLB_PAGE_SIZE_64K)
+#define HPAGE_SHIFT	16
+#elif defined(CONFIG_HUGETLB_PAGE_SIZE_1MB)
+#define HPAGE_SHIFT	20
+#endif
+
+#ifdef CONFIG_HUGETLB_PAGE
+#define HPAGE_SIZE		(1UL << HPAGE_SHIFT)
+#define HPAGE_MASK		(~(HPAGE_SIZE-1))
+#define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT-PAGE_SHIFT)
+#endif
+
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
 
-#define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
-#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+extern void (*clear_page)(void *to);
+extern void (*copy_page)(void *to, void *from);
 
-#if defined(__sh3__)
-#define clear_user_page(page, vaddr)	clear_page(page)
-#define copy_user_page(to, from, vaddr)	copy_page(to, from)
-#elif defined(__SH4__)
-extern void clear_user_page(void *to, unsigned long address);
-extern void copy_user_page(void *to, void *from, unsigned long address);
+extern void clear_page_slow(void *to);
+extern void copy_page_slow(void *to, void *from);
+
+#if defined(CONFIG_SH7705_CACHE_32KB) && defined(CONFIG_MMU)
+struct page;
+extern void clear_user_page(void *to, unsigned long address, struct page *pg);
+extern void copy_user_page(void *to, void *from, unsigned long address, struct page *pg);
+extern void __clear_user_page(void *to, void *orig_to);
+extern void __copy_user_page(void *to, void *from, void *orig_to);
+#elif defined(CONFIG_CPU_SH2) || defined(CONFIG_CPU_SH3) || !defined(CONFIG_MMU)
+#define clear_user_page(page, vaddr, pg)	clear_page(page)
+#define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
+#elif defined(CONFIG_CPU_SH4)
+struct page;
+extern void clear_user_page(void *to, unsigned long address, struct page *pg);
+extern void copy_user_page(void *to, void *from, unsigned long address, struct page *pg);
+extern void __clear_user_page(void *to, void *orig_to);
+extern void __copy_user_page(void *to, void *from, void *orig_to);
 #endif
 
 /*
@@ -61,35 +85,46 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 /*
  * IF YOU CHANGE THIS, PLEASE ALSO CHANGE
  *
- *	arch/sh/vmlinux.lds.S
+ *	arch/sh/kernel/vmlinux.lds.S
  *
  * which has the same constant encoded..
  */
 
 #define __MEMORY_START		CONFIG_MEMORY_START
+#define __MEMORY_SIZE		CONFIG_MEMORY_SIZE
+#ifdef CONFIG_DISCONTIGMEM
+/* Just for HP690, for now.. */
+#define __MEMORY_START_2ND	(__MEMORY_START+0x02000000)
+#define __MEMORY_SIZE_2ND	0x001000000 /* 16MB */
+#endif
 
 #define PAGE_OFFSET		(0x80000000UL)
 #define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
-#define virt_to_page(kaddr)	(mem_map + ((__pa(kaddr)-__MEMORY_START) >> PAGE_SHIFT))
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+
+#define MAP_NR(addr)		(((unsigned long)(addr)-PAGE_OFFSET) >> PAGE_SHIFT)
+
+#ifndef CONFIG_DISCONTIGMEM
+#define phys_to_page(phys)	(mem_map + (((phys)-__MEMORY_START) >> PAGE_SHIFT))
+#define page_to_phys(page)	(((page - mem_map) << PAGE_SHIFT) + __MEMORY_START)
+#endif
+
+/* PFN start number, because of __MEMORY_START */
+#define PFN_START		(__MEMORY_START >> PAGE_SHIFT)
+
+#define pfn_to_page(pfn)	(mem_map + (pfn) - PFN_START)
+#define page_to_pfn(page)	((unsigned long)((page) - mem_map) + PFN_START)
+#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
+#define pfn_valid(pfn)		(((pfn) - PFN_START) < max_mapnr)
+#define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
+
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #ifndef __ASSEMBLY__
 
-/*
- * Tell the user there is some problem.
- */
-#define BUG() do { \
-	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-	asm volatile("nop"); \
-} while (0)
-
-#define PAGE_BUG(page) do { \
-	BUG(); \
-} while (0)
-
 /* Pure 2^n version of get_order */
-extern __inline__ int get_order(unsigned long size)
+static __inline__ int get_order(unsigned long size)
 {
 	int order;
 

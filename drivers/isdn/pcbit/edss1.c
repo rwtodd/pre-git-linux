@@ -1,15 +1,13 @@
 /*
+ * DSS.1 Finite State Machine
+ * base: ITU-T Rec Q.931
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        DSS.1 Finite State Machine
- *        base: ITU-T Rec Q.931
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
@@ -17,18 +15,13 @@
  *              move state/event descriptions to a user space logger
  */
 
-#define __NO_VERSION__
-
-#include <linux/module.h>
-
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
-#include <linux/tqueue.h>
 #include <linux/skbuff.h>
 
 #include <linux/timer.h>
@@ -285,9 +278,7 @@ void pcbit_fsm_event(struct pcbit_dev *dev, struct pcbit_chan *chan,
 	struct fsm_timer_entry *tentry;
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
-
+	spin_lock_irqsave(&dev->lock, flags);
 
         for (action = fsm_table; action->init != 0xff; action++)
                 if (action->init == chan->fsm_state && action->event == event)
@@ -295,9 +286,9 @@ void pcbit_fsm_event(struct pcbit_dev *dev, struct pcbit_chan *chan,
   
 	if (action->init == 0xff) {
 		
+		spin_unlock_irqrestore(&dev->lock, flags);
 		printk(KERN_DEBUG "fsm error: event %x on state %x\n", 
                        event, chan->fsm_state);
-		restore_flags(flags);
 		return;
 	}
 
@@ -322,7 +313,7 @@ void pcbit_fsm_event(struct pcbit_dev *dev, struct pcbit_chan *chan,
                 add_timer(&chan->fsm_timer);
         }
 
-	restore_flags(flags);
+	spin_unlock_irqrestore(&dev->lock, flags);
 
 	if (action->callb)
 		action->callb(dev, chan, data);

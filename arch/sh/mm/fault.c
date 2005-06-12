@@ -1,7 +1,8 @@
-/* $Id: fault.c,v 1.13 2000/03/07 12:05:24 gniibe Exp $
+/* $Id: fault.c,v 1.14 2004/01/13 05:52:11 kkojima Exp $
  *
  *  linux/arch/sh/mm/fault.c
  *  Copyright (C) 1999  Niibe Yutaka
+ *  Copyright (C) 2003  Paul Mundt
  *
  *  Based on linux/arch/i386/mm/fault.c:
  *   Copyright (C) 1995  Linus Torvalds
@@ -19,71 +20,17 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
-#include <asm/hardirq.h>
 #include <asm/mmu_context.h>
+#include <asm/cacheflush.h>
+#include <asm/kgdb.h>
 
 extern void die(const char *,struct pt_regs *,long);
-static void __flush_tlb_page(unsigned long asid, unsigned long page);
-#if defined(__SH4__)
-static void __flush_tlb_phys(unsigned long phys);
-#endif
-
-/*
- * Ugly, ugly, but the goto's result in better assembly..
- */
-int __verify_write(const void * addr, unsigned long size)
-{
-	struct vm_area_struct * vma;
-	unsigned long start = (unsigned long) addr;
-
-	if (!size)
-		return 1;
-
-	vma = find_vma(current->mm, start);
-	if (!vma)
-		goto bad_area;
-	if (vma->vm_start > start)
-		goto check_stack;
-
-good_area:
-	if (!(vma->vm_flags & VM_WRITE))
-		goto bad_area;
-	size--;
-	size += start & ~PAGE_MASK;
-	size >>= PAGE_SHIFT;
-	start &= PAGE_MASK;
-
-	for (;;) {
-		if (handle_mm_fault(current->mm, vma, start, 1) <= 0)
-			goto bad_area;
-		if (!size)
-			break;
-		size--;
-		start += PAGE_SIZE;
-		if (start < vma->vm_end)
-			continue;
-		vma = vma->vm_next;
-		if (!vma || vma->vm_start != start)
-			goto bad_area;
-		if (!(vma->vm_flags & VM_WRITE))
-			goto bad_area;;
-	}
-	return 1;
-
-check_stack:
-	if (!(vma->vm_flags & VM_GROWSDOWN))
-		goto bad_area;
-	if (expand_stack(vma, start) == 0)
-		goto good_area;
-
-bad_area:
-	return 0;
-}
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -97,7 +44,11 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	struct mm_struct *mm;
 	struct vm_area_struct * vma;
 	unsigned long page;
-	unsigned long fixup;
+
+#ifdef CONFIG_SH_KGDB
+	if (kgdb_nofault && kgdb_bus_err_hook)
+		kgdb_bus_err_hook();
+#endif
 
 	tsk = current;
 	mm = tsk->mm;
@@ -106,10 +57,10 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -138,20 +89,23 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
+survive:
 	switch (handle_mm_fault(mm, vma, address, writeaccess)) {
-	case 1:
-		tsk->min_flt++;
-		break;
-	case 2:
-		tsk->maj_flt++;
-		break;
-	case 0:
-		goto do_sigbus;
-	default:
-		goto out_of_memory;
+		case VM_FAULT_MINOR:
+			tsk->min_flt++;
+			break;
+		case VM_FAULT_MAJOR:
+			tsk->maj_flt++;
+			break;
+		case VM_FAULT_SIGBUS:
+			goto do_sigbus;
+		case VM_FAULT_OOM:
+			goto out_of_memory;
+		default:
+			BUG();
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 /*
@@ -159,7 +113,7 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	if (user_mode(regs)) {
 		tsk->thread.address = address;
@@ -170,11 +124,8 @@ bad_area:
 
 no_context:
 	/* Are we prepared to handle this kernel fault?  */
-	fixup = search_exception_table(regs->pc);
-	if (fixup != 0) {
-		regs->pc = fixup;
+	if (fixup_exception(regs))
 		return;
-	}
 
 /*
  * Oops. The kernel tried to access some bad page. We'll have to
@@ -208,14 +159,19 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
+	if (current->pid == 1) {
+		yield();
+		down_read(&mm->mmap_sem);
+		goto survive;
+	}
 	printk("VM: killing process %s\n", tsk->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel
@@ -237,13 +193,27 @@ do_sigbus:
 asmlinkage int __do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 			       unsigned long address)
 {
+	unsigned long addrmax = P4SEG;
 	pgd_t *dir;
 	pmd_t *pmd;
 	pte_t *pte;
 	pte_t entry;
 
-	if (address >= VMALLOC_START && address < VMALLOC_END)
+#ifdef CONFIG_SH_KGDB
+	if (kgdb_nofault && kgdb_bus_err_hook)
+		kgdb_bus_err_hook();
+#endif
+
+#ifdef CONFIG_SH_STORE_QUEUES
+	addrmax = P4SEG_STORE_QUE + 0x04000000;
+#endif
+
+	if (address >= P3SEG && address < addrmax)
 		dir = pgd_offset_k(address);
+	else if (address >= TASK_SIZE)
+		return 1;
+	else if (!current->mm)
+		return 1;
 	else
 		dir = pgd_offset(current->mm, address);
 
@@ -255,126 +225,35 @@ asmlinkage int __do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 		pmd_clear(pmd);
 		return 1;
 	}
-	pte = pte_offset(pmd, address);
+	pte = pte_offset_kernel(pmd, address);
 	entry = *pte;
-	if (pte_none(entry) || !pte_present(entry)
+	if (pte_none(entry) || pte_not_present(entry)
 	    || (writeaccess && !pte_write(entry)))
 		return 1;
 
 	if (writeaccess)
 		entry = pte_mkdirty(entry);
 	entry = pte_mkyoung(entry);
-#if defined(__SH4__)
+
+#ifdef CONFIG_CPU_SH4
 	/*
 	 * ITLB is not affected by "ldtlb" instruction.
 	 * So, we need to flush the entry by ourselves.
 	 */
-	__flush_tlb_page(get_asid(), address&PAGE_MASK);
+
+	{
+		unsigned long flags;
+		local_irq_save(flags);
+		__flush_tlb_page(get_asid(), address&PAGE_MASK);
+		local_irq_restore(flags);
+	}
 #endif
+
 	set_pte(pte, entry);
 	update_mmu_cache(NULL, address, entry);
+
 	return 0;
 }
-
-void update_mmu_cache(struct vm_area_struct * vma,
-		      unsigned long address, pte_t pte)
-{
-	unsigned long flags;
-	unsigned long pteval;
-	unsigned long pteaddr;
-	unsigned long ptea;
-
-	save_and_cli(flags);
-
-#if defined(__SH4__)
-	if (pte_shared(pte)) {
-		struct page *pg;
-
-		pteval = pte_val(pte);
-		pteval &= PAGE_MASK; /* Physicall page address */
-		__flush_tlb_phys(pteval);
-		pg = virt_to_page(__va(pteval));
-		flush_dcache_page(pg);
-	}
-#endif
-
-	/* Ptrace may call this routine. */
-	if (vma && current->active_mm != vma->vm_mm) {
-		restore_flags(flags);
-		return;
-	}
-
-	/* Set PTEH register */
-	pteaddr = (address & MMU_VPN_MASK) | get_asid();
-	ctrl_outl(pteaddr, MMU_PTEH);
-
-	/* Set PTEA register */
-	/* TODO: make this look less hacky */
-	pteval = pte_val(pte);
-#if defined(__SH4__)
-	ptea = ((pteval >> 28) & 0xe) | (pteval & 0x1);
-	ctrl_outl(ptea, MMU_PTEA);
-#endif
-
-	/* Set PTEL register */
-	pteval &= _PAGE_FLAGS_HARDWARE_MASK; /* drop software flags */
-	/* conveniently, we want all the software flags to be 0 anyway */
-	ctrl_outl(pteval, MMU_PTEL);
-
-	/* Load the TLB */
-	asm volatile("ldtlb": /* no output */ : /* no input */ : "memory");
-	restore_flags(flags);
-}
-
-static void __flush_tlb_page(unsigned long asid, unsigned long page)
-{
-	unsigned long addr, data;
-
-	/*
-	 * NOTE: PTEH.ASID should be set to this MM
-	 *       _AND_ we need to write ASID to the array.
-	 *
-	 * It would be simple if we didn't need to set PTEH.ASID...
-	 */
-#if defined(__sh3__)
-	addr = MMU_TLB_ADDRESS_ARRAY |(page & 0x1F000)| MMU_PAGE_ASSOC_BIT;
-	data = (page & 0xfffe0000) | asid; /* VALID bit is off */
-	ctrl_outl(data, addr);
-#elif defined(__SH4__)
-	jump_to_P2();
-	addr = MMU_UTLB_ADDRESS_ARRAY | MMU_PAGE_ASSOC_BIT;
-	data = page | asid; /* VALID bit is off */
-	ctrl_outl(data, addr);
-	back_to_P1();
-#endif
-}
-
-#if defined(__SH4__)
-static void __flush_tlb_phys(unsigned long phys)
-{
-	int i;
-	unsigned long addr, data;
-
-	jump_to_P2();
-	for (i = 0; i < MMU_UTLB_ENTRIES; i++) {
-		addr = MMU_UTLB_DATA_ARRAY | (i<<MMU_U_ENTRY_SHIFT);
-		data = ctrl_inl(addr);
-		if ((data & MMU_UTLB_VALID) && (data&PAGE_MASK) == phys) {
-			data &= ~MMU_UTLB_VALID;
-			ctrl_outl(data, addr);
-		}
-	}
-	for (i = 0; i < MMU_ITLB_ENTRIES; i++) {
-		addr = MMU_ITLB_DATA_ARRAY | (i<<MMU_I_ENTRY_SHIFT);
-		data = ctrl_inl(addr);
-		if ((data & MMU_ITLB_VALID) && (data&PAGE_MASK) == phys) {
-			data &= ~MMU_ITLB_VALID;
-			ctrl_outl(data, addr);
-		}
-	}
-	back_to_P1();
-}
-#endif
 
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 {
@@ -386,7 +265,7 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 		asid = vma->vm_mm->context & MMU_CONTEXT_ASID_MASK;
 		page &= PAGE_MASK;
 
-		save_and_cli(flags);
+		local_irq_save(flags);
 		if (vma->vm_mm != current->mm) {
 			saved_asid = get_asid();
 			set_asid(asid);
@@ -394,18 +273,20 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 		__flush_tlb_page(asid, page);
 		if (saved_asid != MMU_NO_ASID)
 			set_asid(saved_asid);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 }
 
-void flush_tlb_range(struct mm_struct *mm, unsigned long start,
+void flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 		     unsigned long end)
 {
+	struct mm_struct *mm = vma->vm_mm;
+
 	if (mm->context != NO_CONTEXT) {
 		unsigned long flags;
 		int size;
 
-		save_and_cli(flags);
+		local_irq_save(flags);
 		size = (end - start + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
 		if (size > (MMU_NTLB_ENTRIES/4)) { /* Too many TLB to flush */
 			mm->context = NO_CONTEXT;
@@ -429,8 +310,34 @@ void flush_tlb_range(struct mm_struct *mm, unsigned long start,
 			if (saved_asid != MMU_NO_ASID)
 				set_asid(saved_asid);
 		}
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
+}
+
+void flush_tlb_kernel_range(unsigned long start, unsigned long end)
+{
+	unsigned long flags;
+	int size;
+
+	local_irq_save(flags);
+	size = (end - start + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
+	if (size > (MMU_NTLB_ENTRIES/4)) { /* Too many TLB to flush */
+		flush_tlb_all();
+	} else {
+		unsigned long asid = init_mm.context&MMU_CONTEXT_ASID_MASK;
+		unsigned long saved_asid = get_asid();
+
+		start &= PAGE_MASK;
+		end += (PAGE_SIZE - 1);
+		end &= PAGE_MASK;
+		set_asid(asid);
+		while (start < end) {
+			__flush_tlb_page(asid, start);
+			start += PAGE_SIZE;
+		}
+		set_asid(saved_asid);
+	}
+	local_irq_restore(flags);
 }
 
 void flush_tlb_mm(struct mm_struct *mm)
@@ -440,11 +347,11 @@ void flush_tlb_mm(struct mm_struct *mm)
 	if (mm->context != NO_CONTEXT) {
 		unsigned long flags;
 
-		save_and_cli(flags);
+		local_irq_save(flags);
 		mm->context = NO_CONTEXT;
 		if (mm == current->mm)
 			activate_context(mm);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 }
 
@@ -459,9 +366,9 @@ void flush_tlb_all(void)
 	 * 	TF-bit for SH-3, TI-bit for SH-4.
 	 *      It's same position, bit #2.
 	 */
-	save_and_cli(flags);
+	local_irq_save(flags);
 	status = ctrl_inl(MMUCR);
 	status |= 0x04;		
 	ctrl_outl(status, MMUCR);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }

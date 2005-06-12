@@ -7,21 +7,21 @@
 /*
  *
  * Each stripe contains one buffer per disc.  Each buffer can be in
- * one of a number of states determined by bh_state.  Changes between
+ * one of a number of states stored in "flags".  Changes between
  * these states happen *almost* exclusively under a per-stripe
- * spinlock.  Some very specific changes can happen in b_end_io, and
+ * spinlock.  Some very specific changes can happen in bi_end_io, and
  * these are not protected by the spin lock.
  *
- * The bh_state bits that are used to represent these states are:
- *   BH_Uptodate, BH_Lock
+ * The flag bits that are used to represent these states are:
+ *   R5_UPTODATE and R5_LOCKED
  *
- * State Empty == !Uptodate, !Lock
+ * State Empty == !UPTODATE, !LOCK
  *        We have no data, and there is no active request
- * State Want == !Uptodate, Lock
+ * State Want == !UPTODATE, LOCK
  *        A read request is being submitted for this block
- * State Dirty == Uptodate, Lock
+ * State Dirty == UPTODATE, LOCK
  *        Some new data is in this buffer, and it is being written out
- * State Clean == Uptodate, !Lock
+ * State Clean == UPTODATE, !LOCK
  *        We have valid data which is the same as on disc
  *
  * The possible state transitions are:
@@ -57,9 +57,9 @@
  *
  * Buffers for the md device that arrive via make_request are attached
  * to the appropriate stripe in one of two lists linked on b_reqnext.
- * One list for read requests, one for write.  There should never be
- * more than one buffer on the two lists together, but we are not
- * guaranteed of that so we allow for more.
+ * One list (bh_read) for read requests, one (bh_write) for write.
+ * There should never be more than one buffer on the two lists
+ * together, but we are not guaranteed of that so we allow for more.
  *
  * If a buffer is on the read list when the associated cache buffer is
  * Uptodate, the data is copied into the read buffer and it's b_end_io
@@ -70,16 +70,18 @@
  * that the Uptodate bit is set.  Once they have checked that they may
  * take buffers off the read queue.
  *
- * When a buffer on the write_list is committed for write, it is
- * marked clean, copied into the cache buffer, which is then marked
- * dirty, and moved onto a third list, the written list.  Once both
- * the parity block and the cached buffer are successfully written,
- * any buffer on a written list can be returned with b_end_io.
+ * When a buffer on the write list is committed for write it is copied
+ * into the cache buffer, which is then marked dirty, and moved onto a
+ * third list, the written list (bh_written).  Once both the parity
+ * block and the cached buffer are successfully written, any buffer on
+ * a written list can be returned with b_end_io.
  *
- * The write_list and read_list lists act as fifos.  They are protected by the
- * device_lock which can be claimed when a stripe_lock is held.
- * The device_lock is only for list manipulations and will only be held for a very
- * short time.  It can be claimed from interrupts.
+ * The write list and read list both act as fifos.  The read list is
+ * protected by the device_lock.  The write and written lists are
+ * protected by the stripe lock.  The device_lock, which can be
+ * claimed while the stipe lock is held, is only for list
+ * manipulations and will only be held for a very short time.  It can
+ * be claimed from interrupts.
  *
  *
  * Stripes in the stripe cache can be on one of two lists (or on
@@ -122,23 +124,35 @@
  * plus raid5d if it is handling it, plus one for each active request
  * on a cached buffer.
  */
+
 struct stripe_head {
 	struct stripe_head	*hash_next, **hash_pprev; /* hash pointers */
 	struct list_head	lru;			/* inactive_list or handle_list */
 	struct raid5_private_data	*raid_conf;
-	struct buffer_head	*bh_cache[MD_SB_DISKS];	/* buffered copy */
-	struct buffer_head	*bh_read[MD_SB_DISKS];	/* read request buffers of the MD device */
-	struct buffer_head	*bh_write[MD_SB_DISKS];	/* write request buffers of the MD device */
-	struct buffer_head	*bh_written[MD_SB_DISKS]; /* write request buffers of the MD device that have been scheduled for write */
-	unsigned long		sector;			/* sector of this row */
-	int			size;			/* buffers size */
+	sector_t		sector;			/* sector of this row */
 	int			pd_idx;			/* parity disk index */
 	unsigned long		state;			/* state flags */
 	atomic_t		count;			/* nr of active thread/requests */
 	spinlock_t		lock;
-	int			sync_redone;
+	struct r5dev {
+		struct bio	req;
+		struct bio_vec	vec;
+		struct page	*page;
+		struct bio	*toread, *towrite, *written;
+		sector_t	sector;			/* sector of this page */
+		unsigned long	flags;
+	} dev[1]; /* allocated with extra space depending of RAID geometry */
 };
-
+/* Flags */
+#define	R5_UPTODATE	0	/* page contains current data */
+#define	R5_LOCKED	1	/* IO has been submitted on "req" */
+#define	R5_OVERWRITE	2	/* towrite covers whole page */
+/* and some that are internal to handle_stripe */
+#define	R5_Insync	3	/* rdev && rdev->in_sync at start */
+#define	R5_Wantread	4	/* want to schedule a read */
+#define	R5_Wantwrite	5
+#define	R5_Syncio	6	/* this io need to be accounted as resync io */
+#define	R5_Overlap	7	/* There is a pending overlapping request on this block */
 
 /*
  * Write method
@@ -155,38 +169,63 @@ struct stripe_head {
 #define STRIPE_HANDLE		2
 #define	STRIPE_SYNCING		3
 #define	STRIPE_INSYNC		4
+#define	STRIPE_PREREAD_ACTIVE	5
+#define	STRIPE_DELAYED		6
+
+/*
+ * Plugging:
+ *
+ * To improve write throughput, we need to delay the handling of some
+ * stripes until there has been a chance that several write requests
+ * for the one stripe have all been collected.
+ * In particular, any write request that would require pre-reading
+ * is put on a "delayed" queue until there are no stripes currently
+ * in a pre-read phase.  Further, if the "delayed" queue is empty when
+ * a stripe is put on it then we "plug" the queue and do not process it
+ * until an unplug call is made. (the unplug_io_fn() is called).
+ *
+ * When preread is initiated on a stripe, we set PREREAD_ACTIVE and add
+ * it to the count of prereading stripes.
+ * When write is initiated, or the stripe refcnt == 0 (just in case) we
+ * clear the PREREAD_ACTIVE flag and decrement the count
+ * Whenever the delayed queue is empty and the device is not plugged, we
+ * move any strips from delayed to handle and clear the DELAYED flag and set PREREAD_ACTIVE.
+ * In stripe_handle, if we find pre-reading is necessary, we do it if
+ * PREREAD_ACTIVE is set, else we set DELAYED which will send it to the delayed queue.
+ * HANDLE gets cleared if stripe_handle leave nothing locked.
+ */
+ 
 
 struct disk_info {
-	kdev_t	dev;
-	int	operational;
-	int	number;
-	int	raid_disk;
-	int	write_only;
-	int	spare;
-	int	used_slot;
+	mdk_rdev_t	*rdev;
 };
 
 struct raid5_private_data {
 	struct stripe_head	**stripe_hashtbl;
 	mddev_t			*mddev;
-	mdk_thread_t		*thread, *resync_thread;
-	struct disk_info	disks[MD_SB_DISKS];
 	struct disk_info	*spare;
-	int			buffer_size;
 	int			chunk_size, level, algorithm;
 	int			raid_disks, working_disks, failed_disks;
-	int			resync_parity;
 	int			max_nr_stripes;
 
 	struct list_head	handle_list; /* stripes needing handling */
+	struct list_head	delayed_list; /* stripes that have plugged requests */
+	atomic_t		preread_active_stripes; /* stripes with scheduled io */
+
+	char			cache_name[20];
+	kmem_cache_t		*slab_cache; /* for allocating stripes */
 	/*
 	 * Free stripes pool
 	 */
 	atomic_t		active_stripes;
 	struct list_head	inactive_list;
-	md_wait_queue_head_t	wait_for_stripe;
-
-	md_spinlock_t		device_lock;
+	wait_queue_head_t	wait_for_stripe;
+	wait_queue_head_t	wait_for_overlap;
+	int			inactive_blocked;	/* release of inactive stripes blocked,
+							 * waiting for 25% to be free
+							 */        
+	spinlock_t		device_lock;
+	struct disk_info	disks[0];
 };
 
 typedef struct raid5_private_data raid5_conf_t;

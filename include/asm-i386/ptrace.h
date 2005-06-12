@@ -18,7 +18,7 @@
 #define EFL 14
 #define UESP 15
 #define SS   16
-
+#define FRAME_SIZE 17
 
 /* this struct defines the way the registers are stored on the 
    stack during a system call. */
@@ -49,15 +49,21 @@ struct pt_regs {
 #define PTRACE_GETFPXREGS         18
 #define PTRACE_SETFPXREGS         19
 
-#define PTRACE_SETOPTIONS         21
+#define PTRACE_OLDSETOPTIONS         21
 
-/* options set using PTRACE_SETOPTIONS */
-#define PTRACE_O_TRACESYSGOOD     0x00000001
+#define PTRACE_GET_THREAD_AREA    25
+#define PTRACE_SET_THREAD_AREA    26
 
 #ifdef __KERNEL__
+struct task_struct;
+extern void send_sigtrap(struct task_struct *tsk, struct pt_regs *regs, int error_code);
 #define user_mode(regs) ((VM_MASK & (regs)->eflags) || (3 & (regs)->xcs))
 #define instruction_pointer(regs) ((regs)->eip)
-extern void show_regs(struct pt_regs *);
+#if defined(CONFIG_SMP) && defined(CONFIG_FRAME_POINTER)
+extern unsigned long profile_pc(struct pt_regs *regs);
+#else
+#define profile_pc(regs) instruction_pointer(regs)
+#endif
 #endif
 
 #endif

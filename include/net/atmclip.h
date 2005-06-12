@@ -44,7 +44,7 @@ struct atmarp_entry {
 };
 
 
-#define PRIV(dev) ((struct clip_priv *) ((struct net_device *) (dev)+1))
+#define PRIV(dev) ((struct clip_priv *) netdev_priv(dev))
 
 
 struct clip_priv {
@@ -55,13 +55,8 @@ struct clip_priv {
 };
 
 
-extern struct atm_vcc *atmarpd; /* ugly */
-extern struct neigh_table clip_tbl;
-
-int clip_create(int number);
-int clip_mkip(struct atm_vcc *vcc,int timeout);
-int clip_setentry(struct atm_vcc *vcc,u32 ip);
-int clip_encap(struct atm_vcc *vcc,int mode);
-void atm_clip_init(void);
+#ifdef __KERNEL__
+extern struct neigh_table *clip_tbl_hook;
+#endif
 
 #endif

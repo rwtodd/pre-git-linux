@@ -29,11 +29,12 @@ struct ip_tunnel
 	int err;							\
 	int pkt_len = skb->len;						\
 									\
+	skb->ip_summed = CHECKSUM_NONE;					\
 	iph->tot_len = htons(skb->len);					\
-	ip_select_ident(iph, &rt->u.dst);				\
+	ip_select_ident(iph, &rt->u.dst, NULL);				\
 	ip_send_check(iph);						\
 									\
-	err = NF_HOOK(PF_INET, NF_IP_LOCAL_OUT, skb, NULL, rt->u.dst.dev, do_ip_send); \
+	err = NF_HOOK(PF_INET, NF_IP_LOCAL_OUT, skb, NULL, rt->u.dst.dev, dst_output);\
 	if (err == NET_XMIT_SUCCESS || err == NET_XMIT_CN) {		\
 		stats->tx_bytes += pkt_len;				\
 		stats->tx_packets++;					\
@@ -44,8 +45,6 @@ struct ip_tunnel
 } while (0)
 
 
-extern int	ipip_init(void);
-extern int	ipgre_init(void);
 extern int	sit_init(void);
 extern void	sit_cleanup(void);
 

@@ -1,6 +1,6 @@
 /*
  *   I use these routines just to decide when I have to fake a 
- *   volume-table to preserve compatability to original ftape.
+ *   volume-table to preserve compatibility to original ftape.
  */
 /*
  *      Copyright (C) 1994-1995 Bas Laarhoven.
@@ -123,7 +123,7 @@ static __u8 * find_end_of_eof_list(__u8 * ptr, __u8 * limit)
 	while (ptr + 3 < limit) {
 
 		if (get_unaligned((__u32*)ptr)) {
-			++(__u32*)ptr;
+			ptr += sizeof(__u32);
 		} else {
 			return ptr;
 		}

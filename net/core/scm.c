@@ -9,6 +9,7 @@
  *		2 of the License, or (at your option) any later version.
  */
 
+#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -22,17 +23,15 @@
 #include <linux/net.h>
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
+#include <linux/security.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
-#include <linux/inet.h>
-#include <net/ip.h>
 #include <net/protocol.h>
-#include <net/tcp.h>
-#include <net/udp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
+#include <net/compat.h>
 #include <net/scm.h>
 
 
@@ -43,7 +42,7 @@
 
 static __inline__ int scm_check_creds(struct ucred *creds)
 {
-	if ((creds->pid == current->pid || capable(CAP_SYS_ADMIN)) &&
+	if ((creds->pid == current->tgid || capable(CAP_SYS_ADMIN)) &&
 	    ((creds->uid == current->uid || creds->uid == current->euid ||
 	      creds->uid == current->suid) || capable(CAP_SETUID)) &&
 	    ((creds->gid == current->gid || creds->gid == current->egid ||
@@ -128,9 +127,7 @@ int __scm_send(struct socket *sock, struct msghdr *msg, struct scm_cookie *p)
 		   for too short ancillary data object at all! Oops.
 		   OK, let's add it...
 		 */
-		if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
-		    (unsigned long)(((char*)cmsg - (char*)msg->msg_control)
-				    + cmsg->cmsg_len) > msg->msg_controllen)
+		if (!CMSG_OK(msg, cmsg))
 			goto error;
 
 		if (cmsg->cmsg_level != SOL_SOCKET)
@@ -170,10 +167,13 @@ error:
 
 int put_cmsg(struct msghdr * msg, int level, int type, int len, void *data)
 {
-	struct cmsghdr *cm = (struct cmsghdr*)msg->msg_control;
+	struct cmsghdr __user *cm = (struct cmsghdr __user *)msg->msg_control;
 	struct cmsghdr cmhdr;
 	int cmlen = CMSG_LEN(len);
 	int err;
+
+	if (MSG_CMSG_COMPAT & msg->msg_flags)
+		return put_cmsg_compat(msg, level, type, len, data);
 
 	if (cm==NULL || msg->msg_controllen < sizeof(*cm)) {
 		msg->msg_flags |= MSG_CTRUNC;
@@ -202,13 +202,18 @@ out:
 
 void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 {
-	struct cmsghdr *cm = (struct cmsghdr*)msg->msg_control;
+	struct cmsghdr __user *cm = (struct cmsghdr __user*)msg->msg_control;
 
 	int fdmax = 0;
 	int fdnum = scm->fp->count;
 	struct file **fp = scm->fp->fp;
-	int *cmfptr;
+	int __user *cmfptr;
 	int err = 0, i;
+
+	if (MSG_CMSG_COMPAT & msg->msg_flags) {
+		scm_detach_fds_compat(msg, scm);
+		return;
+	}
 
 	if (msg->msg_controllen > sizeof(struct cmsghdr))
 		fdmax = ((msg->msg_controllen - sizeof(struct cmsghdr))
@@ -217,9 +222,12 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 	if (fdnum < fdmax)
 		fdmax = fdnum;
 
-	for (i=0, cmfptr=(int*)CMSG_DATA(cm); i<fdmax; i++, cmfptr++)
+	for (i=0, cmfptr=(int __user *)CMSG_DATA(cm); i<fdmax; i++, cmfptr++)
 	{
 		int new_fd;
+		err = security_file_receive(fp[i]);
+		if (err)
+			break;
 		err = get_unused_fd();
 		if (err < 0)
 			break;
@@ -275,3 +283,9 @@ struct scm_fp_list *scm_fp_dup(struct scm_fp_list *fpl)
 	}
 	return new_fpl;
 }
+
+EXPORT_SYMBOL(__scm_destroy);
+EXPORT_SYMBOL(__scm_send);
+EXPORT_SYMBOL(put_cmsg);
+EXPORT_SYMBOL(scm_detach_fds);
+EXPORT_SYMBOL(scm_fp_dup);

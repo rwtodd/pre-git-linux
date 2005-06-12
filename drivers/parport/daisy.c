@@ -19,11 +19,15 @@
  * published by the Free Software Foundation.
  */
 
+#include <linux/module.h>
 #include <linux/parport.h>
 #include <linux/delay.h>
+#include <linux/sched.h>
+
+#include <asm/current.h>
 #include <asm/uaccess.h>
 
-#define DEBUG /* undef me for production */
+#undef DEBUG
 
 #ifdef DEBUG
 #define DPRINTK(stuff...) printk (stuff)
@@ -37,6 +41,7 @@ static struct daisydev {
 	int daisy;
 	int devnum;
 } *topology = NULL;
+static DEFINE_SPINLOCK(topology_lock);
 
 static int numdevs = 0;
 
@@ -49,22 +54,18 @@ static int assign_addrs (struct parport *port);
 /* Add a device to the discovered topology. */
 static void add_dev (int devnum, struct parport *port, int daisy)
 {
-	struct daisydev *newdev;
+	struct daisydev *newdev, **p;
 	newdev = kmalloc (sizeof (struct daisydev), GFP_KERNEL);
 	if (newdev) {
 		newdev->port = port;
 		newdev->daisy = daisy;
 		newdev->devnum = devnum;
-		newdev->next = topology;
-		if (!topology || topology->devnum >= devnum)
-			topology = newdev;
-		else {
-			struct daisydev *prev = topology;
-			while (prev->next && prev->next->devnum < devnum)
-				prev = prev->next;
-			newdev->next = prev->next;
-			prev->next = newdev;
-		}
+		spin_lock(&topology_lock);
+		for (p = &topology; *p && (*p)->devnum<devnum; p = &(*p)->next)
+			;
+		newdev->next = *p;
+		*p = newdev;
+		spin_unlock(&topology_lock);
 	}
 }
 
@@ -79,6 +80,7 @@ static struct parport *clone_parport (struct parport *real, int muxport)
 		extra->portnum = real->portnum;
 		extra->physport = real;
 		extra->muxport = muxport;
+		real->slaves[muxport-1] = extra;
 	}
 
 	return extra;
@@ -93,7 +95,9 @@ int parport_daisy_init (struct parport *port)
 	static const char *th[] = { /*0*/"th", "st", "nd", "rd", "th" };
 	int num_ports;
 	int i;
+	int last_try = 0;
 
+again:
 	/* Because this is called before any other devices exist,
 	 * we don't have to claim exclusive access.  */
 
@@ -126,7 +130,7 @@ int parport_daisy_init (struct parport *port)
 			/* Analyse that port too.  We won't recurse
 			   forever because of the 'port->muxport < 0'
 			   test above. */
-			parport_announce_port (extra);
+			parport_daisy_init(extra);
 		}
 	}
 
@@ -148,32 +152,46 @@ int parport_daisy_init (struct parport *port)
 		kfree (deviceid);
 	}
 
+	if (!detected && !last_try) {
+		/* No devices were detected.  Perhaps they are in some
+                   funny state; let's try to reset them and see if
+                   they wake up. */
+		parport_daisy_fini (port);
+		parport_write_control (port, PARPORT_CONTROL_SELECT);
+		udelay (50);
+		parport_write_control (port,
+				       PARPORT_CONTROL_SELECT |
+				       PARPORT_CONTROL_INIT);
+		udelay (50);
+		last_try = 1;
+		goto again;
+	}
+
 	return detected;
 }
 
 /* Forget about devices on a physical port. */
 void parport_daisy_fini (struct parport *port)
 {
-	struct daisydev *dev, *prev = topology;
-	while (prev && prev->port == port) {
-		topology = topology->next;
-		kfree (prev);
-		prev = topology;
-	}
+	struct daisydev **p;
 
-	while (prev) {
-		dev = prev->next;
-		if (dev && dev->port == port) {
-			prev->next = dev->next;
-			kfree (dev);
+	spin_lock(&topology_lock);
+	p = &topology;
+	while (*p) {
+		struct daisydev *dev = *p;
+		if (dev->port != port) {
+			p = &dev->next;
+			continue;
 		}
-		prev = prev->next;
+		*p = dev->next;
+		kfree(dev);
 	}
 
 	/* Gaps in the numbering could be handled better.  How should
            someone enumerate through all IEEE1284.3 devices in the
            topology?. */
 	if (!topology) numdevs = 0;
+	spin_unlock(&topology_lock);
 	return;
 }
 
@@ -189,8 +207,7 @@ void parport_daisy_fini (struct parport *port)
  *
  *	This function is similar to parport_register_device(), except
  *	that it locates a device by its number rather than by the port
- *	it is attached to.  See parport_find_device() and
- *	parport_find_class().
+ *	it is attached to.
  *
  *	All parameters except for @devnum are the same as for
  *	parport_register_device().  The return value is the same as
@@ -202,30 +219,34 @@ struct pardevice *parport_open (int devnum, const char *name,
 				void (*irqf) (int, void *, struct pt_regs *),
 				int flags, void *handle)
 {
-	struct parport *port = parport_enumerate ();
+	struct daisydev *p = topology;
+	struct parport *port;
 	struct pardevice *dev;
-	int portnum;
-	int muxnum;
-	int daisynum;
+	int daisy;
 
-	if (parport_device_coords (devnum,  &portnum, &muxnum, &daisynum))
+	spin_lock(&topology_lock);
+	while (p && p->devnum != devnum)
+		p = p->next;
+
+	if (!p) {
+		spin_unlock(&topology_lock);
 		return NULL;
+	}
 
-	while (port && ((port->portnum != portnum) ||
-			(port->muxport != muxnum)))
-		port = port->next;
-
-	if (!port)
-		/* No corresponding parport. */
-		return NULL;
+	daisy = p->daisy;
+	port = parport_get_port(p->port);
+	spin_unlock(&topology_lock);
 
 	dev = parport_register_device (port, name, pf, kf,
 				       irqf, flags, handle);
-	if (dev)
-		dev->daisy = daisynum;
+	parport_put_port(port);
+	if (!dev)
+		return NULL;
+
+	dev->daisy = daisy;
 
 	/* Check that there really is a device to select. */
-	if (daisynum >= 0) {
+	if (daisy >= 0) {
 		int selected;
 		parport_claim_or_block (dev);
 		selected = port->daisy;
@@ -268,57 +289,19 @@ void parport_close (struct pardevice *dev)
 
 int parport_device_num (int parport, int mux, int daisy)
 {
-	struct daisydev *dev = topology;
+	int res = -ENXIO;
+	struct daisydev *dev;
 
+	spin_lock(&topology_lock);
+	dev = topology;
 	while (dev && dev->port->portnum != parport &&
 	       dev->port->muxport != mux && dev->daisy != daisy)
 		dev = dev->next;
+	if (dev)
+		res = dev->devnum;
+	spin_unlock(&topology_lock);
 
-	if (!dev)
-		return -ENXIO;
-
-	return dev->devnum;
-}
-
-/**
- *	parport_device_coords - convert canonical device number
- *	@devnum: device number
- *	@parport: pointer to storage for parallel port number
- *	@mux: pointer to storage for multiplexor port number
- *	@daisy: pointer to storage for daisy chain address
- *
- *	This function converts a device number into its coordinates in
- *	terms of which parallel port in the system it is attached to,
- *	which multiplexor port it is attached to if there is a
- *	multiplexor on that port, and which daisy chain address it has
- *	if it is in a daisy chain.
- *
- *	The caller must allocate storage for @parport, @mux, and
- *	@daisy.
- *
- *	If there is no device with the specified device number, -ENXIO
- *	is returned.  Otherwise, the values pointed to by @parport,
- *	@mux, and @daisy are set to the coordinates of the device,
- *	with -1 for coordinates with no value.
- *
- *	This function is not actually very useful, but this interface
- *	was suggested by IEEE 1284.3.
- **/
-
-int parport_device_coords (int devnum, int *parport, int *mux, int *daisy)
-{
-	struct daisydev *dev = topology;
-
-	while (dev && dev->devnum != devnum)
-		dev = dev->next;
-
-	if (!dev)
-		return -ENXIO;
-
-	if (parport) *parport = dev->port->portnum;
-	if (mux) *mux = dev->port->muxport;
-	if (daisy) *daisy = dev->daisy;
-	return 0;
+	return res;
 }
 
 /* Send a daisy-chain-style CPP command packet. */
@@ -406,8 +389,33 @@ void parport_daisy_deselect_all (struct parport *port)
 
 int parport_daisy_select (struct parport *port, int daisy, int mode)
 {
-	/* mode is currently ignored. FIXME? */
-	return cpp_daisy (port, 0xe0 + daisy) & PARPORT_STATUS_ERROR;
+	switch (mode)
+	{
+		// For these modes we should switch to EPP mode:
+		case IEEE1284_MODE_EPP:
+		case IEEE1284_MODE_EPPSL:
+		case IEEE1284_MODE_EPPSWE:
+			return (cpp_daisy (port, 0x20 + daisy) &
+				PARPORT_STATUS_ERROR);
+
+		// For these modes we should switch to ECP mode:
+		case IEEE1284_MODE_ECP:
+		case IEEE1284_MODE_ECPRLE:
+		case IEEE1284_MODE_ECPSWE: 
+			return (cpp_daisy (port, 0xd0 + daisy) &
+				PARPORT_STATUS_ERROR);
+
+		// Nothing was told for BECP in Daisy chain specification.
+		// May be it's wise to use ECP?
+		case IEEE1284_MODE_BECP:
+		// Others use compat mode
+		case IEEE1284_MODE_NIBBLE:
+		case IEEE1284_MODE_BYTE:
+		case IEEE1284_MODE_COMPAT:
+		default:
+			return (cpp_daisy (port, 0xe0 + daisy) &
+				PARPORT_STATUS_ERROR);
+	}
 }
 
 static int mux_present (struct parport *port)
@@ -501,90 +509,4 @@ static int assign_addrs (struct parport *port)
 
 	kfree (deviceid);
 	return detected;
-}
-
-/* Find a device with a particular manufacturer and model string,
-   starting from a given device number.  Like the PCI equivalent,
-   'from' itself is skipped. */
-
-/**
- *	parport_find_device - find a specific device
- *	@mfg: required manufacturer string
- *	@mdl: required model string
- *	@from: previous device number found in search, or %NULL for
- *	       new search
- *
- *	This walks through the list of parallel port devices looking
- *	for a device whose 'MFG' string matches @mfg and whose 'MDL'
- *	string matches @mdl in their IEEE 1284 Device ID.
- *
- *	When a device is found matching those requirements, its device
- *	number is returned; if there is no matching device, a negative
- *	value is returned.
- *
- *	A new search it initiated by passing %NULL as the @from
- *	argument.  If @from is not %NULL, the search continues from
- *	that device.
- **/
-
-int parport_find_device (const char *mfg, const char *mdl, int from)
-{
-	struct daisydev *d = topology; /* sorted by devnum */
-
-	/* Find where to start. */
-	while (d && d->devnum <= from)
-		d = d->next;
-
-	/* Search. */
-	while (d) {
-		struct parport_device_info *info;
-		info = &d->port->probe_info[1 + d->daisy];
-		if ((!mfg || !strcmp (mfg, info->mfr)) &&
-		    (!mdl || !strcmp (mdl, info->model)))
-			break;
-
-		d = d->next;
-	}
-
-	if (d)
-		return d->devnum;
-
-	return -1;
-}
-
-/**
- *	parport_find_class - find a device in a specified class
- *	@cls: required class
- *	@from: previous device number found in search, or %NULL for
- *	       new search
- *
- *	This walks through the list of parallel port devices looking
- *	for a device whose 'CLS' string matches @cls in their IEEE
- *	1284 Device ID.
- *
- *	When a device is found matching those requirements, its device
- *	number is returned; if there is no matching device, a negative
- *	value is returned.
- *
- *	A new search it initiated by passing %NULL as the @from
- *	argument.  If @from is not %NULL, the search continues from
- *	that device.
- **/
-
-int parport_find_class (parport_device_class cls, int from)
-{
-	struct daisydev *d = topology; /* sorted by devnum */
-
-	/* Find where to start. */
-	while (d && d->devnum <= from)
-		d = d->next;
-
-	/* Search. */
-	while (d && d->port->probe_info[1 + d->daisy].class != cls)
-		d = d->next;
-
-	if (d)
-		return d->devnum;
-
-	return -1;
 }

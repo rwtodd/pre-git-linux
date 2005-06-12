@@ -1,6 +1,8 @@
 #ifndef _M68K_CHECKSUM_H
 #define _M68K_CHECKSUM_H
 
+#include <linux/in6.h>
+
 /*
  * computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit)
@@ -23,21 +25,14 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
  * better 64-bit) boundary
  */
 
-unsigned int csum_partial_copy(const char *src, char *dst, int len, int sum);
+extern unsigned int csum_partial_copy_from_user(const unsigned char *src,
+						unsigned char *dst,
+						int len, int sum,
+						int *csum_err);
 
-
-/*
- * the same as csum_partial_copy, but copies from user space.
- *
- * here even more important to align src and dst on a 32-bit (or even
- * better 64-bit) boundary
- */
-
-extern unsigned int csum_partial_copy_from_user(const char *src, char *dst,
-						int len, int sum, int *csum_err);
-
-#define csum_partial_copy_nocheck(src, dst, len, sum)	\
-	csum_partial_copy((src), (dst), (len), (sum))
+extern unsigned int csum_partial_copy_nocheck(const unsigned char *src,
+					      unsigned char *dst, int len,
+					      int sum);
 
 /*
  *	This is a version of ip_compute_csum() optimized for IP headers,
@@ -123,7 +118,7 @@ ip_compute_csum(unsigned char * buff, int len)
 #define _HAVE_ARCH_IPV6_CSUM
 static __inline__ unsigned short int
 csum_ipv6_magic(struct in6_addr *saddr, struct in6_addr *daddr,
-		__u32 len, unsigned short proto, unsigned int sum) 
+		__u32 len, unsigned short proto, unsigned int sum)
 {
 	register unsigned long tmp;
 	__asm__("addl %2@,%0\n\t"

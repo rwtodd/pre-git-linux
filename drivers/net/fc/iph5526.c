@@ -37,27 +37,26 @@ static const char *version =
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/timer.h>
 #include <linux/spinlock.h>
+#include <linux/netdevice.h>
+#include <linux/fcdevice.h> /* had the declarations for init_fcdev among
+			       others + includes if_fcdevice.h */
+
+#include "../../scsi/scsi.h"
+#include <scsi/scsi_host.h>
+#include "../../fc4/fcp.h"
+
 #include <asm/system.h>
 #include <asm/io.h>
-
-#include <linux/netdevice.h>
-#include <linux/fcdevice.h> /* had the declarations for init_fcdev among others + includes if_fcdevice.h */
-
-#include <linux/blk.h>
-#include "../../scsi/sd.h"
-#include "../../scsi/scsi.h"
-#include "../../scsi/hosts.h"
-#include "../../fc4/fcp.h"
 
 /* driver specific header files */
 #include "tach.h"
@@ -111,12 +110,14 @@ static const char *version =
 #define ALIGNED_ADDR(addr, len) ((((unsigned long)(addr) + (len - 1)) & ~(len - 1)) - (unsigned long)(addr))
 
 
-static struct pci_device_id iph5526_pci_tbl[] __initdata = {
+static struct pci_device_id iph5526_pci_tbl[] = {
 	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_5526, PCI_ANY_ID, PCI_ANY_ID, },
 	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_55x6, PCI_ANY_ID, PCI_ANY_ID, },
 	{ }			/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(pci, iph5526_pci_tbl);
+
+MODULE_LICENSE("GPL");
 
 #define MAX_FC_CARDS 2
 static struct fc_info *fc[MAX_FC_CARDS+1];
@@ -132,7 +133,7 @@ clone_list[] __initdata  = {
 	{0,}
 };
 
-static void tachyon_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t tachyon_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void tachyon_interrupt_handler(int irq, void* dev_id, struct pt_regs* regs);
 
 static int initialize_register_pointers(struct fc_info *fi);
@@ -222,7 +223,7 @@ static void flush_tachyon_cache(struct fc_info *fi, u_short ox_id);
 static int get_scsi_oxid(struct fc_info *fi);
 static void update_scsi_oxid(struct fc_info *fi);
 
-Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
+static Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
 
 static void iph5526_timeout(struct net_device *dev);
 
@@ -230,53 +231,35 @@ static int iph5526_probe_pci(struct net_device *dev);
 
 int __init iph5526_probe(struct net_device *dev)
 {
-	if (pci_present() && (iph5526_probe_pci(dev) == 0))
+	if (iph5526_probe_pci(dev) == 0)
 		return 0;
-    return -ENODEV;
+	return -ENODEV;
 }
 
 static int __init iph5526_probe_pci(struct net_device *dev)
 {
-#ifdef MODULE
-	struct fc_info *fi = (struct fc_info *)dev->priv;
-#else
-	struct fc_info *fi;
-	static int count = 0;
- 
-	if(fc[count] != NULL) {
-		if (dev == NULL) {
-			dev = init_fcdev(NULL, 0);
-			if (dev == NULL)
-				return -ENOMEM;
-		}
-		fi = fc[count];
-#endif
-		fi->dev = dev;
-		dev->base_addr = fi->base_addr;
-		dev->irq = fi->irq;
-		if (dev->priv == NULL) 
-			dev->priv = fi; 
-		fcdev_init(dev);
-		/* Assign ur MAC address.
-		 */
-		dev->dev_addr[0] = (fi->g.my_port_name_high & 0x0000FF00) >> 8;
-		dev->dev_addr[1] = fi->g.my_port_name_high;
-		dev->dev_addr[2] = (fi->g.my_port_name_low & 0xFF000000) >> 24;
-		dev->dev_addr[3] = (fi->g.my_port_name_low & 0x00FF0000) >> 16;
-		dev->dev_addr[4] = (fi->g.my_port_name_low & 0x0000FF00) >> 8;
-		dev->dev_addr[5] = fi->g.my_port_name_low;
-#ifndef MODULE
-		count++;
-	}
-	else
-		return -ENODEV;
-#endif
+	struct fc_info *fi = dev->priv;
+	fi->dev = dev;
+	dev->base_addr = fi->base_addr;
+	dev->irq = fi->irq;
+	if (dev->priv == NULL) 
+		dev->priv = fi; 
+	fcdev_init(dev);
+	/* Assign ur MAC address.
+	 */
+	dev->dev_addr[0] = (fi->g.my_port_name_high & 0x0000FF00) >> 8;
+	dev->dev_addr[1] = fi->g.my_port_name_high;
+	dev->dev_addr[2] = (fi->g.my_port_name_low & 0xFF000000) >> 24;
+	dev->dev_addr[3] = (fi->g.my_port_name_low & 0x00FF0000) >> 16;
+	dev->dev_addr[4] = (fi->g.my_port_name_low & 0x0000FF00) >> 8;
+	dev->dev_addr[5] = fi->g.my_port_name_low;
 	display_cache(fi);
 	return 0;
 }
 
 static int __init fcdev_init(struct net_device *dev)
 {
+	SET_MODULE_OWNER(dev);
 	dev->open = iph5526_open;
 	dev->stop = iph5526_close;
 	dev->hard_start_xmit = iph5526_send_packet;
@@ -285,9 +268,6 @@ static int __init fcdev_init(struct net_device *dev)
 	dev->change_mtu = iph5526_change_mtu; 
 	dev->tx_timeout = iph5526_timeout;
 	dev->watchdog_timeo = 5*HZ;
-#ifndef MODULE
-	fc_setup(dev);
-#endif
 	return 0;
 }
 
@@ -497,7 +477,7 @@ u_char *addr;
 		fi->q.ptr_tachyon_header[i] = fi->q.ptr_tachyon_header_base + 16*i;
 	
 	/* Allocate memory for indices.
-	 * Indices should be aligned on 32 byte boundries. 
+	 * Indices should be aligned on 32 byte boundaries. 
 	 */
 	fi->q.host_ocq_cons_indx = kmalloc(2*32, GFP_KERNEL);
 	if (fi->q.host_ocq_cons_indx == NULL){ 
@@ -621,7 +601,7 @@ u_int bus_addr, bus_indx_addr, i;
 }
 
 
-static void tachyon_interrupt(int irq, void* dev_id, struct pt_regs* regs)
+static irqreturn_t tachyon_interrupt(int irq, void* dev_id, struct pt_regs* regs)
 {
 struct Scsi_Host *host = dev_id;
 struct iph5526_hostdata *hostdata = (struct iph5526_hostdata *)host->hostdata;
@@ -630,6 +610,7 @@ u_long flags;
 	spin_lock_irqsave(&fi->fc_lock, flags);
 	tachyon_interrupt_handler(irq, dev_id, regs);
 	spin_unlock_irqrestore(&fi->fc_lock, flags);
+	return IRQ_HANDLED;
 }
 
 static void tachyon_interrupt_handler(int irq, void* dev_id, struct pt_regs* regs)
@@ -687,8 +668,8 @@ int index, no_of_entries = 0;
 			prev_IMQ_index = current_IMQ_index;
 		}
 	} /*end of for loop*/		
-	return;
 	LEAVE("tachyon_interrupt");
+       return;
 }
 
 
@@ -746,7 +727,7 @@ int index, no_of_entries = 0;
 	else
 		if (current_IMQ_index < fi->q.imq_cons_indx)
 			no_of_entries = IMQ_LENGTH - (fi->q.imq_cons_indx - current_IMQ_index);
-	/* We dont want to look at the same IMQ entry again. 
+	/* We don't want to look at the same IMQ entry again. 
 	 */
 	temp_imq_cons_indx = fi->q.imq_cons_indx + 1;
 	if (no_of_entries != 0)
@@ -1074,11 +1055,11 @@ int wrap_around = FALSE, no_of_wrap_buffs = NO_OF_ENTRIES - 1;
 			fi->fc_stats.rx_dropped++;
 			fi->g.mfs_buffer_count += no_of_buffers;
 			if (fi->g.mfs_buffer_count >= NO_OF_ENTRIES) {
-			int count = fi->g.mfs_buffer_count / NO_OF_ENTRIES;
+				int count = fi->g.mfs_buffer_count / NO_OF_ENTRIES;
 				fi->g.mfs_buffer_count -= NO_OF_ENTRIES * count;
 				update_MFSBQ_indx(fi, count);
-				return;
 			}
+			return;
 		}
 		if (wrap_around) {
 		int wrap_size = no_of_wrap_buffs * MFS_BUFFER_SIZE;
@@ -1930,7 +1911,7 @@ u_int tachyon_status;
 		fi->g.name_server = FALSE;
 		fi->g.alpa_list_index = 0;
 		fi->g.ox_id = NOT_SCSI_XID;
-		fi->g.my_mtu = FRAME_SIZE;
+		fi->g.my_mtu = TACH_FRAME_SIZE;
 		
 		/* Implicitly LOGO with all logged-in nodes. 
 		 */
@@ -2261,7 +2242,7 @@ u_int r_ctl = RCTL_ELS_UCTL;
 u_int type  = TYPE_ELS | SEQUENCE_INITIATIVE | FIRST_SEQUENCE;
 u_int my_mtu = fi->g.my_mtu;
 	ENTER("tx_logi");
-	/* We dont want interrupted for our own logi. 
+	/* We don't want interrupted for our own logi. 
 	 * It screws up the port discovery process. 
 	 */
 	if (d_id == fi->g.my_id)
@@ -2565,7 +2546,7 @@ int count = 0;
 	}
 	/* Perform Port Discovery after timer expires.
 	 * We are giving time for the ADISCed nodes to respond
-	 * so that we dont have to perform PLOGI to those whose
+	 * so that we don't have to perform PLOGI to those whose
 	 * login are _still_ valid.
 	 */
 	fi->explore_timer.function = port_discovery_timer;
@@ -2809,7 +2790,7 @@ int i;
 	else
 	if (logi == ELS_FLOGI)
 		fi->g.login.common_features = htons(FLOGI_C_F);
-	fi->g.login.recv_data_field_size = htons(FRAME_SIZE);
+	fi->g.login.recv_data_field_size = htons(TACH_FRAME_SIZE);
 	fi->g.login.n_port_total_conc_seq = htons(CONCURRENT_SEQUENCES);
 	fi->g.login.rel_off_by_info_cat = htons(RO_INFO_CATEGORY);
 	fi->g.login.ED_TOV = htonl(E_D_TOV);
@@ -2845,7 +2826,7 @@ int i;
 		fi->g.login.c_of_s[2].service_options  = htons(SERVICE_VALID);
 	fi->g.login.c_of_s[2].initiator_ctl = htons(0);
 	fi->g.login.c_of_s[2].recipient_ctl = htons(0);
-	fi->g.login.c_of_s[2].recv_data_field_size = htons(FRAME_SIZE);
+	fi->g.login.c_of_s[2].recv_data_field_size = htons(TACH_FRAME_SIZE);
 	fi->g.login.c_of_s[2].concurrent_sequences = htons(CLASS3_CONCURRENT_SEQUENCE);
 	fi->g.login.c_of_s[2].n_port_end_to_end_credit = htons(0);
 	fi->g.login.c_of_s[2].open_seq_per_exchange = htons(CLASS3_OPEN_SEQUENCE);
@@ -2916,29 +2897,27 @@ static void update_EDB_indx(struct fc_info *fi)
 static int iph5526_open(struct net_device *dev)
 {
 	netif_start_queue(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int iph5526_close(struct net_device *dev)
 {
 	netif_stop_queue(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static void iph5526_timeout(struct net_device *dev)
 {
-	struct fc_info *fi = (struct fc_info*)dev->priv;
+	struct fc_info *fi = dev->priv;
 	printk(KERN_WARNING "%s: timed out on send.\n", dev->name);
-	fi->fc_stats.rx_dropped++;
+	fi->fc_stats.tx_dropped++;
 	dev->trans_start = jiffies;
 	netif_wake_queue(dev);
 }
 
 static int iph5526_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct fc_info *fi = (struct fc_info*)dev->priv;
+	struct fc_info *fi = dev->priv;
 	int status = 0;
 	short type = 0;
 	u_long flags;
@@ -2974,7 +2953,7 @@ static int iph5526_send_packet(struct sk_buff *skb, struct net_device *dev)
 		fi->fc_stats.tx_packets++;
 	}
 	else
-		fi->fc_stats.rx_dropped++;
+		fi->fc_stats.tx_dropped++;
 	dev->trans_start = jiffies;
 	/* We free up the IP buffers in the OCI_interrupt handler.
 	 * status == 0 implies that the frame was not transmitted. So the
@@ -2982,8 +2961,7 @@ static int iph5526_send_packet(struct sk_buff *skb, struct net_device *dev)
 	 */
 	if ((type == ETH_P_ARP) || (status == 0))
 		dev_kfree_skb(skb);
-	else
-		netif_wake_queue(dev);
+	netif_wake_queue(dev);
 	LEAVE("iph5526_send_packet");
 	return 0;
 }
@@ -3148,6 +3126,7 @@ struct fch_hdr fch;
 	if (skb->protocol == ntohs(ETH_P_ARP))
 		skb->data[1] = 0x06;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	fi->fc_stats.rx_packets++;
 	LEAVE("rx_net_packet");
 }
@@ -3168,39 +3147,8 @@ struct fch_hdr fch;
 	skb->protocol = fc_type_trans(skb, dev);
 	DPRINTK("protocol = %x", skb->protocol);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	LEAVE("rx_net_mfs_packet");
-}
-
-unsigned short fc_type_trans(struct sk_buff *skb, struct net_device *dev) 
-{
-struct fch_hdr *fch=(struct fch_hdr *)skb->data;
-struct fcllc *fcllc;
-	skb->mac.raw = skb->data;
-	fcllc = (struct fcllc *)(skb->data + sizeof(struct fch_hdr) + 2);
-	skb_pull(skb,sizeof(struct fch_hdr) + 2);
-
-	if(*fch->daddr & 1) {
-		if(!memcmp(fch->daddr,dev->broadcast,FC_ALEN)) 	
-			skb->pkt_type = PACKET_BROADCAST;
-		else
-			skb->pkt_type = PACKET_MULTICAST;
-	}
-	else if(dev->flags & IFF_PROMISC) {
-		if(memcmp(fch->daddr, dev->dev_addr, FC_ALEN))
-			skb->pkt_type=PACKET_OTHERHOST;
-	}
-	
-	/* Strip the SNAP header from ARP packets since we don't 
-	 * pass them through to the 802.2/SNAP layers.
-	 */
-
-	if (fcllc->dsap == EXTENDED_SAP &&
-		(fcllc->ethertype == ntohs(ETH_P_IP) ||
-		 fcllc->ethertype == ntohs(ETH_P_ARP))) {
-		skb_pull(skb, sizeof(struct fcllc));
-		return fcllc->ethertype;
-	}
-	return ntohs(ETH_P_802_2);
 }
 
 static int tx_exchange(struct fc_info *fi, char *data, u_int len, u_int r_ctl, u_int type, u_int d_id, u_int mtu, int int_required, u_short tx_ox_id, u_int frame_class)
@@ -3403,8 +3351,8 @@ u_int s_id;
 		q = q->next;
 	}
 	DPRINTK1("Port Name does not match. Txing LOGO.");
-	return 0;
 	LEAVE("validate_login");
+       return 0;
 }
 
 static void add_to_address_cache(struct fc_info *fi, u_int *base_ptr)
@@ -3523,7 +3471,7 @@ u_int s_id;
 						/* There might be some new nodes to be 
 						 * discovered. But, some of the earlier 
 						 * requests as a result of the RSCN might be 
-						 * in progress. We dont want to duplicate that 
+						 * in progress. We don't want to duplicate that 
 						 * effort. So letz call SCR after a lag.
 						 */
 						fi->explore_timer.function = scr_timer;
@@ -3740,7 +3688,7 @@ int count = 0, j;
 
 static struct net_device_stats * iph5526_get_stats(struct net_device *dev)
 {	
-struct fc_info *fi = (struct fc_info*)dev->priv; 
+struct fc_info *fi = dev->priv;
 	return (struct net_device_stats *) &fi->fc_stats;
 }
 
@@ -3749,23 +3697,20 @@ struct fc_info *fi = (struct fc_info*)dev->priv;
 
 int iph5526_detect(Scsi_Host_Template *tmpt)
 {
-struct Scsi_Host *host = NULL;
-struct iph5526_hostdata *hostdata;
-struct fc_info *fi = NULL;
-int no_of_hosts = 0, timeout, i, j, count = 0;
-u_int pci_maddr = 0;
-struct pci_dev *pdev = NULL;
+	struct Scsi_Host *host = NULL;
+	struct iph5526_hostdata *hostdata;
+	struct fc_info *fi = NULL;
+	int no_of_hosts = 0, i, j, count = 0;
+	u_int pci_maddr = 0;
+	struct pci_dev *pdev = NULL;
+	unsigned long timeout;
 
 	tmpt->proc_name = "iph5526";
-	if (pci_present() == 0) {
-		printk("iph5526: PCI not present\n");
-		return 0;
-	}
 
 	for (i = 0; i <= MAX_FC_CARDS; i++) 
 		fc[i] = NULL;
 
-	for (i = 0; i < clone_list[i].vendor_id != 0; i++)
+	for (i = 0; clone_list[i].vendor_id != 0; i++)
 	while ((pdev = pci_find_device(clone_list[i].vendor_id, clone_list[i].device_id, pdev))) {
 		unsigned short pci_command;
 		if (pci_enable_device(pdev))
@@ -3787,8 +3732,10 @@ struct pci_dev *pdev = NULL;
 		sprintf(fi->name, "fc%d", count);
 
 		host = scsi_register(tmpt, sizeof(struct iph5526_hostdata));
-		if(host==NULL)
+		if(host==NULL) {
+			kfree(fc[count]);
 			return no_of_hosts;
+		}
 			
 		hostdata = (struct iph5526_hostdata *)host->hostdata;
 		memset(hostdata, 0 , sizeof(struct iph5526_hostdata));
@@ -3798,7 +3745,6 @@ struct pci_dev *pdev = NULL;
 		fi->host = host;
 		//host->max_id = MAX_SCSI_TARGETS;
 		host->max_id = 5;
-		host->hostt->use_new_eh_code = 1;
 		host->this_id = tmpt->this_id;
 
 		pci_maddr = pci_resource_start(pdev, 0);
@@ -3867,8 +3813,11 @@ struct pci_dev *pdev = NULL;
 		/* Wait for the Link to come up and the login process 
 		 * to complete. 
 		 */
-		for(timeout = jiffies + 10*HZ; (timeout > jiffies) && ((fi->g.link_up == FALSE) || (fi->g.port_discovery == TRUE) || (fi->g.explore_fabric == TRUE) || (fi->g.perform_adisc == TRUE));)
+		for(timeout = jiffies + 10*HZ; time_before(jiffies, timeout) && ((fi->g.link_up == FALSE) || (fi->g.port_discovery == TRUE) || (fi->g.explore_fabric == TRUE) || (fi->g.perform_adisc == TRUE));)
+		{
+			cpu_relax();
 			barrier();
+		}
 		
 		count++;
 		no_of_hosts++;
@@ -3885,9 +3834,10 @@ struct pci_dev *pdev = NULL;
 }
 
 
-int iph5526_biosparam(Disk * disk, kdev_t n, int ip[])
+int iph5526_biosparam(struct scsi_device *sdev, struct block_device *n,
+		sector_t capacity, int ip[])
 {
-int size = disk->capacity;
+int size = capacity;
 	ip[0] = 64;
 	ip[1] = 32;
 	ip[2] = size >> 11;
@@ -3904,9 +3854,9 @@ int iph5526_queuecommand(Scsi_Cmnd *Cmnd, void (*done) (Scsi_Cmnd *))
 int int_required = 0;
 u_int r_ctl = FC4_DEVICE_DATA | UNSOLICITED_COMMAND;
 u_int type = TYPE_FCP | SEQUENCE_INITIATIVE;
-u_int frame_class = Cmnd->target;
+u_int frame_class = Cmnd->device->id;
 u_short ox_id = OX_ID_FIRST_SEQUENCE;
-struct Scsi_Host *host = Cmnd->host;
+struct Scsi_Host *host = Cmnd->device->host;
 struct iph5526_hostdata *hostdata = (struct iph5526_hostdata*)host->hostdata;
 struct fc_info *fi = hostdata->fi;
 struct fc_node_info *q;
@@ -3928,9 +3878,9 @@ u_long flags;
 				hostdata->cmnd.fcp_cntl = FCP_CNTL_QTYPE_ORDERED;
 				break;
 			default:
-				if ((jiffies - hostdata->tag_ages[Cmnd->target]) > (5 * HZ)) {
+				if ((jiffies - hostdata->tag_ages[Cmnd->device->id]) > (5 * HZ)) {
 					hostdata->cmnd.fcp_cntl = FCP_CNTL_QTYPE_ORDERED;
-					hostdata->tag_ages[Cmnd->target] = jiffies;
+					hostdata->tag_ages[Cmnd->device->id] = jiffies;
 				}
 				else
 					hostdata->cmnd.fcp_cntl = FCP_CNTL_QTYPE_SIMPLE;
@@ -3944,7 +3894,7 @@ u_long flags;
 	hostdata->cmnd.fcp_addr[3] = 0;
 	hostdata->cmnd.fcp_addr[2] = 0;
 	hostdata->cmnd.fcp_addr[1] = 0;
-	hostdata->cmnd.fcp_addr[0] = htons(Cmnd->lun);
+	hostdata->cmnd.fcp_addr[0] = htons(Cmnd->device->lun);
 
 	memcpy(&hostdata->cmnd.fcp_cdb, Cmnd->cmnd, Cmnd->cmd_len);
 	hostdata->cmnd.fcp_data_len = htonl(Cmnd->request_bufflen);
@@ -3976,7 +3926,7 @@ u_long flags;
 	
 	memcpy(fi->q.ptr_fcp_cmnd[fi->q.fcp_cmnd_indx], &(hostdata->cmnd), sizeof(fcp_cmd));	
 	
-	q = resolve_target(fi, Cmnd->target);
+	q = resolve_target(fi, Cmnd->device->id);
 
 	if (q == NULL) {
 	u_int bad_id = fi->g.my_ddaa | 0xFE;
@@ -4013,7 +3963,7 @@ u_long flags;
 
 int iph5526_abort(Scsi_Cmnd *Cmnd)
 {
-struct Scsi_Host *host = Cmnd->host;
+struct Scsi_Host *host = Cmnd->device->host;
 struct iph5526_hostdata *hostdata = (struct iph5526_hostdata *)host->hostdata;
 struct fc_info *fi = hostdata->fi;
 struct fc_node_info *q;
@@ -4027,7 +3977,7 @@ u_long flags;
 	
 	spin_lock_irqsave(&fi->fc_lock, flags);
 	
-	q = resolve_target(fi, Cmnd->target);
+	q = resolve_target(fi, Cmnd->device->id);
 	if (q == NULL) {
 	u_int bad_id = fi->g.my_ddaa | 0xFE;
 		/* This should not happen as we should always be able to
@@ -4515,81 +4465,77 @@ static char buf[80];
 	return buf;
 }
 
-#ifdef MODULE
-
 #define NAMELEN		8	/* # of chars for storing dev->name */
 
 static struct net_device *dev_fc[MAX_FC_CARDS];
 
-static int io =  0;
-static int irq  = 0;
-static int bad  = 0;	/* 0xbad = bad sig or no reset ack */
+static int io;
+static int irq;
+static int bad;	/* 0xbad = bad sig or no reset ack */
 static int scsi_registered;
 
 
-int init_module(void)
+static int __init iph5526_init(void)
 {
-int i = 0;
+	int i = 0;
 
-	driver_template.module = &__this_module;
-	scsi_register_module(MODULE_SCSI_HA, &driver_template);
+	driver_template.module = THIS_MODULE;
+	scsi_register_host(&driver_template);
 	if (driver_template.present)
 		scsi_registered = TRUE; 
 	else {
 		printk("iph5526: SCSI registeration failed!!!\n");
 		scsi_registered = FALSE;
-		scsi_unregister_module(MODULE_SCSI_HA, &driver_template);
+		scsi_unregister_host(&driver_template);
 	}
 
 	while(fc[i] != NULL) {
-		dev_fc[i] = NULL;
-		dev_fc[i] = init_fcdev(dev_fc[i], 0);	
-		if (dev_fc[i] == NULL) {
+		struct net_device *dev = alloc_fcdev(0);
+		int err;
+
+		if (!dev) {
 			printk("iph5526.c: init_fcdev failed for card #%d\n", i+1);
 			break;
 		}
-		dev_fc[i]->irq = irq;
-		dev_fc[i]->mem_end = bad;
-		dev_fc[i]->base_addr = io;
-		dev_fc[i]->init = iph5526_probe;
-		dev_fc[i]->priv = fc[i];
-		fc[i]->dev = dev_fc[i];
-		if (register_fcdev(dev_fc[i]) != 0) {
-			kfree(dev_fc[i]);
-			dev_fc[i] = NULL;
-			if (i == 0) {
-				printk("iph5526.c: IP registeration failed!!!\n");
-				return -ENODEV;
-			}
+		dev->priv = fc[i];
+		iph5526_probe_pci(dev);
+		err = register_netdev(dev);
+		if (err < 0) {
+			free_netdev(dev);
+			printk("iph5526.c: init_fcdev failed for card #%d\n", i+1);
+			break;
 		}
+		dev_fc[i] = dev;
 		i++;
 	}
 	if (i == 0)
 		return -ENODEV;
-	
+
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit iph5526_exit(void)
 {
-int i = 0;
+	int i = 0;
 	while(fc[i] != NULL) {
-	struct net_device *dev = fc[i]->dev;
-	void *priv = dev->priv;
+		struct net_device *dev = fc[i]->dev;
+		void *priv = dev->priv;
 		fc[i]->g.dont_init = TRUE;
 		take_tachyon_offline(fc[i]);
-		unregister_fcdev(dev);
+		unregister_netdev(dev);
 		clean_up_memory(fc[i]);
 		if (dev->priv)
 			kfree(priv);
-		kfree(dev);
+		free_netdev(dev);
 		dev = NULL;
 		i++;
 	}
 	if (scsi_registered == TRUE)
-		scsi_unregister_module(MODULE_SCSI_HA, &driver_template); 
+		scsi_unregister_host(&driver_template); 
 }
-#endif /* MODULE */
+
+module_init(iph5526_init);
+module_exit(iph5526_exit);
 
 void clean_up_memory(struct fc_info *fi)
 {

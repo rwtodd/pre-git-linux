@@ -10,8 +10,8 @@
  *
  * ------------------------------------------------------------------------- */
 
-#include <linux/malloc.h>
-#include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/time.h>
 #include <linux/signal.h>
 #include <linux/file.h>
 #include "autofs_i.h"
@@ -70,10 +70,10 @@ static int autofs_write(struct file *file, const void *addr, int bytes)
 	/* Keep the currently executing process from receiving a
 	   SIGPIPE unless it was already supposed to get one */
 	if (wr == -EPIPE && !sigpipe) {
-		spin_lock_irqsave(&current->sigmask_lock, flags);
+		spin_lock_irqsave(&current->sighand->siglock, flags);
 		sigdelset(&current->pending.signal, SIGPIPE);
-		recalc_sigpending(current);
-		spin_unlock_irqrestore(&current->sigmask_lock, flags);
+		recalc_sigpending();
+		spin_unlock_irqrestore(&current->sighand->siglock, flags);
 	}
 
 	return (bytes > 0);
@@ -158,21 +158,14 @@ int autofs_wait(struct autofs_sb_info *sbi, struct qstr *name)
 
 	if ( wq->name ) {
 		/* Block all but "shutdown" signals while waiting */
-		sigset_t oldset;
-		unsigned long irqflags;
+		sigset_t sigmask;
 
-		spin_lock_irqsave(&current->sigmask_lock, irqflags);
-		oldset = current->blocked;
-		siginitsetinv(&current->blocked, SHUTDOWN_SIGS & ~oldset.sig[0]);
-		recalc_sigpending(current);
-		spin_unlock_irqrestore(&current->sigmask_lock, irqflags);
+		siginitsetinv(&sigmask, SHUTDOWN_SIGS);
+		sigprocmask(SIG_BLOCK, &sigmask, &sigmask);
 
 		interruptible_sleep_on(&wq->queue);
 
-		spin_lock_irqsave(&current->sigmask_lock, irqflags);
-		current->blocked = oldset;
-		recalc_sigpending(current);
-		spin_unlock_irqrestore(&current->sigmask_lock, irqflags);
+		sigprocmask(SIG_SETMASK, &sigmask, NULL);
 	} else {
 		DPRINTK(("autofs_wait: skipped sleeping\n"));
 	}
@@ -190,7 +183,7 @@ int autofs_wait_release(struct autofs_sb_info *sbi, autofs_wqt_t wait_queue_toke
 {
 	struct autofs_wait_queue *wq, **wql;
 
-	for ( wql = &sbi->queues ; (wq = *wql) ; wql = &wq->next ) {
+	for ( wql = &sbi->queues ; (wq = *wql) != 0 ; wql = &wq->next ) {
 		if ( wq->wait_queue_token == wait_queue_token )
 			break;
 	}

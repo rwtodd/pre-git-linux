@@ -1,23 +1,14 @@
-/* $Id: act2000_isa.h,v 1.4 2000/11/12 16:32:06 kai Exp $
+/* $Id: act2000_isa.h,v 1.4.6.1 2001/09/23 22:24:32 kai Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000 (ISA-Version).
  *
- * Copyright 1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Author       Fritz Elfert
+ * Copyright    by Fritz Elfert      <fritz@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  * Thanks to Friedemann Baitinger and IBM Germany
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
  */
 
@@ -137,7 +128,7 @@ typedef enum {
 extern int act2000_isa_detect(unsigned short portbase);
 extern int act2000_isa_config_irq(act2000_card * card, short irq);
 extern int act2000_isa_config_port(act2000_card * card, unsigned short portbase);
-extern int act2000_isa_download(act2000_card * card, act2000_ddef * cb);
+extern int act2000_isa_download(act2000_card * card, act2000_ddef __user * cb);
 extern void act2000_isa_release(act2000_card * card);
 extern void act2000_isa_receive(act2000_card *card);
 extern void act2000_isa_send(act2000_card *card);

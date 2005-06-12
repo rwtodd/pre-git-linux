@@ -1,33 +1,33 @@
-/* $Id: hfcscard.c,v 1.8 2000/11/24 17:05:37 kai Exp $
+/* $Id: hfcscard.c,v 1.10.2.4 2004/01/14 16:04:48 keil Exp $
  *
- * hfcscard.c     low level stuff for hfcs based cards (Teles3c, ACER P10)
+ * low level stuff for hfcs based cards (Teles3c, ACER P10)
  *
- * Author     Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/init.h>
+#include <linux/isapnp.h>
 #include "hisax.h"
 #include "hfc_2bds0.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
 
-static const char *hfcs_revision = "$Revision: 1.8 $";
+static const char *hfcs_revision = "$Revision: 1.10.2.4 $";
 
-static void
+static irqreturn_t
 hfcs_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val, stat;
+	u_long flags;
 
-	if (!cs) {
-		printk(KERN_WARNING "HFCS: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	if ((HFCD_ANYINT | HFCD_BUSY_NBUSY) & 
 		(stat = cs->BC_Read_Reg(cs, HFCD_DATA, HFCD_STAT))) {
 		val = cs->BC_Read_Reg(cs, HFCD_DATA, HFCD_INT_S1);
@@ -38,6 +38,8 @@ hfcs_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 		if (cs->debug & L1_DEB_ISAC)
 			debugl1(cs, "HFCS: irq_no_irq stat(%02x)", stat);
 	}
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 static void
@@ -62,23 +64,17 @@ release_io_hfcs(struct IsdnCardState *cs)
 static void
 reset_hfcs(struct IsdnCardState *cs)
 {
-	long flags;
-
 	printk(KERN_INFO "HFCS: resetting card\n");
 	cs->hw.hfcD.cirm = HFCD_RESET;
 	if (cs->typ == ISDN_CTYPE_TELES3C)
 		cs->hw.hfcD.cirm |= HFCD_MEM8K;
 	cs->BC_Write_Reg(cs, HFCD_DATA, HFCD_CIRM, cs->hw.hfcD.cirm);	/* Reset On */
-	save_flags(flags);
-	sti();
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((30*HZ)/1000);
+	mdelay(10);
 	cs->hw.hfcD.cirm = 0;
 	if (cs->typ == ISDN_CTYPE_TELES3C)
 		cs->hw.hfcD.cirm |= HFCD_MEM8K;
 	cs->BC_Write_Reg(cs, HFCD_DATA, HFCD_CIRM, cs->hw.hfcD.cirm);	/* Reset Off */
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);
+	mdelay(10);
 	if (cs->typ == ISDN_CTYPE_TELES3C)
 		cs->hw.hfcD.cirm |= HFCD_INTB;
 	else if (cs->typ == ISDN_CTYPE_ACERP10)
@@ -101,41 +97,76 @@ reset_hfcs(struct IsdnCardState *cs)
 	cs->BC_Write_Reg(cs, HFCD_DATA, HFCD_MST_MODE, cs->hw.hfcD.mst_m); /* HFC Master */
 	cs->hw.hfcD.sctrl = 0;
 	cs->BC_Write_Reg(cs, HFCD_DATA, HFCD_SCTRL, cs->hw.hfcD.sctrl);
-	restore_flags(flags);
 }
 
 static int
 hfcs_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
-	long flags;
+	u_long flags;
+	int delay;
 
 	if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "HFCS: card_msg %x", mt);
 	switch (mt) {
 		case CARD_RESET:
+			spin_lock_irqsave(&cs->lock, flags);
 			reset_hfcs(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_RELEASE:
 			release_io_hfcs(cs);
 			return(0);
 		case CARD_INIT:
-			cs->hw.hfcD.timer.expires = jiffies + 75;
+			delay = (75*HZ)/100 +1;
+			cs->hw.hfcD.timer.expires = jiffies + delay;
 			add_timer(&cs->hw.hfcD.timer);
+			spin_lock_irqsave(&cs->lock, flags);
+			reset_hfcs(cs);
 			init2bds0(cs);
-			save_flags(flags);
-			sti();
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_timeout((80*HZ)/1000);
+			spin_unlock_irqrestore(&cs->lock, flags);
+			delay = (80*HZ)/1000 +1;
+			msleep(80);
+			spin_lock_irqsave(&cs->lock, flags);
 			cs->hw.hfcD.ctmt |= HFCD_TIM800;
 			cs->BC_Write_Reg(cs, HFCD_DATA, HFCD_CTMT, cs->hw.hfcD.ctmt); 
 			cs->BC_Write_Reg(cs, HFCD_DATA, HFCD_MST_MODE, cs->hw.hfcD.mst_m);
-			restore_flags(flags);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_TEST:
 			return(0);
 	}
 	return(0);
 }
+
+#ifdef __ISAPNP__
+static struct isapnp_device_id hfc_ids[] __initdata = {
+	{ ISAPNP_VENDOR('A', 'N', 'X'), ISAPNP_FUNCTION(0x1114),
+	  ISAPNP_VENDOR('A', 'N', 'X'), ISAPNP_FUNCTION(0x1114), 
+	  (unsigned long) "Acer P10" },
+	{ ISAPNP_VENDOR('B', 'I', 'L'), ISAPNP_FUNCTION(0x0002),
+	  ISAPNP_VENDOR('B', 'I', 'L'), ISAPNP_FUNCTION(0x0002), 
+	  (unsigned long) "Billion 2" },
+	{ ISAPNP_VENDOR('B', 'I', 'L'), ISAPNP_FUNCTION(0x0001),
+	  ISAPNP_VENDOR('B', 'I', 'L'), ISAPNP_FUNCTION(0x0001), 
+	  (unsigned long) "Billion 1" },
+	{ ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x7410),
+	  ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x7410), 
+	  (unsigned long) "IStar PnP" },
+	{ ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2610),
+	  ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2610), 
+	  (unsigned long) "Teles 16.3c" },
+	{ ISAPNP_VENDOR('S', 'F', 'M'), ISAPNP_FUNCTION(0x0001),
+	  ISAPNP_VENDOR('S', 'F', 'M'), ISAPNP_FUNCTION(0x0001), 
+	  (unsigned long) "Tornado Tipa C" },
+	{ ISAPNP_VENDOR('K', 'Y', 'E'), ISAPNP_FUNCTION(0x0001),
+	  ISAPNP_VENDOR('K', 'Y', 'E'), ISAPNP_FUNCTION(0x0001), 
+	  (unsigned long) "Genius Speed Surfer" },
+	{ 0, }
+};
+
+static struct isapnp_device_id *ipid __initdata = &hfc_ids[0];
+static struct pnp_card *pnp_c __devinitdata = NULL;
+#endif
 
 int __init
 setup_hfcs(struct IsdnCard *card)
@@ -145,6 +176,49 @@ setup_hfcs(struct IsdnCard *card)
 
 	strcpy(tmp, hfcs_revision);
 	printk(KERN_INFO "HiSax: HFC-S driver Rev. %s\n", HiSax_getrev(tmp));
+
+#ifdef __ISAPNP__
+	if (!card->para[1] && isapnp_present()) {
+		struct pnp_dev *pnp_d;
+		while(ipid->card_vendor) {
+			if ((pnp_c = pnp_find_card(ipid->card_vendor,
+				ipid->card_device, pnp_c))) {
+				pnp_d = NULL;
+				if ((pnp_d = pnp_find_dev(pnp_c,
+					ipid->vendor, ipid->function, pnp_d))) {
+					int err;
+
+					printk(KERN_INFO "HiSax: %s detected\n",
+						(char *)ipid->driver_data);
+					pnp_disable_dev(pnp_d);
+					err = pnp_activate_dev(pnp_d);
+					if (err<0) {
+						printk(KERN_WARNING "%s: pnp_activate_dev ret(%d)\n",
+							__FUNCTION__, err);
+						return(0);
+					}
+					card->para[1] = pnp_port_start(pnp_d, 0);
+					card->para[0] = pnp_irq(pnp_d, 0);
+					if (!card->para[0] || !card->para[1]) {
+						printk(KERN_ERR "HFC PnP:some resources are missing %ld/%lx\n",
+							card->para[0], card->para[1]);
+						pnp_disable_dev(pnp_d);
+						return(0);
+					}
+					break;
+				} else {
+					printk(KERN_ERR "HFC PnP: PnP error card found, no device\n");
+				}
+			}
+			ipid++;
+			pnp_c = NULL;
+		} 
+		if (!ipid->card_vendor) {
+			printk(KERN_INFO "HFC PnP: no ISAPnP card found\n");
+			return(0);
+		}
+	}
+#endif
 	cs->hw.hfcD.addr = card->para[1] & 0xfffe;
 	cs->irq = card->para[0];
 	cs->hw.hfcD.cip = 0;
@@ -161,15 +235,13 @@ setup_hfcs(struct IsdnCard *card)
 		cs->hw.hfcD.bfifosize = 7*1024 + 512;
 	} else
 		return (0);
-	if (check_region((cs->hw.hfcD.addr), 2)) {
+	if (!request_region(cs->hw.hfcD.addr, 2, "HFCS isdn")) {
 		printk(KERN_WARNING
 		       "HiSax: %s config port %x-%x already in use\n",
 		       CardType[card->typ],
 		       cs->hw.hfcD.addr,
 		       cs->hw.hfcD.addr + 2);
 		return (0);
-	} else {
-		request_region(cs->hw.hfcD.addr, 2, "HFCS isdn");
 	}
 	printk(KERN_INFO
 	       "HFCS: defined at 0x%x IRQ %d HZ %d\n",
@@ -188,7 +260,6 @@ setup_hfcs(struct IsdnCard *card)
 	cs->hw.hfcD.timer.function = (void *) hfcs_Timer;
 	cs->hw.hfcD.timer.data = (long) cs;
 	init_timer(&cs->hw.hfcD.timer);
-	reset_hfcs(cs);
 	cs->cardmsg = &hfcs_card_msg;
 	cs->irq_func = &hfcs_interrupt;
 	return (1);

@@ -16,11 +16,8 @@
  *    along with this program; if not, write to the Free Software
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *    Questions/Comments/Bugfixes to arrays@compaq.com
+ *    Questions/Comments/Bugfixes to iss_storagedev@hp.com
  *
- *    If you want to make changes, improve or add functionality to this
- *    driver, you'll probably need the Compaq Array Controller Interface
- *    Specificiation (Document number ECG086/1198)
  */
 #ifndef IDA_IOCTL_H
 #define IDA_IOCTL_H
@@ -60,7 +57,7 @@ typedef struct {
 
 /* currently, sg_cnt is assumed to be 1: only the 0th element of sg is used */
 	struct {
-		void	*addr;
+		void	__user *addr;
 		size_t	size;
 	} sg[SG_MAX];
 	int	sg_cnt;

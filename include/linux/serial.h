@@ -48,7 +48,7 @@ struct serial_struct {
 	unsigned char	*iomem_base;
 	unsigned short	iomem_reg_shift;
 	unsigned int	port_high;
-	int	reserved[1];
+	unsigned long	iomap_base;	/* cookie passed into ioremap */
 };
 
 /*
@@ -80,7 +80,6 @@ struct serial_struct {
 #define SERIAL_IO_PORT	0
 #define SERIAL_IO_HUB6	1
 #define SERIAL_IO_MEM	2
-#define SERIAL_IO_GSC	3
 
 struct serial_uart_config {
 	char	*name;
@@ -91,6 +90,7 @@ struct serial_uart_config {
 #define UART_CLEAR_FIFO		0x01
 #define UART_USE_FIFO		0x02
 #define UART_STARTECH		0x04
+#define UART_NATSEMI		0x08
 
 /*
  * Definitions for async_struct (and serial_struct) flags field
@@ -131,7 +131,6 @@ struct serial_uart_config {
 
 /* Internal flags used only by kernel/chr_drv/serial.c */
 #define ASYNC_INITIALIZED	0x80000000 /* Serial port was initialized */
-#define ASYNC_CALLOUT_ACTIVE	0x40000000 /* Call out device is active */
 #define ASYNC_NORMAL_ACTIVE	0x20000000 /* Normal device is active */
 #define ASYNC_BOOT_AUTOCONF	0x10000000 /* Autoconfigure port on bootup */
 #define ASYNC_CLOSING		0x08000000 /* Serial port is closing */
@@ -139,8 +138,10 @@ struct serial_uart_config {
 #define ASYNC_CHECK_CD		0x02000000 /* i.e., CLOCAL */
 #define ASYNC_SHARE_IRQ		0x01000000 /* for multifunction cards
 					     --- no longer used */
+#define ASYNC_CONS_FLOW		0x00800000 /* flow control for console  */
 
-#define ASYNC_INTERNAL_FLAGS	0xFF000000 /* Internal flags */
+#define ASYNC_BOOT_ONLYMCA	0x00400000 /* Probe only if MCA bus */
+#define ASYNC_INTERNAL_FLAGS	0xFFC00000 /* Internal flags */
 
 /*
  * Multiport serial configuration structure --- external structure
@@ -176,6 +177,12 @@ struct serial_icounter_struct {
 /* Export to allow PCMCIA to use this - Dave Hinds */
 extern int register_serial(struct serial_struct *req);
 extern void unregister_serial(int line);
+
+/* Allow architectures to override entries in serial8250_ports[] at run time: */
+struct uart_port;	/* forward declaration */
+extern int early_serial_setup(struct uart_port *port);
+extern int early_serial_console_init(char *options);
+extern int serial8250_start_console(struct uart_port *port, char *options);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

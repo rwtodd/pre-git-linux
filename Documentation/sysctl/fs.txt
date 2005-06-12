@@ -82,11 +82,11 @@ of error messages about running out of file handles, you might
 want to increase this limit.
 
 The three values in file-nr denote the number of allocated
-file handles, the number of used file handles and the maximum
+file handles, the number of unused file handles and the maximum
 number of file handles. When the allocated file handles come
-close to the maximum, but the number of actually used ones is
-far behind, you've encountered a peak in your usage of file
-handles and you don't need to increase the maximum.
+close to the maximum, but the number of unused file handles is
+significantly greater than 0, you've encountered a peak in your 
+usage of file handles and you don't need to increase the maximum.
 
 ==============================================================
 
@@ -138,3 +138,13 @@ thus the maximum number of mounted filesystems the kernel
 can have. You only need to increase super-max if you need to
 mount more filesystems than the current value in super-max
 allows you to.
+
+==============================================================
+
+aio-nr & aio-max-nr:
+
+aio-nr shows the current system-wide number of asynchronous io
+requests.  aio-max-nr allows you to change the maximum value
+aio-nr can grow to.
+
+==============================================================

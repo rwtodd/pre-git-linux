@@ -22,7 +22,7 @@
 **  This driver has been ported to Linux from the FreeBSD NCR53C8XX driver
 **  and is currently maintained by
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -63,7 +63,7 @@
 **  August 18 1997 by Cort <cort@cs.nmt.edu>:
 **     Support for Power/PC (Big Endian).
 **
-**  June 20 1998 by Gerard Roudier <groudier@club-internet.fr>:
+**  June 20 1998 by Gerard Roudier
 **     Support for up to 64 tags per lun.
 **     O(1) everywhere (C and SCRIPTS) for normal cases.
 **     Low PCI traffic for command handling when on-chip RAM is present.
@@ -73,8 +73,6 @@
 */
 
 /*
-**	May 11 2000, version 3.3b
-**
 **	Supported SCSI-II features:
 **	    Synchronous negotiation
 **	    Wide negotiation        (depends on the NCR Chip)
@@ -84,28 +82,11 @@
 **	    Etc...
 **
 **	Supported NCR/SYMBIOS chips:
-**		53C810		(8 bits, Fast SCSI-2, no rom BIOS) 
-**		53C815		(8 bits, Fast SCSI-2, on board rom BIOS)
-**		53C820		(Wide,   Fast SCSI-2, no rom BIOS)
-**		53C825		(Wide,   Fast SCSI-2, on board rom BIOS)
-**		53C860		(8 bits, Fast 20,     no rom BIOS)
-**		53C875		(Wide,   Fast 20,     on board rom BIOS)
-**		53C895		(Wide,   Fast 40,     on board rom BIOS)
-**		53C895A		(Wide,   Fast 40,     on board rom BIOS)
-**		53C896		(Wide,   Fast 40,     on board rom BIOS)
-**		53C897		(Wide,   Fast 40,     on board rom BIOS)
-**		53C1510D	(Wide,   Fast 40,     on board rom BIOS)
-**
-**	Other features:
-**		Memory mapped IO (linux-1.3.X and above only)
-**		Module
-**		Shared IRQ (since linux-1.3.72)
+**		53C720		(Wide,   Fast SCSI-2, intfly problems)
 */
 
-/*
-**	Name and version of the driver
-*/
-#define SCSI_NCR_DRIVER_NAME	"ncr53c8xx - version 3.3b"
+/* Name and version of the driver */
+#define SCSI_NCR_DRIVER_NAME	"ncr53c8xx-3.4.3f"
 
 #define SCSI_NCR_DEBUG_FLAGS	(0)
 
@@ -116,91 +97,42 @@
 **==========================================================
 */
 
-#define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
-
-#ifdef MODULE
+#include <linux/blkdev.h>
+#include <linux/delay.h>
+#include <linux/dma-mapping.h>
+#include <linux/errno.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/ioport.h>
+#include <linux/mm.h>
 #include <linux/module.h>
-#endif
+#include <linux/sched.h>
+#include <linux/signal.h>
+#include <linux/spinlock.h>
+#include <linux/stat.h>
+#include <linux/string.h>
+#include <linux/time.h>
+#include <linux/timer.h>
+#include <linux/types.h>
 
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <asm/system.h>
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,17)
-#include <linux/spinlock.h>
-#elif LINUX_VERSION_CODE >= LinuxVersionCode(2,1,93)
-#include <asm/spinlock.h>
-#endif
-#include <linux/delay.h>
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/errno.h>
-#include <linux/pci.h>
-#include <linux/string.h>
-#include <linux/malloc.h>
-#include <linux/mm.h>
-#include <linux/ioport.h>
-#include <linux/time.h>
-#include <linux/timer.h>
-#include <linux/stat.h>
 
-#include <linux/version.h>
-#include <linux/blk.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
+#include <scsi/scsi_tcq.h>
+#include <scsi/scsi_transport.h>
+#include <scsi/scsi_transport_spi.h>
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,35)
-#include <linux/init.h>
-#endif
-
-#ifndef	__init
-#define	__init
-#endif
-#ifndef	__initdata
-#define	__initdata
-#endif
-
-#if LINUX_VERSION_CODE <= LinuxVersionCode(2,1,92)
-#include <linux/bios32.h>
-#endif
-
-#include "scsi.h"
-#include "hosts.h"
-#include "constants.h"
-#include "sd.h"
-
-#include <linux/types.h>
-
-/*
-**	Define BITS_PER_LONG for earlier linux versions.
-*/
-#ifndef	BITS_PER_LONG
-#if (~0UL) == 0xffffffffUL
-#define	BITS_PER_LONG	32
-#else
-#define	BITS_PER_LONG	64
-#endif
-#endif
-
-/*
-**	Define the BSD style u_int32 and u_int64 type.
-**	Are in fact u_int32_t and u_int64_t :-)
-*/
-typedef u32 u_int32;
-typedef u64 u_int64;
-typedef	u_long		vm_offset_t;
 #include "ncr53c8xx.h"
-
-/*
-**	Donnot compile integrity checking code for Linux-2.3.0 
-**	and above since SCSI data structures are not ready yet.
-*/
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,3,0)
-#define	SCSI_NCR_INTEGRITY_CHECKING
-#endif
 
 #define NAME53C			"ncr53c"
 #define NAME53C8XX		"ncr53c8xx"
-#define DRIVER_SMP_LOCK		ncr53c8xx_lock
 
 #include "sym53c8xx_comm.h"
+
 
 /*==========================================================
 **
@@ -280,9 +212,9 @@ typedef	u_long		vm_offset_t;
 **	Choose appropriate type for tag bitmap.
 */
 #if	MAX_TAGS > 32
-typedef u_int64 tagmap_t;
+typedef u64 tagmap_t;
 #else
-typedef u_int32 tagmap_t;
+typedef u32 tagmap_t;
 #endif
 
 /*
@@ -346,7 +278,7 @@ typedef u_int32 tagmap_t;
 **    The maximum number of segments a transfer is split into.
 **    We support up to 127 segments for both read and write.
 **    The data scripts are broken into 2 sub-scripts.
-**    80 (MAX_SCATTERL) segments are moved from a sub-script 
+**    80 (MAX_SCATTERL) segments are moved from a sub-script
 **    in on-chip RAM. This makes data transfers shorter than 
 **    80k (assuming 1k fs) as fast as possible.
 */
@@ -368,34 +300,13 @@ typedef u_int32 tagmap_t;
 #define NCR_SNOOP_TIMEOUT (1000000)
 
 /*
-**	Head of list of NCR boards
-**
-**	For kernel version < 1.3.70, host is retrieved by its irq level.
-**	For later kernels, the internal host control block address 
-**	(struct ncb) is used as device id parameter of the irq stuff.
-*/
-
-static struct Scsi_Host		*first_host	= NULL;
-static Scsi_Host_Template	*the_template	= NULL;	
-
-/*
 **	Other definitions
 */
 
 #define ScsiResult(host_code, scsi_code) (((host_code) << 16) + ((scsi_code) & 0x7f))
 
-static void ncr53c8xx_select_queue_depths(
-	struct Scsi_Host *host, struct scsi_device *devlist);
-static void ncr53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs);
-static void ncr53c8xx_timeout(unsigned long np);
-
 #define initverbose (driver_setup.verbose)
 #define bootverbose (np->verbose)
-
-#ifdef SCSI_NCR_NVRAM_SUPPORT
-static u_char Tekram_sync[16] __initdata =
-	{25,31,37,43, 50,62,75,125, 12,15,18,21, 6,7,9,10};
-#endif /* SCSI_NCR_NVRAM_SUPPORT */
 
 /*==========================================================
 **
@@ -459,7 +370,8 @@ static u_char Tekram_sync[16] __initdata =
 #define	SIR_RESEL_BAD_I_T_L	(15)
 #define	SIR_RESEL_BAD_I_T_L_Q	(16)
 #define	SIR_DONE_OVERFLOW	(17)
-#define	SIR_MAX			(17)
+#define	SIR_INTFLY		(18)
+#define	SIR_MAX			(18)
 
 /*==========================================================
 **
@@ -488,31 +400,6 @@ static u_char Tekram_sync[16] __initdata =
 
 /*==========================================================
 **
-**	"Special features" of targets.
-**	quirks field		of struct tcb.
-**	actualquirks field	of struct ccb.
-**
-**==========================================================
-*/
-
-#define	QUIRK_AUTOSAVE	(0x01)
-#define	QUIRK_NOMSG	(0x02)
-#define QUIRK_NOSYNC	(0x10)
-#define QUIRK_NOWIDE16	(0x20)
-
-/*==========================================================
-**
-**	Capability bits in Inquire response byte 7.
-**
-**==========================================================
-*/
-
-#define	INQ7_QUEUE	(0x02)
-#define	INQ7_SYNC	(0x10)
-#define	INQ7_WIDE16	(0x20)
-
-/*==========================================================
-**
 **	Misc.
 **
 **==========================================================
@@ -527,16 +414,13 @@ static u_char Tekram_sync[16] __initdata =
 **==========================================================
 */
 
+static struct scsi_transport_template *ncr53c8xx_transport_template = NULL;
+
 struct tcb;
 struct lcb;
 struct ccb;
 struct ncb;
 struct script;
-
-typedef struct ncb * ncb_p;
-typedef struct tcb * tcb_p;
-typedef struct lcb * lcb_p;
-typedef struct ccb * ccb_p;
 
 struct link {
 	ncrcmd	l_cmd;
@@ -556,49 +440,11 @@ struct	usrcmd {
 #define UC_SETORDER	13
 #define UC_SETWIDE	14
 #define UC_SETFLAG	15
-#define UC_CLEARPROF	16
 #define UC_SETVERBOSE	17
 
 #define	UF_TRACE	(0x01)
 #define	UF_NODISC	(0x02)
 #define	UF_NOSCAN	(0x04)
-
-/*---------------------------------------
-**
-**	Timestamps for profiling
-**
-**---------------------------------------
-*/
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-
-struct tstamp {
-	u_long start;
-	u_long end;
-	u_long command;
-	u_long status;
-	u_long disconnect;
-	u_long reselect;
-};
-
-/*
-**	profiling data (per device)
-*/
-
-struct profile {
-	u_long	num_trans;
-	u_long	num_kbytes;
-	u_long	rest_bytes;
-	u_long	num_disc;
-	u_long	num_break;
-	u_long	num_int;
-	u_long	num_fly;
-	u_long	ms_setup;
-	u_long	ms_data;
-	u_long	ms_disc;
-	u_long	ms_post;
-};
-#endif
 
 /*========================================================================
 **
@@ -646,9 +492,7 @@ struct tcb {
 	**----------------------------------------------------------------
 	*/
 	struct link     jump_lcb[4];	/* JUMPs for reselection	*/
-	lcb_p		lp[MAX_LUN];	/* The lcb's of this tcb	*/
-	u_char		inq_done;	/* Target capabilities received	*/
-	u_char		inq_byte7;	/* Contains these capabilities	*/
+	struct lcb *	lp[MAX_LUN];	/* The lcb's of this tcb	*/
 
 	/*----------------------------------------------------------------
 	**	Pointer to the ccb used for negotiation.
@@ -656,7 +500,7 @@ struct tcb {
 	**	when tagged command queuing is enabled.
 	**----------------------------------------------------------------
 	*/
-	ccb_p   nego_cp;
+	struct ccb *   nego_cp;
 
 	/*----------------------------------------------------------------
 	**	statistical data
@@ -669,30 +513,30 @@ struct tcb {
 	**	negotiation of wide and synch transfer and device quirks.
 	**----------------------------------------------------------------
 	*/
+#ifdef SCSI_NCR_BIG_ENDIAN
+/*0*/	u16	period;
+/*2*/	u_char	sval;
+/*3*/	u_char	minsync;
+/*0*/	u_char	wval;
+/*1*/	u_char	widedone;
+/*2*/	u_char	quirks;
+/*3*/	u_char	maxoffs;
+#else
 /*0*/	u_char	minsync;
 /*1*/	u_char	sval;
-/*2*/	u_short	period;
+/*2*/	u16	period;
 /*0*/	u_char	maxoffs;
 /*1*/	u_char	quirks;
 /*2*/	u_char	widedone;
 /*3*/	u_char	wval;
-
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-	u_char 	ic_min_sync;
-	u_char 	ic_max_width;
-	u_char 	ic_maximums_set;
-	u_char 	ic_done;
 #endif
 
-	/*----------------------------------------------------------------
-	**	User settable limits and options.
-	**	These limits are read from the NVRAM if present.
-	**----------------------------------------------------------------
-	*/
+	/* User settable limits and options.  */
 	u_char	usrsync;
 	u_char	usrwide;
 	u_char	usrtags;
 	u_char	usrflag;
+	struct scsi_target *starget;
 };
 
 /*========================================================================
@@ -729,17 +573,17 @@ struct lcb {
 	**	64 possible tags.
 	**----------------------------------------------------------------
 	*/
-	u_int32		jump_ccb_0;	/* Default table if no tags	*/
-	u_int32		*jump_ccb;	/* Virtual address		*/
+	u32		jump_ccb_0;	/* Default table if no tags	*/
+	u32		*jump_ccb;	/* Virtual address		*/
 
 	/*----------------------------------------------------------------
 	**	CCB queue management.
 	**----------------------------------------------------------------
 	*/
-	XPT_QUEHEAD	free_ccbq;	/* Queue of available CCBs	*/
-	XPT_QUEHEAD	busy_ccbq;	/* Queue of busy CCBs		*/
-	XPT_QUEHEAD	wait_ccbq;	/* Queue of waiting for IO CCBs	*/
-	XPT_QUEHEAD	skip_ccbq;	/* Queue of skipped CCBs	*/
+	struct list_head free_ccbq;	/* Queue of available CCBs	*/
+	struct list_head busy_ccbq;	/* Queue of busy CCBs		*/
+	struct list_head wait_ccbq;	/* Queue of waiting for IO CCBs	*/
+	struct list_head skip_ccbq;	/* Queue of skipped CCBs	*/
 	u_char		actccbs;	/* Number of allocated CCBs	*/
 	u_char		busyccbs;	/* CCBs busy for this lun	*/
 	u_char		queuedccbs;	/* CCBs queued to the controller*/
@@ -759,7 +603,6 @@ struct lcb {
 	u_char		usetags;	/* Command queuing is active	*/
 	u_char		maxtags;	/* Max nr of tags asked by user	*/
 	u_char		numtags;	/* Current number of tags	*/
-	u_char		inq_byte7;	/* Store unit CmdQ capabitility	*/
 
 	/*----------------------------------------------------------------
 	**	QUEUE FULL control and ORDERED tag control.
@@ -769,11 +612,11 @@ struct lcb {
 	**	QUEUE FULL and ORDERED tag control.
 	**----------------------------------------------------------------
 	*/
-	u_short		num_good;	/* Nr of GOOD since QUEUE FULL	*/
+	u16		num_good;	/* Nr of GOOD since QUEUE FULL	*/
 	tagmap_t	tags_umap;	/* Used tags bitmap		*/
 	tagmap_t	tags_smap;	/* Tags in use at 'tag_stime'	*/
 	u_long		tags_stime;	/* Last time we set smap=umap	*/
-	ccb_p		held_ccb;	/* CCB held for QUEUE FULL	*/
+	struct ccb *	held_ccb;	/* CCB held for QUEUE FULL	*/
 };
 
 /*========================================================================
@@ -822,9 +665,9 @@ struct head {
 	**	The goalpointer points after the last transfer command.
 	**----------------------------------------------------------------
 	*/
-	u_int32		savep;
-	u_int32		lastp;
-	u_int32		goalp;
+	u32		savep;
+	u32		lastp;
+	u32		goalp;
 
 	/*----------------------------------------------------------------
 	**	Alternate data pointer.
@@ -832,22 +675,14 @@ struct head {
 	**	when the direction is unknown and the device claims data out.
 	**----------------------------------------------------------------
 	*/
-	u_int32		wlastp;
-	u_int32		wgoalp;
+	u32		wlastp;
+	u32		wgoalp;
 
 	/*----------------------------------------------------------------
 	**	The virtual address of the ccb containing this header.
 	**----------------------------------------------------------------
 	*/
-	ccb_p	cp;
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	/*----------------------------------------------------------------
-	**	Space for some timestamps to gather profiling data.
-	**----------------------------------------------------------------
-	*/
-	struct tstamp	stamp;
-#endif
+	struct ccb *	cp;
 
 	/*----------------------------------------------------------------
 	**	Status fields.
@@ -894,10 +729,17 @@ struct head {
 /*
 **	Last four bytes (host)
 */
+#ifdef SCSI_NCR_BIG_ENDIAN
+#define  actualquirks  phys.header.status[3]
+#define  host_status   phys.header.status[2]
+#define  scsi_status   phys.header.status[1]
+#define  parity_status phys.header.status[0]
+#else
 #define  actualquirks  phys.header.status[0]
 #define  host_status   phys.header.status[1]
 #define  scsi_status   phys.header.status[2]
 #define  parity_status phys.header.status[3]
+#endif
 
 /*
 **	First four bytes (script)
@@ -950,7 +792,7 @@ struct dsb {
 	struct scr_tblmove smsg  ;
 	struct scr_tblmove cmd   ;
 	struct scr_tblmove sense ;
-	struct scr_tblmove data [MAX_SCATTER];
+	struct scr_tblmove data[MAX_SCATTER];
 };
 
 
@@ -1000,7 +842,7 @@ struct ccb {
 	**	pointer to a control block.
 	**----------------------------------------------------------------
 	*/
-	Scsi_Cmnd	*cmd;		/* SCSI command 		*/
+	struct scsi_cmnd	*cmd;		/* SCSI command 		*/
 	u_char		cdb_buf[16];	/* Copy of CDB			*/
 	u_char		sense_buf[64];
 	int		data_len;	/* Total data length		*/
@@ -1030,9 +872,9 @@ struct ccb {
 	u_char		lun;
 	u_char		queued;
 	u_char		auto_sense;
-	ccb_p		link_ccb;	/* Host adapter CCB chain	*/
-	XPT_QUEHEAD	link_ccbq;	/* Link to unit CCB queue	*/
-	u_int32		startp;		/* Initial data pointer		*/
+	struct ccb *	link_ccb;	/* Host adapter CCB chain	*/
+	struct list_head link_ccbq;	/* Link to unit CCB queue	*/
+	u32		startp;		/* Initial data pointer		*/
 	u_long		magic;		/* Free / busy  CCB flag	*/
 };
 
@@ -1059,20 +901,17 @@ struct ncb {
 	**	CCBs management queues.
 	**----------------------------------------------------------------
 	*/
-	Scsi_Cmnd	*waiting_list;	/* Commands waiting for a CCB	*/
+	struct scsi_cmnd	*waiting_list;	/* Commands waiting for a CCB	*/
 					/*  when lcb is not allocated.	*/
-	Scsi_Cmnd	*done_list;	/* Commands waiting for done()  */
+	struct scsi_cmnd	*done_list;	/* Commands waiting for done()  */
 					/* callback to be invoked.      */ 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,93)
 	spinlock_t	smp_lock;	/* Lock for SMP threading       */
-#endif
 
 	/*----------------------------------------------------------------
 	**	Chip and controller indentification.
 	**----------------------------------------------------------------
 	*/
 	int		unit;		/* Unit number			*/
-	char		chip_name[8];	/* Chip name			*/
 	char		inst_name[16];	/* ncb instance name		*/
 
 	/*----------------------------------------------------------------
@@ -1081,8 +920,8 @@ struct ncb {
 	**	be used for probing adapter implementation differences.
 	**----------------------------------------------------------------
 	*/
-	u_char	sv_scntl0, sv_scntl3, sv_dmode, sv_dcntl, sv_ctest3, sv_ctest4,
-		sv_ctest5, sv_gpcntl, sv_stest2, sv_stest4;
+	u_char	sv_scntl0, sv_scntl3, sv_dmode, sv_dcntl, sv_ctest0, sv_ctest3,
+		sv_ctest4, sv_ctest5, sv_gpcntl, sv_stest2, sv_stest4;
 
 	/*----------------------------------------------------------------
 	**	Actual initial value of IO register bits used by the 
@@ -1090,8 +929,8 @@ struct ncb {
 	**	features that are to be enabled.
 	**----------------------------------------------------------------
 	*/
-	u_char	rv_scntl0, rv_scntl3, rv_dmode, rv_dcntl, rv_ctest3, rv_ctest4, 
-		rv_ctest5, rv_stest2;
+	u_char	rv_scntl0, rv_scntl3, rv_dmode, rv_dcntl, rv_ctest0, rv_ctest3,
+		rv_ctest4, rv_ctest5, rv_stest2;
 
 	/*----------------------------------------------------------------
 	**	Targets management.
@@ -1111,11 +950,11 @@ struct ncb {
 	**	Virtual and physical bus addresses of the chip.
 	**----------------------------------------------------------------
 	*/
-	vm_offset_t	vaddr;		/* Virtual and bus address of	*/
-	vm_offset_t     paddr;		/*  chip's IO registers.	*/
-	vm_offset_t     paddr2;		/* On-chip RAM bus address.	*/
+	void __iomem *vaddr;		/* Virtual and bus address of	*/
+	unsigned long	paddr;		/*  chip's IO registers.	*/
+	unsigned long	paddr2;		/* On-chip RAM bus address.	*/
 	volatile			/* Pointer to volatile for 	*/
-	struct ncr_reg	*reg;		/*  memory mapped IO.		*/
+	struct ncr_reg	__iomem *reg;	/*  memory mapped IO.		*/
 
 	/*----------------------------------------------------------------
 	**	SCRIPTS virtual and physical bus addresses.
@@ -1133,14 +972,10 @@ struct ncb {
 	**	General controller parameters and configuration.
 	**----------------------------------------------------------------
 	*/
-	pcidev_t	pdev;
-	u_short		device_id;	/* PCI device id		*/
+	struct device	*dev;
 	u_char		revision_id;	/* PCI device revision id	*/
-	u_char		bus;		/* PCI BUS number		*/
-	u_char		device_fn;	/* PCI BUS device and function	*/
-	u_long		base_io;	/* IO space base address	*/
-	u_int		irq;		/* IRQ level			*/
-	u_int		features;	/* Chip features map		*/
+	u32		irq;		/* IRQ level			*/
+	u32		features;	/* Chip features map		*/
 	u_char		myaddr;		/* SCSI id of the adapter	*/
 	u_char		maxburst;	/* log base 2 of dwords burst	*/
 	u_char		maxwide;	/* Maximum transfer width	*/
@@ -1157,10 +992,10 @@ struct ncb {
 	**	SCRIPTS processor in order to start SCSI commands.
 	**----------------------------------------------------------------
 	*/
-	u_short		squeueput;	/* Next free slot of the queue	*/
-	u_short		actccbs;	/* Number of allocated CCBs	*/
-	u_short		queuedccbs;	/* Number of CCBs in start queue*/
-	u_short		queuedepth;	/* Start queue depth		*/
+	u16		squeueput;	/* Next free slot of the queue	*/
+	u16		actccbs;	/* Number of allocated CCBs	*/
+	u16		queuedccbs;	/* Number of CCBs in start queue*/
+	u16		queuedepth;	/* Start queue depth		*/
 
 	/*----------------------------------------------------------------
 	**	Timeout handler.
@@ -1176,11 +1011,6 @@ struct ncb {
 	*/
 	struct ncr_reg	regdump;	/* Register dump		*/
 	u_long		regtime;	/* Time it has been done	*/
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	struct profile	profile;	/* Profiling data		*/
-	u_int		disc_phys;	/* Disconnection counters 	*/
-	u_int		disc_ref;
-#endif
 
 	/*----------------------------------------------------------------
 	**	Miscellaneous buffers accessed by the scripts-processor.
@@ -1190,7 +1020,7 @@ struct ncb {
 	*/
 	u_char		msgout[8];	/* Buffer for MESSAGE OUT 	*/
 	u_char		msgin [8];	/* Buffer for MESSAGE IN	*/
-	u_int32		lastmsg;	/* Last SCSI message sent	*/
+	u32		lastmsg;	/* Last SCSI message sent	*/
 	u_char		scratch;	/* Scratch for SCSI receive	*/
 
 	/*----------------------------------------------------------------
@@ -1216,23 +1046,9 @@ struct ncb {
 	**	Fields that should be removed or changed.
 	**----------------------------------------------------------------
 	*/
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	u_long		ktime;		/* Copy of kernel time		*/
-#endif
 	struct ccb	*ccb;		/* Global CCB			*/
 	struct usrcmd	user;		/* Command from user		*/
-	u_char		release_stage;	/* Synchronisation stage on release  */
-
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-	/*----------------------------------------------------------------
-	**	Fields that are used for integrity check
-	**----------------------------------------------------------------
-	*/
-	unsigned char check_integrity; /* Enable midlayer integ.check on
-					* bus scan. */
-	unsigned char check_integ_par;  /* Set if par or Init. Det. error
-					 * used only during integ check */
-#endif
+	volatile u_char	release_stage;	/* Synchronisation stage on release  */
 };
 
 #define NCB_SCRIPT_PHYS(np,lbl)	 (np->p_script  + offsetof (struct script, lbl))
@@ -1260,6 +1076,23 @@ struct ncb {
 */
 
 /*
+**	For HP Zalon/53c720 systems, the Zalon interface
+**	between CPU and 53c720 does prefetches, which causes
+**	problems with self modifying scripts.  The problem
+**	is overcome by calling a dummy subroutine after each
+**	modification, to force a refetch of the script on
+**	return from the subroutine.
+*/
+
+#ifdef CONFIG_NCR53C8XX_PREFETCH
+#define PREFETCH_FLUSH_CNT	2
+#define PREFETCH_FLUSH		SCR_CALL, PADDRH (wait_dma),
+#else
+#define PREFETCH_FLUSH_CNT	0
+#define PREFETCH_FLUSH
+#endif
+
+/*
 **	Script fragments which are loaded into the on-chip RAM 
 **	of 825A, 875 and 895 chips.
 */
@@ -1267,31 +1100,23 @@ struct script {
 	ncrcmd	start		[  5];
 	ncrcmd  startpos	[  1];
 	ncrcmd	select		[  6];
-	ncrcmd	select2		[  9];
+	ncrcmd	select2		[  9 + PREFETCH_FLUSH_CNT];
 	ncrcmd	loadpos		[  4];
 	ncrcmd	send_ident	[  9];
 	ncrcmd	prepare		[  6];
 	ncrcmd	prepare2	[  7];
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	ncrcmd  command		[  9];
-#else
 	ncrcmd  command		[  6];
-#endif
 	ncrcmd  dispatch	[ 32];
 	ncrcmd  clrack		[  4];
 	ncrcmd	no_data		[ 17];
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	ncrcmd  status		[ 11];
-#else
 	ncrcmd  status		[  8];
-#endif
 	ncrcmd  msg_in		[  2];
 	ncrcmd  msg_in2		[ 16];
 	ncrcmd  msg_bad		[  4];
 	ncrcmd	setmsg		[  7];
 	ncrcmd	cleanup		[  6];
 	ncrcmd  complete	[  9];
-	ncrcmd	cleanup_ok	[  8];
+	ncrcmd	cleanup_ok	[  8 + PREFETCH_FLUSH_CNT];
 	ncrcmd	cleanup0	[  1];
 #ifndef SCSI_NCR_CCB_DONE_SUPPORT
 	ncrcmd	signal		[ 12];
@@ -1303,25 +1128,17 @@ struct script {
 #endif
 	ncrcmd  save_dp		[  7];
 	ncrcmd  restore_dp	[  5];
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	ncrcmd  disconnect	[ 28];
-#else
-	ncrcmd  disconnect	[ 17];
-#endif
+	ncrcmd  disconnect	[ 10];
 	ncrcmd	msg_out		[  9];
 	ncrcmd	msg_out_done	[  7];
 	ncrcmd  idle		[  2];
 	ncrcmd	reselect	[  8];
 	ncrcmd	reselected	[  8];
-	ncrcmd	resel_dsa	[  6];
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	ncrcmd	loadpos1	[  7];
-#else
+	ncrcmd	resel_dsa	[  6 + PREFETCH_FLUSH_CNT];
 	ncrcmd	loadpos1	[  4];
-#endif
 	ncrcmd  resel_lun	[  6];
 	ncrcmd	resel_tag	[  6];
-	ncrcmd	jump_to_nexus	[  4];
+	ncrcmd	jump_to_nexus	[  4 + PREFETCH_FLUSH_CNT];
 	ncrcmd	nexus_indirect	[  4];
 	ncrcmd	resel_notag	[  4];
 	ncrcmd  data_in		[MAX_SCATTERL * 4];
@@ -1342,7 +1159,7 @@ struct scripth {
 #endif
 	ncrcmd	select_no_atn	[  8];
 	ncrcmd	cancel		[  4];
-	ncrcmd	skip		[  9];
+	ncrcmd	skip		[  9 + PREFETCH_FLUSH_CNT];
 	ncrcmd	skip2		[ 19];
 	ncrcmd	par_err_data_in	[  6];
 	ncrcmd	par_err_other	[  4];
@@ -1375,9 +1192,10 @@ struct scripth {
 	ncrcmd	bad_i_t_l_q	[  4];
 	ncrcmd	bad_target	[  8];
 	ncrcmd	bad_status	[  8];
-	ncrcmd	start_ram	[  4];
+	ncrcmd	start_ram	[  4 + PREFETCH_FLUSH_CNT];
 	ncrcmd	start_ram0	[  4];
 	ncrcmd	sto_restart	[  5];
+	ncrcmd	wait_dma	[  2];
 	ncrcmd	snooptest	[  9];
 	ncrcmd	snoopend	[  2];
 };
@@ -1391,70 +1209,54 @@ struct scripth {
 **==========================================================
 */
 
-static	void	ncr_alloc_ccb	(ncb_p np, u_char tn, u_char ln);
-static	void	ncr_complete	(ncb_p np, ccb_p cp);
-static	void	ncr_exception	(ncb_p np);
-static	void	ncr_free_ccb	(ncb_p np, ccb_p cp);
-static	void	ncr_init_ccb	(ncb_p np, ccb_p cp);
-static	void	ncr_init_tcb	(ncb_p np, u_char tn);
-static	lcb_p	ncr_alloc_lcb	(ncb_p np, u_char tn, u_char ln);
-static	lcb_p	ncr_setup_lcb	(ncb_p np, u_char tn, u_char ln,
-				 u_char *inq_data);
-static	void	ncr_getclock	(ncb_p np, int mult);
-static	void	ncr_selectclock	(ncb_p np, u_char scntl3);
-static	ccb_p	ncr_get_ccb	(ncb_p np, u_char tn, u_char ln);
-static	void	ncr_init	(ncb_p np, int reset, char * msg, u_long code);
-static	int	ncr_int_sbmc	(ncb_p np);
-static	int	ncr_int_par	(ncb_p np);
-static	void	ncr_int_ma	(ncb_p np);
-static	void	ncr_int_sir	(ncb_p np);
-static  void    ncr_int_sto     (ncb_p np);
-static	u_long	ncr_lookup	(char* id);
+static	void	ncr_alloc_ccb	(struct ncb *np, u_char tn, u_char ln);
+static	void	ncr_complete	(struct ncb *np, struct ccb *cp);
+static	void	ncr_exception	(struct ncb *np);
+static	void	ncr_free_ccb	(struct ncb *np, struct ccb *cp);
+static	void	ncr_init_ccb	(struct ncb *np, struct ccb *cp);
+static	void	ncr_init_tcb	(struct ncb *np, u_char tn);
+static	struct lcb *	ncr_alloc_lcb	(struct ncb *np, u_char tn, u_char ln);
+static	struct lcb *	ncr_setup_lcb	(struct ncb *np, struct scsi_device *sdev);
+static	void	ncr_getclock	(struct ncb *np, int mult);
+static	void	ncr_selectclock	(struct ncb *np, u_char scntl3);
+static	struct ccb *ncr_get_ccb	(struct ncb *np, u_char tn, u_char ln);
+static	void	ncr_chip_reset	(struct ncb *np, int delay);
+static	void	ncr_init	(struct ncb *np, int reset, char * msg, u_long code);
+static	int	ncr_int_sbmc	(struct ncb *np);
+static	int	ncr_int_par	(struct ncb *np);
+static	void	ncr_int_ma	(struct ncb *np);
+static	void	ncr_int_sir	(struct ncb *np);
+static  void    ncr_int_sto     (struct ncb *np);
 static	void	ncr_negotiate	(struct ncb* np, struct tcb* tp);
-static	int	ncr_prepare_nego(ncb_p np, ccb_p cp, u_char *msgptr);
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-static	int	ncr_ic_nego(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd, u_char *msgptr);
-#endif
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-static	void	ncb_profile	(ncb_p np, ccb_p cp);
-#endif
+static	int	ncr_prepare_nego(struct ncb *np, struct ccb *cp, u_char *msgptr);
 
 static	void	ncr_script_copy_and_bind
-				(ncb_p np, ncrcmd *src, ncrcmd *dst, int len);
+				(struct ncb *np, ncrcmd *src, ncrcmd *dst, int len);
 static  void    ncr_script_fill (struct script * scr, struct scripth * scripth);
-static	int	ncr_scatter	(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd);
-static	void	ncr_getsync	(ncb_p np, u_char sfac, u_char *fakp, u_char *scntl3p);
-static	void	ncr_setsync	(ncb_p np, ccb_p cp, u_char scntl3, u_char sxfer);
-static	void	ncr_setup_tags	(ncb_p np, u_char tn, u_char ln);
-static	void	ncr_setwide	(ncb_p np, ccb_p cp, u_char wide, u_char ack);
+static	int	ncr_scatter	(struct ncb *np, struct ccb *cp, struct scsi_cmnd *cmd);
+static	void	ncr_getsync	(struct ncb *np, u_char sfac, u_char *fakp, u_char *scntl3p);
+static	void	ncr_setsync	(struct ncb *np, struct ccb *cp, u_char scntl3, u_char sxfer);
+static	void	ncr_setup_tags	(struct ncb *np, struct scsi_device *sdev);
+static	void	ncr_setwide	(struct ncb *np, struct ccb *cp, u_char wide, u_char ack);
 static	int	ncr_show_msg	(u_char * msg);
-static  void    ncr_print_msg   (ccb_p cp, char *label, u_char *msg);
-static	int	ncr_snooptest	(ncb_p np);
-static	void	ncr_timeout	(ncb_p np);
-static  void    ncr_wakeup      (ncb_p np, u_long code);
-static  void    ncr_wakeup_done (ncb_p np);
-static	void	ncr_start_next_ccb (ncb_p np, lcb_p lp, int maxn);
-static	void	ncr_put_start_queue(ncb_p np, ccb_p cp);
-static	void	ncr_start_reset	(ncb_p np);
-static	int	ncr_reset_scsi_bus (ncb_p np, int enab_int, int settle_delay);
+static  void    ncr_print_msg   (struct ccb *cp, char *label, u_char *msg);
+static	int	ncr_snooptest	(struct ncb *np);
+static	void	ncr_timeout	(struct ncb *np);
+static  void    ncr_wakeup      (struct ncb *np, u_long code);
+static  void    ncr_wakeup_done (struct ncb *np);
+static	void	ncr_start_next_ccb (struct ncb *np, struct lcb * lp, int maxn);
+static	void	ncr_put_start_queue(struct ncb *np, struct ccb *cp);
 
-#ifdef SCSI_NCR_USER_COMMAND_SUPPORT
-static	void	ncr_usercmd	(ncb_p np);
-#endif
-
-static int ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device);
-
-static void insert_into_waiting_list(ncb_p np, Scsi_Cmnd *cmd);
-static Scsi_Cmnd *retrieve_from_waiting_list(int to_remove, ncb_p np, Scsi_Cmnd *cmd);
-static void process_waiting_list(ncb_p np, int sts);
+static void insert_into_waiting_list(struct ncb *np, struct scsi_cmnd *cmd);
+static struct scsi_cmnd *retrieve_from_waiting_list(int to_remove, struct ncb *np, struct scsi_cmnd *cmd);
+static void process_waiting_list(struct ncb *np, int sts);
 
 #define remove_from_waiting_list(np, cmd) \
 		retrieve_from_waiting_list(1, (np), (cmd))
 #define requeue_waiting_list(np) process_waiting_list((np), DID_OK)
 #define reset_waiting_list(np) process_waiting_list((np), DID_RESET)
 
-static inline char *ncr_name (ncb_p np)
+static inline char *ncr_name (struct ncb *np)
 {
 	return np->inst_name;
 }
@@ -1559,7 +1361,7 @@ static	struct script script0 __initdata = {
 	/*
 	**	Now there are 4 possibilities:
 	**
-	**	(1) The ncr looses arbitration.
+	**	(1) The ncr loses arbitration.
 	**	This is ok, because it will try again,
 	**	when the bus becomes idle.
 	**	(But beware of the timeout function!)
@@ -1605,6 +1407,10 @@ static	struct script script0 __initdata = {
 	SCR_COPY_F (4),
 		RADDR (dsa),
 		PADDR (loadpos),
+	/*
+	**	Flush script prefetch if required
+	*/
+	PREFETCH_FLUSH
 	/*
 	**	then we do the actual copy.
 	*/
@@ -1673,14 +1479,6 @@ static	struct script script0 __initdata = {
 		PADDR (dispatch),
 
 }/*-------------------------< COMMAND >--------------------*/,{
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	/*
-	**	... set a timestamp ...
-	*/
-	SCR_COPY (sizeof (u_long)),
-		NADDR (ktime),
-		NADDR (header.stamp.command),
-#endif
 	/*
 	**	... and send the command
 	*/
@@ -1712,7 +1510,7 @@ static	struct script script0 __initdata = {
 	**	Possible data corruption during Memory Write and Invalidate.
 	**	This work-around resets the addressing logic prior to the 
 	**	start of the first MOVE of a DATA IN phase.
-	**	(See README.ncr53c8xx for more information)
+	**	(See Documentation/scsi/ncr53c8xx.txt for more information)
 	*/
 	SCR_JUMPR ^ IFFALSE (IF (SCR_DATA_IN)),
 		20,
@@ -1786,14 +1584,6 @@ static	struct script script0 __initdata = {
 		PADDR (no_data),
 
 }/*-------------------------< STATUS >--------------------*/,{
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	/*
-	**	set the timestamp.
-	*/
-	SCR_COPY (sizeof (u_long)),
-		NADDR (ktime),
-		NADDR (header.stamp.status),
-#endif
 	/*
 	**	get the status
 	*/
@@ -1922,6 +1712,10 @@ static	struct script script0 __initdata = {
 	SCR_COPY_F (4),
 		RADDR (dsa),
 		PADDR (cleanup0),
+	/*
+	**	Flush script prefetch if required
+	*/
+	PREFETCH_FLUSH
 	SCR_COPY (sizeof (struct head)),
 		NADDR (header),
 }/*-------------------------< CLEANUP0 >--------------------*/,{
@@ -1951,8 +1745,8 @@ static	struct script script0 __initdata = {
 	/*
 	**	... signal completion to the host
 	*/
-	SCR_INT_FLY,
-		0,
+	SCR_INT,
+		SIR_INTFLY,
 	/*
 	**	Auf zu neuen Schandtaten!
 	*/
@@ -1971,8 +1765,8 @@ static	struct script script0 __initdata = {
 	SCR_INT,
 		SIR_DONE_OVERFLOW,
 }/*------------------------< DONE_END >---------------------*/,{
-	SCR_INT_FLY,
-		0,
+	SCR_INT,
+		SIR_INTFLY,
 	SCR_COPY (4),
 		RADDR (temp),
 		PADDR (done_pos),
@@ -2020,44 +1814,11 @@ static	struct script script0 __initdata = {
 	*/
 	SCR_WAIT_DISC,
 		0,
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	/*
-	**	Profiling:
-	**	Set a time stamp,
-	**	and count the disconnects.
-	*/
-	SCR_COPY (sizeof (u_long)),
-		NADDR (ktime),
-		NADDR (header.stamp.disconnect),
-	SCR_COPY (4),
-		NADDR (disc_phys),
-		RADDR (scratcha),
-	SCR_REG_REG (scratcha, SCR_ADD, 0x01),
-		0,
-	SCR_COPY (4),
-		RADDR (scratcha),
-		NADDR (disc_phys),
-#endif
 	/*
 	**	Status is: DISCONNECTED.
 	*/
 	SCR_LOAD_REG (HS_REG, HS_DISCONNECT),
 		0,
-	/*
-	**	If QUIRK_AUTOSAVE is set,
-	**	do an "save pointer" operation.
-	*/
-	SCR_FROM_REG (QU_REG),
-		0,
-	SCR_JUMP ^ IFFALSE (MASK (QUIRK_AUTOSAVE, QUIRK_AUTOSAVE)),
-		PADDR (cleanup_ok),
-	/*
-	**	like SAVE_DP message:
-	**	Copy TEMP register to SAVEP in header.
-	*/
-	SCR_COPY (4),
-		RADDR (temp),
-		NADDR (header.savep),
 	SCR_JUMP,
 		PADDR (cleanup_ok),
 
@@ -2168,6 +1929,10 @@ static	struct script script0 __initdata = {
 		RADDR (dsa),
 		PADDR (loadpos1),
 	/*
+	**	Flush script prefetch if required
+	*/
+	PREFETCH_FLUSH
+	/*
 	**	then we do the actual copy.
 	*/
 	SCR_COPY (sizeof (struct head)),
@@ -2178,14 +1943,6 @@ static	struct script script0 __initdata = {
 }/*-------------------------< LOADPOS1 >-------------------*/,{
 		0,
 		NADDR (header),
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	/*
-	**      Set a time stamp for this reselection
-	*/
-	SCR_COPY (sizeof (u_long)),
-		NADDR (ktime),
-		NADDR (header.stamp.reselect),
-#endif
 	/*
 	**	The DSA contains the data structure address.
 	*/
@@ -2237,6 +1994,10 @@ static	struct script script0 __initdata = {
 	SCR_COPY_F (4),
 		RADDR (temp),
 		PADDR (nexus_indirect),
+	/*
+	**	Flush script prefetch if required
+	*/
+	PREFETCH_FLUSH
 	SCR_COPY (4),
 }/*-------------------------< NEXUS_INDIRECT >-------------------*/,{
 		0,
@@ -2334,7 +2095,7 @@ static	struct scripth scripth0 __initdata = {
 **-----------------------------------------------------------
 **
 **  ##===========< I=0; i<MAX_DONE >===========
-**  ||	SCR_COPY (sizeof(ccb_p)),
+**  ||	SCR_COPY (sizeof(struct ccb *),
 **  ||		NADDR (header.cp),
 **  ||		NADDR (ccb_done[i]),
 **  ||	SCR_CALL,
@@ -2392,6 +2153,10 @@ static	struct scripth scripth0 __initdata = {
 	SCR_COPY_F (4),
 		RADDR (dsa),
 		PADDRH (skip2),
+	/*
+	**	Flush script prefetch if required
+	*/
+	PREFETCH_FLUSH
 	/*
 	**	then we do the actual copy.
 	*/
@@ -2903,6 +2668,10 @@ static	struct scripth scripth0 __initdata = {
 	SCR_COPY_F (4),
 		RADDR (scratcha),
 		PADDRH (start_ram0),
+	/*
+	**	Flush script prefetch if required
+	*/
+	PREFETCH_FLUSH
 	SCR_COPY (sizeof (struct script)),
 }/*-------------------------< START_RAM0 >--------------------*/,{
 		0,
@@ -2920,6 +2689,17 @@ static	struct scripth scripth0 __initdata = {
 		PADDR (startpos),
 	SCR_JUMP,
 		PADDR (start),
+}/*-------------------------< WAIT_DMA >-------------------*/,{
+	/*
+	**	For HP Zalon/53c720 systems, the Zalon interface
+	**	between CPU and 53c720 does prefetches, which causes
+	**	problems with self modifying scripts.  The problem
+	**	is overcome by calling a dummy subroutine after each
+	**	modification, to force a refetch of the script on
+	**	return from the subroutine.
+	*/
+	SCR_RETURN,
+		0,
 }/*-------------------------< SNOOPTEST >-------------------*/,{
 	/*
 	**	Read the variable.
@@ -2968,20 +2748,20 @@ void __init ncr_script_fill (struct script * scr, struct scripth * scrh)
 		*p++ =PADDR (idle);
 	};
 
-	assert ((u_long)p == (u_long)&scrh->tryloop + sizeof (scrh->tryloop));
+	BUG_ON((u_long)p != (u_long)&scrh->tryloop + sizeof (scrh->tryloop));
 
 #ifdef SCSI_NCR_CCB_DONE_SUPPORT
 
 	p = scrh->done_queue;
 	for (i = 0; i<MAX_DONE; i++) {
-		*p++ =SCR_COPY (sizeof(ccb_p));
+		*p++ =SCR_COPY (sizeof(struct ccb *));
 		*p++ =NADDR (header.cp);
 		*p++ =NADDR (ccb_done[i]);
 		*p++ =SCR_CALL;
 		*p++ =PADDR (done_end);
 	}
 
-	assert ((u_long)p ==(u_long)&scrh->done_queue+sizeof(scrh->done_queue));
+	BUG_ON((u_long)p != (u_long)&scrh->done_queue+sizeof(scrh->done_queue));
 
 #endif /* SCSI_NCR_CCB_DONE_SUPPORT */
 
@@ -2992,7 +2772,8 @@ void __init ncr_script_fill (struct script * scr, struct scripth * scrh)
 		*p++ =SCR_MOVE_TBL ^ SCR_DATA_IN;
 		*p++ =offsetof (struct dsb, data[i]);
 	};
-	assert ((u_long)p == (u_long)&scrh->hdata_in + sizeof (scrh->hdata_in));
+
+	BUG_ON((u_long)p != (u_long)&scrh->hdata_in + sizeof (scrh->hdata_in));
 
 	p = scr->data_in;
 	for (i=MAX_SCATTERH; i<MAX_SCATTERH+MAX_SCATTERL; i++) {
@@ -3001,7 +2782,8 @@ void __init ncr_script_fill (struct script * scr, struct scripth * scrh)
 		*p++ =SCR_MOVE_TBL ^ SCR_DATA_IN;
 		*p++ =offsetof (struct dsb, data[i]);
 	};
-	assert ((u_long)p == (u_long)&scr->data_in + sizeof (scr->data_in));
+
+	BUG_ON((u_long)p != (u_long)&scr->data_in + sizeof (scr->data_in));
 
 	p = scrh->hdata_out;
 	for (i=0; i<MAX_SCATTERH; i++) {
@@ -3010,7 +2792,8 @@ void __init ncr_script_fill (struct script * scr, struct scripth * scrh)
 		*p++ =SCR_MOVE_TBL ^ SCR_DATA_OUT;
 		*p++ =offsetof (struct dsb, data[i]);
 	};
-	assert ((u_long)p==(u_long)&scrh->hdata_out + sizeof (scrh->hdata_out));
+
+	BUG_ON((u_long)p != (u_long)&scrh->hdata_out + sizeof (scrh->hdata_out));
 
 	p = scr->data_out;
 	for (i=MAX_SCATTERH; i<MAX_SCATTERH+MAX_SCATTERL; i++) {
@@ -3020,7 +2803,7 @@ void __init ncr_script_fill (struct script * scr, struct scripth * scrh)
 		*p++ =offsetof (struct dsb, data[i]);
 	};
 
-	assert ((u_long)p == (u_long)&scr->data_out + sizeof (scr->data_out));
+	BUG_ON((u_long) p != (u_long)&scr->data_out + sizeof (scr->data_out));
 }
 
 /*==========================================================
@@ -3033,7 +2816,7 @@ void __init ncr_script_fill (struct script * scr, struct scripth * scrh)
 */
 
 static void __init 
-ncr_script_copy_and_bind (ncb_p np, ncrcmd *src, ncrcmd *dst, int len)
+ncr_script_copy_and_bind (struct ncb *np, ncrcmd *src, ncrcmd *dst, int len)
 {
 	ncrcmd  opcode, new, old, tmp1, tmp2;
 	ncrcmd	*start, *end;
@@ -3058,7 +2841,7 @@ ncr_script_copy_and_bind (ncb_p np, ncrcmd *src, ncrcmd *dst, int len)
 		if (opcode == 0) {
 			printk (KERN_ERR "%s: ERROR0 IN SCRIPT at %d.\n",
 				ncr_name(np), (int) (src-start-1));
-			MDELAY (1000);
+			mdelay(1000);
 		};
 
 		if (DEBUG_FLAGS & DEBUG_SCRIPT)
@@ -3088,7 +2871,7 @@ ncr_script_copy_and_bind (ncb_p np, ncrcmd *src, ncrcmd *dst, int len)
 			if ((tmp1 ^ tmp2) & 3) {
 				printk (KERN_ERR"%s: ERROR1 IN SCRIPT at %d.\n",
 					ncr_name(np), (int) (src-start-1));
-				MDELAY (1000);
+				mdelay(1000);
 			}
 			/*
 			**	If PREFETCH feature not enabled, remove 
@@ -3110,7 +2893,7 @@ ncr_script_copy_and_bind (ncb_p np, ncrcmd *src, ncrcmd *dst, int len)
 		case 0x8:
 			/*
 			**	JUMP / CALL
-			**	dont't relocate if relative :-)
+			**	don't relocate if relative :-)
 			*/
 			if (opcode & 0x00800000)
 				relocs = 0;
@@ -3136,8 +2919,7 @@ ncr_script_copy_and_bind (ncb_p np, ncrcmd *src, ncrcmd *dst, int len)
 
 				switch (old & RELOC_MASK) {
 				case RELOC_REGISTER:
-					new = (old & ~RELOC_MASK)
-						+ pcivtobus(np->paddr);
+					new = (old & ~RELOC_MASK) + np->paddr;
 					break;
 				case RELOC_LABEL:
 					new = (old & ~RELOC_MASK) + np->p_script;
@@ -3179,21 +2961,8 @@ ncr_script_copy_and_bind (ncb_p np, ncrcmd *src, ncrcmd *dst, int len)
 	};
 }
 
-/*==========================================================
-**
-**
-**      Auto configuration:  attach and init a host adapter.
-**
-**
-**==========================================================
-*/
-
 /*
 **	Linux host data structure
-**
-**	The script area is allocated in the host data structure
-**	because kmalloc() returns NULL during scsi initialisations
-**	with Linux 1.2.X
 */
 
 struct host_data {
@@ -3201,24 +2970,24 @@ struct host_data {
 };
 
 /*
-**	Print something which allows to retrieve the controler type, unit,
+**	Print something which allows to retrieve the controller type, unit,
 **	target, lun concerned by a kernel message.
 */
 
-static void PRINT_TARGET(ncb_p np, int target)
+static void PRINT_TARGET(struct ncb *np, int target)
 {
 	printk(KERN_INFO "%s-<%d,*>: ", ncr_name(np), target);
 }
 
-static void PRINT_LUN(ncb_p np, int target, int lun)
+static void PRINT_LUN(struct ncb *np, int target, int lun)
 {
 	printk(KERN_INFO "%s-<%d,%d>: ", ncr_name(np), target, lun);
 }
 
-static void PRINT_ADDR(Scsi_Cmnd *cmd)
+static void PRINT_ADDR(struct scsi_cmnd *cmd)
 {
-	struct host_data *host_data = (struct host_data *) cmd->host->hostdata;
-	PRINT_LUN(host_data->ncb, cmd->target, cmd->lun);
+	struct host_data *host_data = (struct host_data *) cmd->device->host->hostdata;
+	PRINT_LUN(host_data->ncb, cmd->device->id, cmd->device->lun);
 }
 
 /*==========================================================
@@ -3254,85 +3023,31 @@ static u_long div_10M[] =
 #define burst_length(bc) (!(bc))? 0 : 1 << (bc)
 
 /*
- *	Burst code from io register bits.
+ *	Burst code from io register bits.  Burst enable is ctest0 for c720
  */
-#define burst_code(dmode, ctest4, ctest5) \
-	(ctest4) & 0x80? 0 : (((dmode) & 0xc0) >> 6) + ((ctest5) & 0x04) + 1
+#define burst_code(dmode, ctest0) \
+	(ctest0) & 0x80 ? 0 : (((dmode) & 0xc0) >> 6) + 1
 
 /*
  *	Set initial io register bits from burst code.
  */
-static inline void ncr_init_burst(ncb_p np, u_char bc)
+static inline void ncr_init_burst(struct ncb *np, u_char bc)
 {
-	np->rv_ctest4	&= ~0x80;
+	u_char *be = &np->rv_ctest0;
+	*be		&= ~0x80;
 	np->rv_dmode	&= ~(0x3 << 6);
 	np->rv_ctest5	&= ~0x4;
 
 	if (!bc) {
-		np->rv_ctest4	|= 0x80;
-	}
-	else {
+		*be		|= 0x80;
+	} else {
 		--bc;
 		np->rv_dmode	|= ((bc & 0x3) << 6);
 		np->rv_ctest5	|= (bc & 0x4);
 	}
 }
 
-#ifdef SCSI_NCR_NVRAM_SUPPORT
-
-/*
-**	Get target set-up from Symbios format NVRAM.
-*/
-
-static void __init 
-ncr_Symbios_setup_target(ncb_p np, int target, Symbios_nvram *nvram)
-{
-	tcb_p tp = &np->target[target];
-	Symbios_target *tn = &nvram->target[target];
-
-	tp->usrsync = tn->sync_period ? (tn->sync_period + 3) / 4 : 255;
-	tp->usrwide = tn->bus_width == 0x10 ? 1 : 0;
-	tp->usrtags =
-		(tn->flags & SYMBIOS_QUEUE_TAGS_ENABLED)? MAX_TAGS : 0;
-
-	if (!(tn->flags & SYMBIOS_DISCONNECT_ENABLE))
-		tp->usrflag |= UF_NODISC;
-	if (!(tn->flags & SYMBIOS_SCAN_AT_BOOT_TIME))
-		tp->usrflag |= UF_NOSCAN;
-}
-
-/*
-**	Get target set-up from Tekram format NVRAM.
-*/
-
-static void __init 
-ncr_Tekram_setup_target(ncb_p np, int target, Tekram_nvram *nvram)
-{
-	tcb_p tp = &np->target[target];
-	struct Tekram_target *tn = &nvram->target[target];
-	int i;
-
-	if (tn->flags & TEKRAM_SYNC_NEGO) {
-		i = tn->sync_index & 0xf;
-		tp->usrsync = Tekram_sync[i];
-	}
-
-	tp->usrwide = (tn->flags & TEKRAM_WIDE_NEGO) ? 1 : 0;
-
-	if (tn->flags & TEKRAM_TAGGED_COMMANDS) {
-		tp->usrtags = 2 << nvram->max_tags_index;
-	}
-
-	if (!(tn->flags & TEKRAM_DISCONNECT_ENABLE))
-		tp->usrflag = UF_NODISC;
- 
-	/* If any device does not support parity, we will not use this option */
-	if (!(tn->flags & TEKRAM_PARITY_CHECK))
-		np->rv_scntl0  &= ~0x0a; /* SCSI parity checking disabled */
-}
-#endif /* SCSI_NCR_NVRAM_SUPPORT */
-
-static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
+static void __init ncr_prepare_setting(struct ncb *np)
 {
 	u_char	burst_max;
 	u_long	period;
@@ -3346,6 +3061,7 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	np->sv_scntl3	= INB(nc_scntl3) & 0x07;
 	np->sv_dmode	= INB(nc_dmode)  & 0xce;
 	np->sv_dcntl	= INB(nc_dcntl)  & 0xa8;
+	np->sv_ctest0	= INB(nc_ctest0) & 0x84;
 	np->sv_ctest3	= INB(nc_ctest3) & 0x01;
 	np->sv_ctest4	= INB(nc_ctest4) & 0x80;
 	np->sv_ctest5	= INB(nc_ctest5) & 0x24;
@@ -3359,11 +3075,17 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 
 	np->maxwide	= (np->features & FE_WIDE)? 1 : 0;
 
-	/*
-	**	Get the frequency of the chip's clock.
-	**	Find the right value for scntl3.
-	*/
+ 	/*
+	 *  Guess the frequency of the chip's clock.
+	 */
+	if (np->features & FE_ULTRA)
+		np->clock_khz = 80000;
+	else
+		np->clock_khz = 40000;
 
+	/*
+	 *  Get the clock multiplier factor.
+ 	 */
 	if	(np->features & FE_QUAD)
 		np->multiplier	= 4;
 	else if	(np->features & FE_DBLR)
@@ -3371,10 +3093,11 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	else
 		np->multiplier	= 1;
 
-	np->clock_khz	= (np->features & FE_CLK80)? 80000 : 40000;
-	np->clock_khz	*= np->multiplier;
-
-	if (np->clock_khz != 40000)
+	/*
+	 *  Measure SCSI clock frequency for chips 
+	 *  it may vary from assumed one.
+	 */
+	if (np->features & FE_VARCLK)
 		ncr_getclock(np, np->multiplier);
 
 	/*
@@ -3404,10 +3127,8 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	 * Check against chip SCSI standard support (SCSI-2,ULTRA,ULTRA2).
 	 */
 
-	if	(np->minsync < 25 && !(np->features & (FE_ULTRA|FE_ULTRA2)))
+	if	(np->minsync < 25 && !(np->features & FE_ULTRA))
 		np->minsync = 25;
-	else if	(np->minsync < 12 && !(np->features & FE_ULTRA2))
-		np->minsync = 12;
 
 	/*
 	 * Maximum synchronous period factor supported by the chip.
@@ -3423,10 +3144,11 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	np->rv_scntl0	= np->sv_scntl0;
 	np->rv_dmode	= np->sv_dmode;
 	np->rv_dcntl	= np->sv_dcntl;
+	np->rv_ctest0	= np->sv_ctest0;
 	np->rv_ctest3	= np->sv_ctest3;
 	np->rv_ctest4	= np->sv_ctest4;
 	np->rv_ctest5	= np->sv_ctest5;
-	burst_max	= burst_code(np->sv_dmode, np->sv_ctest4, np->sv_ctest5);
+	burst_max	= burst_code(np->sv_dmode, np->sv_ctest0);
 #else
 
 	/*
@@ -3434,7 +3156,7 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	*/
 	burst_max	= driver_setup.burst_max;
 	if (burst_max == 255)
-		burst_max = burst_code(np->sv_dmode, np->sv_ctest4, np->sv_ctest5);
+		burst_max = burst_code(np->sv_dmode, np->sv_ctest0);
 	if (burst_max > 7)
 		burst_max = 7;
 	if (burst_max > np->maxburst)
@@ -3457,6 +3179,12 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 		np->rv_ctest3	|= WRIE;	/* Write and Invalidate */
 	if (np->features & FE_DFS)
 		np->rv_ctest5	|= DFS;		/* Dma Fifo Size */
+	if (np->features & FE_MUX)
+		np->rv_ctest4	|= MUX;		/* Host bus multiplex mode */
+	if (np->features & FE_EA)
+		np->rv_dcntl	|= EA;		/* Enable ACK */
+	if (np->features & FE_EHP)
+		np->rv_ctest0	|= EHP;		/* Even host parity */
 
 	/*
 	**	Select some other
@@ -3466,25 +3194,6 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	if (driver_setup.scsi_parity)
 		np->rv_scntl0	|= 0x0a;	/*  full arb., ena parity, par->ATN  */
 
-#ifdef SCSI_NCR_NVRAM_SUPPORT
-	/*
-	**	Get parity checking, host ID and verbose mode from NVRAM
-	**/
-	if (nvram) {
-		switch(nvram->type) {
-		case SCSI_NCR_TEKRAM_NVRAM:
-			np->myaddr = nvram->data.Tekram.host_id & 0x0f;
-			break;
-		case SCSI_NCR_SYMBIOS_NVRAM:
-			if (!(nvram->data.Symbios.flags & SYMBIOS_PARITY_ENABLE))
-				np->rv_scntl0  &= ~0x0a;
-			np->myaddr = nvram->data.Symbios.host_id & 0x0f;
-			if (nvram->data.Symbios.flags & SYMBIOS_VERBOSE_MSGS)
-				np->verbose += 1;
-			break;
-		}
-	}
-#endif
 	/*
 	**  Get SCSI addr of host adapter (set by bios?).
 	*/
@@ -3511,9 +3220,7 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	**	  since a 100% safe algorithm is not possible.
 	*/
 	np->scsi_mode = SMODE_SE;
-	if	(np->features & FE_ULTRA2)
-		np->scsi_mode = (np->sv_stest4 & SMODE);
-	else if	(np->features & FE_DIFF) {
+	if (np->features & FE_DIFF) {
 		switch(driver_setup.diff_support) {
 		case 4:	/* Trust previous settings if present, then GPIO3 */
 			if (np->sv_scntl3) {
@@ -3522,8 +3229,6 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 				break;
 			}
 		case 3:	/* SYMBIOS controllers report HVD through GPIO3 */
-			if (nvram && nvram->type != SCSI_NCR_SYMBIOS_NVRAM)
-				break;
 			if (INB(nc_gpreg) & 0x08)
 				break;
 		case 2:	/* Set HVD unconditionally */
@@ -3546,8 +3251,7 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	**	that drive the LED directly.
 	**	Also probe initial setting of GPIO0 as output.
 	*/
-	if ((driver_setup.led_pin ||
-	     (nvram && nvram->type == SCSI_NCR_SYMBIOS_NVRAM)) &&
+	if ((driver_setup.led_pin) &&
 	    !(np->features & FE_LEDC) && !(np->sv_gpcntl & 0x01))
 		np->features |= FE_LED0;
 
@@ -3567,51 +3271,24 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 
 	/*
 	**	Configure targets according to driver setup.
-	**	If NVRAM present get targets setup from NVRAM.
 	**	Allow to override sync, wide and NOSCAN from 
 	**	boot command line.
 	*/
 	for (i = 0 ; i < MAX_TARGET ; i++) {
-		tcb_p tp = &np->target[i];
+		struct tcb *tp = &np->target[i];
 
-		tp->usrsync = 255;
-#ifdef SCSI_NCR_NVRAM_SUPPORT
-		if (nvram) {
-			switch(nvram->type) {
-			case SCSI_NCR_TEKRAM_NVRAM:
-				ncr_Tekram_setup_target(np, i, &nvram->data.Tekram);
-				break;
-			case SCSI_NCR_SYMBIOS_NVRAM:
-				ncr_Symbios_setup_target(np, i, &nvram->data.Symbios);
-				break;
-			}
-			if (driver_setup.use_nvram & 0x2)
-				tp->usrsync = driver_setup.default_sync;
-			if (driver_setup.use_nvram & 0x4)
-				tp->usrwide = driver_setup.max_wide;
-			if (driver_setup.use_nvram & 0x8)
-				tp->usrflag &= ~UF_NOSCAN;
-		}
-		else {
-#else
-		if (1) {
-#endif
-			tp->usrsync = driver_setup.default_sync;
-			tp->usrwide = driver_setup.max_wide;
-			tp->usrtags = MAX_TAGS;
-			if (!driver_setup.disconnection)
-				np->target[i].usrflag = UF_NODISC;
-		}
+		tp->usrsync = driver_setup.default_sync;
+		tp->usrwide = driver_setup.max_wide;
+		tp->usrtags = MAX_TAGS;
+		if (!driver_setup.disconnection)
+			np->target[i].usrflag = UF_NODISC;
 	}
 
 	/*
 	**	Announce all that stuff to user.
 	*/
 
-	i = nvram ? nvram->type : 0;
-	printk(KERN_INFO "%s: %sID %d, Fast-%d%s%s\n", ncr_name(np),
-		i  == SCSI_NCR_SYMBIOS_NVRAM ? "Symbios format NVRAM, " :
-		(i == SCSI_NCR_TEKRAM_NVRAM  ? "Tekram format NVRAM, " : ""),
+	printk(KERN_INFO "%s: ID %d, Fast-%d%s%s\n", ncr_name(np),
 		np->myaddr,
 		np->minsync < 12 ? 40 : (np->minsync < 25 ? 20 : 10),
 		(np->rv_scntl0 & 0xa)	? ", Parity Checking"	: ", NO Parity",
@@ -3632,401 +3309,7 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	if (bootverbose && np->paddr2)
 		printk (KERN_INFO "%s: on-chip RAM at 0x%lx\n",
 			ncr_name(np), np->paddr2);
-
-	return 0;
 }
-
-/*
-**	Host attach and initialisations.
-**
-**	Allocate host data and ncb structure.
-**	Request IO region and remap MMIO region.
-**	Do chip initialization.
-**	If all is OK, install interrupt handling and
-**	start the timer daemon.
-*/
-
-static int __init 
-ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device)
-{
-        struct host_data *host_data;
-	ncb_p np = 0;
-        struct Scsi_Host *instance = 0;
-	u_long flags = 0;
-	ncr_nvram *nvram = device->nvram;
-	int i;
-
-	printk(KERN_INFO "ncr53c%s-%d: rev 0x%x on pci bus %d device %d function %d "
-#ifdef __sparc__
-		"irq %s\n",
-#else
-		"irq %d\n",
-#endif
-		device->chip.name, unit, device->chip.revision_id,
-		device->slot.bus, (device->slot.device_fn & 0xf8) >> 3,
-		device->slot.device_fn & 7,
-#ifdef __sparc__
-		__irq_itoa(device->slot.irq));
-#else
-		device->slot.irq);
-#endif
-
-	/*
-	**	Allocate host_data structure
-	*/
-        if (!(instance = scsi_register(tpnt, sizeof(*host_data))))
-	        goto attach_error;
-	host_data = (struct host_data *) instance->hostdata;
-
-	/*
-	**	Allocate the host control block.
-	*/
-	np = __m_calloc_dma(device->pdev, sizeof(struct ncb), "NCB");
-	if (!np)
-		goto attach_error;
-	NCR_INIT_LOCK_NCB(np);
-	np->pdev  = device->pdev;
-	np->p_ncb = vtobus(np);
-	host_data->ncb = np;
-
-	/*
-	**	Allocate the default CCB.
-	*/
-	np->ccb = (ccb_p) m_calloc_dma(sizeof(struct ccb), "CCB");
-	if (!np->ccb)
-		goto attach_error;
-
-	/*
-	**	Store input informations in the host data structure.
-	*/
-	strncpy(np->chip_name, device->chip.name, sizeof(np->chip_name) - 1);
-	np->unit	= unit;
-	np->verbose	= driver_setup.verbose;
-	sprintf(np->inst_name, "ncr53c%s-%d", np->chip_name, np->unit);
-	np->device_id	= device->chip.device_id;
-	np->revision_id	= device->chip.revision_id;
-	np->bus		= device->slot.bus;
-	np->device_fn	= device->slot.device_fn;
-	np->features	= device->chip.features;
-	np->clock_divn	= device->chip.nr_divisor;
-	np->maxoffs	= device->chip.offset_max;
-	np->maxburst	= device->chip.burst_max;
-	np->myaddr	= device->host_id;
-
-	/*
-	**	Allocate SCRIPTS areas.
-	*/
-	np->script0  = (struct script *)
-			m_calloc_dma(sizeof(struct script), "SCRIPT");
-	if (!np->script0)
-		goto attach_error;
-	np->scripth0  = (struct scripth *)
-			m_calloc_dma(sizeof(struct scripth), "SCRIPTH");
-	if (!np->scripth0)
-		goto attach_error;
-
-	/*
-	**    Initialize timer structure
-        **
-        */
-	init_timer(&np->timer);
-	np->timer.data     = (unsigned long) np;
-	np->timer.function = ncr53c8xx_timeout;
-
-	/*
-	**	Try to map the controller chip to
-	**	virtual and physical memory.
-	*/
-
-	np->paddr	= device->slot.base;
-	np->paddr2	= (np->features & FE_RAM)? device->slot.base_2 : 0;
-
-#ifndef NCR_IOMAPPED
-	np->vaddr = remap_pci_mem((u_long) np->paddr, (u_long) 128);
-	if (!np->vaddr) {
-		printk(KERN_ERR
-			"%s: can't map memory mapped IO region\n",ncr_name(np));
-		goto attach_error;
-	}
-	else
-		if (bootverbose > 1)
-			printk(KERN_INFO
-				"%s: using memory mapped IO at virtual address 0x%lx\n", ncr_name(np), (u_long) np->vaddr);
-
-	/*
-	**	Make the controller's registers available.
-	**	Now the INB INW INL OUTB OUTW OUTL macros
-	**	can be used safely.
-	*/
-
-	np->reg = (struct ncr_reg*) np->vaddr;
-
-#endif /* !defined NCR_IOMAPPED */
-
-	/*
-	**	Try to map the controller chip into iospace.
-	*/
-
-	request_region(device->slot.io_port, 128, "ncr53c8xx");
-	np->base_io = device->slot.io_port;
-
-#ifdef SCSI_NCR_NVRAM_SUPPORT
-	if (nvram) {
-		switch(nvram->type) {
-		case SCSI_NCR_SYMBIOS_NVRAM:
-#ifdef SCSI_NCR_DEBUG_NVRAM
-			ncr_display_Symbios_nvram(&nvram->data.Symbios);
-#endif
-			break;
-		case SCSI_NCR_TEKRAM_NVRAM:
-#ifdef SCSI_NCR_DEBUG_NVRAM
-			ncr_display_Tekram_nvram(&nvram->data.Tekram);
-#endif
-			break;
-		default:
-			nvram = 0;
-#ifdef SCSI_NCR_DEBUG_NVRAM
-			printk(KERN_DEBUG "%s: NVRAM: None or invalid data.\n", ncr_name(np));
-#endif
-		}
-	}
-#endif
-
-	/*
-	**	Do chip dependent initialization.
-	*/
-	(void)ncr_prepare_setting(np, nvram);
-
-	if (np->paddr2 && sizeof(struct script) > 4096) {
-		np->paddr2 = 0;
-		printk(KERN_WARNING "%s: script too large, NOT using on chip RAM.\n",
-			ncr_name(np));
-	}
-
-	/*
-	**	Fill Linux host instance structure
-	*/
-	instance->max_channel	= 0;
-	instance->this_id       = np->myaddr;
-	instance->max_id	= np->maxwide ? 16 : 8;
-	instance->max_lun	= SCSI_NCR_MAX_LUN;
-#ifndef NCR_IOMAPPED
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,29)
-	instance->base		= (unsigned long) np->reg;
-#else
-	instance->base		= (char *) np->reg;
-#endif
-#endif
-	instance->irq		= device->slot.irq;
-	instance->unique_id	= device->slot.io_port;
-	instance->io_port	= device->slot.io_port;
-	instance->n_io_port	= 128;
-	instance->dma_channel	= 0;
-	instance->cmd_per_lun	= MAX_TAGS;
-	instance->can_queue	= (MAX_START-4);
-	instance->select_queue_depths = ncr53c8xx_select_queue_depths;
-
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-	np->check_integrity	  = 0;
-	instance->check_integrity = 0;
-
-#ifdef SCSI_NCR_ENABLE_INTEGRITY_CHECK
-	if ( !(driver_setup.bus_check & 0x04) ) {
-		np->check_integrity	  = 1;
-		instance->check_integrity = 1;
-	}
-#endif
-#endif
-	/*
-	**	Patch script to physical addresses
-	*/
-	ncr_script_fill (&script0, &scripth0);
-
-	np->scripth	= np->scripth0;
-	np->p_scripth	= vtobus(np->scripth);
-
-	np->p_script	= (np->paddr2) ?
-			  pcivtobus(np->paddr2) : vtobus(np->script0);
-
-	ncr_script_copy_and_bind (np, (ncrcmd *) &script0, (ncrcmd *) np->script0, sizeof(struct script));
-	ncr_script_copy_and_bind (np, (ncrcmd *) &scripth0, (ncrcmd *) np->scripth0, sizeof(struct scripth));
-	np->ccb->p_ccb		= vtobus (np->ccb);
-
-	/*
-	**    Patch the script for LED support.
-	*/
-
-	if (np->features & FE_LED0) {
-		np->script0->idle[0]  =
-				cpu_to_scr(SCR_REG_REG(gpreg, SCR_OR,  0x01));
-		np->script0->reselected[0] =
-				cpu_to_scr(SCR_REG_REG(gpreg, SCR_AND, 0xfe));
-		np->script0->start[0] =
-				cpu_to_scr(SCR_REG_REG(gpreg, SCR_AND, 0xfe));
-	}
-
-	/*
-	**	Look for the target control block of this nexus.
-	**	For i = 0 to 3
-	**		JUMP ^ IFTRUE (MASK (i, 3)), @(next_lcb)
-	*/
-	for (i = 0 ; i < 4 ; i++) {
-		np->jump_tcb[i].l_cmd   =
-				cpu_to_scr((SCR_JUMP ^ IFTRUE (MASK (i, 3))));
-		np->jump_tcb[i].l_paddr =
-				cpu_to_scr(NCB_SCRIPTH_PHYS (np, bad_target));
-	}
-
-	/*
-	**	Reset chip.
-	*/
-
-	OUTB (nc_istat,  SRST);
-	UDELAY (100);
-	OUTB (nc_istat,  0   );
-
-	/*
-	**	Now check the cache handling of the pci chipset.
-	*/
-
-	if (ncr_snooptest (np)) {
-		printk (KERN_ERR "CACHE INCORRECTLY CONFIGURED.\n");
-		goto attach_error;
-	};
-
-	/*
-	**	Install the interrupt handler.
-	*/
-
-	if (request_irq(device->slot.irq, ncr53c8xx_intr,
-			((driver_setup.irqm & 0x10) ? 0 : SA_SHIRQ) |
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,2,0)
-			((driver_setup.irqm & 0x20) ? 0 : SA_INTERRUPT),
-#else
-			0,
-#endif
-			"ncr53c8xx", np)) {
-#ifdef __sparc__
-		printk(KERN_ERR "%s: request irq %s failure\n",
-			ncr_name(np), __irq_itoa(device->slot.irq));
-#else
-		printk(KERN_ERR "%s: request irq %d failure\n",
-			ncr_name(np), device->slot.irq);
-#endif
-		goto attach_error;
-	}
-
-	np->irq = device->slot.irq;
-
-	/*
-	**	Initialize the fixed part of the default ccb.
-	*/
-	ncr_init_ccb(np, np->ccb);
-
-	/*
-	**	After SCSI devices have been opened, we cannot
-	**	reset the bus safely, so we do it here.
-	**	Interrupt handler does the real work.
-	**	Process the reset exception,
-	**	if interrupts are not enabled yet.
-	**	Then enable disconnects.
-	*/
-	NCR_LOCK_NCB(np, flags);
-	if (ncr_reset_scsi_bus(np, 0, driver_setup.settle_delay) != 0) {
-		printk(KERN_ERR "%s: FATAL ERROR: CHECK SCSI BUS - CABLES, TERMINATION, DEVICE POWER etc.!\n", ncr_name(np));
-
-		NCR_UNLOCK_NCB(np, flags);
-		goto attach_error;
-	}
-	ncr_exception (np);
-
-	np->disc = 1;
-
-	/*
-	**	The middle-level SCSI driver does not
-	**	wait for devices to settle.
-	**	Wait synchronously if more than 2 seconds.
-	*/
-	if (driver_setup.settle_delay > 2) {
-		printk(KERN_INFO "%s: waiting %d seconds for scsi devices to settle...\n",
-			ncr_name(np), driver_setup.settle_delay);
-		MDELAY (1000 * driver_setup.settle_delay);
-	}
-
-	/*
-	**	Now let the generic SCSI driver
-	**	look for the SCSI devices on the bus ..
-	*/
-
-	/*
-	**	start the timeout daemon
-	*/
-	np->lasttime=0;
-	ncr_timeout (np);
-
-	/*
-	**  use SIMPLE TAG messages by default
-	*/
-#ifdef SCSI_NCR_ALWAYS_SIMPLE_TAG
-	np->order = M_SIMPLE_TAG;
-#endif
-
-	/*
-	**  Done.
-	*/
-        if (!the_template) {
-        	the_template = instance->hostt;
-        	first_host = instance;
-	}
-
-	NCR_UNLOCK_NCB(np, flags);
-
-	return 0;
-
-attach_error:
-	if (!instance) return -1;
-	printk(KERN_INFO "%s: detaching...\n", ncr_name(np));
-	if (!np)
-		goto unregister;
-#ifndef NCR_IOMAPPED
-	if (np->vaddr) {
-#ifdef DEBUG_NCR53C8XX
-		printk(KERN_DEBUG "%s: releasing memory mapped IO region %lx[%d]\n", ncr_name(np), (u_long) np->vaddr, 128);
-#endif
-		unmap_pci_mem((vm_offset_t) np->vaddr, (u_long) 128);
-	}
-#endif /* !NCR_IOMAPPED */
-	if (np->base_io) {
-#ifdef DEBUG_NCR53C8XX
-		printk(KERN_DEBUG "%s: releasing IO region %x[%d]\n", ncr_name(np), np->base_io, 128);
-#endif
-		release_region(np->base_io, 128);
-	}
-	if (np->irq) {
-#ifdef DEBUG_NCR53C8XX
-#ifdef __sparc__
-	printk(KERN_INFO "%s: freeing irq %s\n", ncr_name(np),
-	       __irq_itoa(np->irq));
-#else
-	printk(KERN_INFO "%s: freeing irq %d\n", ncr_name(np), np->irq);
-#endif
-#endif
-		free_irq(np->irq, np);
-	}
-	if (np->scripth0)
-		m_free_dma(np->scripth0, sizeof(struct scripth), "SCRIPTH");
-	if (np->script0)
-		m_free_dma(np->script0, sizeof(struct script), "SCRIPT");
-	if (np->ccb)
-		m_free_dma(np->ccb, sizeof(struct ccb), "CCB");
-	m_free_dma(np, sizeof(struct ncb), "NCB");
-
-unregister:
-	scsi_unregister(instance);
-
-        return -1;
- }
-
 
 /*==========================================================
 **
@@ -4047,199 +3330,23 @@ unregister:
 **
 **==========================================================
 */
-static inline void ncr_queue_done_cmd(ncb_p np, Scsi_Cmnd *cmd)
+static inline void ncr_queue_done_cmd(struct ncb *np, struct scsi_cmnd *cmd)
 {
 	unmap_scsi_data(np, cmd);
 	cmd->host_scribble = (char *) np->done_list;
 	np->done_list = cmd;
 }
 
-static inline void ncr_flush_done_cmds(Scsi_Cmnd *lcmd)
+static inline void ncr_flush_done_cmds(struct scsi_cmnd *lcmd)
 {
-	Scsi_Cmnd *cmd;
+	struct scsi_cmnd *cmd;
 
 	while (lcmd) {
 		cmd = lcmd;
-		lcmd = (Scsi_Cmnd *) cmd->host_scribble;
+		lcmd = (struct scsi_cmnd *) cmd->host_scribble;
 		cmd->scsi_done(cmd);
 	}
 }
-
-/*==========================================================
-**
-**
-**	Prepare the next negotiation message for integrity check,
-**	if needed.
-**
-**	Fill in the part of message buffer that contains the 
-**	negotiation and the nego_status field of the CCB.
-**	Returns the size of the message in bytes.
-**
-**
-**==========================================================
-*/
-
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-static int ncr_ic_nego(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd, u_char *msgptr)
-{
-	tcb_p tp = &np->target[cp->target];
-	int msglen = 0;
-	int nego = 0;
-	u_char no_increase;
-
-	if (tp->inq_done) {
-
-		if (!tp->ic_maximums_set) {
-			tp->ic_maximums_set = 1;
-
-			/* check target and host adapter capabilities */
-			if ( (tp->inq_byte7 & INQ7_WIDE16) && 
-					np->maxwide && tp->usrwide ) 
-				tp->ic_max_width = 1;
-			else
-				tp->ic_max_width = 0;
-
-			if ((tp->inq_byte7 & INQ7_SYNC) && tp->maxoffs) {
-				tp->ic_min_sync   = (tp->minsync < np->minsync) ?
-							np->minsync : tp->minsync;
-			}
-			else 
-				tp->ic_min_sync   = 255;
-			
-			tp->period   = 1;
-			tp->widedone = 1;
-		}
-
-		if (DEBUG_FLAGS & DEBUG_IC) {
-			printk("%s: cmd->ic_nego %d, 1st byte 0x%2X\n",
-				ncr_name(np), cmd->ic_nego, cmd->cmnd[0]);
-		}
-
-		/* First command from integrity check routine will request
-		 * a PPR message.  Disable.
-		 */
-		if ((cmd->ic_nego & NS_PPR) == NS_PPR)
-			cmd->ic_nego &= ~NS_PPR;
-		/* Previous command recorded a parity or an initiator
-		 * detected error condition. Force bus to narrow for this
-		 * target. Clear flag. Negotation on request sense.
-		 * Note: kernel forces 2 bus resets :o( but clears itself out.
-		 * Minor bug? in scsi_obsolete.c (ugly)
-		 */
-		if (np->check_integ_par) {
-			printk("%s: Parity Error. Target set to narrow.\n",
-				ncr_name(np));
-			tp->ic_max_width = 0;
-			tp->widedone = tp->period = 0;
-		}
-		
-		/* In case of a bus reset, ncr_negotiate will reset 
-                 * the flags tp->widedone and tp->period to 0, forcing
-		 * a new negotiation. 
-		 */
-		no_increase = 0;
-		if (tp->widedone == 0) {
-			cmd->ic_nego = NS_WIDE;
-			tp->widedone = 1;
-			no_increase = 1;
-		}
-		else if (tp->period == 0) {
-			cmd->ic_nego = NS_SYNC;
-			tp->period = 1;
-			no_increase = 1;
-		}
-			
-		switch (cmd->ic_nego) {
-		case NS_WIDE:
-			/*
-			**	negotiate wide transfers ?
-			**	Do NOT negotiate if device only supports
-			**	narrow.	
-			*/
-			if (tp->ic_max_width | np->check_integ_par) {
-				nego = NS_WIDE;
-
-				msgptr[msglen++] = M_EXTENDED;
-				msgptr[msglen++] = 2;
-				msgptr[msglen++] = M_X_WIDE_REQ;
-				msgptr[msglen++] = cmd->ic_nego_width & tp->ic_max_width;
-			}
-			else
-				cmd->ic_nego_width &= tp->ic_max_width;
-              
-			break;
-
-		case NS_SYNC:
-			/*
-			**	negotiate synchronous transfers?
-			**	Target must support sync transfers.
-			**
-			**	If period becomes longer than max, reset to async
-			*/
-
-			if (tp->inq_byte7 & INQ7_SYNC) {
-
-				nego = NS_SYNC;
-
-				msgptr[msglen++] = M_EXTENDED;
-				msgptr[msglen++] = 3;
-				msgptr[msglen++] = M_X_SYNC_REQ;
-
-				switch (cmd->ic_nego_sync) {
-				case 2: /* increase the period */
-					if (!no_increase) {
-					  if (tp->ic_min_sync <= 0x0A)
-					      tp->ic_min_sync = 0x0C;
-					  else if (tp->ic_min_sync <= 0x0C)
-					      tp->ic_min_sync = 0x19;
-					  else if (tp->ic_min_sync <= 0x19)
-					      tp->ic_min_sync *= 2;
-					  else {
-						tp->ic_min_sync = 255;
-						cmd->ic_nego_sync = 0;
-						tp->maxoffs = 0;
-					   }
-					}
-					msgptr[msglen++] = tp->maxoffs?tp->ic_min_sync:0;
-					msgptr[msglen++] = tp->maxoffs;
-					break;
-
-				case 1: /* nego. to maximum */
-					msgptr[msglen++] = tp->maxoffs?tp->ic_min_sync:0;
-					msgptr[msglen++] = tp->maxoffs;
-					break;
-
-				case 0:	/* nego to async */
-				default:
-					msgptr[msglen++] = 0;
-					msgptr[msglen++] = 0;
-					break;
-				};
-			}
-			else
-				cmd->ic_nego_sync = 0;
-			break;
-
-		case NS_NOCHANGE:
-		default:
-			break;
-		};
-	};
-
-	cp->nego_status = nego;
-	np->check_integ_par = 0;
-
-	if (nego) {
-		tp->nego_cp = cp;
-		if (DEBUG_FLAGS & DEBUG_NEGO) {
-			ncr_print_msg(cp, nego == NS_WIDE ?
-			  "wide/narrow msgout": "sync/async msgout", msgptr);
-		};
-	};
-
-	return msglen;
-}
-#endif /* SCSI_NCR_INTEGRITY_CHECKING */
 
 /*==========================================================
 **
@@ -4255,25 +3362,22 @@ static int ncr_ic_nego(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd, u_char *msgptr)
 */
 
 
-static int ncr_prepare_nego(ncb_p np, ccb_p cp, u_char *msgptr)
+static int ncr_prepare_nego(struct ncb *np, struct ccb *cp, u_char *msgptr)
 {
-	tcb_p tp = &np->target[cp->target];
+	struct tcb *tp = &np->target[cp->target];
 	int msglen = 0;
 	int nego = 0;
+	struct scsi_target *starget = tp->starget;
 
-	if (tp->inq_done) {
+	if (likely(starget)) {
 
 		/*
 		**	negotiate wide transfers ?
 		*/
 
 		if (!tp->widedone) {
-			if (tp->inq_byte7 & INQ7_WIDE16) {
+			if (spi_support_wide(starget)) {
 				nego = NS_WIDE;
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-				if (tp->ic_done)
-		       			 tp->usrwide &= tp->ic_max_width;
-#endif
 			} else
 				tp->widedone=1;
 
@@ -4284,13 +3388,8 @@ static int ncr_prepare_nego(ncb_p np, ccb_p cp, u_char *msgptr)
 		*/
 
 		if (!nego && !tp->period) {
-			if (tp->inq_byte7 & INQ7_SYNC) {
+			if (spi_support_sync(starget)) {
 				nego = NS_SYNC;
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-				if ((tp->ic_done) &&
-				 	      (tp->minsync < tp->ic_min_sync))
-		       			 tp->minsync = tp->ic_min_sync;
-#endif
 			} else {
 				tp->period  =0xffff;
 				PRINT_TARGET(np, cp->target);
@@ -4339,18 +3438,18 @@ static int ncr_prepare_nego(ncb_p np, ccb_p cp, u_char *msgptr)
 **
 **==========================================================
 */
-static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
+static int ncr_queue_command (struct ncb *np, struct scsi_cmnd *cmd)
 {
-/*	Scsi_Device        *device    = cmd->device; */
-	tcb_p tp                      = &np->target[cmd->target];
-	lcb_p lp		      = tp->lp[cmd->lun];
-	ccb_p cp;
+/*	struct scsi_device        *device    = cmd->device; */
+	struct tcb *tp                      = &np->target[cmd->device->id];
+	struct lcb *lp		      = tp->lp[cmd->device->lun];
+	struct ccb *cp;
 
 	int	segments;
 	u_char	idmsg, *msgptr;
-	u_int  msglen;
+	u32	msglen;
 	int	direction;
-	u_int32	lastp, goalp;
+	u32	lastp, goalp;
 
 	/*---------------------------------------------
 	**
@@ -4358,11 +3457,11 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	**
 	**---------------------------------------------
 	*/
-	if ((cmd->target == np->myaddr	  ) ||
-		(cmd->target >= MAX_TARGET) ||
-		(cmd->lun    >= MAX_LUN   )) {
+	if ((cmd->device->id == np->myaddr	  ) ||
+		(cmd->device->id >= MAX_TARGET) ||
+		(cmd->device->lun    >= MAX_LUN   )) {
 		return(DID_BAD_TARGET);
-        }
+	}
 
 	/*---------------------------------------------
 	**
@@ -4373,7 +3472,8 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	**
 	**---------------------------------------------
 	*/
-	if (cmd->cmnd[0] == 0 && (tp->usrflag & UF_NOSCAN)) {
+	if ((cmd->cmnd[0] == 0 || cmd->cmnd[0] == 0x12) && 
+	    (tp->usrflag & UF_NOSCAN)) {
 		tp->usrflag &= ~UF_NOSCAN;
 		return DID_BAD_TARGET;
 	}
@@ -4399,36 +3499,11 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 			np->settle_time = tlimit;
 	}
 
-        if (np->settle_time || !(cp=ncr_get_ccb (np, cmd->target, cmd->lun))) {
+	if (np->settle_time || !(cp=ncr_get_ccb (np, cmd->device->id, cmd->device->lun))) {
 		insert_into_waiting_list(np, cmd);
 		return(DID_OK);
 	}
 	cp->cmd = cmd;
-
-	/*---------------------------------------------------
-	**
-	**	Enable tagged queue if asked by scsi ioctl
-	**
-	**----------------------------------------------------
-	*/
-#if 0	/* This stuff was only usefull for linux-1.2.13 */
-	if (lp && !lp->numtags && cmd->device && cmd->device->tagged_queue) {
-		lp->numtags = tp->usrtags;
-		ncr_setup_tags (np, cmd->target, cmd->lun);
-	}
-#endif
-
-	/*---------------------------------------------------
-	**
-	**	timestamp
-	**
-	**----------------------------------------------------
-	*/
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	bzero (&cp->phys.header.stamp, sizeof (struct tstamp));
-	cp->phys.header.stamp.start = jiffies;
-#endif
-
 
 	/*----------------------------------------------------
 	**
@@ -4437,7 +3512,7 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	**----------------------------------------------------
 	*/
 
-	idmsg = M_IDENTIFY | cmd->lun;
+	idmsg = M_IDENTIFY | cmd->device->lun;
 
 	if (cp ->tag != NO_TAG ||
 		(cp != np->ccb && np->disc && !(tp->usrflag & UF_NODISC)))
@@ -4496,9 +3571,9 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	**----------------------------------------------------
 	*/
 
-	direction = scsi_data_direction(cmd);
-	if (direction != SCSI_DATA_NONE) {
-		segments = ncr_scatter (np, cp, cp->cmd);
+	direction = cmd->sc_data_direction;
+	if (direction != DMA_NONE) {
+		segments = ncr_scatter(np, cp, cp->cmd);
 		if (segments < 0) {
 			ncr_free_ccb(np, cp);
 			return(DID_ERROR);
@@ -4520,72 +3595,9 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 
 	cp->nego_status = 0;
 
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-	if ((np->check_integrity && tp->ic_done) || !np->check_integrity) {
-		 if ((!tp->widedone || !tp->period) && !tp->nego_cp && lp) {
-			msglen += ncr_prepare_nego (np, cp, msgptr + msglen);
-		 }
-	}
-	else if (np->check_integrity && (cmd->ic_in_progress)) { 
-		msglen += ncr_ic_nego (np, cp, cmd, msgptr + msglen);
-        }
-	else if (np->check_integrity && cmd->ic_complete) {
-                /*
-                 * Midlayer signal to the driver that all of the scsi commands
-                 * for the integrity check have completed. Save the negotiated
-                 * parameters (extracted from sval and wval). 
-                 */ 
-
-		{
-			u_char idiv;
-			idiv = (tp->wval>>4) & 0x07;
-			if ((tp->sval&0x1f) && idiv )
-				tp->period = (((tp->sval>>5)+4)  
-						*div_10M[idiv-1])/np->clock_khz;
-			else
-				tp->period = 0xffff;
-		}
-		/*
-		 * tp->period contains 10 times the transfer period, 
-		 * which itself is 4 * the requested negotiation rate.
-		 */
-		if	(tp->period <= 250)	tp->ic_min_sync = 10;
-		else if	(tp->period <= 303)	tp->ic_min_sync = 11;
-		else if	(tp->period <= 500)	tp->ic_min_sync = 12;
-		else				
-				tp->ic_min_sync = (tp->period + 40 - 1) / 40;
-
-
-		/*
-                 * Negotiation for this target it complete.
-                 */
-		tp->ic_max_width =  (tp->wval & EWS) ? 1: 0;
-		tp->ic_done = 1;
-		tp->widedone = 1;
-
-		printk("%s: Integrity Check Complete: \n", ncr_name(np)); 
-
-		printk("%s: %s %s SCSI", ncr_name(np), 
-				(tp->sval&0x1f)?"SYNC":"ASYNC",
-				tp->ic_max_width?"WIDE":"NARROW");
-
-		if (tp->sval&0x1f) {
-                        u_long mbs = 10000 * (tp->ic_max_width + 1);
-
-                        printk(" %d.%d  MB/s", 
-                                (int) (mbs / tp->period), (int) (mbs % tp->period));
-
-			printk(" (%d ns, %d offset)\n", 
-				  tp->period/10, tp->sval&0x1f);
-		}
-		else
-                        printk(" %d MB/s. \n ", (tp->ic_max_width+1)*5);
-        }
-#else
 	if ((!tp->widedone || !tp->period) && !tp->nego_cp && lp) {
 		msglen += ncr_prepare_nego (np, cp, msgptr + msglen);
 	}
-#endif /* SCSI_NCR_INTEGRITY_CHECKING */
 
 	/*----------------------------------------------------
 	**
@@ -4594,17 +3606,17 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	**----------------------------------------------------
 	*/
 	if (!cp->data_len)
-		direction = SCSI_DATA_NONE;
+		direction = DMA_NONE;
 
 	/*
-	**	If data direction is UNKNOWN, speculate DATA_READ 
-	**	but prepare alternate pointers for WRITE in case 
+	**	If data direction is BIDIRECTIONAL, speculate FROM_DEVICE
+	**	but prepare alternate pointers for TO_DEVICE in case 
 	**	of our speculation will be just wrong.
 	**	SCRIPTS will swap values if needed.
 	*/
 	switch(direction) {
-	case SCSI_DATA_UNKNOWN:
-	case SCSI_DATA_WRITE:
+	case DMA_BIDIRECTIONAL:
+	case DMA_TO_DEVICE:
 		goalp = NCB_SCRIPT_PHYS (np, data_out2) + 8;
 		if (segments <= MAX_SCATTERL)
 			lastp = goalp - 8 - (segments * 16);
@@ -4612,12 +3624,12 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 			lastp = NCB_SCRIPTH_PHYS (np, hdata_out2);
 			lastp -= (segments - MAX_SCATTERL) * 16;
 		}
-		if (direction != SCSI_DATA_UNKNOWN)
+		if (direction != DMA_BIDIRECTIONAL)
 			break;
 		cp->phys.header.wgoalp	= cpu_to_scr(goalp);
 		cp->phys.header.wlastp	= cpu_to_scr(lastp);
 		/* fall through */
-	case SCSI_DATA_READ:
+	case DMA_FROM_DEVICE:
 		goalp = NCB_SCRIPT_PHYS (np, data_in2) + 8;
 		if (segments <= MAX_SCATTERL)
 			lastp = goalp - 8 - (segments * 16);
@@ -4627,7 +3639,7 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 		}
 		break;
 	default:
-	case SCSI_DATA_NONE:
+	case DMA_NONE:
 		lastp = goalp = NCB_SCRIPT_PHYS (np, no_data);
 		break;
 	}
@@ -4639,7 +3651,7 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	cp->phys.header.lastp = cpu_to_scr(lastp);
 	cp->phys.header.goalp = cpu_to_scr(goalp);
 
-	if (direction == SCSI_DATA_UNKNOWN)
+	if (direction == DMA_BIDIRECTIONAL)
 		cp->phys.header.savep = 
 			cpu_to_scr(NCB_SCRIPTH_PHYS (np, data_io));
 	else
@@ -4670,7 +3682,7 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	/*
 	**	select
 	*/
-	cp->phys.select.sel_id		= cmd->target;
+	cp->phys.select.sel_id		= cmd->device->id;
 	cp->phys.select.sel_scntl3	= tp->wval;
 	cp->phys.select.sel_sxfer	= tp->sval;
 	/*
@@ -4682,14 +3694,14 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	/*
 	**	command
 	*/
-	memcpy(cp->cdb_buf, cmd->cmnd, MIN(cmd->cmd_len, sizeof(cp->cdb_buf)));
+	memcpy(cp->cdb_buf, cmd->cmnd, min_t(int, cmd->cmd_len, sizeof(cp->cdb_buf)));
 	cp->phys.cmd.addr		= cpu_to_scr(CCB_PHYS (cp, cdb_buf[0]));
 	cp->phys.cmd.size		= cpu_to_scr(cmd->cmd_len);
 
 	/*
 	**	status
 	*/
-	cp->actualquirks		= tp->quirks;
+	cp->actualquirks		= 0;
 	cp->host_status			= cp->nego_status ? HS_NEGOTIATE : HS_BUSY;
 	cp->scsi_status			= S_ILLEGAL;
 	cp->parity_status		= 0;
@@ -4740,30 +3752,30 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 **==========================================================
 */
 
-static void ncr_start_next_ccb(ncb_p np, lcb_p lp, int maxn)
+static void ncr_start_next_ccb(struct ncb *np, struct lcb *lp, int maxn)
 {
-	XPT_QUEHEAD *qp;
-	ccb_p cp;
+	struct list_head *qp;
+	struct ccb *cp;
 
 	if (lp->held_ccb)
 		return;
 
 	while (maxn-- && lp->queuedccbs < lp->queuedepth) {
-		qp = xpt_remque_head(&lp->wait_ccbq);
+		qp = ncr_list_pop(&lp->wait_ccbq);
 		if (!qp)
 			break;
 		++lp->queuedccbs;
-		cp = xpt_que_entry(qp, struct ccb, link_ccbq);
-		xpt_insque_tail(qp, &lp->busy_ccbq);
+		cp = list_entry(qp, struct ccb, link_ccbq);
+		list_add_tail(qp, &lp->busy_ccbq);
 		lp->jump_ccb[cp->tag == NO_TAG ? 0 : cp->tag] =
 			cpu_to_scr(CCB_PHYS (cp, restart));
 		ncr_put_start_queue(np, cp);
 	}
 }
 
-static void ncr_put_start_queue(ncb_p np, ccb_p cp)
+static void ncr_put_start_queue(struct ncb *np, struct ccb *cp)
 {
-	u_short	qidx;
+	u16	qidx;
 
 	/*
 	**	insert into start queue.
@@ -4792,28 +3804,9 @@ static void ncr_put_start_queue(ncb_p np, ccb_p cp)
 }
 
 
-/*==========================================================
-**
-**
-**	Start reset process.
-**	If reset in progress do nothing.
-**	The interrupt handler will reinitialize the chip.
-**	The timeout handler will wait for settle_time before 
-**	clearing it and so resuming command processing.
-**
-**
-**==========================================================
-*/
-static void ncr_start_reset(ncb_p np)
+static int ncr_reset_scsi_bus(struct ncb *np, int enab_int, int settle_delay)
 {
-	if (!np->settle_time) {
-		(void) ncr_reset_scsi_bus(np, 1, driver_setup.settle_delay);
- 	}
- }
- 
-static int ncr_reset_scsi_bus(ncb_p np, int enab_int, int settle_delay)
-{
-	u_int32 term;
+	u32 term;
 	int retv = 0;
 
 	np->settle_time	= ktime_get(settle_delay * HZ);
@@ -4823,10 +3816,8 @@ static int ncr_reset_scsi_bus(ncb_p np, int enab_int, int settle_delay)
 			"command processing suspended for %d seconds\n",
 			ncr_name(np), settle_delay);
 
-	OUTB (nc_istat, SRST);
-	UDELAY (100);
-	OUTB (nc_istat, 0);
-	UDELAY (2000);	/* The 895 needs time for the bus mode to settle */
+	ncr_chip_reset(np, 100);
+	udelay(2000);	/* The 895 needs time for the bus mode to settle */
 	if (enab_int)
 		OUTW (nc_sien, RST);
 	/*
@@ -4834,9 +3825,8 @@ static int ncr_reset_scsi_bus(ncb_p np, int enab_int, int settle_delay)
 	**	properly set IRQ mode, prior to resetting the bus.
 	*/
 	OUTB (nc_stest3, TE);
-	OUTB (nc_dcntl, (np->rv_dcntl & IRQM));
 	OUTB (nc_scntl1, CRST);
-	UDELAY (200);
+	udelay(200);
 
 	if (!driver_setup.bus_check)
 		goto out;
@@ -4873,6 +3863,20 @@ out:
 	return retv;
 }
 
+/*
+ * Start reset process.
+ * If reset in progress do nothing.
+ * The interrupt handler will reinitialize the chip.
+ * The timeout handler will wait for settle_time before 
+ * clearing it and so resuming command processing.
+ */
+static void ncr_start_reset(struct ncb *np)
+{
+	if (!np->settle_time) {
+		ncr_reset_scsi_bus(np, 1, driver_setup.settle_delay);
+ 	}
+}
+ 
 /*==========================================================
 **
 **
@@ -4882,17 +3886,17 @@ out:
 **
 **==========================================================
 */
-static int ncr_reset_bus (ncb_p np, Scsi_Cmnd *cmd, int sync_reset)
+static int ncr_reset_bus (struct ncb *np, struct scsi_cmnd *cmd, int sync_reset)
 {
-/*	Scsi_Device        *device    = cmd->device; */
-	ccb_p cp;
+/*	struct scsi_device        *device    = cmd->device; */
+	struct ccb *cp;
 	int found;
 
 /*
  * Return immediately if reset is in progress.
  */
 	if (np->settle_time) {
-		return SCSI_RESET_PUNT;
+		return FAILED;
 	}
 /*
  * Start the reset process.
@@ -4938,9 +3942,10 @@ static int ncr_reset_bus (ncb_p np, Scsi_Cmnd *cmd, int sync_reset)
 		ncr_queue_done_cmd(np, cmd);
 	}
 
-	return SCSI_RESET_SUCCESS;
+	return SUCCESS;
 }
 
+#if 0 /* unused and broken.. */
 /*==========================================================
 **
 **
@@ -4950,10 +3955,10 @@ static int ncr_reset_bus (ncb_p np, Scsi_Cmnd *cmd, int sync_reset)
 **
 **==========================================================
 */
-static int ncr_abort_command (ncb_p np, Scsi_Cmnd *cmd)
+static int ncr_abort_command (struct ncb *np, struct scsi_cmnd *cmd)
 {
-/*	Scsi_Device        *device    = cmd->device; */
-	ccb_p cp;
+/*	struct scsi_device        *device    = cmd->device; */
+	struct ccb *cp;
 	int found;
 	int retv;
 
@@ -5021,26 +4026,19 @@ static int ncr_abort_command (ncb_p np, Scsi_Cmnd *cmd)
 
 	return retv;
 }
+#endif
 
-/*==========================================================
-**
-**	Linux release module stuff.
-**
-**	Called before unloading the module
-**	Detach the host.
-**	We have to free resources and halt the NCR chip
-**
-**==========================================================
-*/
-
-#ifdef MODULE
-static int ncr_detach(ncb_p np)
+static void ncr_detach(struct ncb *np)
 {
-	ccb_p cp;
-	tcb_p tp;
-	lcb_p lp;
+	struct ccb *cp;
+	struct tcb *tp;
+	struct lcb *lp;
 	int target, lun;
 	int i;
+	char inst_name[16];
+
+	/* Local copy so we don't access np after freeing it! */
+	strlcpy(inst_name, ncr_name(np), sizeof(inst_name));
 
 	printk("%s: releasing host resources\n", ncr_name(np));
 
@@ -5053,7 +4051,8 @@ static int ncr_detach(ncb_p np)
 	printk("%s: stopping the timer\n", ncr_name(np));
 #endif
 	np->release_stage = 1;
-	for (i = 50 ; i && np->release_stage != 2 ; i--) MDELAY (100);
+	for (i = 50 ; i && np->release_stage != 2 ; i--)
+		mdelay(100);
 	if (np->release_stage != 2)
 		printk("%s: the timer seems to be already stopped\n", ncr_name(np));
 	else np->release_stage = 2;
@@ -5068,31 +4067,17 @@ static int ncr_detach(ncb_p np)
 	OUTW (nc_sien , 0);
 	OUTB (nc_dien , 0);
 
-/*
-**	Free irq
-*/
-
-#ifdef DEBUG_NCR53C8XX
-#ifdef __sparc__
-	printk("%s: freeing irq %s\n", ncr_name(np), __irq_itoa(np->irq));
-#else
-	printk("%s: freeing irq %d\n", ncr_name(np), np->irq);
-#endif
-#endif
-	free_irq(np->irq, np);
-
 	/*
 	**	Reset NCR chip
 	**	Restore bios setting for automatic clock detection.
 	*/
 
 	printk("%s: resetting chip\n", ncr_name(np));
-	OUTB (nc_istat,  SRST);
-	UDELAY (100);
-	OUTB (nc_istat,  0   );
+	ncr_chip_reset(np, 100);
 
 	OUTB(nc_dmode,	np->sv_dmode);
 	OUTB(nc_dcntl,	np->sv_dcntl);
+	OUTB(nc_ctest0,	np->sv_ctest0);
 	OUTB(nc_ctest3,	np->sv_ctest3);
 	OUTB(nc_ctest4,	np->sv_ctest4);
 	OUTB(nc_ctest5,	np->sv_ctest5);
@@ -5100,22 +4085,6 @@ static int ncr_detach(ncb_p np)
 	OUTB(nc_stest2,	np->sv_stest2);
 
 	ncr_selectclock(np, np->sv_scntl3);
-
-	/*
-	**	Release Memory mapped IO region and IO mapped region
-	*/
-
-#ifndef NCR_IOMAPPED
-#ifdef DEBUG_NCR53C8XX
-	printk("%s: releasing memory mapped IO region %lx[%d]\n", ncr_name(np), (u_long) np->vaddr, 128);
-#endif
-	unmap_pci_mem((vm_offset_t) np->vaddr, (u_long) 128);
-#endif /* !NCR_IOMAPPED */
-
-#ifdef DEBUG_NCR53C8XX
-	printk("%s: releasing IO region %x[%d]\n", ncr_name(np), np->base_io, 128);
-#endif
-	release_region(np->base_io, 128);
 
 	/*
 	**	Free allocated ccb(s)
@@ -5133,9 +4102,7 @@ static int ncr_detach(ncb_p np)
 		m_free_dma(cp, sizeof(*cp), "CCB");
 	}
 
-	/*
-	**	Free allocated tp(s)
-	*/
+	/* Free allocated tp(s) */
 
 	for (target = 0; target < MAX_TARGET ; target++) {
 		tp=&np->target[target];
@@ -5160,11 +4127,8 @@ static int ncr_detach(ncb_p np)
 		m_free_dma(np->ccb, sizeof(struct ccb), "CCB");
 	m_free_dma(np, sizeof(struct ncb), "NCB");
 
-	printk("%s: host resources successfully released\n", ncr_name(np));
-
-	return 1;
+	printk("%s: host resources successfully released\n", inst_name);
 }
-#endif
 
 /*==========================================================
 **
@@ -5176,11 +4140,11 @@ static int ncr_detach(ncb_p np)
 **==========================================================
 */
 
-void ncr_complete (ncb_p np, ccb_p cp)
+void ncr_complete (struct ncb *np, struct ccb *cp)
 {
-	Scsi_Cmnd *cmd;
-	tcb_p tp;
-	lcb_p lp;
+	struct scsi_cmnd *cmd;
+	struct tcb *tp;
+	struct lcb *lp;
 
 	/*
 	**	Sanity check
@@ -5190,12 +4154,8 @@ void ncr_complete (ncb_p np, ccb_p cp)
 		return;
 
 	/*
-	**	timestamp
-	**	Optional, spare some CPU time
+	**	Print minimal debug information.
 	*/
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	ncb_profile (np, cp);
-#endif
 
 	if (DEBUG_FLAGS & DEBUG_TINY)
 		printk ("CCB=%lx STAT=%x/%x\n", (unsigned long)cp,
@@ -5207,8 +4167,8 @@ void ncr_complete (ncb_p np, ccb_p cp)
 
 	cmd = cp->cmd;
 	cp->cmd = NULL;
-	tp = &np->target[cmd->target];
-	lp = tp->lp[cmd->lun];
+	tp = &np->target[cmd->device->id];
+	lp = tp->lp[cmd->device->lun];
 
 	/*
 	**	We donnot queue more than 1 ccb per target 
@@ -5217,7 +4177,7 @@ void ncr_complete (ncb_p np, ccb_p cp)
 	*/
 
 	if (cp == tp->nego_cp)
-		tp->nego_cp = 0;
+		tp->nego_cp = NULL;
 
 	/*
 	**	If auto-sense performed, change scsi status.
@@ -5233,9 +4193,8 @@ void ncr_complete (ncb_p np, ccb_p cp)
 
 	if (lp && lp->held_ccb) {
 		if (cp == lp->held_ccb) {
-			xpt_que_splice(&lp->skip_ccbq, &lp->wait_ccbq);
-			xpt_que_init(&lp->skip_ccbq);
-			lp->held_ccb = 0;
+			list_splice_init(&lp->skip_ccbq, &lp->wait_ccbq);
+			lp->held_ccb = NULL;
 		}
 	}
 
@@ -5259,7 +4218,7 @@ void ncr_complete (ncb_p np, ccb_p cp)
 			printk ("extraneous data discarded.\n");
 			break;
 		case XE_BAD_PHASE:
-			printk ("illegal scsi phase (4/5).\n");
+			printk ("invalid scsi phase (4/5).\n");
 			break;
 		default:
 			printk ("extended error %d.\n", cp->xerr_status);
@@ -5286,11 +4245,11 @@ void ncr_complete (ncb_p np, ccb_p cp)
 	if (   (cp->host_status == HS_COMPLETE)
 		&& (cp->scsi_status == S_GOOD ||
 		    cp->scsi_status == S_COND_MET)) {
-                /*
-		**	All went well (GOOD status).
-		**	CONDITION MET status is returned on 
-                **	`Pre-Fetch' or `Search data' success.
-                */
+		/*
+		 *	All went well (GOOD status).
+		 *	CONDITION MET status is returned on 
+		 *	`Pre-Fetch' or `Search data' success.
+		 */
 		cmd->result = ScsiResult(DID_OK, cp->scsi_status);
 
 		/*
@@ -5304,19 +4263,7 @@ void ncr_complete (ncb_p np, ccb_p cp)
 		**	Allocate the lcb if not yet.
 		*/
 		if (!lp)
-			ncr_alloc_lcb (np, cmd->target, cmd->lun);
-
-		/*
-		**	On standard INQUIRY response (EVPD and CmDt 
-		**	not set), setup logical unit according to 
-		**	announced capabilities (we need the 1rst 7 bytes).
-		*/
-		if (cmd->cmnd[0] == 0x12 && !(cmd->cmnd[1] & 0x3) &&
-		    cmd->cmnd[4] >= 7 && !cmd->use_sg) {
-			sync_scsi_data(np, cmd);	/* SYNC the data */
-			ncr_setup_lcb (np, cmd->target, cmd->lun,
-				       (char *) cmd->request_buffer);
-		}
+			ncr_alloc_lcb (np, cmd->device->id, cmd->device->lun);
 
 		tp->bytes     += cp->data_len;
 		tp->transfers ++;
@@ -5330,7 +4277,7 @@ void ncr_complete (ncb_p np, ccb_p cp)
 			if (lp->num_good >= 1000) {
 				lp->num_good = 0;
 				++lp->numtags;
-				ncr_setup_tags (np, cmd->target, cmd->lun);
+				ncr_setup_tags (np, cmd->device);
 			}
 		}
 	} else if ((cp->host_status == HS_COMPLETE)
@@ -5344,7 +4291,7 @@ void ncr_complete (ncb_p np, ccb_p cp)
 		**	Copy back sense data to caller's buffer.
 		*/
 		memcpy(cmd->sense_buffer, cp->sense_buf,
-		       MIN(sizeof(cmd->sense_buffer), sizeof(cp->sense_buf)));
+		       min(sizeof(cmd->sense_buffer), sizeof(cp->sense_buf)));
 
 		if (DEBUG_FLAGS & (DEBUG_RESULT|DEBUG_TINY)) {
 			u_char * p = (u_char*) & cmd->sense_buffer;
@@ -5444,7 +4391,7 @@ void ncr_complete (ncb_p np, ccb_p cp)
 	**	requeue awaiting scsi commands for this lun.
 	*/
 	if (lp && lp->queuedccbs < lp->queuedepth &&
-	    !xpt_que_empty(&lp->wait_ccbq))
+	    !list_empty(&lp->wait_ccbq))
 		ncr_start_next_ccb(np, lp, 2);
 
 	/*
@@ -5472,17 +4419,17 @@ void ncr_complete (ncb_p np, ccb_p cp)
 **	This CCB has been skipped by the NCR.
 **	Queue it in the correponding unit queue.
 */
-static void ncr_ccb_skipped(ncb_p np, ccb_p cp)
+static void ncr_ccb_skipped(struct ncb *np, struct ccb *cp)
 {
-	tcb_p tp = &np->target[cp->target];
-	lcb_p lp = tp->lp[cp->lun];
+	struct tcb *tp = &np->target[cp->target];
+	struct lcb *lp = tp->lp[cp->lun];
 
 	if (lp && cp != np->ccb) {
 		cp->host_status &= ~HS_SKIPMASK;
 		cp->start.schedule.l_paddr = 
 			cpu_to_scr(NCB_SCRIPT_PHYS (np, select));
-		xpt_remque(&cp->link_ccbq);
-		xpt_insque_tail(&cp->link_ccbq, &lp->skip_ccbq);
+		list_del(&cp->link_ccbq);
+		list_add_tail(&cp->link_ccbq, &lp->skip_ccbq);
 		if (cp->queued) {
 			--lp->queuedccbs;
 		}
@@ -5497,9 +4444,9 @@ static void ncr_ccb_skipped(ncb_p np, ccb_p cp)
 **	The NCR has completed CCBs.
 **	Look at the DONE QUEUE if enabled, otherwise scan all CCBs
 */
-void ncr_wakeup_done (ncb_p np)
+void ncr_wakeup_done (struct ncb *np)
 {
-	ccb_p cp;
+	struct ccb *cp;
 #ifdef SCSI_NCR_CCB_DONE_SUPPORT
 	int i, j;
 
@@ -5513,7 +4460,7 @@ void ncr_wakeup_done (ncb_p np)
 		if (!CCB_DONE_VALID(cp))
 			break;
 
-		np->ccb_done[j] = (ccb_p) CCB_DONE_EMPTY;
+		np->ccb_done[j] = (struct ccb *)CCB_DONE_EMPTY;
 		np->scripth->done_queue[5*j + 4] =
 				cpu_to_scr(NCB_SCRIPT_PHYS (np, done_plug));
 		MEMORY_BARRIER();
@@ -5543,9 +4490,9 @@ void ncr_wakeup_done (ncb_p np)
 /*
 **	Complete all active CCBs.
 */
-void ncr_wakeup (ncb_p np, u_long code)
+void ncr_wakeup (struct ncb *np, u_long code)
 {
-	ccb_p cp = np->ccb;
+	struct ccb *cp = np->ccb;
 
 	while (cp) {
 		if (cp->host_status != HS_IDLE) {
@@ -5556,6 +4503,27 @@ void ncr_wakeup (ncb_p np, u_long code)
 	}
 }
 
+/*
+** Reset ncr chip.
+*/
+
+/* Some initialisation must be done immediately following reset, for 53c720,
+ * at least.  EA (dcntl bit 5) isn't set here as it is set once only in
+ * the _detect function.
+ */
+static void ncr_chip_reset(struct ncb *np, int delay)
+{
+	OUTB (nc_istat,  SRST);
+	udelay(delay);
+	OUTB (nc_istat,  0   );
+
+	if (np->features & FE_EHP)
+		OUTB (nc_ctest0, EHP);
+	if (np->features & FE_MUX)
+		OUTB (nc_ctest4, MUX);
+}
+
+
 /*==========================================================
 **
 **
@@ -5565,7 +4533,7 @@ void ncr_wakeup (ncb_p np, u_long code)
 **==========================================================
 */
 
-void ncr_init (ncb_p np, int reset, char * msg, u_long code)
+void ncr_init (struct ncb *np, int reset, char * msg, u_long code)
 {
  	int	i;
 
@@ -5575,7 +4543,7 @@ void ncr_init (ncb_p np, int reset, char * msg, u_long code)
 
 	if (reset) {
 		OUTB (nc_istat,  SRST);
-		UDELAY (100);
+		udelay(100);
 	}
 	else {
 		OUTB (nc_stest3, TE|CSF);
@@ -5602,14 +4570,16 @@ void ncr_init (ncb_p np, int reset, char * msg, u_long code)
 	np->squeueput = 0;
 	np->script0->startpos[0] = cpu_to_scr(NCB_SCRIPTH_PHYS (np, tryloop));
 
+#ifdef SCSI_NCR_CCB_DONE_SUPPORT
 	/*
 	**	Clear Done Queue
 	*/
 	for (i = 0; i < MAX_DONE; i++) {
-		np->ccb_done[i] = (ccb_p) CCB_DONE_EMPTY;
+		np->ccb_done[i] = (struct ccb *)CCB_DONE_EMPTY;
 		np->scripth0->done_queue[5*i + 4] =
 			cpu_to_scr(NCB_SCRIPT_PHYS (np, done_end));
 	}
+#endif
 
 	/*
 	**	Start at first entry.
@@ -5628,8 +4598,11 @@ void ncr_init (ncb_p np, int reset, char * msg, u_long code)
 	**	Init chip.
 	*/
 
-	OUTB (nc_istat,  0x00   );	/*  Remove Reset, abort */
-	UDELAY (2000);	/* The 895 needs time for the bus mode to settle */
+	/*
+	** Remove reset; big delay because the 895 needs time for the
+	** bus mode to settle
+	*/
+	ncr_chip_reset(np, 2000);
 
 	OUTB (nc_scntl0, np->rv_scntl0 | 0xc0);
 					/*  full arb., ena parity, par->ATN  */
@@ -5644,6 +4617,7 @@ void ncr_init (ncb_p np, int reset, char * msg, u_long code)
 	OUTB (nc_ctest5, np->rv_ctest5);	/* Large fifo + large burst */
 
 	OUTB (nc_dcntl , NOCOM|np->rv_dcntl);	/* Protect SFBR */
+	OUTB (nc_ctest0, np->rv_ctest0);	/* 720: CDIS and EHP */
 	OUTB (nc_ctest3, np->rv_ctest3);	/* Write and invalidate */
 	OUTB (nc_ctest4, np->rv_ctest4);	/* Master parity checking */
 
@@ -5673,24 +4647,6 @@ void ncr_init (ncb_p np, int reset, char * msg, u_long code)
 	OUTB (nc_dien , MDPE|BF|ABRT|SSI|SIR|IID);
 
 	/*
-	**	For 895/6 enable SBMC interrupt and save current SCSI bus mode.
-	*/
-	if (np->features & FE_ULTRA2) {
-		OUTONW (nc_sien, SBMC);
-		np->scsi_mode = INB (nc_stest4) & SMODE;
-	}
-
-	/*
-	**	DEL 441 - 53C876 Rev 5 - Part Number 609-0392787/2788 - ITEM 2.
-	**	Disable overlapped arbitration.
-	**	All 896 chips are also affected by this errata.
-	*/
-	if (np->device_id == PCI_DEVICE_ID_NCR_53C875)
-		OUTB (nc_ctest0, (1<<5));
-	else if (np->device_id == PCI_DEVICE_ID_NCR_53C896)
-		OUTB (nc_ccntl0, DPR);
-
-	/*
 	**	Fill in target structure.
 	**	Reinitialize usrsync.
 	**	Reinitialize usrwide.
@@ -5698,7 +4654,7 @@ void ncr_init (ncb_p np, int reset, char * msg, u_long code)
 	*/
 
 	for (i=0;i<MAX_TARGET;i++) {
-		tcb_p tp = &np->target[i];
+		struct tcb *tp = &np->target[i];
 
 		tp->sval    = 0;
 		tp->wval    = np->rv_scntl3;
@@ -5722,16 +4678,15 @@ void ncr_init (ncb_p np, int reset, char * msg, u_long code)
 	/*
 	**    Start script processor.
 	*/
-	MEMORY_BARRIER();
 	if (np->paddr2) {
 		if (bootverbose)
 			printk ("%s: Downloading SCSI SCRIPTS.\n",
 				ncr_name(np));
 		OUTL (nc_scratcha, vtobus(np->script0));
-		OUTL (nc_dsp, NCB_SCRIPTH_PHYS (np, start_ram));
+		OUTL_DSP (NCB_SCRIPTH_PHYS (np, start_ram));
 	}
 	else
-		OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, start));
+		OUTL_DSP (NCB_SCRIPT_PHYS (np, start));
 }
 
 /*==========================================================
@@ -5772,8 +4727,11 @@ static void ncr_negotiate (struct ncb* np, struct tcb* tp)
 	if (minsync > np->maxsync)
 		minsync = 255;
 
+	if (tp->maxoffs > np->maxoffs)
+		tp->maxoffs = np->maxoffs;
+
 	tp->minsync = minsync;
-	tp->maxoffs = (minsync<255 ? np->maxoffs : 0);
+	tp->maxoffs = (minsync<255 ? tp->maxoffs : 0);
 
 	/*
 	**	period=0: has to negotiate sync transfer
@@ -5797,7 +4755,7 @@ static void ncr_negotiate (struct ncb* np, struct tcb* tp)
 **==========================================================
 */
 
-static void ncr_getsync(ncb_p np, u_char sfac, u_char *fakp, u_char *scntl3p)
+static void ncr_getsync(struct ncb *np, u_char sfac, u_char *fakp, u_char *scntl3p)
 {
 	u_long	clk = np->clock_khz;	/* SCSI clock frequency in kHz	*/
 	int	div = np->clock_divn;	/* Number of divisors supported	*/
@@ -5827,14 +4785,14 @@ static void ncr_getsync(ncb_p np, u_char sfac, u_char *fakp, u_char *scntl3p)
 	*/
 	fak = (kpc - 1) / div_10M[div] + 1;
 
-#if 0	/* This optimization does not seem very usefull */
+#if 0	/* This optimization does not seem very useful */
 
 	per = (fak * div_10M[div]) / clk;
 
 	/*
 	**	Why not to try the immediate lower divisor and to choose 
 	**	the one that allows the fastest output speed ?
-	**	We dont want input speed too much greater than output speed.
+	**	We don't want input speed too much greater than output speed.
 	*/
 	if (div >= 1 && fak < 8) {
 		u_long fak2, per2;
@@ -5866,10 +4824,10 @@ static void ncr_getsync(ncb_p np, u_char sfac, u_char *fakp, u_char *scntl3p)
 **==========================================================
 */
 
-static void ncr_set_sync_wide_status (ncb_p np, u_char target)
+static void ncr_set_sync_wide_status (struct ncb *np, u_char target)
 {
-	ccb_p cp;
-	tcb_p tp = &np->target[target];
+	struct ccb *cp;
+	struct tcb *tp = &np->target[target];
 
 	/*
 	**	set actual value and sync_status
@@ -5884,7 +4842,7 @@ static void ncr_set_sync_wide_status (ncb_p np, u_char target)
 	*/
 	for (cp = np->ccb; cp; cp = cp->link_ccb) {
 		if (!cp->cmd) continue;
-		if (cp->cmd->target != target) continue;
+		if (cp->cmd->device->id != target) continue;
 #if 0
 		cp->sync_status = tp->sval;
 		cp->wide_status = tp->wval;
@@ -5901,20 +4859,14 @@ static void ncr_set_sync_wide_status (ncb_p np, u_char target)
 **==========================================================
 */
 
-static void ncr_setsync (ncb_p np, ccb_p cp, u_char scntl3, u_char sxfer)
+static void ncr_setsync (struct ncb *np, struct ccb *cp, u_char scntl3, u_char sxfer)
 {
-	Scsi_Cmnd *cmd;
-	tcb_p tp;
+	struct scsi_cmnd *cmd = cp->cmd;
+	struct tcb *tp;
 	u_char target = INB (nc_sdid) & 0x0f;
 	u_char idiv;
 
-	assert (cp && cp->cmd);
-	if (!cp) return;
-
-	cmd = cp->cmd;
-	if (!cmd) return;
-
-	assert (target == (cmd->target & 0xf));
+	BUG_ON(target != (cmd->device->id & 0xf));
 
 	tp = &np->target[target];
 
@@ -5985,21 +4937,15 @@ static void ncr_setsync (ncb_p np, ccb_p cp, u_char scntl3, u_char sxfer)
 **==========================================================
 */
 
-static void ncr_setwide (ncb_p np, ccb_p cp, u_char wide, u_char ack)
+static void ncr_setwide (struct ncb *np, struct ccb *cp, u_char wide, u_char ack)
 {
-	Scsi_Cmnd *cmd;
-	u_short target = INB (nc_sdid) & 0x0f;
-	tcb_p tp;
+	struct scsi_cmnd *cmd = cp->cmd;
+	u16 target = INB (nc_sdid) & 0x0f;
+	struct tcb *tp;
 	u_char	scntl3;
 	u_char	sxfer;
 
-	assert (cp && cp->cmd);
-	if (!cp) return;
-
-	cmd = cp->cmd;
-	if (!cmd) return;
-
-	assert (target == (cmd->target & 0xf));
+	BUG_ON(target != (cmd->device->id & 0xf));
 
 	tp = &np->target[target];
 	tp->widedone  =  wide+1;
@@ -6039,16 +4985,17 @@ static void ncr_setwide (ncb_p np, ccb_p cp, u_char wide, u_char ack)
 **==========================================================
 */
 
-static void ncr_setup_tags (ncb_p np, u_char tn, u_char ln)
+static void ncr_setup_tags (struct ncb *np, struct scsi_device *sdev)
 {
-	tcb_p tp = &np->target[tn];
-	lcb_p lp = tp->lp[ln];
+	unsigned char tn = sdev->id, ln = sdev->lun;
+	struct tcb *tp = &np->target[tn];
+	struct lcb *lp = tp->lp[ln];
 	u_char   reqtags, maxdepth;
 
 	/*
 	**	Just in case ...
 	*/
-	if ((!tp) || (!lp))
+	if ((!tp) || (!lp) || !sdev)
 		return;
 
 	/*
@@ -6072,7 +5019,7 @@ static void ncr_setup_tags (ncb_p np, u_char tn, u_char ln)
 	**	only devices capable of tagged commands
 	**	only if enabled by user ..
 	*/
-	if ((lp->inq_byte7 & INQ7_QUEUE) && lp->numtags > 1) {
+	if (sdev->tagged_supported && lp->numtags > 1) {
 		reqtags = lp->numtags;
 	} else {
 		reqtags = 1;
@@ -6126,92 +5073,6 @@ static void ncr_setup_tags (ncb_p np, u_char tn, u_char ln)
 	}
 }
 
-/*----------------------------------------------------
-**
-**	handle user commands
-**
-**----------------------------------------------------
-*/
-
-#ifdef SCSI_NCR_USER_COMMAND_SUPPORT
-
-static void ncr_usercmd (ncb_p np)
-{
-	u_char t;
-	tcb_p tp;
-
-	switch (np->user.cmd) {
-
-	case 0: return;
-
-	case UC_SETSYNC:
-		for (t=0; t<MAX_TARGET; t++) {
-			if (!((np->user.target>>t)&1)) continue;
-			tp = &np->target[t];
-			tp->usrsync = np->user.data;
-			ncr_negotiate (np, tp);
-		};
-		break;
-
-	case UC_SETTAGS:
-		for (t=0; t<MAX_TARGET; t++) {
-			int ln;
-			if (!((np->user.target>>t)&1)) continue;
-			np->target[t].usrtags = np->user.data;
-			for (ln = 0; ln < MAX_LUN; ln++) {
-				lcb_p lp = np->target[t].lp[ln];
-				if (!lp)
-					continue;
-				lp->maxtags = lp->numtags = np->user.data;
-				ncr_setup_tags (np, t, ln);
-			}
- 		};
-		break;
-
-	case UC_SETDEBUG:
-#ifdef SCSI_NCR_DEBUG_INFO_SUPPORT
-		ncr_debug = np->user.data;
-#endif
-		break;
-
-	case UC_SETORDER:
-		np->order = np->user.data;
-		break;
-
-	case UC_SETVERBOSE:
-		np->verbose = np->user.data;
-		break;
-
-	case UC_SETWIDE:
-		for (t=0; t<MAX_TARGET; t++) {
-			u_long size;
-			if (!((np->user.target>>t)&1)) continue;
-			tp = &np->target[t];
-			size = np->user.data;
-			if (size > np->maxwide) size=np->maxwide;
-			tp->usrwide = size;
-			ncr_negotiate (np, tp);
-		};
-		break;
-
-	case UC_SETFLAG:
-		for (t=0; t<MAX_TARGET; t++) {
-			if (!((np->user.target>>t)&1)) continue;
-			tp = &np->target[t];
-			tp->usrflag = np->user.data;
-		};
-		break;
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	case UC_CLEARPROF:
-		bzero(&np->profile, sizeof(np->profile));
-		break;
-#endif
-	}
-	np->user.cmd=0;
-}
-#endif
-
 /*==========================================================
 **
 **
@@ -6226,7 +5087,7 @@ static void ncr_usercmd (ncb_p np)
 **----------------------------------------------------------
 */
 
-static void ncr_timeout (ncb_p np)
+static void ncr_timeout (struct ncb *np)
 {
 	u_long	thistime = ktime_get(0);
 
@@ -6241,12 +5102,7 @@ static void ncr_timeout (ncb_p np)
 		return;
 	}
 
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	np->ktime = thistime;
-	np->timer.expires = ktime_get(1);
-#else
 	np->timer.expires = ktime_get(SCSI_NCR_TIMER_INTERVAL);
-#endif
 	add_timer(&np->timer);
 
 	/*
@@ -6274,15 +5130,6 @@ static void ncr_timeout (ncb_p np)
 		**	block ncr interrupts
 		*/
 		np->lasttime = thistime;
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-		/*
-		**	Reset profile data to avoid ugly overflow
-		**	(Limited to 1024 GB for 32 bit architecture)
-		*/
-		if (np->profile.num_kbytes > (~0UL >> 2))
-			bzero(&np->profile, sizeof(np->profile));
-#endif
 	}
 
 #ifdef SCSI_NCR_BROKEN_INTR
@@ -6328,9 +5175,9 @@ static void ncr_timeout (ncb_p np)
 **==========================================================
 */
 
-static void ncr_log_hard_error(ncb_p np, u_short sist, u_char dstat)
+static void ncr_log_hard_error(struct ncb *np, u16 sist, u_char dstat)
 {
-	u_int32	dsp;
+	u32	dsp;
 	int	script_ofs;
 	int	script_size;
 	char	*script_name;
@@ -6354,7 +5201,7 @@ static void ncr_log_hard_error(ncb_p np, u_short sist, u_char dstat)
 	} else {
 		script_ofs	= dsp;
 		script_size	= 0;
-		script_base	= 0;
+		script_base	= NULL;
 		script_name	= "mem";
 	}
 
@@ -6370,10 +5217,10 @@ static void ncr_log_hard_error(ncb_p np, u_short sist, u_char dstat)
 			scr_to_cpu((int) *(ncrcmd *)(script_base + script_ofs)));
 	}
 
-        printk ("%s: regdump:", ncr_name(np));
-        for (i=0; i<16;i++)
+	printk ("%s: regdump:", ncr_name(np));
+	for (i=0; i<16;i++)
             printk (" %02x", (unsigned)INB_OFF(i));
-        printk (".\n");
+	printk (".\n");
 }
 
 /*============================================================
@@ -6408,10 +5255,10 @@ static void ncr_log_hard_error(ncb_p np, u_short sist, u_char dstat)
 **============================================================
 */
 
-void ncr_exception (ncb_p np)
+void ncr_exception (struct ncb *np)
 {
 	u_char	istat, dstat;
-	u_short	sist;
+	u16	sist;
 	int	i;
 
 	/*
@@ -6426,18 +5273,11 @@ void ncr_exception (ncb_p np)
 		OUTB (nc_istat, (istat & SIGP) | INTF);
 		istat = INB (nc_istat);
 		if (DEBUG_FLAGS & DEBUG_TINY) printk ("F ");
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-		np->profile.num_fly++;
-#endif
 		ncr_wakeup_done (np);
 	};
 
 	if (!(istat & (SIP|DIP)))
 		return;
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	np->profile.num_int++;
-#endif
 
 	if (istat & CABRT)
 		OUTB (nc_istat, CABRT);
@@ -6493,7 +5333,7 @@ void ncr_exception (ncb_p np)
 				ncr_name(np), istat, dstat, sist);
 			return;
 		}
-		OUTONB (nc_dcntl, (STD|NOCOM));
+		OUTONB_STD ();
 		return;
 	};
 
@@ -6570,7 +5410,7 @@ void ncr_exception (ncb_p np)
 	if (sist & UDC) {
 		printk ("%s: unexpected disconnect\n", ncr_name(np));
 		OUTB (HS_PRT, HS_UNEXPECTED);
-		OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, cleanup));
+		OUTL_DSP (NCB_SCRIPT_PHYS (np, cleanup));
 		return;
 	};
 
@@ -6598,10 +5438,10 @@ void ncr_exception (ncb_p np)
 **----------------------------------------------------------
 */
 
-void ncr_int_sto (ncb_p np)
+void ncr_int_sto (struct ncb *np)
 {
 	u_long dsa;
-	ccb_p cp;
+	struct ccb *cp;
 	if (DEBUG_FLAGS & DEBUG_TINY) printk ("T");
 
 	/*
@@ -6622,7 +5462,7 @@ void ncr_int_sto (ncb_p np)
 	**	repair start queue and jump to start point.
 	*/
 
-	OUTL (nc_dsp, NCB_SCRIPTH_PHYS (np, sto_restart));
+	OUTL_DSP (NCB_SCRIPTH_PHYS (np, sto_restart));
 	return;
 }
 
@@ -6643,7 +5483,7 @@ void ncr_int_sto (ncb_p np)
 **----------------------------------------------------------
 */
 
-static int ncr_int_sbmc (ncb_p np)
+static int ncr_int_sbmc (struct ncb *np)
 {
 	u_char scsi_mode = INB (nc_stest4) & SMODE;
 
@@ -6675,14 +5515,14 @@ static int ncr_int_sbmc (ncb_p np)
 **----------------------------------------------------------
 */
 
-static int ncr_int_par (ncb_p np)
+static int ncr_int_par (struct ncb *np)
 {
 	u_char	hsts	= INB (HS_PRT);
-	u_int32	dbc	= INL (nc_dbc);
+	u32	dbc	= INL (nc_dbc);
 	u_char	sstat1	= INB (nc_sstat1);
 	int phase	= -1;
 	int msg		= -1;
-	u_int32 jmp;
+	u32 jmp;
 
 	printk("%s: SCSI parity error detected: SCR1=%d DBC=%x SSTAT1=%x\n",
 		ncr_name(np), hsts, dbc, sstat1);
@@ -6717,13 +5557,6 @@ static int ncr_int_par (ncb_p np)
 	else
 		msg = M_ID_ERROR;
 
-#ifdef SCSI_NCR_INTEGRITY_CHECKING
-	/*
-	**      Save error message. For integrity check use only.
-	*/
-	if (np->check_integrity)
-		np->check_integ_par = msg;
-#endif
 
 	/*
 	 *	If the NCR stopped on a MOVE ^ DATA_IN, we jump to a 
@@ -6740,7 +5573,7 @@ static int ncr_int_par (ncb_p np)
 	OUTB (nc_stest3, TE|CSF);	/* clear scsi fifo */
 
 	np->msgout[0] = msg;
-	OUTL (nc_dsp, jmp);
+	OUTL_DSP (jmp);
 	return 1;
 
 reset_all:
@@ -6762,20 +5595,20 @@ reset_all:
 **----------------------------------------------------------
 */
 
-static void ncr_int_ma (ncb_p np)
+static void ncr_int_ma (struct ncb *np)
 {
-	u_int32	dbc;
-	u_int32	rest;
-	u_int32	dsp;
-	u_int32	dsa;
-	u_int32	nxtdsp;
-	u_int32	newtmp;
-	u_int32	*vdsp;
-	u_int32	oadr, olen;
-	u_int32	*tblp;
-        ncrcmd *newcmd;
+	u32	dbc;
+	u32	rest;
+	u32	dsp;
+	u32	dsa;
+	u32	nxtdsp;
+	u32	newtmp;
+	u32	*vdsp;
+	u32	oadr, olen;
+	u32	*tblp;
+	ncrcmd *newcmd;
 	u_char	cmd, sbcl;
-	ccb_p	cp;
+	struct ccb *cp;
 
 	dsp	= INL (nc_dsp);
 	dbc	= INL (nc_dbc);
@@ -6791,7 +5624,7 @@ static void ncr_int_ma (ncb_p np)
 
 	if ((cmd & 1) == 0) {
 		u_char	ctest5, ss0, ss2;
-		u_short	delta;
+		u16	delta;
 
 		ctest5 = (np->rv_ctest5 & DFS) ? INB (nc_ctest5) : 0;
 		if (ctest5 & DFS)
@@ -6800,7 +5633,7 @@ static void ncr_int_ma (ncb_p np)
 			delta=(INB (nc_dfifo) - rest) & 0x7f;
 
 		/*
-		**	The data in the dma fifo has not been transfered to
+		**	The data in the dma fifo has not been transferred to
 		**	the target -> add the amount to the rest
 		**	and clear the data.
 		**	Check the sstat2 register in case of wide transfer.
@@ -6840,7 +5673,7 @@ static void ncr_int_ma (ncb_p np)
 	if (!(cmd & 6)) {
 		cp = np->header.cp;
 		if (CCB_PHYS(cp, phys) != dsa)
-			cp = 0;
+			cp = NULL;
 	} else {
 		cp  = np->ccb;
 		while (cp && (CCB_PHYS (cp, phys) != dsa))
@@ -6851,16 +5684,16 @@ static void ncr_int_ma (ncb_p np)
 	**	try to find the interrupted script command,
 	**	and the address at which to continue.
 	*/
-	vdsp	= 0;
+	vdsp	= NULL;
 	nxtdsp	= 0;
 	if	(dsp >  np->p_script &&
 		 dsp <= np->p_script + sizeof(struct script)) {
-		vdsp = (u_int32 *)((char*)np->script0 + (dsp-np->p_script-8));
+		vdsp = (u32 *)((char*)np->script0 + (dsp-np->p_script-8));
 		nxtdsp = dsp;
 	}
 	else if	(dsp >  np->p_scripth &&
 		 dsp <= np->p_scripth + sizeof(struct scripth)) {
-		vdsp = (u_int32 *)((char*)np->scripth0 + (dsp-np->p_scripth-8));
+		vdsp = (u32 *)((char*)np->scripth0 + (dsp-np->p_scripth-8));
 		nxtdsp = dsp;
 	}
 	else if (cp) {
@@ -6905,11 +5738,11 @@ static void ncr_int_ma (ncb_p np)
 	oadr = scr_to_cpu(vdsp[1]);
 
 	if (cmd & 0x10) {	/* Table indirect */
-		tblp = (u_int32 *) ((char*) &cp->phys + oadr);
+		tblp = (u32 *) ((char*) &cp->phys + oadr);
 		olen = scr_to_cpu(tblp[0]);
 		oadr = scr_to_cpu(tblp[1]);
 	} else {
-		tblp = (u_int32 *) 0;
+		tblp = (u32 *) 0;
 		olen = scr_to_cpu(vdsp[0]) & 0xffffff;
 	};
 
@@ -6991,11 +5824,8 @@ static void ncr_int_ma (ncb_p np)
 	**	fake the return address (to the patch).
 	**	and restart script processor at dispatcher.
 	*/
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	np->profile.num_break++;
-#endif
 	OUTL (nc_temp, newtmp);
-	OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, dispatch));
+	OUTL_DSP (NCB_SCRIPT_PHYS (np, dispatch));
 	return;
 
 	/*
@@ -7057,7 +5887,7 @@ unexpected_phase:
 	}
 
 	if (nxtdsp) {
-		OUTL (nc_dsp, nxtdsp);
+		OUTL_DSP (nxtdsp);
 		return;
 	}
 
@@ -7066,16 +5896,16 @@ reset_all:
 }
 
 
-static void ncr_sir_to_redo(ncb_p np, int num, ccb_p cp)
+static void ncr_sir_to_redo(struct ncb *np, int num, struct ccb *cp)
 {
-	Scsi_Cmnd *cmd	= cp->cmd;
-	tcb_p tp	= &np->target[cmd->target];
-	lcb_p lp	= tp->lp[cmd->lun];
-	XPT_QUEHEAD	*qp;
-	ccb_p		cp2;
+	struct scsi_cmnd *cmd	= cp->cmd;
+	struct tcb *tp	= &np->target[cmd->device->id];
+	struct lcb *lp	= tp->lp[cmd->device->lun];
+	struct list_head *qp;
+	struct ccb *	cp2;
 	int		disc_cnt = 0;
 	int		busy_cnt = 0;
-	u_int32		startp;
+	u32		startp;
 	u_char		s_status = INB (SS_PRT);
 
 	/*
@@ -7085,10 +5915,10 @@ static void ncr_sir_to_redo(ncb_p np, int num, ccb_p cp)
 	**	are before cp and busy ones after.
 	*/
 	if (lp) {
-		qp = lp->busy_ccbq.blink;
+		qp = lp->busy_ccbq.prev;
 		while (qp != &lp->busy_ccbq) {
-			cp2 = xpt_que_entry(qp, struct ccb, link_ccbq);
-			qp  = qp->blink;
+			cp2 = list_entry(qp, struct ccb, link_ccbq);
+			qp  = qp->prev;
 			++busy_cnt;
 			if (cp2 == cp)
 				break;
@@ -7116,7 +5946,7 @@ static void ncr_sir_to_redo(ncb_p np, int num, ccb_p cp)
 		if (disc_cnt < lp->numtags) {
 			lp->numtags	= disc_cnt > 2 ? disc_cnt : 2;
 			lp->num_good	= 0;
-			ncr_setup_tags (np, cmd->target, cmd->lun);
+			ncr_setup_tags (np, cmd->device);
 		}
 		/*
 		**	Requeue the command to the start queue.
@@ -7131,7 +5961,7 @@ static void ncr_sir_to_redo(ncb_p np, int num, ccb_p cp)
 		ncr_put_start_queue(np, cp);
 		if (disc_cnt)
 			INB (nc_ctest2);		/* Clear SIGP */
-		OUTL (nc_dsp,	NCB_SCRIPT_PHYS (np, reselect));
+		OUTL_DSP (NCB_SCRIPT_PHYS (np, reselect));
 		return;
 	case S_TERMINATED:
 	case S_CHECK_COND:
@@ -7148,7 +5978,7 @@ static void ncr_sir_to_redo(ncb_p np, int num, ccb_p cp)
 		**
 		**	identify message
 		*/
-		cp->scsi_smsg2[0]	= M_IDENTIFY | cmd->lun;
+		cp->scsi_smsg2[0]	= M_IDENTIFY | cmd->device->lun;
 		cp->phys.smsg.addr	= cpu_to_scr(CCB_PHYS (cp, scsi_smsg2));
 		cp->phys.smsg.size	= cpu_to_scr(1);
 
@@ -7162,13 +5992,13 @@ static void ncr_sir_to_redo(ncb_p np, int num, ccb_p cp)
 		**	patch requested size into sense command
 		*/
 		cp->sensecmd[0]		= 0x03;
-		cp->sensecmd[1]		= cmd->lun << 5;
+		cp->sensecmd[1]		= cmd->device->lun << 5;
 		cp->sensecmd[4]		= sizeof(cp->sense_buf);
 
 		/*
 		**	sense data
 		*/
-		bzero(cp->sense_buf, sizeof(cp->sense_buf));
+		memset(cp->sense_buf, 0, sizeof(cp->sense_buf));
 		cp->phys.sense.addr	= cpu_to_scr(CCB_PHYS(cp,sense_buf[0]));
 		cp->phys.sense.size	= cpu_to_scr(sizeof(cp->sense_buf));
 
@@ -7193,18 +6023,18 @@ static void ncr_sir_to_redo(ncb_p np, int num, ccb_p cp)
 		/*
 		**	Select without ATN for quirky devices.
 		*/
-		if (tp->quirks & QUIRK_NOMSG)
+		if (cmd->device->select_no_atn)
 			cp->start.schedule.l_paddr =
 			cpu_to_scr(NCB_SCRIPTH_PHYS (np, select_no_atn));
 
 		ncr_put_start_queue(np, cp);
 
-		OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, start));
+		OUTL_DSP (NCB_SCRIPT_PHYS (np, start));
 		return;
 	}
 
 out:
-	OUTONB (nc_dcntl, (STD|NOCOM));
+	OUTONB_STD ();
 	return;
 }
 
@@ -7235,7 +6065,7 @@ static int ncr_show_msg (u_char * msg)
 	return (1);
 }
 
-static void ncr_print_msg ( ccb_p cp, char *label, u_char *msg)
+static void ncr_print_msg ( struct ccb *cp, char *label, u_char *msg)
 {
 	if (cp)
 		PRINT_ADDR(cp->cmd);
@@ -7246,19 +6076,32 @@ static void ncr_print_msg ( ccb_p cp, char *label, u_char *msg)
 	printk(".\n");
 }
 
-void ncr_int_sir (ncb_p np)
+void ncr_int_sir (struct ncb *np)
 {
 	u_char scntl3;
 	u_char chg, ofs, per, fak, wide;
 	u_char num = INB (nc_dsps);
-	ccb_p	cp=0;
+	struct ccb *cp=NULL;
 	u_long	dsa    = INL (nc_dsa);
 	u_char	target = INB (nc_sdid) & 0x0f;
-	tcb_p	tp     = &np->target[target];
+	struct tcb *tp     = &np->target[target];
+	struct scsi_target *starget = tp->starget;
 
 	if (DEBUG_FLAGS & DEBUG_TINY) printk ("I#%d", num);
 
 	switch (num) {
+	case SIR_INTFLY:
+		/*
+		**	This is used for HP Zalon/53c720 where INTFLY
+		**	operation is currently broken.
+		*/
+		ncr_wakeup_done(np);
+#ifdef SCSI_NCR_CCB_DONE_SUPPORT
+		OUTL(nc_dsp, NCB_SCRIPT_PHYS (np, done_end) + 8);
+#else
+		OUTL(nc_dsp, NCB_SCRIPT_PHYS (np, start));
+#endif
+		return;
 	case SIR_RESEL_NO_MSG_IN:
 	case SIR_RESEL_NO_IDENTIFY:
 		/*
@@ -7267,7 +6110,7 @@ void ncr_int_sir (ncb_p np)
 		**	We just assume lun=0, 1 CCB, no tag.
 		*/
 		if (tp->lp[0]) { 
-			OUTL (nc_dsp, scr_to_cpu(tp->lp[0]->jump_ccb[0]));
+			OUTL_DSP (scr_to_cpu(tp->lp[0]->jump_ccb[0]));
 			return;
 		}
 	case SIR_RESEL_BAD_TARGET:	/* Will send a TARGET RESET message */
@@ -7297,7 +6140,8 @@ void ncr_int_sir (ncb_p np)
 		while (cp && (CCB_PHYS (cp, phys) != dsa))
 			cp = cp->link_ccb;
 
-		assert (cp && cp == np->header.cp);
+		BUG_ON(!cp);
+		BUG_ON(cp != np->header.cp);
 
 		if (!cp || cp != np->header.cp)
 			goto out;
@@ -7309,7 +6153,7 @@ void ncr_int_sir (ncb_p np)
 **	Was Sie schon immer ueber transfermode negotiation wissen wollten ...
 **
 **	We try to negotiate sync and wide transfer only after
-**	a successfull inquire command. We look at byte 7 of the
+**	a successful inquire command. We look at byte 7 of the
 **	inquire data to determine the capabilities of the target.
 **
 **	When we try to negotiate, we append the negotiation message
@@ -7344,7 +6188,7 @@ void ncr_int_sir (ncb_p np)
 **
 **	Possible cases:		   hs  sir   msg_in value  send   goto
 **	We try to negotiate:
-**	-> target doesnt't msgin   NEG FAIL  noop   defa.  -      dispatch
+**	-> target doesn't msgin    NEG FAIL  noop   defa.  -      dispatch
 **	-> target rejected our msg NEG FAIL  reject defa.  -      dispatch
 **	-> target answered  (ok)   NEG SYNC  sdtr   set    -      clrack
 **	-> target answered (!ok)   NEG SYNC  sdtr   defa.  REJ--->msg_bad
@@ -7399,10 +6243,13 @@ void ncr_int_sir (ncb_p np)
 
 		case NS_SYNC:
 			ncr_setsync (np, cp, 0, 0xe0);
+			spi_period(starget) = 0;
+			spi_offset(starget) = 0;
 			break;
 
 		case NS_WIDE:
 			ncr_setwide (np, cp, 0, 0);
+			spi_width(starget) = 0;
 			break;
 
 		};
@@ -7437,8 +6284,8 @@ void ncr_int_sir (ncb_p np)
 		**	      it CAN transfer synch.
 		*/
 
-		if (ofs)
-			tp->inq_byte7 |= INQ7_SYNC;
+		if (ofs && tp->starget)
+			spi_support_sync(tp->starget) = 1;
 
 		/*
 		**	check values against driver limits.
@@ -7489,18 +6336,23 @@ void ncr_int_sir (ncb_p np)
 					**	Answer wasn't acceptable.
 					*/
 					ncr_setsync (np, cp, 0, 0xe0);
-					OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, msg_bad));
+					spi_period(starget) = 0;
+					spi_offset(starget) = 0;
+					OUTL_DSP (NCB_SCRIPT_PHYS (np, msg_bad));
 				} else {
 					/*
 					**	Answer is ok.
 					*/
 					ncr_setsync (np, cp, scntl3, (fak<<5)|ofs);
-					OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, clrack));
+					spi_period(starget) = per;
+					spi_offset(starget) = ofs;
+					OUTL_DSP (NCB_SCRIPT_PHYS (np, clrack));
 				};
 				return;
 
 			case NS_WIDE:
 				ncr_setwide (np, cp, 0, 0);
+				spi_width(starget) = 0;
 				break;
 			};
 		};
@@ -7511,6 +6363,8 @@ void ncr_int_sir (ncb_p np)
 		*/
 
 		ncr_setsync (np, cp, scntl3, (fak<<5)|ofs);
+		spi_period(starget) = per;
+		spi_offset(starget) = ofs;
 
 		np->msgout[0] = M_EXTENDED;
 		np->msgout[1] = 3;
@@ -7528,7 +6382,7 @@ void ncr_int_sir (ncb_p np)
 		}
 
 		if (!ofs) {
-			OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, msg_bad));
+			OUTL_DSP (NCB_SCRIPT_PHYS (np, msg_bad));
 			return;
 		}
 		np->msgin [0] = M_NOOP;
@@ -7558,8 +6412,8 @@ void ncr_int_sir (ncb_p np)
 		**	      it CAN transfer wide.
 		*/
 
-		if (wide)
-			tp->inq_byte7 |= INQ7_WIDE16;
+		if (wide && tp->starget)
+			spi_support_wide(tp->starget) = 1;
 
 		/*
 		**	check values against driver limits.
@@ -7586,18 +6440,22 @@ void ncr_int_sir (ncb_p np)
 					**	Answer wasn't acceptable.
 					*/
 					ncr_setwide (np, cp, 0, 1);
-					OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, msg_bad));
+					spi_width(starget) = 0;
+					OUTL_DSP (NCB_SCRIPT_PHYS (np, msg_bad));
 				} else {
 					/*
 					**	Answer is ok.
 					*/
 					ncr_setwide (np, cp, wide, 1);
-					OUTL (nc_dsp, NCB_SCRIPT_PHYS (np, clrack));
+					spi_width(starget) = wide;
+					OUTL_DSP (NCB_SCRIPT_PHYS (np, clrack));
 				};
 				return;
 
 			case NS_SYNC:
 				ncr_setsync (np, cp, 0, 0xe0);
+				spi_period(starget) = 0;
+				spi_offset(starget) = 0;
 				break;
 			};
 		};
@@ -7608,6 +6466,7 @@ void ncr_int_sir (ncb_p np)
 		*/
 
 		ncr_setwide (np, cp, wide, 1);
+		spi_width(starget) = wide;
 
 		np->msgout[0] = M_EXTENDED;
 		np->msgout[1] = 2;
@@ -7700,62 +6559,54 @@ void ncr_int_sir (ncb_p np)
 	};
 
 out:
-	OUTONB (nc_dcntl, (STD|NOCOM));
+	OUTONB_STD ();
 }
 
 /*==========================================================
 **
 **
-**	Aquire a control block
+**	Acquire a control block
 **
 **
 **==========================================================
 */
 
-static	ccb_p ncr_get_ccb (ncb_p np, u_char tn, u_char ln)
+static	struct ccb *ncr_get_ccb (struct ncb *np, u_char tn, u_char ln)
 {
-	tcb_p tp = &np->target[tn];
-	lcb_p lp = tp->lp[ln];
+	struct tcb *tp = &np->target[tn];
+	struct lcb *lp = tp->lp[ln];
 	u_char tag = NO_TAG;
-	ccb_p cp = (ccb_p) 0;
+	struct ccb *cp = NULL;
 
 	/*
 	**	Lun structure available ?
 	*/
 	if (lp) {
-		XPT_QUEHEAD *qp;
+		struct list_head *qp;
 		/*
 		**	Keep from using more tags than we can handle.
 		*/
 		if (lp->usetags && lp->busyccbs >= lp->maxnxs)
-			return (ccb_p) 0;
+			return NULL;
 
 		/*
 		**	Allocate a new CCB if needed.
 		*/
-		if (xpt_que_empty(&lp->free_ccbq))
+		if (list_empty(&lp->free_ccbq))
 			ncr_alloc_ccb(np, tn, ln);
 
 		/*
-		**	Tune tag mode if asked by user.
-		*/
-		if (lp->queuedepth != lp->numtags) {
-			ncr_setup_tags(np, tn, ln);
-		}
-			
-		/*
 		**	Look for free CCB
 		*/
-		qp = xpt_remque_head(&lp->free_ccbq);
+		qp = ncr_list_pop(&lp->free_ccbq);
 		if (qp) {
-			cp = xpt_que_entry(qp, struct ccb, link_ccbq);
+			cp = list_entry(qp, struct ccb, link_ccbq);
 			if (cp->magic) {
 				PRINT_LUN(np, tn, ln);
 				printk ("ccb free list corrupted (@%p)\n", cp);
-				cp = 0;
-			}
-			else {
-				xpt_insque_tail(qp, &lp->wait_ccbq);
+				cp = NULL;
+			} else {
+				list_add_tail(qp, &lp->wait_ccbq);
 				++lp->busyccbs;
 			}
 		}
@@ -7769,7 +6620,7 @@ static	ccb_p ncr_get_ccb (ncb_p np, u_char tn, u_char ln)
 				tag = lp->cb_tags[lp->ia_tag];
 		}
 		else if (lp->actccbs > 0)
-			return (ccb_p) 0;
+			return NULL;
 	}
 
 	/*
@@ -7790,7 +6641,7 @@ static	ccb_p ncr_get_ccb (ncb_p np, u_char tn, u_char ln)
 #endif
 
 	if (cp->magic)
-		return ((ccb_p) 0);
+		return NULL;
 
 	cp->magic = 1;
 
@@ -7830,10 +6681,10 @@ static	ccb_p ncr_get_ccb (ncb_p np, u_char tn, u_char ln)
 **==========================================================
 */
 
-static void ncr_free_ccb (ncb_p np, ccb_p cp)
+static void ncr_free_ccb (struct ncb *np, struct ccb *cp)
 {
-	tcb_p tp = &np->target[cp->target];
-	lcb_p lp = tp->lp[cp->lun];
+	struct tcb *tp = &np->target[cp->target];
+	struct lcb *lp = tp->lp[cp->lun];
 
 	if (DEBUG_FLAGS & DEBUG_TAGS) {
 		PRINT_LUN(np, cp->target, cp->lun);
@@ -7865,10 +6716,8 @@ static void ncr_free_ccb (ncb_p np, ccb_p cp)
 	*/
 
 	if (lp) {
-		if (cp != np->ccb) {
-			xpt_remque(&cp->link_ccbq);
-			xpt_insque_head(&cp->link_ccbq, &lp->free_ccbq);
-		}
+		if (cp != np->ccb)
+			list_move(&cp->link_ccbq, &lp->free_ccbq);
 		--lp->busyccbs;
 		if (cp->queued) {
 			--lp->queuedccbs;
@@ -7888,15 +6737,14 @@ static void ncr_free_ccb (ncb_p np, ccb_p cp)
 }
 
 
-#define ncr_reg_bus_addr(r) \
-	(pcivtobus(np->paddr) + offsetof (struct ncr_reg, r))
+#define ncr_reg_bus_addr(r) (np->paddr + offsetof (struct ncr_reg, r))
 
 /*------------------------------------------------------------------------
 **	Initialize the fixed part of a CCB structure.
 **------------------------------------------------------------------------
 **------------------------------------------------------------------------
 */
-static void ncr_init_ccb(ncb_p np, ccb_p cp)
+static void ncr_init_ccb(struct ncb *np, struct ccb *cp)
 {
 	ncrcmd copy_4 = np->features & FE_PFEN ? SCR_COPY(4) : SCR_COPY_F(4);
 
@@ -7907,9 +6755,9 @@ static void ncr_init_ccb(ncb_p np, ccb_p cp)
 	cp->phys.header.cp = cp;
 
 	/*
-	**	This allows xpt_remque to work for the default ccb.
+	**	This allows list_del to work for the default ccb.
 	*/
-	xpt_que_init(&cp->link_ccbq);
+	INIT_LIST_HEAD(&cp->link_ccbq);
 
 	/*
 	**	Initialyze the start and restart launch script.
@@ -7923,7 +6771,7 @@ static void ncr_init_ccb(ncb_p np, ccb_p cp)
 	cp->start.schedule.l_cmd = cpu_to_scr(SCR_JUMP);
 	cp->start.p_phys	 = cpu_to_scr(CCB_PHYS(cp, phys));
 
-	bcopy(&cp->start, &cp->restart, sizeof(cp->restart));
+	memcpy(&cp->restart, &cp->start, sizeof(cp->restart));
 
 	cp->start.schedule.l_paddr   = cpu_to_scr(NCB_SCRIPT_PHYS (np, idle));
 	cp->restart.schedule.l_paddr = cpu_to_scr(NCB_SCRIPTH_PHYS (np, abort));
@@ -7935,11 +6783,11 @@ static void ncr_init_ccb(ncb_p np, ccb_p cp)
 **------------------------------------------------------------------------
 **------------------------------------------------------------------------
 */
-static void ncr_alloc_ccb(ncb_p np, u_char tn, u_char ln)
+static void ncr_alloc_ccb(struct ncb *np, u_char tn, u_char ln)
 {
-	tcb_p tp = &np->target[tn];
-	lcb_p lp = tp->lp[ln];
-	ccb_p cp = 0;
+	struct tcb *tp = &np->target[tn];
+	struct lcb *lp = tp->lp[ln];
+	struct ccb *cp = NULL;
 
 	/*
 	**	Allocate memory for this CCB.
@@ -7953,7 +6801,7 @@ static void ncr_alloc_ccb(ncb_p np, u_char tn, u_char ln)
 	*/
 	lp->actccbs++;
 	np->actccbs++;
-	bzero (cp, sizeof (*cp));
+	memset(cp, 0, sizeof (*cp));
 	ncr_init_ccb(np, cp);
 
 	/*
@@ -7963,8 +6811,7 @@ static void ncr_alloc_ccb(ncb_p np, u_char tn, u_char ln)
 	cp->link_ccb      = np->ccb->link_ccb;
 	np->ccb->link_ccb = cp;
 
-	xpt_insque_head(&cp->link_ccbq, &lp->free_ccbq);
-	ncr_setup_tags (np, tn, ln);
+	list_add(&cp->link_ccbq, &lp->free_ccbq);
 }
 
 /*==========================================================
@@ -7985,9 +6832,9 @@ static void ncr_alloc_ccb(ncb_p np, u_char tn, u_char ln)
 **	It contains a SCRIPT that is called on target reselection.
 **------------------------------------------------------------------------
 */
-static void ncr_init_tcb (ncb_p np, u_char tn)
+static void ncr_init_tcb (struct ncb *np, u_char tn)
 {
-	tcb_p tp = &np->target[tn];
+	struct tcb *tp = &np->target[tn];
 	ncrcmd copy_1 = np->features & FE_PFEN ? SCR_COPY(1) : SCR_COPY_F(1);
 	int th = tn & 3;
 	int i;
@@ -8006,15 +6853,23 @@ static void ncr_init_tcb (ncb_p np, u_char tn)
 	*/
 	tp->getscr[0] =	cpu_to_scr(copy_1);
 	tp->getscr[1] = cpu_to_scr(vtobus (&tp->sval));
+#ifdef SCSI_NCR_BIG_ENDIAN
+	tp->getscr[2] = cpu_to_scr(ncr_reg_bus_addr(nc_sxfer) ^ 3);
+#else
 	tp->getscr[2] = cpu_to_scr(ncr_reg_bus_addr(nc_sxfer));
-  
+#endif
+
 	/*
 	**	Load the timing register.
 	**	COPY @(tp->wval), @(scntl3)
 	*/
 	tp->getscr[3] =	cpu_to_scr(copy_1);
 	tp->getscr[4] = cpu_to_scr(vtobus (&tp->wval));
+#ifdef SCSI_NCR_BIG_ENDIAN
+	tp->getscr[5] = cpu_to_scr(ncr_reg_bus_addr(nc_scntl3) ^ 3);
+#else
 	tp->getscr[5] = cpu_to_scr(ncr_reg_bus_addr(nc_scntl3));
+#endif
 
 	/*
 	**	Get the IDENTIFY message and the lun.
@@ -8043,10 +6898,17 @@ static void ncr_init_tcb (ncb_p np, u_char tn)
 	/*
 	**	These assert's should be moved at driver initialisations.
 	*/
-	assert (( (offsetof(struct ncr_reg, nc_sxfer) ^
-		offsetof(struct tcb    , sval    )) &3) == 0);
-	assert (( (offsetof(struct ncr_reg, nc_scntl3) ^
-		offsetof(struct tcb    , wval    )) &3) == 0);
+#ifdef SCSI_NCR_BIG_ENDIAN
+	BUG_ON(((offsetof(struct ncr_reg, nc_sxfer) ^
+		 offsetof(struct tcb    , sval    )) &3) != 3);
+	BUG_ON(((offsetof(struct ncr_reg, nc_scntl3) ^
+		 offsetof(struct tcb    , wval    )) &3) != 3);
+#else
+	BUG_ON(((offsetof(struct ncr_reg, nc_sxfer) ^
+		 offsetof(struct tcb    , sval    )) &3) != 0);
+	BUG_ON(((offsetof(struct ncr_reg, nc_scntl3) ^
+		 offsetof(struct tcb    , wval    )) &3) != 0);
+#endif
 }
 
 
@@ -8057,10 +6919,10 @@ static void ncr_init_tcb (ncb_p np, u_char tn)
 **	command has been successfully completed for this target/lun.
 **------------------------------------------------------------------------
 */
-static lcb_p ncr_alloc_lcb (ncb_p np, u_char tn, u_char ln)
+static struct lcb *ncr_alloc_lcb (struct ncb *np, u_char tn, u_char ln)
 {
-	tcb_p tp = &np->target[tn];
-	lcb_p lp = tp->lp[ln];
+	struct tcb *tp = &np->target[tn];
+	struct lcb *lp = tp->lp[ln];
 	ncrcmd copy_4 = np->features & FE_PFEN ? SCR_COPY(4) : SCR_COPY_F(4);
 	int lh = ln & 3;
 
@@ -8076,7 +6938,7 @@ static lcb_p ncr_alloc_lcb (ncb_p np, u_char tn, u_char ln)
 	lp = m_calloc_dma(sizeof(struct lcb), "LCB");
 	if (!lp)
 		goto fail;
-	bzero(lp, sizeof(*lp));
+	memset(lp, 0, sizeof(*lp));
 	tp->lp[ln] = lp;
 
 	/*
@@ -8088,10 +6950,10 @@ static lcb_p ncr_alloc_lcb (ncb_p np, u_char tn, u_char ln)
 	/*
 	**	Initialize the CCB queue headers.
 	*/
-	xpt_que_init(&lp->free_ccbq);
-	xpt_que_init(&lp->busy_ccbq);
-	xpt_que_init(&lp->wait_ccbq);
-	xpt_que_init(&lp->skip_ccbq);
+	INIT_LIST_HEAD(&lp->free_ccbq);
+	INIT_LIST_HEAD(&lp->busy_ccbq);
+	INIT_LIST_HEAD(&lp->wait_ccbq);
+	INIT_LIST_HEAD(&lp->skip_ccbq);
 
 	/*
 	**	Set max CCBs to 1 and use the default 1 entry 
@@ -8147,11 +7009,12 @@ fail:
 **	will play with CHANGE DEFINITION commands. :-)
 **------------------------------------------------------------------------
 */
-static lcb_p ncr_setup_lcb (ncb_p np, u_char tn, u_char ln, u_char *inq_data)
+static struct lcb *ncr_setup_lcb (struct ncb *np, struct scsi_device *sdev)
 {
-	tcb_p tp = &np->target[tn];
-	lcb_p lp = tp->lp[ln];
-	u_char inq_byte7;
+	unsigned char tn = sdev->id, ln = sdev->lun;
+	struct tcb *tp = &np->target[tn];
+	struct lcb *lp = tp->lp[ln];
+	struct scsi_target *starget = tp->starget;
 
 	/*
 	**	If no lcb, try to allocate it.
@@ -8160,55 +7023,16 @@ static lcb_p ncr_setup_lcb (ncb_p np, u_char tn, u_char ln, u_char *inq_data)
 		goto fail;
 
 	/*
-	**	Get device quirks from a speciality table.
+	**	Prepare negotiation
 	*/
-	tp->quirks = ncr_lookup (inq_data);
-	if (tp->quirks && bootverbose) {
-		PRINT_LUN(np, tn, ln);
-		printk ("quirks=%x.\n", tp->quirks);
-	}
-
-	/*
-	**	Evaluate trustable target/unit capabilities.
-	**	We only believe device version >= SCSI-2 that 
-	**	use appropriate response data format (2).
-	**	But it seems that some CCS devices also 
-	**	support SYNC and I donnot want to frustrate 
-	**	anybody. ;-)
-	*/
-	inq_byte7 = 0;
-	if	((inq_data[2] & 0x7) >= 2 && (inq_data[3] & 0xf) == 2)
-		inq_byte7 = inq_data[7];
-	else if ((inq_data[2] & 0x7) == 1 && (inq_data[3] & 0xf) == 1)
-		inq_byte7 = INQ7_SYNC;
-
-	/*
-	**	Throw away announced LUN capabilities if we are told 
-	**	that there is no real device supported by the logical unit.
-	*/
-	if ((inq_data[0] & 0xe0) > 0x20 || (inq_data[0] & 0x1f) == 0x1f)
-		inq_byte7 &= (INQ7_SYNC | INQ7_WIDE16);
-
-	/*
-	**	If user is wanting SYNC, force this feature.
-	*/
-	if (driver_setup.force_sync_nego)
-		inq_byte7 |= INQ7_SYNC;
-
-	/*
-	**	Prepare negotiation if SIP capabilities have changed.
-	*/
-	tp->inq_done = 1;
-	if ((inq_byte7 ^ tp->inq_byte7) & (INQ7_SYNC | INQ7_WIDE16)) {
-		tp->inq_byte7 = inq_byte7;
+	if (spi_support_wide(starget) || spi_support_sync(starget))
 		ncr_negotiate(np, tp);
-	}
 
 	/*
 	**	If unit supports tagged commands, allocate the 
 	**	CCB JUMP table if not yet.
 	*/
-	if ((inq_byte7 & INQ7_QUEUE) && lp->jump_ccb == &lp->jump_ccb_0) {
+	if (sdev->tagged_supported && lp->jump_ccb == &lp->jump_ccb_0) {
 		int i;
 		lp->jump_ccb = m_calloc_dma(256, "JUMP_CCB");
 		if (!lp->jump_ccb) {
@@ -8223,16 +7047,9 @@ static lcb_p ncr_setup_lcb (ncb_p np, u_char tn, u_char ln, u_char *inq_data)
 			lp->cb_tags[i] = i;
 		lp->maxnxs = MAX_TAGS;
 		lp->tags_stime = ktime_get(3*HZ);
+		ncr_setup_tags (np, sdev);
 	}
 
-	/*
-	**	Adjust tagged queueing status if needed.
-	*/
-	if ((inq_byte7 ^ lp->inq_byte7) & INQ7_QUEUE) {
-		lp->inq_byte7 = inq_byte7;
-		lp->numtags   = lp->maxtags;
-		ncr_setup_tags (np, tn, ln);
-	}
 
 fail:
 	return lp;
@@ -8267,44 +7084,57 @@ fail:
 **	sizes to the data segment array.
 */
 
-static	int	ncr_scatter(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd)
+static int ncr_scatter_no_sglist(struct ncb *np, struct ccb *cp, struct scsi_cmnd *cmd)
 {
-	struct scr_tblmove *data;
+	struct scr_tblmove *data = &cp->phys.data[MAX_SCATTER - 1];
+	int segment;
+
+	cp->data_len = cmd->request_bufflen;
+
+	if (cmd->request_bufflen) {
+		dma_addr_t baddr = map_scsi_single_data(np, cmd);
+		if (baddr) {
+			ncr_build_sge(np, data, baddr, cmd->request_bufflen);
+			segment = 1;
+		} else {
+			segment = -2;
+		}
+	} else {
+		segment = 0;
+	}
+
+	return segment;
+}
+
+static int ncr_scatter(struct ncb *np, struct ccb *cp, struct scsi_cmnd *cmd)
+{
 	int segment	= 0;
 	int use_sg	= (int) cmd->use_sg;
 
-	data		= cp->phys.data;
 	cp->data_len	= 0;
 
-	if (!use_sg) {
-		if (cmd->request_bufflen) {
-			u_long baddr = map_scsi_single_data(np, cmd);
-
-			data = &data[MAX_SCATTER - 1];
-			data[0].addr = cpu_to_scr(baddr);
-			data[0].size = cpu_to_scr(cmd->request_bufflen);
-			cp->data_len = cmd->request_bufflen;
-			segment = 1;
-		}
-	}
-	else if (use_sg <= MAX_SCATTER) {
+	if (!use_sg)
+		segment = ncr_scatter_no_sglist(np, cp, cmd);
+	else if ((use_sg = map_scsi_sg_data(np, cmd)) > 0) {
 		struct scatterlist *scatter = (struct scatterlist *)cmd->buffer;
+		struct scr_tblmove *data;
 
-		use_sg = map_scsi_sg_data(np, cmd);
-		data = &data[MAX_SCATTER - use_sg];
-
-		while (segment < use_sg) {
-			u_long baddr = scsi_sg_dma_address(&scatter[segment]);
-			unsigned int len = scsi_sg_dma_len(&scatter[segment]);
-
-			data[segment].addr = cpu_to_scr(baddr);
-			data[segment].size = cpu_to_scr(len);
-			cp->data_len	  += len;
-			++segment;
+		if (use_sg > MAX_SCATTER) {
+			unmap_scsi_data(np, cmd);
+			return -1;
 		}
-	}
-	else {
-		return -1;
+
+		data = &cp->phys.data[MAX_SCATTER - use_sg];
+
+		for (segment = 0; segment < use_sg; segment++) {
+			dma_addr_t baddr = sg_dma_address(&scatter[segment]);
+			unsigned int len = sg_dma_len(&scatter[segment]);
+
+			ncr_build_sge(np, &data[segment], baddr, len);
+			cp->data_len += len;
+		}
+	} else {
+		segment = -2;
 	}
 
 	return segment;
@@ -8313,7 +7143,7 @@ static	int	ncr_scatter(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd)
 /*==========================================================
 **
 **
-**	Test the pci bus snoop logic :-(
+**	Test the bus snoop logic :-(
 **
 **	Has to be called with interrupts disabled.
 **
@@ -8321,10 +7151,9 @@ static	int	ncr_scatter(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd)
 **==========================================================
 */
 
-#ifndef NCR_IOMAPPED
 static int __init ncr_regtest (struct ncb* np)
 {
-	register volatile u_int32 data;
+	register volatile u32 data;
 	/*
 	**	ncr registers may NOT be cached.
 	**	write 0xffffffff to a read only register area,
@@ -8344,21 +7173,18 @@ static int __init ncr_regtest (struct ncb* np)
 	};
 	return (0);
 }
-#endif
 
 static int __init ncr_snooptest (struct ncb* np)
 {
-	u_int32	ncr_rd, ncr_wr, ncr_bk, host_rd, host_wr, pc;
+	u32	ncr_rd, ncr_wr, ncr_bk, host_rd, host_wr, pc;
 	int	i, err=0;
-#ifndef NCR_IOMAPPED
 	if (np->reg) {
-            err |= ncr_regtest (np);
-            if (err) return (err);
+		err |= ncr_regtest (np);
+		if (err)
+			return (err);
 	}
-#endif
-	/*
-	**	init
-	*/
+
+	/* init */
 	pc  = NCB_SCRIPTH_PHYS (np, snooptest);
 	host_wr = 1;
 	ncr_wr  = 2;
@@ -8370,7 +7196,7 @@ static int __init ncr_snooptest (struct ncb* np)
 	/*
 	**	Start script (exchange values)
 	*/
-	OUTL (nc_dsp, pc);
+	OUTL_DSP (pc);
 	/*
 	**	Wait 'til done (with timeout)
 	*/
@@ -8390,9 +7216,7 @@ static int __init ncr_snooptest (struct ncb* np)
 	/*
 	**	Reset ncr chip
 	*/
-	OUTB (nc_istat,  SRST);
-	UDELAY (100);
-	OUTB (nc_istat,  0   );
+	ncr_chip_reset(np, 100);
 	/*
 	**	check for timeout
 	*/
@@ -8433,129 +7257,6 @@ static int __init ncr_snooptest (struct ncb* np)
 
 /*==========================================================
 **
-**
-**	Profiling the drivers and targets performance.
-**
-**
-**==========================================================
-*/
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-
-/*
-**	Compute the difference in jiffies ticks.
-*/
-
-#define ncr_delta(from, to) \
-	( ((to) && (from))? (to) - (from) : -1 )
-
-#define PROFILE  cp->phys.header.stamp
-static	void ncb_profile (ncb_p np, ccb_p cp)
-{
-	long co, st, en, di, re, post, work, disc;
-	u_int diff;
-
-	PROFILE.end = jiffies;
-
-	st = ncr_delta (PROFILE.start,PROFILE.status);
-	if (st<0) return;	/* status  not reached  */
-
-	co = ncr_delta (PROFILE.start,PROFILE.command);
-	if (co<0) return;	/* command not executed */
-
-	en = ncr_delta (PROFILE.start,PROFILE.end),
-	di = ncr_delta (PROFILE.start,PROFILE.disconnect),
-	re = ncr_delta (PROFILE.start,PROFILE.reselect);
-	post = en - st;
-
-	/*
-	**	@PROFILE@  Disconnect time invalid if multiple disconnects
-	*/
-
-	if (di>=0) disc = re - di; else  disc = 0;
-
-	work = (st - co) - disc;
-
-	diff = (scr_to_cpu(np->disc_phys) - np->disc_ref) & 0xff;
-	np->disc_ref += diff;
-
-	np->profile.num_trans	+= 1;
-	if (cp->cmd) {
-		np->profile.num_kbytes	+= (cp->cmd->request_bufflen >> 10);
-		np->profile.rest_bytes	+= (cp->cmd->request_bufflen & (0x400-1));
-		if (np->profile.rest_bytes >= 0x400) {
-			++np->profile.num_kbytes;
-			np->profile.rest_bytes	-= 0x400;
-		}
-	}
-	np->profile.num_disc	+= diff;
-	np->profile.ms_setup	+= co;
-	np->profile.ms_data	+= work;
-	np->profile.ms_disc	+= disc;
-	np->profile.ms_post	+= post;
-}
-#undef PROFILE
-
-#endif /* SCSI_NCR_PROFILE_SUPPORT */
-
-/*==========================================================
-**
-**
-**	Device lookup.
-**
-**	@GENSCSI@ should be integrated to scsiconf.c
-**
-**
-**==========================================================
-*/
-
-struct table_entry {
-	char *	manufacturer;
-	char *	model;
-	char *	version;
-	u_long	info;
-};
-
-static struct table_entry device_tab[] =
-{
-#if 0
-	{"", "", "", QUIRK_NOMSG},
-#endif
-	{"SONY", "SDT-5000", "3.17", QUIRK_NOMSG},
-	{"WangDAT", "Model 2600", "01.7", QUIRK_NOMSG},
-	{"WangDAT", "Model 3200", "02.2", QUIRK_NOMSG},
-	{"WangDAT", "Model 1300", "02.4", QUIRK_NOMSG},
-	{"", "", "", 0} /* catch all: must be last entry. */
-};
-
-static u_long ncr_lookup(char * id)
-{
-	struct table_entry * p = device_tab;
-	char *d, *r, c;
-
-	for (;;p++) {
-
-		d = id+8;
-		r = p->manufacturer;
-		while ((c=*r++)) if (c!=*d++) break;
-		if (c) continue;
-
-		d = id+16;
-		r = p->model;
-		while ((c=*r++)) if (c!=*d++) break;
-		if (c) continue;
-
-		d = id+32;
-		r = p->version;
-		while ((c=*r++)) if (c!=*d++) break;
-		if (c) continue;
-
-		return (p->info);
-	}
-}
-
-/*==========================================================
-**
 **	Determine the ncr's clock frequency.
 **	This is essential for the negotiation
 **	of the synchronous transfer rate.
@@ -8580,7 +7281,7 @@ static u_long ncr_lookup(char * id)
 /*
  *	Select NCR SCSI clock frequency
  */
-static void ncr_selectclock(ncb_p np, u_char scntl3)
+static void ncr_selectclock(struct ncb *np, u_char scntl3)
 {
 	if (np->multiplier < 2) {
 		OUTB(nc_scntl3,	scntl3);
@@ -8594,11 +7295,11 @@ static void ncr_selectclock(ncb_p np, u_char scntl3)
 	if (np->multiplier > 2) {  /* Poll bit 5 of stest4 for quadrupler */
 		int i = 20;
 		while (!(INB(nc_stest4) & LCKFRQ) && --i > 0)
-			UDELAY (20);
+			udelay(20);
 		if (!i)
 			printk("%s: the chip cannot lock the frequency\n", ncr_name(np));
 	} else			/* Wait 20 micro-seconds for doubler	*/
-		UDELAY (20);
+		udelay(20);
 	OUTB(nc_stest3, HSC);		/* Halt the scsi clock		*/
 	OUTB(nc_scntl3,	scntl3);
 	OUTB(nc_stest1, (DBLEN|DBLSEL));/* Select clock multiplier	*/
@@ -8609,7 +7310,7 @@ static void ncr_selectclock(ncb_p np, u_char scntl3)
 /*
  *	calculate NCR SCSI clock frequency (in KHz)
  */
-static unsigned __init ncrgetfreq (ncb_p np, int gen)
+static unsigned __init ncrgetfreq (struct ncb *np, int gen)
 {
 	unsigned ms = 0;
 	char count = 0;
@@ -8639,7 +7340,7 @@ static unsigned __init ncrgetfreq (ncb_p np, int gen)
 	OUTB (nc_stime1, gen);	/* set to nominal delay of 1<<gen * 125us */
 	while (!(INW(nc_sist) & GEN) && ms++ < 100000) {
 		for (count = 0; count < 10; count ++)
-			UDELAY (100);	/* count ms */
+			udelay(100);	/* count ms */
 	}
 	OUTB (nc_stime1, 0);	/* disable general purpose timer */
  	/*
@@ -8660,7 +7361,7 @@ static unsigned __init ncrgetfreq (ncb_p np, int gen)
 /*
  *	Get/probe NCR SCSI clock frequency
  */
-static void __init ncr_getclock (ncb_p np, int mult)
+static void __init ncr_getclock (struct ncb *np, int mult)
 {
 	unsigned char scntl3 = INB(nc_scntl3);
 	unsigned char stest1 = INB(nc_stest1);
@@ -8686,13 +7387,13 @@ static void __init ncr_getclock (ncb_p np, int mult)
 	if (np->multiplier != mult || (scntl3 & 7) < 3 || !(scntl3 & 1)) {
 		unsigned f2;
 
-		OUTB(nc_istat, SRST); UDELAY (5); OUTB(nc_istat, 0);
+		ncr_chip_reset(np, 5);
 
 		(void) ncrgetfreq (np, 11);	/* throw away first result */
 		f1 = ncrgetfreq (np, 11);
 		f2 = ncrgetfreq (np, 11);
 
-		if (bootverbose)
+		if(bootverbose)
 			printk ("%s: NCR clock is %uKHz, %uKHz\n", ncr_name(np), f1, f2);
 
 		if (f1 > f2) f1 = f2;		/* trust lower result	*/
@@ -8723,69 +7424,69 @@ static void __init ncr_getclock (ncb_p np, int mult)
 
 /*===================== LINUX ENTRY POINTS SECTION ==========================*/
 
-/*
-**   Linux select queue depths function
-*/
-
-static void ncr53c8xx_select_queue_depths(struct Scsi_Host *host, struct scsi_device *devlist)
+static int ncr53c8xx_slave_configure(struct scsi_device *device)
 {
-	struct scsi_device *device;
+	struct Scsi_Host *host = device->host;
+	struct ncb *np = ((struct host_data *) host->hostdata)->ncb;
+	struct tcb *tp = &np->target[device->id];
+	struct lcb *lp = tp->lp[device->lun];
+	int numtags, depth_to_use;
 
-	for (device = devlist; device; device = device->next) {
-		ncb_p np;
-		tcb_p tp;
-		lcb_p lp;
-		int numtags;
+	tp->starget = device->sdev_target;
 
-		if (device->host != host)
-			continue;
+	ncr_setup_lcb(np, device);
 
-		np = ((struct host_data *) host->hostdata)->ncb;
-		tp = &np->target[device->id];
-		lp = tp->lp[device->lun];
+	/*
+	**	Select queue depth from driver setup.
+	**	Donnot use more than configured by user.
+	**	Use at least 2.
+	**	Donnot use more than our maximum.
+	*/
+	numtags = device_queue_depth(np->unit, device->id, device->lun);
+	if (numtags > tp->usrtags)
+		numtags = tp->usrtags;
+	if (!device->tagged_supported)
+		numtags = 1;
+	depth_to_use = numtags;
+	if (depth_to_use < 2)
+		depth_to_use = 2;
+	if (depth_to_use > MAX_TAGS)
+		depth_to_use = MAX_TAGS;
 
-		/*
-		**	Select queue depth from driver setup.
-		**	Donnot use more than configured by user.
-		**	Use at least 2.
-		**	Donnot use more than our maximum.
-		*/
-		numtags = device_queue_depth(np->unit, device->id, device->lun);
-		if (numtags > tp->usrtags)
-			numtags = tp->usrtags;
-		if (!device->tagged_supported)
-			numtags = 1;
-		device->queue_depth = numtags;
-		if (device->queue_depth < 2)
-			device->queue_depth = 2;
-		if (device->queue_depth > MAX_TAGS)
-			device->queue_depth = MAX_TAGS;
+	scsi_adjust_queue_depth(device,
+				(device->tagged_supported ?
+				 MSG_SIMPLE_TAG : 0),
+				depth_to_use);
 
-		/*
-		**	Since the queue depth is not tunable under Linux,
-		**	we need to know this value in order not to 
-		**	announce stupid things to user.
-		*/
-		if (lp) {
-			lp->numtags = lp->maxtags = numtags;
-			lp->scdev_depth = device->queue_depth;
-		}
-		ncr_setup_tags (np, device->id, device->lun);
+	/*
+	**	Since the queue depth is not tunable under Linux,
+	**	we need to know this value in order not to 
+	**	announce stupid things to user.
+	**
+	**	XXX(hch): As of Linux 2.6 it certainly _is_ tunable..
+	**		  In fact we just tuned it, or did I miss
+	**		  something important? :)
+	*/
+	if (lp) {
+		lp->numtags = lp->maxtags = numtags;
+		lp->scdev_depth = depth_to_use;
+	}
+	ncr_setup_tags (np, device);
 
 #ifdef DEBUG_NCR53C8XX
-printk("ncr53c8xx_select_queue_depth: host=%d, id=%d, lun=%d, depth=%d\n",
-	np->unit, device->id, device->lun, device->queue_depth);
+	printk("ncr53c8xx_select_queue_depth: host=%d, id=%d, lun=%d, depth=%d\n",
+	       np->unit, device->id, device->lun, depth_to_use);
 #endif
-	}
+
+	if (spi_support_sync(device->sdev_target) &&
+	    !spi_initial_dv(device->sdev_target))
+		spi_dv_device(device);
+	return 0;
 }
 
-/*
-**   Linux entry point of queuecommand() function
-*/
-
-int ncr53c8xx_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
+static int ncr53c8xx_queue_command (struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
 {
-     ncb_p np = ((struct host_data *) cmd->host->hostdata)->ncb;
+     struct ncb *np = ((struct host_data *) cmd->device->host->hostdata)->ncb;
      unsigned long flags;
      int sts;
 
@@ -8795,12 +7496,10 @@ printk("ncr53c8xx_queue_command\n");
 
      cmd->scsi_done     = done;
      cmd->host_scribble = NULL;
-#ifdef SCSI_NCR_DYNAMIC_DMA_MAPPING
      cmd->__data_mapped = 0;
      cmd->__data_mapping = 0;
-#endif
 
-     NCR_LOCK_NCB(np, flags);
+     spin_lock_irqsave(&np->smp_lock, flags);
 
      if ((sts = ncr_queue_command(np, cmd)) != DID_OK) {
 	  cmd->result = ScsiResult(sts, 0);
@@ -8813,29 +7512,24 @@ printk("ncr53c8xx : command not queued - result=%d\n", sts);
 printk("ncr53c8xx : command successfully queued\n");
 #endif
 
-     NCR_UNLOCK_NCB(np, flags);
+     spin_unlock_irqrestore(&np->smp_lock, flags);
 
      if (sts != DID_OK) {
           unmap_scsi_data(np, cmd);
           done(cmd);
+	  sts = 0;
      }
 
      return sts;
 }
 
-/*
-**   Linux entry point of the interrupt handler.
-**   Since linux versions > 1.3.70, we trust the kernel for 
-**   passing the internal host descriptor as 'dev_id'.
-**   Otherwise, we scan the host list and call the interrupt 
-**   routine for each host that uses this IRQ.
-*/
-
-static void ncr53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs)
+irqreturn_t ncr53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs)
 {
      unsigned long flags;
-     ncb_p np = (ncb_p) dev_id;
-     Scsi_Cmnd *done_list;
+     struct Scsi_Host *shost = (struct Scsi_Host *)dev_id;
+     struct host_data *host_data = (struct host_data *)shost->hostdata;
+     struct ncb *np = host_data->ncb;
+     struct scsi_cmnd *done_list;
 
 #ifdef DEBUG_NCR53C8XX
      printk("ncr53c8xx : interrupt received\n");
@@ -8843,120 +7537,68 @@ static void ncr53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs)
 
      if (DEBUG_FLAGS & DEBUG_TINY) printk ("[");
 
-     NCR_LOCK_NCB(np, flags);
+     spin_lock_irqsave(&np->smp_lock, flags);
      ncr_exception(np);
      done_list     = np->done_list;
-     np->done_list = 0;
-     NCR_UNLOCK_NCB(np, flags);
+     np->done_list = NULL;
+     spin_unlock_irqrestore(&np->smp_lock, flags);
 
      if (DEBUG_FLAGS & DEBUG_TINY) printk ("]\n");
 
-     if (done_list) {
-          NCR_LOCK_SCSI_DONE(np, flags);
-          ncr_flush_done_cmds(done_list);
-          NCR_UNLOCK_SCSI_DONE(np, flags);
-     }
+     if (done_list)
+	     ncr_flush_done_cmds(done_list);
+     return IRQ_HANDLED;
 }
-
-/*
-**   Linux entry point of the timer handler
-*/
 
 static void ncr53c8xx_timeout(unsigned long npref)
 {
-     ncb_p np = (ncb_p) npref;
-     unsigned long flags;
-     Scsi_Cmnd *done_list;
+	struct ncb *np = (struct ncb *) npref;
+	unsigned long flags;
+	struct scsi_cmnd *done_list;
 
-     NCR_LOCK_NCB(np, flags);
-     ncr_timeout((ncb_p) np);
-     done_list     = np->done_list;
-     np->done_list = 0;
-     NCR_UNLOCK_NCB(np, flags);
+	spin_lock_irqsave(&np->smp_lock, flags);
+	ncr_timeout(np);
+	done_list     = np->done_list;
+	np->done_list = NULL;
+	spin_unlock_irqrestore(&np->smp_lock, flags);
 
-     if (done_list) {
-          NCR_LOCK_SCSI_DONE(np, flags);
-          ncr_flush_done_cmds(done_list);
-          NCR_UNLOCK_SCSI_DONE(np, flags);
-     }
+	if (done_list)
+		ncr_flush_done_cmds(done_list);
 }
 
-/*
-**   Linux entry point of reset() function
-*/
-
-#if defined SCSI_RESET_SYNCHRONOUS && defined SCSI_RESET_ASYNCHRONOUS
-int ncr53c8xx_reset(Scsi_Cmnd *cmd, unsigned int reset_flags)
-#else
-int ncr53c8xx_reset(Scsi_Cmnd *cmd)
-#endif
+static int ncr53c8xx_bus_reset(struct scsi_cmnd *cmd)
 {
-	ncb_p np = ((struct host_data *) cmd->host->hostdata)->ncb;
+	struct ncb *np = ((struct host_data *) cmd->device->host->hostdata)->ncb;
 	int sts;
 	unsigned long flags;
-	Scsi_Cmnd *done_list;
+	struct scsi_cmnd *done_list;
 
-#if defined SCSI_RESET_SYNCHRONOUS && defined SCSI_RESET_ASYNCHRONOUS
-	printk("ncr53c8xx_reset: pid=%lu reset_flags=%x serial_number=%ld serial_number_at_timeout=%ld\n",
-		cmd->pid, reset_flags, cmd->serial_number, cmd->serial_number_at_timeout);
-#else
-	printk("ncr53c8xx_reset: command pid %lu\n", cmd->pid);
-#endif
-
-	NCR_LOCK_NCB(np, flags);
-
-	/*
-	 * We have to just ignore reset requests in some situations.
-	 */
-#if defined SCSI_RESET_NOT_RUNNING
-	if (cmd->serial_number != cmd->serial_number_at_timeout) {
-		sts = SCSI_RESET_NOT_RUNNING;
-		goto out;
-	}
-#endif
 	/*
 	 * If the mid-level driver told us reset is synchronous, it seems 
 	 * that we must call the done() callback for the involved command, 
 	 * even if this command was not queued to the low-level driver, 
-	 * before returning SCSI_RESET_SUCCESS.
+	 * before returning SUCCESS.
 	 */
 
-#if defined SCSI_RESET_SYNCHRONOUS && defined SCSI_RESET_ASYNCHRONOUS
-	sts = ncr_reset_bus(np, cmd,
-	(reset_flags & (SCSI_RESET_SYNCHRONOUS | SCSI_RESET_ASYNCHRONOUS)) == SCSI_RESET_SYNCHRONOUS);
-#else
-	sts = ncr_reset_bus(np, cmd, 0);
-#endif
+	spin_lock_irqsave(&np->smp_lock, flags);
+	sts = ncr_reset_bus(np, cmd, 1);
 
-	/*
-	 * Since we always reset the controller, when we return success, 
-	 * we add this information to the return code.
-	 */
-#if defined SCSI_RESET_HOST_RESET
-	if (sts == SCSI_RESET_SUCCESS)
-		sts |= SCSI_RESET_HOST_RESET;
-#endif
-
-out:
 	done_list     = np->done_list;
-	np->done_list = 0;
-	NCR_UNLOCK_NCB(np, flags);
+	np->done_list = NULL;
+	spin_unlock_irqrestore(&np->smp_lock, flags);
 
 	ncr_flush_done_cmds(done_list);
 
 	return sts;
 }
 
-/*
-**   Linux entry point of abort() function
-*/
-
-int ncr53c8xx_abort(Scsi_Cmnd *cmd)
+#if 0 /* unused and broken */
+static int ncr53c8xx_abort(struct scsi_cmnd *cmd)
 {
-	ncb_p np = ((struct host_data *) cmd->host->hostdata)->ncb;
+	struct ncb *np = ((struct host_data *) cmd->device->host->hostdata)->ncb;
 	int sts;
 	unsigned long flags;
-	Scsi_Cmnd *done_list;
+	struct scsi_cmnd *done_list;
 
 #if defined SCSI_RESET_SYNCHRONOUS && defined SCSI_RESET_ASYNCHRONOUS
 	printk("ncr53c8xx_abort: pid=%lu serial_number=%ld serial_number_at_timeout=%ld\n",
@@ -8980,24 +7622,12 @@ int ncr53c8xx_abort(Scsi_Cmnd *cmd)
 	sts = ncr_abort_command(np, cmd);
 out:
 	done_list     = np->done_list;
-	np->done_list = 0;
+	np->done_list = NULL;
 	NCR_UNLOCK_NCB(np, flags);
 
 	ncr_flush_done_cmds(done_list);
 
 	return sts;
-}
-
-
-#ifdef MODULE
-int ncr53c8xx_release(struct Scsi_Host *host)
-{
-#ifdef DEBUG_NCR53C8XX
-printk("ncr53c8xx : release\n");
-#endif
-     ncr_detach(((struct host_data *) host->hostdata)->ncb);
-
-     return 1;
 }
 #endif
 
@@ -9017,55 +7647,55 @@ printk("ncr53c8xx : release\n");
 
 #define next_wcmd host_scribble
 
-static void insert_into_waiting_list(ncb_p np, Scsi_Cmnd *cmd)
+static void insert_into_waiting_list(struct ncb *np, struct scsi_cmnd *cmd)
 {
-	Scsi_Cmnd *wcmd;
+	struct scsi_cmnd *wcmd;
 
 #ifdef DEBUG_WAITING_LIST
 	printk("%s: cmd %lx inserted into waiting list\n", ncr_name(np), (u_long) cmd);
 #endif
-	cmd->next_wcmd = 0;
+	cmd->next_wcmd = NULL;
 	if (!(wcmd = np->waiting_list)) np->waiting_list = cmd;
 	else {
 		while ((wcmd->next_wcmd) != 0)
-			wcmd = (Scsi_Cmnd *) wcmd->next_wcmd;
+			wcmd = (struct scsi_cmnd *) wcmd->next_wcmd;
 		wcmd->next_wcmd = (char *) cmd;
 	}
 }
 
-static Scsi_Cmnd *retrieve_from_waiting_list(int to_remove, ncb_p np, Scsi_Cmnd *cmd)
+static struct scsi_cmnd *retrieve_from_waiting_list(int to_remove, struct ncb *np, struct scsi_cmnd *cmd)
 {
-	Scsi_Cmnd **pcmd = &np->waiting_list;
+	struct scsi_cmnd **pcmd = &np->waiting_list;
 
 	while (*pcmd) {
 		if (cmd == *pcmd) {
 			if (to_remove) {
-				*pcmd = (Scsi_Cmnd *) cmd->next_wcmd;
-				cmd->next_wcmd = 0;
+				*pcmd = (struct scsi_cmnd *) cmd->next_wcmd;
+				cmd->next_wcmd = NULL;
 			}
 #ifdef DEBUG_WAITING_LIST
 	printk("%s: cmd %lx retrieved from waiting list\n", ncr_name(np), (u_long) cmd);
 #endif
 			return cmd;
 		}
-		pcmd = (Scsi_Cmnd **) &(*pcmd)->next_wcmd;
+		pcmd = (struct scsi_cmnd **) &(*pcmd)->next_wcmd;
 	}
-	return 0;
+	return NULL;
 }
 
-static void process_waiting_list(ncb_p np, int sts)
+static void process_waiting_list(struct ncb *np, int sts)
 {
-	Scsi_Cmnd *waiting_list, *wcmd;
+	struct scsi_cmnd *waiting_list, *wcmd;
 
 	waiting_list = np->waiting_list;
-	np->waiting_list = 0;
+	np->waiting_list = NULL;
 
 #ifdef DEBUG_WAITING_LIST
 	if (waiting_list) printk("%s: waiting_list=%lx processing sts=%d\n", ncr_name(np), (u_long) waiting_list, sts);
 #endif
 	while ((wcmd = waiting_list) != 0) {
-		waiting_list = (Scsi_Cmnd *) wcmd->next_wcmd;
-		wcmd->next_wcmd = 0;
+		waiting_list = (struct scsi_cmnd *) wcmd->next_wcmd;
+		wcmd->next_wcmd = NULL;
 		if (sts == DID_OK) {
 #ifdef DEBUG_WAITING_LIST
 	printk("%s: cmd %lx trying to requeue\n", ncr_name(np), (u_long) wcmd);
@@ -9084,344 +7714,23 @@ static void process_waiting_list(ncb_p np, int sts)
 
 #undef next_wcmd
 
-#ifdef SCSI_NCR_PROC_INFO_SUPPORT
-
-/*=========================================================================
-**	Proc file system stuff
-**
-**	A read operation returns profile information.
-**	A write operation is a control command.
-**	The string is parsed in the driver code and the command is passed 
-**	to the ncr_usercmd() function.
-**=========================================================================
-*/
-
-#ifdef SCSI_NCR_USER_COMMAND_SUPPORT
-
-#define is_digit(c)	((c) >= '0' && (c) <= '9')
-#define digit_to_bin(c)	((c) - '0')
-#define is_space(c)	((c) == ' ' || (c) == '\t')
-
-static int skip_spaces(char *ptr, int len)
+static ssize_t show_ncr53c8xx_revision(struct class_device *dev, char *buf)
 {
-	int cnt, c;
-
-	for (cnt = len; cnt > 0 && (c = *ptr++) && is_space(c); cnt--);
-
-	return (len - cnt);
+	struct Scsi_Host *host = class_to_shost(dev);
+	struct host_data *host_data = (struct host_data *)host->hostdata;
+  
+	return snprintf(buf, 20, "0x%x\n", host_data->ncb->revision_id);
 }
-
-static int get_int_arg(char *ptr, int len, u_long *pv)
-{
-	int	cnt, c;
-	u_long	v;
-
-	for (v = 0, cnt = len; cnt > 0 && (c = *ptr++) && is_digit(c); cnt--) {
-		v = (v * 10) + digit_to_bin(c);
-	}
-
-	if (pv)
-		*pv = v;
-
-	return (len - cnt);
-}
-
-static int is_keyword(char *ptr, int len, char *verb)
-{
-	int verb_len = strlen(verb);
-
-	if (len >= strlen(verb) && !memcmp(verb, ptr, verb_len))
-		return verb_len;
-	else
-		return 0;
-
-}
-
-#define SKIP_SPACES(min_spaces)						\
-	if ((arg_len = skip_spaces(ptr, len)) < (min_spaces))		\
-		return -EINVAL;						\
-	ptr += arg_len; len -= arg_len;
-
-#define GET_INT_ARG(v)							\
-	if (!(arg_len = get_int_arg(ptr, len, &(v))))			\
-		return -EINVAL;						\
-	ptr += arg_len; len -= arg_len;
-
-
-/*
-**	Parse a control command
-*/
-
-static int ncr_user_command(ncb_p np, char *buffer, int length)
-{
-	char *ptr	= buffer;
-	int len		= length;
-	struct usrcmd	 *uc = &np->user;
-	int		arg_len;
-	u_long 		target;
-
-	bzero(uc, sizeof(*uc));
-
-	if (len > 0 && ptr[len-1] == '\n')
-		--len;
-
-	if	((arg_len = is_keyword(ptr, len, "setsync")) != 0)
-		uc->cmd = UC_SETSYNC;
-	else if	((arg_len = is_keyword(ptr, len, "settags")) != 0)
-		uc->cmd = UC_SETTAGS;
-	else if	((arg_len = is_keyword(ptr, len, "setorder")) != 0)
-		uc->cmd = UC_SETORDER;
-	else if	((arg_len = is_keyword(ptr, len, "setverbose")) != 0)
-		uc->cmd = UC_SETVERBOSE;
-	else if	((arg_len = is_keyword(ptr, len, "setwide")) != 0)
-		uc->cmd = UC_SETWIDE;
-	else if	((arg_len = is_keyword(ptr, len, "setdebug")) != 0)
-		uc->cmd = UC_SETDEBUG;
-	else if	((arg_len = is_keyword(ptr, len, "setflag")) != 0)
-		uc->cmd = UC_SETFLAG;
-	else if	((arg_len = is_keyword(ptr, len, "clearprof")) != 0)
-		uc->cmd = UC_CLEARPROF;
-	else
-		arg_len = 0;
-
-#ifdef DEBUG_PROC_INFO
-printk("ncr_user_command: arg_len=%d, cmd=%ld\n", arg_len, uc->cmd);
-#endif
-
-	if (!arg_len)
-		return -EINVAL;
-	ptr += arg_len; len -= arg_len;
-
-	switch(uc->cmd) {
-	case UC_SETSYNC:
-	case UC_SETTAGS:
-	case UC_SETWIDE:
-	case UC_SETFLAG:
-		SKIP_SPACES(1);
-		if ((arg_len = is_keyword(ptr, len, "all")) != 0) {
-			ptr += arg_len; len -= arg_len;
-			uc->target = ~0;
-		} else {
-			GET_INT_ARG(target);
-			uc->target = (1<<target);
-#ifdef DEBUG_PROC_INFO
-printk("ncr_user_command: target=%ld\n", target);
-#endif
-		}
-		break;
-	}
-
-	switch(uc->cmd) {
-	case UC_SETVERBOSE:
-	case UC_SETSYNC:
-	case UC_SETTAGS:
-	case UC_SETWIDE:
-		SKIP_SPACES(1);
-		GET_INT_ARG(uc->data);
-#ifdef DEBUG_PROC_INFO
-printk("ncr_user_command: data=%ld\n", uc->data);
-#endif
-		break;
-	case UC_SETORDER:
-		SKIP_SPACES(1);
-		if	((arg_len = is_keyword(ptr, len, "simple")))
-			uc->data = M_SIMPLE_TAG;
-		else if	((arg_len = is_keyword(ptr, len, "ordered")))
-			uc->data = M_ORDERED_TAG;
-		else if	((arg_len = is_keyword(ptr, len, "default")))
-			uc->data = 0;
-		else
-			return -EINVAL;
-		break;
-	case UC_SETDEBUG:
-		while (len > 0) {
-			SKIP_SPACES(1);
-			if	((arg_len = is_keyword(ptr, len, "alloc")))
-				uc->data |= DEBUG_ALLOC;
-			else if	((arg_len = is_keyword(ptr, len, "phase")))
-				uc->data |= DEBUG_PHASE;
-			else if	((arg_len = is_keyword(ptr, len, "queue")))
-				uc->data |= DEBUG_QUEUE;
-			else if	((arg_len = is_keyword(ptr, len, "result")))
-				uc->data |= DEBUG_RESULT;
-			else if	((arg_len = is_keyword(ptr, len, "scatter")))
-				uc->data |= DEBUG_SCATTER;
-			else if	((arg_len = is_keyword(ptr, len, "script")))
-				uc->data |= DEBUG_SCRIPT;
-			else if	((arg_len = is_keyword(ptr, len, "tiny")))
-				uc->data |= DEBUG_TINY;
-			else if	((arg_len = is_keyword(ptr, len, "timing")))
-				uc->data |= DEBUG_TIMING;
-			else if	((arg_len = is_keyword(ptr, len, "nego")))
-				uc->data |= DEBUG_NEGO;
-			else if	((arg_len = is_keyword(ptr, len, "tags")))
-				uc->data |= DEBUG_TAGS;
-			else
-				return -EINVAL;
-			ptr += arg_len; len -= arg_len;
-		}
-#ifdef DEBUG_PROC_INFO
-printk("ncr_user_command: data=%ld\n", uc->data);
-#endif
-		break;
-	case UC_SETFLAG:
-		while (len > 0) {
-			SKIP_SPACES(1);
-			if	((arg_len = is_keyword(ptr, len, "trace")))
-				uc->data |= UF_TRACE;
-			else if	((arg_len = is_keyword(ptr, len, "no_disc")))
-				uc->data |= UF_NODISC;
-			else
-				return -EINVAL;
-			ptr += arg_len; len -= arg_len;
-		}
-		break;
-	default:
-		break;
-	}
-
-	if (len)
-		return -EINVAL;
-	else {
-		long flags;
-
-		NCR_LOCK_NCB(np, flags);
-		ncr_usercmd (np);
-		NCR_UNLOCK_NCB(np, flags);
-	}
-	return length;
-}
-
-#endif	/* SCSI_NCR_USER_COMMAND_SUPPORT */
-
-
-#ifdef SCSI_NCR_USER_INFO_SUPPORT
-/*
-**	Copy formatted profile information into the input buffer.
-*/
-
-#define to_ms(t) ((t) * 1000 / HZ)
-
-static int ncr_host_info(ncb_p np, char *ptr, off_t offset, int len)
-{
-	struct info_str info;
-
-	info.buffer	= ptr;
-	info.length	= len;
-	info.offset	= offset;
-	info.pos	= 0;
-
-	copy_info(&info, "  Chip NCR53C%s, device id 0x%x, "
-			 "revision id 0x%x\n",
-			 np->chip_name, np->device_id,	np->revision_id);
-	copy_info(&info, "  On PCI bus %d, device %d, function %d, "
-#ifdef __sparc__
-		"IRQ %s\n",
-#else
-		"IRQ %d\n",
-#endif
-		np->bus, (np->device_fn & 0xf8) >> 3, np->device_fn & 7,
-#ifdef __sparc__
-		__irq_itoa(np->irq));
-#else
-		(int) np->irq);
-#endif
-	copy_info(&info, "  Synchronous period factor %d, "
-			 "max commands per lun %d\n",
-			 (int) np->minsync, MAX_TAGS);
-
-	if (driver_setup.debug || driver_setup.verbose > 1) {
-		copy_info(&info, "  Debug flags 0x%x, verbosity level %d\n",
-			  driver_setup.debug, driver_setup.verbose);
-	}
-
-#ifdef SCSI_NCR_PROFILE_SUPPORT
-	copy_info(&info, "Profiling information:\n");
-	copy_info(&info, "  %-12s = %lu\n", "num_trans",np->profile.num_trans);
-	copy_info(&info, "  %-12s = %lu\n", "num_kbytes",np->profile.num_kbytes);
-	copy_info(&info, "  %-12s = %lu\n", "num_disc",	np->profile.num_disc);
-	copy_info(&info, "  %-12s = %lu\n", "num_break",np->profile.num_break);
-	copy_info(&info, "  %-12s = %lu\n", "num_int",	np->profile.num_int);
-	copy_info(&info, "  %-12s = %lu\n", "num_fly",	np->profile.num_fly);
-	copy_info(&info, "  %-12s = %lu\n", "ms_setup",	to_ms(np->profile.ms_setup));
-	copy_info(&info, "  %-12s = %lu\n", "ms_data",	to_ms(np->profile.ms_data));
-	copy_info(&info, "  %-12s = %lu\n", "ms_disc",	to_ms(np->profile.ms_disc));
-	copy_info(&info, "  %-12s = %lu\n", "ms_post",	to_ms(np->profile.ms_post));
-#endif
-	
-	return info.pos > info.offset? info.pos - info.offset : 0;
-}
-
-#endif /* SCSI_NCR_USER_INFO_SUPPORT */
-
-/*
-**	Entry point of the scsi proc fs of the driver.
-**	- func = 0 means read  (returns profile data)
-**	- func = 1 means write (parse user control command)
-*/
-
-static int ncr53c8xx_proc_info(char *buffer, char **start, off_t offset,
-			int length, int hostno, int func)
-{
-	struct Scsi_Host *host;
-	struct host_data *host_data;
-	ncb_p ncb = 0;
-	int retv;
-
-#ifdef DEBUG_PROC_INFO
-printk("ncr53c8xx_proc_info: hostno=%d, func=%d\n", hostno, func);
-#endif
-
-	for (host = first_host; host; host = host->next) {
-		if (host->hostt == the_template && host->host_no == hostno) {
-			host_data = (struct host_data *) host->hostdata;
-			ncb = host_data->ncb;
-			break;
-		}
-	}
-
-	if (!ncb)
-		return -EINVAL;
-
-	if (func) {
-#ifdef	SCSI_NCR_USER_COMMAND_SUPPORT
-		retv = ncr_user_command(ncb, buffer, length);
-#else
-		retv = -EINVAL;
-#endif
-	}
-	else {
-		if (start)
-			*start = buffer;
-#ifdef SCSI_NCR_USER_INFO_SUPPORT
-		retv = ncr_host_info(ncb, buffer, offset, length);
-#else
-		retv = -EINVAL;
-#endif
-	}
-
-	return retv;
-}
-
-/*=========================================================================
-**	End of proc file system stuff
-**=========================================================================
-*/
-#endif
-
-
-/*==========================================================
-**
-**	/proc directory entry.
-**
-**==========================================================
-*/
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,3,27)
-static struct proc_dir_entry proc_scsi_ncr53c8xx = {
-    PROC_SCSI_NCR53C8XX, 9, NAME53C8XX,
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
+  
+static struct class_device_attribute ncr53c8xx_revision_attr = {
+	.attr	= { .name = "revision", .mode = S_IRUGO, },
+	.show	= show_ncr53c8xx_revision,
 };
-#endif
+  
+static struct class_device_attribute *ncr53c8xx_host_attrs[] = {
+	&ncr53c8xx_revision_attr,
+	NULL
+};
 
 /*==========================================================
 **
@@ -9430,88 +7739,342 @@ static struct proc_dir_entry proc_scsi_ncr53c8xx = {
 **==========================================================
 */
 #ifdef	MODULE
-char *ncr53c8xx = 0;	/* command line passed by insmod */
-# if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,30)
-MODULE_PARM(ncr53c8xx, "s");
-# endif
+char *ncr53c8xx;	/* command line passed by insmod */
+module_param(ncr53c8xx, charp, 0);
 #endif
 
-int __init ncr53c8xx_setup(char *str)
+static int __init ncr53c8xx_setup(char *str)
 {
 	return sym53c8xx__setup(str);
 }
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,13)
 #ifndef MODULE
 __setup("ncr53c8xx=", ncr53c8xx_setup);
 #endif
-#endif
 
-/*===================================================================
-**
-**   SYM53C8XX supported device list
-**
-**===================================================================
-*/
-
-static u_short	ncr_chip_ids[]   __initdata = {
-	PCI_DEVICE_ID_NCR_53C810,
-	PCI_DEVICE_ID_NCR_53C815,
-	PCI_DEVICE_ID_NCR_53C820,
-	PCI_DEVICE_ID_NCR_53C825,
-	PCI_DEVICE_ID_NCR_53C860,
-	PCI_DEVICE_ID_NCR_53C875,
-	PCI_DEVICE_ID_NCR_53C875J,
-	PCI_DEVICE_ID_NCR_53C885,
-	PCI_DEVICE_ID_NCR_53C895,
-	PCI_DEVICE_ID_NCR_53C896,
-	PCI_DEVICE_ID_NCR_53C895A,
-	PCI_DEVICE_ID_NCR_53C1510D
-};
-
-/*==========================================================
-**
-**	Chip detection entry point.
-**
-**==========================================================
-*/
-int __init ncr53c8xx_detect(Scsi_Host_Template *tpnt)
-{
-	/*
-	**    Initialize driver general stuff.
-	*/
-#ifdef SCSI_NCR_PROC_INFO_SUPPORT
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,3,27)
-     tpnt->proc_dir  = &proc_scsi_ncr53c8xx;
-#else
-     tpnt->proc_name = NAME53C8XX;
-#endif
-     tpnt->proc_info = ncr53c8xx_proc_info;
-#endif
-
-#if	defined(SCSI_NCR_BOOT_COMMAND_LINE_SUPPORT) && defined(MODULE)
-if (ncr53c8xx)
-	ncr53c8xx_setup(ncr53c8xx);
-#endif
-
-	return sym53c8xx__detect(tpnt, ncr_chip_ids,
-				 sizeof(ncr_chip_ids)/sizeof(ncr_chip_ids[0]));
-}
-
-/*==========================================================
-**
-**   Entry point for info() function
-**
-**==========================================================
-*/
-const char *ncr53c8xx_info (struct Scsi_Host *host)
-{
-	return SCSI_NCR_DRIVER_NAME;
-}
 
 /*
-**	Module stuff
-*/
+ *	Host attach and initialisations.
+ *
+ *	Allocate host data and ncb structure.
+ *	Request IO region and remap MMIO region.
+ *	Do chip initialization.
+ *	If all is OK, install interrupt handling and
+ *	start the timer daemon.
+ */
+struct Scsi_Host * __init ncr_attach(struct scsi_host_template *tpnt,
+					int unit, struct ncr_device *device)
+{
+	struct host_data *host_data;
+	struct ncb *np = NULL;
+	struct Scsi_Host *instance = NULL;
+	u_long flags = 0;
+	int i;
 
-static Scsi_Host_Template driver_template = NCR53C8XX;
-#include "scsi_module.c"
+	if (!tpnt->name)
+		tpnt->name	= SCSI_NCR_DRIVER_NAME;
+	if (!tpnt->shost_attrs)
+		tpnt->shost_attrs = ncr53c8xx_host_attrs;
+
+	tpnt->queuecommand	= ncr53c8xx_queue_command;
+	tpnt->slave_configure	= ncr53c8xx_slave_configure;
+	tpnt->eh_bus_reset_handler = ncr53c8xx_bus_reset;
+	tpnt->can_queue		= SCSI_NCR_CAN_QUEUE;
+	tpnt->this_id		= 7;
+	tpnt->sg_tablesize	= SCSI_NCR_SG_TABLESIZE;
+	tpnt->cmd_per_lun	= SCSI_NCR_CMD_PER_LUN;
+	tpnt->use_clustering	= ENABLE_CLUSTERING;
+
+	if (device->differential)
+		driver_setup.diff_support = device->differential;
+
+	printk(KERN_INFO "ncr53c720-%d: rev 0x%x irq %d\n",
+		unit, device->chip.revision_id, device->slot.irq);
+
+	instance = scsi_host_alloc(tpnt, sizeof(*host_data));
+	if (!instance)
+	        goto attach_error;
+	host_data = (struct host_data *) instance->hostdata;
+
+	np = __m_calloc_dma(device->dev, sizeof(struct ncb), "NCB");
+	if (!np)
+		goto attach_error;
+	spin_lock_init(&np->smp_lock);
+	np->dev = device->dev;
+	np->p_ncb = vtobus(np);
+	host_data->ncb = np;
+
+	np->ccb = m_calloc_dma(sizeof(struct ccb), "CCB");
+	if (!np->ccb)
+		goto attach_error;
+
+	/* Store input information in the host data structure.  */
+	np->unit	= unit;
+	np->verbose	= driver_setup.verbose;
+	sprintf(np->inst_name, "ncr53c720-%d", np->unit);
+	np->revision_id	= device->chip.revision_id;
+	np->features	= device->chip.features;
+	np->clock_divn	= device->chip.nr_divisor;
+	np->maxoffs	= device->chip.offset_max;
+	np->maxburst	= device->chip.burst_max;
+	np->myaddr	= device->host_id;
+
+	/* Allocate SCRIPTS areas.  */
+	np->script0 = m_calloc_dma(sizeof(struct script), "SCRIPT");
+	if (!np->script0)
+		goto attach_error;
+	np->scripth0 = m_calloc_dma(sizeof(struct scripth), "SCRIPTH");
+	if (!np->scripth0)
+		goto attach_error;
+
+	init_timer(&np->timer);
+	np->timer.data     = (unsigned long) np;
+	np->timer.function = ncr53c8xx_timeout;
+
+	/* Try to map the controller chip to virtual and physical memory. */
+
+	np->paddr	= device->slot.base;
+	np->paddr2	= (np->features & FE_RAM) ? device->slot.base_2 : 0;
+
+	if (device->slot.base_v)
+		np->vaddr = device->slot.base_v;
+	else
+		np->vaddr = ioremap(device->slot.base_c, 128);
+
+	if (!np->vaddr) {
+		printk(KERN_ERR
+			"%s: can't map memory mapped IO region\n",ncr_name(np));
+		goto attach_error;
+	} else {
+		if (bootverbose > 1)
+			printk(KERN_INFO
+				"%s: using memory mapped IO at virtual address 0x%lx\n", ncr_name(np), (u_long) np->vaddr);
+	}
+
+	/* Make the controller's registers available.  Now the INB INW INL
+	 * OUTB OUTW OUTL macros can be used safely.
+	 */
+
+	np->reg = (struct ncr_reg __iomem *)np->vaddr;
+
+	/* Do chip dependent initialization.  */
+	ncr_prepare_setting(np);
+
+	if (np->paddr2 && sizeof(struct script) > 4096) {
+		np->paddr2 = 0;
+		printk(KERN_WARNING "%s: script too large, NOT using on chip RAM.\n",
+			ncr_name(np));
+	}
+
+	instance->max_channel	= 0;
+	instance->this_id       = np->myaddr;
+	instance->max_id	= np->maxwide ? 16 : 8;
+	instance->max_lun	= SCSI_NCR_MAX_LUN;
+	instance->base		= (unsigned long) np->reg;
+	instance->irq		= device->slot.irq;
+	instance->unique_id	= device->slot.base;
+	instance->dma_channel	= 0;
+	instance->cmd_per_lun	= MAX_TAGS;
+	instance->can_queue	= (MAX_START-4);
+	/* This can happen if you forget to call ncr53c8xx_init from
+	 * your module_init */
+	BUG_ON(!ncr53c8xx_transport_template);
+	instance->transportt	= ncr53c8xx_transport_template;
+	scsi_set_device(instance, device->dev);
+
+	/* Patch script to physical addresses */
+	ncr_script_fill(&script0, &scripth0);
+
+	np->scripth	= np->scripth0;
+	np->p_scripth	= vtobus(np->scripth);
+	np->p_script	= (np->paddr2) ?  np->paddr2 : vtobus(np->script0);
+
+	ncr_script_copy_and_bind(np, (ncrcmd *) &script0,
+			(ncrcmd *) np->script0, sizeof(struct script));
+	ncr_script_copy_and_bind(np, (ncrcmd *) &scripth0,
+			(ncrcmd *) np->scripth0, sizeof(struct scripth));
+	np->ccb->p_ccb	= vtobus (np->ccb);
+
+	/* Patch the script for LED support.  */
+
+	if (np->features & FE_LED0) {
+		np->script0->idle[0]  =
+				cpu_to_scr(SCR_REG_REG(gpreg, SCR_OR,  0x01));
+		np->script0->reselected[0] =
+				cpu_to_scr(SCR_REG_REG(gpreg, SCR_AND, 0xfe));
+		np->script0->start[0] =
+				cpu_to_scr(SCR_REG_REG(gpreg, SCR_AND, 0xfe));
+	}
+
+	/*
+	 * Look for the target control block of this nexus.
+	 * For i = 0 to 3
+	 *   JUMP ^ IFTRUE (MASK (i, 3)), @(next_lcb)
+	 */
+	for (i = 0 ; i < 4 ; i++) {
+		np->jump_tcb[i].l_cmd   =
+				cpu_to_scr((SCR_JUMP ^ IFTRUE (MASK (i, 3))));
+		np->jump_tcb[i].l_paddr =
+				cpu_to_scr(NCB_SCRIPTH_PHYS (np, bad_target));
+	}
+
+	ncr_chip_reset(np, 100);
+
+	/* Now check the cache handling of the chipset.  */
+
+	if (ncr_snooptest(np)) {
+		printk(KERN_ERR "CACHE INCORRECTLY CONFIGURED.\n");
+		goto attach_error;
+	};
+
+	/* Install the interrupt handler.  */
+	np->irq = device->slot.irq;
+
+	/* Initialize the fixed part of the default ccb.  */
+	ncr_init_ccb(np, np->ccb);
+
+	/*
+	 * After SCSI devices have been opened, we cannot reset the bus
+	 * safely, so we do it here.  Interrupt handler does the real work.
+	 * Process the reset exception if interrupts are not enabled yet.
+	 * Then enable disconnects.
+	 */
+	spin_lock_irqsave(&np->smp_lock, flags);
+	if (ncr_reset_scsi_bus(np, 0, driver_setup.settle_delay) != 0) {
+		printk(KERN_ERR "%s: FATAL ERROR: CHECK SCSI BUS - CABLES, TERMINATION, DEVICE POWER etc.!\n", ncr_name(np));
+
+		spin_unlock_irqrestore(&np->smp_lock, flags);
+		goto attach_error;
+	}
+	ncr_exception(np);
+
+	np->disc = 1;
+
+	/*
+	 * The middle-level SCSI driver does not wait for devices to settle.
+	 * Wait synchronously if more than 2 seconds.
+	 */
+	if (driver_setup.settle_delay > 2) {
+		printk(KERN_INFO "%s: waiting %d seconds for scsi devices to settle...\n",
+			ncr_name(np), driver_setup.settle_delay);
+		mdelay(1000 * driver_setup.settle_delay);
+	}
+
+	/* start the timeout daemon */
+	np->lasttime=0;
+	ncr_timeout (np);
+
+	/* use SIMPLE TAG messages by default */
+#ifdef SCSI_NCR_ALWAYS_SIMPLE_TAG
+	np->order = M_SIMPLE_TAG;
+#endif
+
+	spin_unlock_irqrestore(&np->smp_lock, flags);
+
+	return instance;
+
+ attach_error:
+	if (!instance)
+		return NULL;
+	printk(KERN_INFO "%s: detaching...\n", ncr_name(np));
+	if (!np)
+		goto unregister;
+	if (np->scripth0)
+		m_free_dma(np->scripth0, sizeof(struct scripth), "SCRIPTH");
+	if (np->script0)
+		m_free_dma(np->script0, sizeof(struct script), "SCRIPT");
+	if (np->ccb)
+		m_free_dma(np->ccb, sizeof(struct ccb), "CCB");
+	m_free_dma(np, sizeof(struct ncb), "NCB");
+	host_data->ncb = NULL;
+
+ unregister:
+	scsi_host_put(instance);
+
+	return NULL;
+}
+
+
+int ncr53c8xx_release(struct Scsi_Host *host)
+{
+	struct host_data *host_data;
+#ifdef DEBUG_NCR53C8XX
+	printk("ncr53c8xx: release\n");
+#endif
+	if (!host)
+		return 1;
+	host_data = (struct host_data *)host->hostdata;
+	if (host_data && host_data->ncb)
+		ncr_detach(host_data->ncb);
+	return 1;
+}
+
+static void ncr53c8xx_set_period(struct scsi_target *starget, int period)
+{
+	struct Scsi_Host *shost = dev_to_shost(starget->dev.parent);
+	struct ncb *np = ((struct host_data *)shost->hostdata)->ncb;
+	struct tcb *tp = &np->target[starget->id];
+
+	if (period > np->maxsync)
+		period = np->maxsync;
+	else if (period < np->minsync)
+		period = np->minsync;
+
+	tp->usrsync = period;
+
+	ncr_negotiate(np, tp);
+}
+
+static void ncr53c8xx_set_offset(struct scsi_target *starget, int offset)
+{
+	struct Scsi_Host *shost = dev_to_shost(starget->dev.parent);
+	struct ncb *np = ((struct host_data *)shost->hostdata)->ncb;
+	struct tcb *tp = &np->target[starget->id];
+
+	if (offset > np->maxoffs)
+		offset = np->maxoffs;
+	else if (offset < 0)
+		offset = 0;
+
+	tp->maxoffs = offset;
+
+	ncr_negotiate(np, tp);
+}
+
+static void ncr53c8xx_set_width(struct scsi_target *starget, int width)
+{
+	struct Scsi_Host *shost = dev_to_shost(starget->dev.parent);
+	struct ncb *np = ((struct host_data *)shost->hostdata)->ncb;
+	struct tcb *tp = &np->target[starget->id];
+
+	if (width > np->maxwide)
+		width = np->maxwide;
+	else if (width < 0)
+		width = 0;
+
+	tp->usrwide = width;
+
+	ncr_negotiate(np, tp);
+}
+
+static struct spi_function_template ncr53c8xx_transport_functions =  {
+	.set_period	= ncr53c8xx_set_period,
+	.show_period	= 1,
+	.set_offset	= ncr53c8xx_set_offset,
+	.show_offset	= 1,
+	.set_width	= ncr53c8xx_set_width,
+	.show_width	= 1,
+};
+
+int __init ncr53c8xx_init(void)
+{
+	ncr53c8xx_transport_template = spi_attach_transport(&ncr53c8xx_transport_functions);
+	if (!ncr53c8xx_transport_template)
+		return -ENODEV;
+	return 0;
+}
+
+void ncr53c8xx_exit(void)
+{
+	spi_release_transport(ncr53c8xx_transport_template);
+}

@@ -9,61 +9,72 @@
 extern const struct exception_table_entry __start___ex_table[];
 extern const struct exception_table_entry __stop___ex_table[];
 
-static unsigned long
-search_one_table(const struct exception_table_entry *start,
-		 const struct exception_table_entry *last,
-		 unsigned long value, unsigned long *g2)
+void sort_extable(struct exception_table_entry *start,
+		  struct exception_table_entry *finish)
 {
-	const struct exception_table_entry *first = start;
-	const struct exception_table_entry *mid;
-	long diff = 0;
-        while (first <= last) {
-		mid = (last - first) / 2 + first;
-		diff = mid->insn - value;
-                if (diff == 0) {
-                	if (!mid->fixup) {
-                		*g2 = 0;
-                		return (mid + 1)->fixup;
-                	} else
-	                        return mid->fixup;
-                } else if (diff < 0)
-                        first = mid+1;
-                else
-                        last = mid-1;
-        }
-        if (last->insn < value && !last->fixup && last[1].insn > value) {
-        	*g2 = (value - last->insn)/4;
-        	return last[1].fixup;
-        }
-        if (first > start && first[-1].insn < value
-	    && !first[-1].fixup && first->insn < value) {
-        	*g2 = (value - first[-1].insn)/4;
-        	return first->fixup;
-        }
-        return 0;
 }
 
-unsigned long
-search_exception_table(unsigned long addr, unsigned long *g2)
+/* Caller knows they are in a range if ret->fixup == 0 */
+const struct exception_table_entry *
+search_extable(const struct exception_table_entry *start,
+	       const struct exception_table_entry *last,
+	       unsigned long value)
 {
-	unsigned long ret;
+	const struct exception_table_entry *walk;
 
-#ifndef CONFIG_MODULES
-	/* There is only the kernel to search.  */
-	ret = search_one_table(__start___ex_table,
-			       __stop___ex_table-1, addr, g2);
-	if (ret) return ret;
-#else
-	/* The kernel is the last "module" -- no need to treat it special.  */
-	struct module *mp;
-	for (mp = module_list; mp != NULL; mp = mp->next) {
-		if (mp->ex_table_start == NULL)
+	/* Single insn entries are encoded as:
+	 *	word 1:	insn address
+	 *	word 2:	fixup code address
+	 *
+	 * Range entries are encoded as:
+	 *	word 1: first insn address
+	 *	word 2: 0
+	 *	word 3: last insn address + 4 bytes
+	 *	word 4: fixup code address
+	 *
+	 * See asm/uaccess.h for more details.
+	 */
+
+	/* 1. Try to find an exact match. */
+	for (walk = start; walk <= last; walk++) {
+		if (walk->fixup == 0) {
+			/* A range entry, skip both parts. */
+			walk++;
 			continue;
-		ret = search_one_table(mp->ex_table_start,
-				       mp->ex_table_end-1, addr, g2);
-		if (ret) return ret;
-	}
-#endif
+		}
 
-	return 0;
+		if (walk->insn == value)
+			return walk;
+	}
+
+	/* 2. Try to find a range match. */
+	for (walk = start; walk <= (last - 1); walk++) {
+		if (walk->fixup)
+			continue;
+
+		if (walk[0].insn <= value && walk[1].insn > value)
+			return walk;
+
+		walk++;
+	}
+
+        return NULL;
+}
+
+/* Special extable search, which handles ranges.  Returns fixup */
+unsigned long search_extables_range(unsigned long addr, unsigned long *g2)
+{
+	const struct exception_table_entry *entry;
+
+	entry = search_exception_tables(addr);
+	if (!entry)
+		return 0;
+
+	/* Inside range?  Fix g2 and return correct fixup */
+	if (!entry->fixup) {
+		*g2 = (addr - entry->insn) / 4;
+		return (entry + 1)->fixup;
+	}
+
+	return entry->fixup;
 }

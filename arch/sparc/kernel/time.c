@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.57 2000/09/16 07:33:45 davem Exp $
+/* $Id: time.c,v 1.60 2002/01/23 14:33:55 davem Exp $
  * linux/arch/sparc/kernel/time.c
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -17,16 +17,19 @@
  */
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/time.h>
 #include <linux/timex.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
+#include <linux/profile.h>
 
 #include <asm/oplib.h>
 #include <asm/segment.h>
@@ -41,13 +44,19 @@
 #include <asm/page.h>
 #include <asm/pcic.h>
 
-extern rwlock_t xtime_lock;
+extern unsigned long wall_jiffies;
 
+u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
+
+DEFINE_SPINLOCK(rtc_lock);
 enum sparc_clock_type sp_clock_typ;
-unsigned long mstk48t02_regs = 0UL;
-static struct mostek48t08 *mstk48t08_regs = 0;
+DEFINE_SPINLOCK(mostek_lock);
+void __iomem *mstk48t02_regs = NULL;
+static struct mostek48t08 *mstk48t08_regs = NULL;
 static int set_rtc_mmss(unsigned long);
-static void sbus_do_settimeofday(struct timeval *tv);
+static int sbus_do_settimeofday(struct timespec *tv);
 
 #ifdef CONFIG_SUN4
 struct intersil *intersil_clock;
@@ -70,38 +79,26 @@ struct intersil *intersil_clock;
 
 #endif
 
-static spinlock_t ticker_lock = SPIN_LOCK_UNLOCKED;
-
-/* 32-bit Sparc specific profiling function. */
-void sparc_do_profile(unsigned long pc, unsigned long o7)
+unsigned long profile_pc(struct pt_regs *regs)
 {
-	if(prof_buffer && current->pid) {
-		extern int _stext;
-		extern int __copy_user_begin, __copy_user_end;
-		extern int __atomic_begin, __atomic_end;
-		extern int __bzero_begin, __bzero_end;
-		extern int __bitops_begin, __bitops_end;
+	extern char __copy_user_begin[], __copy_user_end[];
+	extern char __atomic_begin[], __atomic_end[];
+	extern char __bzero_begin[], __bzero_end[];
+	extern char __bitops_begin[], __bitops_end[];
 
-		if ((pc >= (unsigned long) &__copy_user_begin &&
-		     pc < (unsigned long) &__copy_user_end) ||
-		    (pc >= (unsigned long) &__atomic_begin &&
-		     pc < (unsigned long) &__atomic_end) ||
-		    (pc >= (unsigned long) &__bzero_begin &&
-		     pc < (unsigned long) &__bzero_end) ||
-		    (pc >= (unsigned long) &__bitops_begin &&
-		     pc < (unsigned long) &__bitops_end))
-			pc = o7;
+	unsigned long pc = regs->pc;
 
-		pc -= (unsigned long) &_stext;
-		pc >>= prof_shift;
-
-		spin_lock(&ticker_lock);
-		if(pc < prof_len)
-			prof_buffer[pc]++;
-		else
-			prof_buffer[prof_len - 1]++;
-		spin_unlock(&ticker_lock);
-	}
+	if (in_lock_functions(pc) ||
+	    (pc >= (unsigned long) __copy_user_begin &&
+	     pc < (unsigned long) __copy_user_end) ||
+	    (pc >= (unsigned long) __atomic_begin &&
+	     pc < (unsigned long) __atomic_end) ||
+	    (pc >= (unsigned long) __bzero_begin &&
+	     pc < (unsigned long) __bzero_end) ||
+	    (pc >= (unsigned long) __bitops_begin &&
+	     pc < (unsigned long) __bitops_end))
+		pc = regs->u_regs[UREG_RETPC];
+	return pc;
 }
 
 __volatile__ unsigned int *master_l10_counter;
@@ -111,16 +108,20 @@ __volatile__ unsigned int *master_l10_limit;
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+
+#define TICK_SIZE (tick_nsec / 1000)
+
+irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	/* last time the cmos clock got updated */
-	static long last_rtc_update=0;
+	static long last_rtc_update;
 
 #ifndef CONFIG_SMP
-	if(!user_mode(regs))
-		sparc_do_profile(regs->pc, regs->u_regs[UREG_RETPC]);
+	profile_tick(CPU_PROFILING, regs);
 #endif
 
+	/* Protect counter clear so that do_gettimeoffset works */
+	write_seqlock(&xtime_lock);
 #ifdef CONFIG_SUN4
 	if((idprom->id_machtype == (SM_SUN4 | SM_4_260)) ||
 	   (idprom->id_machtype == (SM_SUN4 | SM_4_110))) {
@@ -132,21 +133,25 @@ void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 #endif
 	clear_clock_irq();
 
-	write_lock(&xtime_lock);
-
 	do_timer(regs);
+#ifndef CONFIG_SMP
+	update_process_times(user_mode(regs));
+#endif
+
 
 	/* Determine when to update the Mostek clock. */
 	if ((time_status & STA_UNSYNC) == 0 &&
 	    xtime.tv_sec > last_rtc_update + 660 &&
-	    xtime.tv_usec >= 500000 - ((unsigned) tick) / 2 &&
-	    xtime.tv_usec <= 500000 + ((unsigned) tick) / 2) {
+	    (xtime.tv_nsec / 1000) >= 500000 - ((unsigned) TICK_SIZE) / 2 &&
+	    (xtime.tv_nsec / 1000) <= 500000 + ((unsigned) TICK_SIZE) / 2) {
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
 	    last_rtc_update = xtime.tv_sec;
 	  else
 	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
-	write_unlock(&xtime_lock);
+	write_sequnlock(&xtime_lock);
+
+	return IRQ_HANDLED;
 }
 
 /* Kick start a stopped clock (procedure from the Sun NVRAM/hostid FAQ). */
@@ -158,11 +163,15 @@ static void __init kick_start_clock(void)
 
 	prom_printf("CLOCK: Clock was stopped. Kick start ");
 
+	spin_lock_irq(&mostek_lock);
+
 	/* Turn on the kick start bit to start the oscillator. */
 	regs->creg |= MSTK_CREG_WRITE;
 	regs->sec &= ~MSTK_STOP;
 	regs->hour |= MSTK_KICK_START;
 	regs->creg &= ~MSTK_CREG_WRITE;
+
+	spin_unlock_irq(&mostek_lock);
 
 	/* Delay to allow the clock oscillator to start. */
 	sec = MSTK_REG_SEC(regs);
@@ -174,6 +183,8 @@ static void __init kick_start_clock(void)
 		sec = regs->sec;
 	}
 	prom_printf("\n");
+
+	spin_lock_irq(&mostek_lock);
 
 	/* Turn off kick start and set a "valid" time and date. */
 	regs->creg |= MSTK_CREG_WRITE;
@@ -187,12 +198,17 @@ static void __init kick_start_clock(void)
 	MSTK_SET_REG_YEAR(regs,1996 - MSTK_YEAR_ZERO);
 	regs->creg &= ~MSTK_CREG_WRITE;
 
+	spin_unlock_irq(&mostek_lock);
+
 	/* Ensure the kick start bit is off. If it isn't, turn it off. */
 	while (regs->hour & MSTK_KICK_START) {
 		prom_printf("CLOCK: Kick start still on!\n");
+
+		spin_lock_irq(&mostek_lock);
 		regs->creg |= MSTK_CREG_WRITE;
 		regs->hour &= ~MSTK_KICK_START;
 		regs->creg &= ~MSTK_CREG_WRITE;
+		spin_unlock_irq(&mostek_lock);
 	}
 
 	prom_printf("CLOCK: Kick start procedure successful.\n");
@@ -204,10 +220,12 @@ static __inline__ int has_low_battery(void)
 	struct mostek48t02 *regs = (struct mostek48t02 *)mstk48t02_regs;
 	unsigned char data1, data2;
 
+	spin_lock_irq(&mostek_lock);
 	data1 = regs->eeprom[0];	/* Read some data. */
 	regs->eeprom[0] = ~data1;	/* Write back the complement. */
 	data2 = regs->eeprom[0];	/* Read back the complement. */
 	regs->eeprom[0] = data1;	/* Restore the original value. */
+	spin_unlock_irq(&mostek_lock);
 
 	return (data1 == data2);	/* Was the write blocked? */
 }
@@ -224,9 +242,9 @@ static __inline__ void sun4_clock_probe(void)
 		sp_clock_typ = MSTK48T02;
 		r.start = sun4_clock_physaddr;
 		mstk48t02_regs = sbus_ioremap(&r, 0,
-				       sizeof(struct mostek48t02), 0);
-		mstk48t08_regs = 0;  /* To catch weirdness */
-		intersil_clock = 0;  /* just in case */
+				       sizeof(struct mostek48t02), NULL);
+		mstk48t08_regs = NULL;  /* To catch weirdness */
+		intersil_clock = NULL;  /* just in case */
 
 		/* Kick start the clock if it is completely stopped. */
 		if (mostek_read(mstk48t02_regs + MOSTEK_SEC) & MSTK_STOP)
@@ -239,7 +257,7 @@ static __inline__ void sun4_clock_probe(void)
 		intersil_clock = (struct intersil *) 
 		    sbus_ioremap(&r, 0, sizeof(*intersil_clock), "intersil");
 		mstk48t02_regs = 0;  /* just be sure */
-		mstk48t08_regs = 0;  /* ditto */
+		mstk48t08_regs = NULL;  /* ditto */
 		/* initialise the clock */
 
 		intersil_intr(intersil_clock,INTERSIL_INT_100HZ);
@@ -313,7 +331,7 @@ static __inline__ void clock_probe(void)
 		r.start = clk_reg[0].phys_addr;
 		mstk48t02_regs = sbus_ioremap(&r, 0,
 		    sizeof(struct mostek48t02), "mk48t02");
-		mstk48t08_regs = 0;  /* To catch weirdness */
+		mstk48t08_regs = NULL;  /* To catch weirdness */
 	} else if (strcmp(model, "mk48t08") == 0) {
 		sp_clock_typ = MSTK48T08;
 		if(prom_getproperty(node, "reg", (char *) clk_reg,
@@ -332,7 +350,7 @@ static __inline__ void clock_probe(void)
 		mstk48t08_regs = (struct mostek48t08 *) sbus_ioremap(&r, 0,
 		    sizeof(struct mostek48t08), "mk48t08");
 
-		mstk48t02_regs = (unsigned long)&mstk48t08_regs->regs;
+		mstk48t02_regs = &mstk48t08_regs->regs;
 	} else {
 		prom_printf("CLOCK: Unknown model name '%s'\n",model);
 		prom_halt();
@@ -357,7 +375,6 @@ void __init sbus_time_init(void)
 	struct intersil *iregs;
 #endif
 
-	do_get_fast_time = do_gettimeofday;
 	BTFIXUPSET_CALL(bus_do_settimeofday, sbus_do_settimeofday, BTFIXUPCALL_NORM);
 	btfixup();
 
@@ -366,7 +383,7 @@ void __init sbus_time_init(void)
 	else
 		clock_probe();
 
-	init_timers(timer_interrupt);
+	sparc_init_timers(timer_interrupt);
 	
 #ifdef CONFIG_SUN4
 	if(idprom->id_machtype == (SM_SUN4 | SM_4_330)) {
@@ -376,6 +393,7 @@ void __init sbus_time_init(void)
 		prom_printf("Something wrong, clock regs not mapped yet.\n");
 		prom_halt();
 	}		
+	spin_lock_irq(&mostek_lock);
 	mregs->creg |= MSTK_CREG_READ;
 	sec = MSTK_REG_SEC(mregs);
 	min = MSTK_REG_MIN(mregs);
@@ -384,8 +402,11 @@ void __init sbus_time_init(void)
 	mon = MSTK_REG_MONTH(mregs);
 	year = MSTK_CVT_YEAR( MSTK_REG_YEAR(mregs) );
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	xtime.tv_usec = 0;
+	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
+        set_normalized_timespec(&wall_to_monotonic,
+                                -xtime.tv_sec, -xtime.tv_nsec);
 	mregs->creg &= ~MSTK_CREG_READ;
+	spin_unlock_irq(&mostek_lock);
 #ifdef CONFIG_SUN4
 	} else if(idprom->id_machtype == (SM_SUN4 | SM_4_260) ) {
 		/* initialise the intersil on sun4 */
@@ -414,13 +435,15 @@ void __init sbus_time_init(void)
 		intersil_start(iregs);
 
 		xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-		xtime.tv_usec = 0;
+		xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
+	        set_normalized_timespec(&wall_to_monotonic,
+ 	                               -xtime.tv_sec, -xtime.tv_nsec);
 		printk("%u/%u/%u %u:%u:%u\n",day,mon,year,hour,min,sec);
 	}
 #endif
 
 	/* Now that OBP ticker has been silenced, it is safe to enable IRQ. */
-	__sti();
+	local_irq_enable();
 }
 
 void __init time_init(void)
@@ -437,79 +460,106 @@ void __init time_init(void)
 
 extern __inline__ unsigned long do_gettimeoffset(void)
 {
-	struct tasklet_struct *t;
-	unsigned long offset = 0;
-	unsigned int count;
-
-	count = (*master_l10_counter >> 10) & 0x1fffff;
-
-	t = &bh_task_vec[TIMER_BH];
-	if (test_bit(TASKLET_STATE_SCHED, &t->state))
-		offset = 1000000;
-
-	return offset + count;
+	return (*master_l10_counter >> 10) & 0x1fffff;
 }
 
-/* This need not obtain the xtime_lock as it is coded in
- * an implicitly SMP safe way already.
+/*
+ * Returns nanoseconds
+ * XXX This is a suboptimal implementation.
+ */
+unsigned long long sched_clock(void)
+{
+	return (unsigned long long)jiffies * (1000000000 / HZ);
+}
+
+/* Ok, my cute asm atomicity trick doesn't work anymore.
+ * There are just too many variables that need to be protected
+ * now (both members of xtime, wall_jiffies, et al.)
  */
 void do_gettimeofday(struct timeval *tv)
 {
-	/* Load doubles must be used on xtime so that what we get
-	 * is guarenteed to be atomic, this is why we can run this
-	 * with interrupts on full blast.  Don't touch this... -DaveM
-	 */
-	__asm__ __volatile__("
-	sethi	%hi(master_l10_counter), %o1
-	ld	[%o1 + %lo(master_l10_counter)], %g3
-	sethi	%hi(xtime), %g2
-1:	ldd	[%g2 + %lo(xtime)], %o4
-	ld	[%g3], %o1
-	ldd	[%g2 + %lo(xtime)], %o2
-	xor	%o4, %o2, %o2
-	xor	%o5, %o3, %o3
-	orcc	%o2, %o3, %g0
-	bne	1b
-	 cmp	%o1, 0
-	bge	1f
-	 srl	%o1, 0xa, %o1
-	sethi	%hi(tick), %o3
-	ld	[%o3 + %lo(tick)], %o3
-	sethi	%hi(0x1fffff), %o2
-	or	%o2, %lo(0x1fffff), %o2
-	add	%o5, %o3, %o5
-	and	%o1, %o2, %o1
-1:	add	%o5, %o1, %o5
-	sethi	%hi(1000000), %o2
-	or	%o2, %lo(1000000), %o2
-	cmp	%o5, %o2
-	bl,a	1f
-	 st	%o4, [%o0 + 0x0]
-	add	%o4, 0x1, %o4
-	sub	%o5, %o2, %o5
-	st	%o4, [%o0 + 0x0]
-1:	st	%o5, [%o0 + 0x4]");
-}
+	unsigned long flags;
+	unsigned long seq;
+	unsigned long usec, sec;
+	unsigned long max_ntp_tick = tick_usec - tickadj;
 
-void do_settimeofday(struct timeval *tv)
-{
-	write_lock_irq(&xtime_lock);
-	bus_do_settimeofday(tv);
-	write_unlock_irq(&xtime_lock);
-}
+	do {
+		unsigned long lost;
 
-static void sbus_do_settimeofday(struct timeval *tv)
-{
-	tv->tv_usec -= do_gettimeoffset();
-	if(tv->tv_usec < 0) {
-		tv->tv_usec += 1000000;
-		tv->tv_sec--;
+		seq = read_seqbegin_irqsave(&xtime_lock, flags);
+		usec = do_gettimeoffset();
+		lost = jiffies - wall_jiffies;
+
+		/*
+		 * If time_adjust is negative then NTP is slowing the clock
+		 * so make sure not to go into next possible interval.
+		 * Better to lose some accuracy than have time go backwards..
+		 */
+		if (unlikely(time_adjust < 0)) {
+			usec = min(usec, max_ntp_tick);
+
+			if (lost)
+				usec += lost * max_ntp_tick;
+		}
+		else if (unlikely(lost))
+			usec += lost * tick_usec;
+
+		sec = xtime.tv_sec;
+		usec += (xtime.tv_nsec / 1000);
+	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
+
+	while (usec >= 1000000) {
+		usec -= 1000000;
+		sec++;
 	}
-	xtime = *tv;
+
+	tv->tv_sec = sec;
+	tv->tv_usec = usec;
+}
+
+EXPORT_SYMBOL(do_gettimeofday);
+
+int do_settimeofday(struct timespec *tv)
+{
+	int ret;
+
+	write_seqlock_irq(&xtime_lock);
+	ret = bus_do_settimeofday(tv);
+	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
+	return ret;
+}
+
+EXPORT_SYMBOL(do_settimeofday);
+
+static int sbus_do_settimeofday(struct timespec *tv)
+{
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
+	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+		return -EINVAL;
+
+	/*
+	 * This is revolting. We need to set "xtime" correctly. However, the
+	 * value in this location is the value at the most recent update of
+	 * wall time.  Discover what correction gettimeofday() would have
+	 * made, and then undo it!
+	 */
+	nsec -= 1000 * (do_gettimeoffset() +
+			(jiffies - wall_jiffies) * (USEC_PER_SEC / HZ));
+
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
+
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
+	return 0;
 }
 
 /*
@@ -520,6 +570,7 @@ static int set_rtc_mmss(unsigned long nowtime)
 {
 	int real_seconds, real_minutes, mostek_minutes;
 	struct mostek48t02 *regs = (struct mostek48t02 *)mstk48t02_regs;
+	unsigned long flags;
 #ifdef CONFIG_SUN4
 	struct intersil *iregs = intersil_clock;
 	int temp;
@@ -557,6 +608,8 @@ static int set_rtc_mmss(unsigned long nowtime)
 		}
 #endif
 	}
+
+	spin_lock_irqsave(&mostek_lock, flags);
 	/* Read the current RTC minutes. */
 	regs->creg |= MSTK_CREG_READ;
 	mostek_minutes = MSTK_REG_MIN(regs);
@@ -579,8 +632,10 @@ static int set_rtc_mmss(unsigned long nowtime)
 		MSTK_SET_REG_SEC(regs,real_seconds);
 		MSTK_SET_REG_MIN(regs,real_minutes);
 		regs->creg &= ~MSTK_CREG_WRITE;
-	} else
+		spin_unlock_irqrestore(&mostek_lock, flags);
+		return 0;
+	} else {
+		spin_unlock_irqrestore(&mostek_lock, flags);
 		return -1;
-
-	return 0;
+	}
 }

@@ -1,15 +1,15 @@
-/* $Id: bkm_a8.c,v 1.14.6.2 2000/11/29 16:00:14 kai Exp $
- * bkm_a8.c     low level stuff for Scitel Quadro (4*S0, passive)
- *              derived from the original file sedlbauer.c
- *              derived from the original file niccy.c
- *              derived from the original file netjet.c
+/* $Id: bkm_a8.c,v 1.22.2.4 2004/01/15 14:02:34 keil Exp $
  *
- * Author       Roland Klabunde (R.Klabunde@Berkom.de)
+ * low level stuff for Scitel Quadro (4*S0, passive)
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Roland Klabunde
+ * Copyright    by Roland Klabunde   <R.Klabunde@Berkom.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
-#define __NO_VERSION__
+
 
 #include <linux/config.h>
 #include <linux/init.h>
@@ -21,13 +21,13 @@
 #include <linux/pci.h>
 #include "bkm_ax.h"
 
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 
 #define	ATTEMPT_PCI_REMAPPING	/* Required for PLX rev 1 */
 
 extern const char *CardType[];
 
-const char sct_quadro_revision[] = "$Revision: 1.14.6.2 $";
+const char sct_quadro_revision[] = "$Revision: 1.22.2.4 $";
 
 static const char *sct_quadro_subtypes[] =
 {
@@ -46,19 +46,14 @@ static inline u_char
 readreg(unsigned int ale, unsigned int adr, u_char off)
 {
 	register u_char ret;
-	long flags;
-	save_flags(flags);
-	cli();
 	wordout(ale, off);
 	ret = wordin(adr) & 0xFF;
-	restore_flags(flags);
 	return (ret);
 }
 
 static inline void
 readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
 {
-	/* fifo read without cli because it's allready done  */
 	int i;
 	wordout(ale, off);
 	for (i = 0; i < size; i++)
@@ -69,18 +64,13 @@ readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size
 static inline void
 writereg(unsigned int ale, unsigned int adr, u_char off, u_char data)
 {
-	long flags;
-	save_flags(flags);
-	cli();
 	wordout(ale, off);
 	wordout(adr, data);
-	restore_flags(flags);
 }
 
 static inline void
 writefifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
 {
-	/* fifo write without cli because it's allready done  */
 	int i;
 	wordout(ale, off);
 	for (i = 0; i < size; i++)
@@ -150,19 +140,19 @@ set_ipac_active(struct IsdnCardState *cs, u_int active)
 
 #include "hscx_irq.c"
 
-static void
+static irqreturn_t
 bkm_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char ista, val, icnt = 5;
+	u_long flags;
 
-	if (!cs) {
-		printk(KERN_WARNING "HiSax: Scitel Quadro: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	ista = readreg(cs->hw.ax.base, cs->hw.ax.data_adr, IPAC_ISTA);
-	if (!(ista & 0x3f)) /* not this IPAC */
-		return;
+	if (!(ista & 0x3f)) { /* not this IPAC */
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return IRQ_NONE;
+	}
       Start_IPAC:
 	if (cs->debug & L1_DEB_IPAC)
 		debugl1(cs, "IPAC ISTA %02X", ista);
@@ -199,15 +189,16 @@ bkm_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
 		       sct_quadro_subtypes[cs->subtyp]);
 	writereg(cs->hw.ax.base, cs->hw.ax.data_adr, IPAC_MASK, 0xFF);
 	writereg(cs->hw.ax.base, cs->hw.ax.data_adr, IPAC_MASK, 0xC0);
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
-
 
 void
 release_io_sct_quadro(struct IsdnCardState *cs)
 {
-	release_region(cs->hw.ax.base & 0xffffffc0, 256);
+	release_region(cs->hw.ax.base & 0xffffffc0, 128);
 	if (cs->subtyp == SCT_1)
-		release_region(cs->hw.ax.plx_adr, 256);
+		release_region(cs->hw.ax.plx_adr, 64);
 }
 
 static void
@@ -224,44 +215,45 @@ enable_bkm_int(struct IsdnCardState *cs, unsigned bEnable)
 static void
 reset_bkm(struct IsdnCardState *cs)
 {
-	long flags;
-
 	if (cs->subtyp == SCT_1) {
 		wordout(cs->hw.ax.plx_adr + 0x50, (wordin(cs->hw.ax.plx_adr + 0x50) & ~4));
-		save_flags(flags);
-		sti();
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10 * HZ) / 1000);
+		mdelay(10);
 		/* Remove the soft reset */
 		wordout(cs->hw.ax.plx_adr + 0x50, (wordin(cs->hw.ax.plx_adr + 0x50) | 4));
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10 * HZ) / 1000);
-		restore_flags(flags);
+		mdelay(10);
 	}
 }
 
 static int
 BKM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+
 	switch (mt) {
 		case CARD_RESET:
+			spin_lock_irqsave(&cs->lock, flags);
 			/* Disable ints */
 			set_ipac_active(cs, 0);
 			enable_bkm_int(cs, 0);
 			reset_bkm(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_RELEASE:
 			/* Sanity */
+			spin_lock_irqsave(&cs->lock, flags);
 			set_ipac_active(cs, 0);
 			enable_bkm_int(cs, 0);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			release_io_sct_quadro(cs);
 			return (0);
 		case CARD_INIT:
+			spin_lock_irqsave(&cs->lock, flags);
 			cs->debug |= L1_DEB_IPAC;
 			set_ipac_active(cs, 1);
 			inithscxisac(cs, 3);
 			/* Enable ints */
 			enable_bkm_int(cs, 1);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_TEST:
 			return (0);
@@ -272,13 +264,11 @@ BKM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 int __init
 sct_alloc_io(u_int adr, u_int len)
 {
-	if (check_region(adr, len)) {
+	if (!request_region(adr, len, "scitel")) {
 		printk(KERN_WARNING
 			"HiSax: Scitel port %#x-%#x already in use\n",
 			adr, adr + len);
 		return (1);
-	} else {
-		request_region(adr, len, "scitel");
 	}
 	return(0);
 }
@@ -295,7 +285,7 @@ static u_char pci_irq __initdata = 0;
 int __init
 setup_sct_quadro(struct IsdnCard *card)
 {
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
 	u_char pci_rev_id;
@@ -321,10 +311,6 @@ setup_sct_quadro(struct IsdnCard *card)
 		(sub_vendor_id != PCI_VENDOR_ID_BERKOM)))
 		return (0);
 	if (cs->subtyp == SCT_1) {
-		if (!pci_present()) {
-			printk(KERN_ERR "bkm_a4t: no PCI bus present\n");
-			return (0);
-		}
 		while ((dev_a8 = pci_find_device(PCI_VENDOR_ID_PLX,
 			PCI_DEVICE_ID_PLX_9050, dev_a8))) {
 			
@@ -350,20 +336,17 @@ setup_sct_quadro(struct IsdnCard *card)
 		}
 #ifdef ATTEMPT_PCI_REMAPPING
 /* HACK: PLX revision 1 bug: PLX address bit 7 must not be set */
-		pcibios_read_config_byte(pci_bus, pci_device_fn,
-			PCI_REVISION_ID, &pci_rev_id);
+		pci_read_config_byte(dev_a8, PCI_REVISION_ID, &pci_rev_id);
 		if ((pci_ioaddr1 & 0x80) && (pci_rev_id == 1)) {
 			printk(KERN_WARNING "HiSax: %s (%s): PLX rev 1, remapping required!\n",
 				CardType[card->typ],
 				sct_quadro_subtypes[cs->subtyp]);
 			/* Restart PCI negotiation */
-			pcibios_write_config_dword(pci_bus, pci_device_fn,
-				PCI_BASE_ADDRESS_1, (u_int) - 1);
+			pci_write_config_dword(dev_a8, PCI_BASE_ADDRESS_1, (u_int) - 1);
 			/* Move up by 0x80 byte */
 			pci_ioaddr1 += 0x80;
 			pci_ioaddr1 &= PCI_BASE_ADDRESS_IO_MASK;
-			pcibios_write_config_dword(pci_bus, pci_device_fn,
-				PCI_BASE_ADDRESS_1, pci_ioaddr1);
+			pci_write_config_dword(dev_a8, PCI_BASE_ADDRESS_1, pci_ioaddr1);
 			dev_a8->resource[ 1].start = pci_ioaddr1;
 		}
 #endif /* End HACK */
@@ -374,11 +357,11 @@ setup_sct_quadro(struct IsdnCard *card)
 		       sct_quadro_subtypes[cs->subtyp]);
 		return (0);
 	}
-	pcibios_read_config_dword(pci_bus, pci_device_fn, PCI_BASE_ADDRESS_1, &pci_ioaddr1);
-	pcibios_read_config_dword(pci_bus, pci_device_fn, PCI_BASE_ADDRESS_2, &pci_ioaddr2);
-	pcibios_read_config_dword(pci_bus, pci_device_fn, PCI_BASE_ADDRESS_3, &pci_ioaddr3);
-	pcibios_read_config_dword(pci_bus, pci_device_fn, PCI_BASE_ADDRESS_4, &pci_ioaddr4);
-	pcibios_read_config_dword(pci_bus, pci_device_fn, PCI_BASE_ADDRESS_5, &pci_ioaddr5);
+	pci_read_config_dword(dev_a8, PCI_BASE_ADDRESS_1, &pci_ioaddr1);
+	pci_read_config_dword(dev_a8, PCI_BASE_ADDRESS_2, &pci_ioaddr2);
+	pci_read_config_dword(dev_a8, PCI_BASE_ADDRESS_3, &pci_ioaddr3);
+	pci_read_config_dword(dev_a8, PCI_BASE_ADDRESS_4, &pci_ioaddr4);
+	pci_read_config_dword(dev_a8, PCI_BASE_ADDRESS_5, &pci_ioaddr5);
 	if (!pci_ioaddr1 || !pci_ioaddr2 || !pci_ioaddr3 || !pci_ioaddr4 || !pci_ioaddr5) {
 		printk(KERN_WARNING "HiSax: %s (%s): No IO base address(es)\n",
 		       CardType[card->typ],
@@ -403,9 +386,9 @@ setup_sct_quadro(struct IsdnCard *card)
 	switch(cs->subtyp) {
 		case 1:
 			cs->hw.ax.base = pci_ioaddr5 + 0x00;
-			if (sct_alloc_io(pci_ioaddr1, 256))
+			if (sct_alloc_io(pci_ioaddr1, 128))
 				return(0);
-			if (sct_alloc_io(pci_ioaddr5, 256))
+			if (sct_alloc_io(pci_ioaddr5, 64))
 				return(0);
 			/* disable all IPAC */
 			writereg(pci_ioaddr5, pci_ioaddr5 + 4,
@@ -419,24 +402,24 @@ setup_sct_quadro(struct IsdnCard *card)
 			break;
 		case 2:
 			cs->hw.ax.base = pci_ioaddr4 + 0x08;
-			if (sct_alloc_io(pci_ioaddr4, 256))
+			if (sct_alloc_io(pci_ioaddr4, 64))
 				return(0);
 			break;
 		case 3:
 			cs->hw.ax.base = pci_ioaddr3 + 0x10;
-			if (sct_alloc_io(pci_ioaddr3, 256))
+			if (sct_alloc_io(pci_ioaddr3, 64))
 				return(0);
 			break;
 		case 4:
 			cs->hw.ax.base = pci_ioaddr2 + 0x20;
-			if (sct_alloc_io(pci_ioaddr2, 256))
+			if (sct_alloc_io(pci_ioaddr2, 64))
 				return(0);
 			break;
 	}	
 	/* For isac and hscx data path */
 	cs->hw.ax.data_adr = cs->hw.ax.base + 4;
 
-	printk(KERN_INFO "HiSax: %s (%s) configured at 0x%.4X, 0x%.4X, 0x%.4X and IRQ %d\n",
+	printk(KERN_INFO "HiSax: %s (%s) configured at 0x%.4lX, 0x%.4lX, 0x%.4lX and IRQ %d\n",
 	       CardType[card->typ],
 	       sct_quadro_subtypes[cs->subtyp],
 	       cs->hw.ax.plx_adr,

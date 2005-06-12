@@ -10,6 +10,8 @@
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/sockios.h>
+#include <linux/syscalls.h>
 #include <linux/tty.h>
 #include <linux/file.h>
 
@@ -25,16 +27,13 @@ struct irix_termios {
 	cc_t c_cc[NCCS];
 };
 
-extern asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd,
-				unsigned long arg);
-extern asmlinkage int sys_write(unsigned int fd,char * buf,unsigned int count);
 extern void start_tty(struct tty_struct *tty);
 static struct tty_struct *get_tty(int fd)
 {
 	struct file *filp;
 	struct tty_struct *ttyp = NULL;
 
-	read_lock(&current->files->file_lock);
+	spin_lock(&current->files->file_lock);
 	filp = fcheck(fd);
 	if(filp && filp->private_data) {
 		ttyp = (struct tty_struct *) filp->private_data;
@@ -42,14 +41,14 @@ static struct tty_struct *get_tty(int fd)
 		if(ttyp->magic != TTY_MAGIC)
 			ttyp =NULL;
 	}
-	read_unlock(&current->files->file_lock);
+	spin_unlock(&current->files->file_lock);
 	return ttyp;
 }
 
 static struct tty_struct *get_real_tty(struct tty_struct *tp)
 {
-	if (tp->driver.type == TTY_DRIVER_TYPE_PTY &&
-	   tp->driver.subtype == PTY_TYPE_MASTER)
+	if (tp->driver->type == TTY_DRIVER_TYPE_PTY &&
+	   tp->driver->subtype == PTY_TYPE_MASTER)
 		return tp->link;
 	else
 		return tp;

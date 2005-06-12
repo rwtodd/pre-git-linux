@@ -106,6 +106,7 @@ struct amiga_hw_present {
     AMIGAHW_DECLARE(ALICE_NTSC);	/* NTSC Alice (8374) */
     AMIGAHW_DECLARE(MAGIC_REKICK);	/* A3000 Magic Hard Rekick */
     AMIGAHW_DECLARE(PCMCIA);		/* PCMCIA Slot */
+    AMIGAHW_DECLARE(GG2_ISA);		/* GG2 Zorro2ISA Bridge */
     AMIGAHW_DECLARE(ZORRO);		/* Zorro AutoConfig */
     AMIGAHW_DECLARE(ZORRO3);		/* Zorro III */
 };
@@ -251,8 +252,8 @@ struct CUSTOM {
 #define DMAF_ALL		(0x01FF)
 
 struct CIA {
-    unsigned char pra; 		char pad0[0xff];
-    unsigned char prb; 		char pad1[0xff];
+    unsigned char pra;		char pad0[0xff];
+    unsigned char prb;		char pad1[0xff];
     unsigned char ddra;		char pad2[0xff];
     unsigned char ddrb;		char pad3[0xff];
     unsigned char talo;		char pad4[0xff];
@@ -262,10 +263,10 @@ struct CIA {
     unsigned char todlo;	char pad8[0xff];
     unsigned char todmid;	char pad9[0xff];
     unsigned char todhi;	char pada[0x1ff];
-    unsigned char sdr; 		char padb[0xff];
-    unsigned char icr; 		char padc[0xff];
-    unsigned char cra; 		char padd[0xff];
-    unsigned char crb; 		char pade[0xff];
+    unsigned char sdr;		char padb[0xff];
+    unsigned char icr;		char padc[0xff];
+    unsigned char cra;		char padd[0xff];
+    unsigned char crb;		char pade[0xff];
 };
 
 #define zTwoBase (0x80000000)
@@ -318,12 +319,12 @@ struct tod3000 {
   unsigned int  :28, year2:4;	/* lower digit */
   unsigned int  :28, year1:4;	/* upper digit */
   unsigned int  :28, cntrl1:4;	/* control-byte 1 */
-  unsigned int  :28, cntrl2:4;	/* control-byte 2 */  
+  unsigned int  :28, cntrl2:4;	/* control-byte 2 */
   unsigned int  :28, cntrl3:4;	/* control-byte 3 */
 };
 #define TOD3000_CNTRL1_HOLD	0
 #define TOD3000_CNTRL1_FREE	9
-#define TOD_3000 ((struct tod3000 *)(zTwoBase+0xDC0000))
+#define tod_3000 ((*(volatile struct tod3000 *)(zTwoBase+0xDC0000)))
 
 struct tod2000 {
   unsigned int  :28, second2:4;	/* lower digit */
@@ -340,7 +341,7 @@ struct tod2000 {
   unsigned int  :28, year1:4;	/* upper digit */
   unsigned int  :28, weekday:4;
   unsigned int  :28, cntrl1:4;	/* control-byte 1 */
-  unsigned int  :28, cntrl2:4;	/* control-byte 2 */  
+  unsigned int  :28, cntrl2:4;	/* control-byte 2 */
   unsigned int  :28, cntrl3:4;	/* control-byte 3 */
 };
 
@@ -348,6 +349,6 @@ struct tod2000 {
 #define TOD2000_CNTRL1_BUSY	(1<<1)
 #define TOD2000_CNTRL3_24HMODE	(1<<2)
 #define TOD2000_HOUR1_PM	(1<<2)
-#define TOD_2000 ((struct tod2000 *)(zTwoBase+0xDC0000))
+#define tod_2000 ((*(volatile struct tod2000 *)(zTwoBase+0xDC0000)))
 
 #endif /* _M68K_AMIGAHW_H */

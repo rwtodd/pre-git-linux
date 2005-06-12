@@ -12,17 +12,10 @@
 #include <asm/btfixup.h>
 
 #ifndef __ASSEMBLY__
-/* PROM provided per-processor information we need
- * to start them all up.
- */
 
-struct prom_cpuinfo {
-	int prom_node;
-	int mid;
-};
-extern int linux_num_cpus;	/* number of CPUs probed  */
+#include <linux/cpumask.h>
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* __ASSEMBLY__ */
 
 #ifdef CONFIG_SMP
 
@@ -30,27 +23,15 @@ extern int linux_num_cpus;	/* number of CPUs probed  */
 
 #include <asm/ptrace.h>
 #include <asm/asi.h>
-
-extern struct prom_cpuinfo linux_cpus[NR_CPUS];
-
-/* Per processor Sparc parameters we need. */
-
-struct cpuinfo_sparc {
-	unsigned long udelay_val; /* that's it */
-	unsigned short next;
-	unsigned short mid;
-};
-
-extern struct cpuinfo_sparc cpu_data[NR_CPUS];
-extern unsigned long cpu_offset[NR_CPUS];
+#include <asm/atomic.h>
 
 /*
  *	Private routines/data
  */
  
-extern int smp_found_cpus;
 extern unsigned char boot_cpu_id;
-extern unsigned long cpu_present_map;
+extern cpumask_t phys_cpu_present_map;
+#define cpu_possible_map phys_cpu_present_map
 
 typedef void (*smpfunc_t)(unsigned long, unsigned long, unsigned long,
 		       unsigned long, unsigned long);
@@ -66,13 +47,14 @@ void smp_callin(void);
 void smp_boot_cpus(void);
 void smp_store_cpu_info(int);
 
-int smp_bogo_info(char *buf);
-int smp_info(char *buf);
+struct seq_file;
+void smp_bogo(struct seq_file *);
+void smp_info(struct seq_file *);
 
 BTFIXUPDEF_CALL(void, smp_cross_call, smpfunc_t, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
 BTFIXUPDEF_CALL(void, smp_message_pass, int, int, unsigned long, int)
-BTFIXUPDEF_CALL(int, __smp_processor_id, void)
-BTFIXUPDEF_BLACKBOX(smp_processor_id)
+BTFIXUPDEF_CALL(int, __hard_smp_processor_id, void)
+BTFIXUPDEF_BLACKBOX(hard_smp_processor_id)
 BTFIXUPDEF_BLACKBOX(load_current)
 
 #define smp_cross_call(func,arg1,arg2,arg3,arg4,arg5) BTFIXUP_CALL(smp_cross_call)(func,arg1,arg2,arg3,arg4,arg5)
@@ -101,7 +83,6 @@ extern __inline__ int smp_call_function(void (*func)(void *info), void *info, in
 
 extern __volatile__ int __cpu_number_map[NR_CPUS];
 extern __volatile__ int __cpu_logical_map[NR_CPUS];
-extern unsigned long smp_proc_in_lock[NR_CPUS];
 
 extern __inline__ int cpu_logical_map(int cpu)
 {
@@ -148,7 +129,7 @@ extern __inline__ int hard_smp_processor_id(void)
 	   			     "=&r" (cpuid));
 	   See btfixup.h and btfixupprep.c to understand how a blackbox works.
 	 */
-	__asm__ __volatile__("sethi %%hi(___b_smp_processor_id), %0\n\t"
+	__asm__ __volatile__("sethi %%hi(___b_hard_smp_processor_id), %0\n\t"
 			     "sethi %%hi(boot_cpu_id), %0\n\t"
 			     "ldub [%0 + %%lo(boot_cpu_id)], %0\n\t" :
 			     "=&r" (cpuid));
@@ -160,17 +141,17 @@ extern __inline__ int hard_smp_processor_id(void)
 	int cpuid;
 	
 	__asm__ __volatile__("mov %%o7, %%g1\n\t"
-			     "call ___f___smp_processor_id\n\t"
+			     "call ___f___hard_smp_processor_id\n\t"
 			     " nop\n\t"
 			     "mov %%g2, %0\n\t" : "=r"(cpuid) : : "g1", "g2");
 	return cpuid;
 }
 #endif
 
-#define smp_processor_id() hard_smp_processor_id()
-/* XXX We really need to implement this now.  -DaveM */
-extern __inline__ void smp_send_reschedule(int cpu) { }
-extern __inline__ void smp_send_stop(void) { }
+#define smp_processor_id()	(current_thread_info()->cpu)
+
+#define prof_multiplier(__cpu)		cpu_data(__cpu).multiplier
+#define prof_counter(__cpu)		cpu_data(__cpu).counter
 
 #endif /* !(__ASSEMBLY__) */
 
@@ -188,9 +169,7 @@ extern __inline__ void smp_send_stop(void) { }
 #define MBOX_IDLECPU2         0xFD
 #define MBOX_STOPCPU2         0xFE
 
-#define PROC_CHANGE_PENALTY     15
-
-#endif /* !(CONFIG_SMP) */
+#endif /* SMP */
 
 #define NO_PROC_ID            0xFF
 

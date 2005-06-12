@@ -12,17 +12,7 @@
 #include <linux/ioport.h>
 #include <linux/skbuff.h>
 
-#define TX_2X_PAGES 12
-#define TX_1X_PAGES 6
-
-/* Should always use two Tx slots to get back-to-back transmits. */
-#define EI_PINGPONG
-
-#ifdef EI_PINGPONG
-#define TX_PAGES TX_2X_PAGES
-#else
-#define TX_PAGES TX_1X_PAGES
-#endif
+#define TX_PAGES 12	/* Two Tx slots */
 
 #define ETHER_ADDR_LEN 6
 
@@ -39,24 +29,20 @@ extern int ei_debug;
 #define ei_debug 1
 #endif
 
-#ifndef HAVE_AUTOIRQ
-/* From auto_irq.c */
-extern void autoirq_setup(int waittime);
-extern unsigned long autoirq_report(int waittime);
+#ifdef CONFIG_NET_POLL_CONTROLLER
+extern void ei_poll(struct net_device *dev);
 #endif
 
-/* Currently unused - delete in v2.5.x after purging from drivers */
-#define load_8390_module(driver)	0
-#define unload_8390_module()		do { } while (0)
-
-extern int ethdev_init(struct net_device *dev);
 extern void NS8390_init(struct net_device *dev, int startp);
 extern int ei_open(struct net_device *dev);
 extern int ei_close(struct net_device *dev);
-extern void ei_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+extern irqreturn_t ei_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+extern struct net_device *__alloc_ei_netdev(int size);
+static inline struct net_device *alloc_ei_netdev(void)
+{
+	return __alloc_ei_netdev(0);
+}
 
-/* Most of these entries should be in 'struct net_device' (or most of the
-   things in there should be here!) */
 /* You have one of these per-board */
 struct ei_device {
 	const char *name;
@@ -64,10 +50,14 @@ struct ei_device {
 	void (*get_8390_hdr)(struct net_device *, struct e8390_pkt_hdr *, int);
 	void (*block_output)(struct net_device *, int, const unsigned char *, int);
 	void (*block_input)(struct net_device *, int, struct sk_buff *, int);
+	unsigned long rmem_start;
+	unsigned long rmem_end;
+	void __iomem *mem;
 	unsigned char mcfilter[8];
 	unsigned open:1;
 	unsigned word16:1;  		/* We have the 16-bit (vs 8-bit) version of the card. */
-	unsigned bigendian:1;		/* 16-bit big endian mode */
+	unsigned bigendian:1;		/* 16-bit big endian mode. Do NOT */
+					/* set this on random 8390 clones! */
 	unsigned txing:1;		/* Transmit Active */
 	unsigned irqlock:1;		/* 8390's intrs disabled when '1'. */
 	unsigned dmaing:1;		/* Remote DMA Active */
@@ -92,7 +82,7 @@ struct ei_device {
 /* The maximum time waited (in jiffies) before assuming a Tx failed. (20ms) */
 #define TX_TIMEOUT (20*HZ/100)
 
-#define ei_status (*(struct ei_device *)(dev->priv))
+#define ei_status (*(struct ei_device *)netdev_priv(dev))
 
 /* Some generic ethernet register configurations. */
 #define E8390_TX_IRQ_MASK	0xa	/* For register EN0_ISR */
@@ -115,11 +105,36 @@ struct ei_device {
 
 /*
  *	Only generate indirect loads given a machine that needs them.
+ *      - removed AMIGA_PCMCIA from this list, handled as ISA io now
  */
  
-#if defined(CONFIG_MAC) || defined(CONFIG_AMIGA_PCMCIA) || \
-    defined(CONFIG_ARIADNE2) || defined(CONFIG_ARIADNE2_MODULE) || \
+#if defined(CONFIG_MAC) ||  \
+    defined(CONFIG_ZORRO8390) || defined(CONFIG_ZORRO8390_MODULE) || \
     defined(CONFIG_HYDRA) || defined(CONFIG_HYDRA_MODULE)
+#define EI_SHIFT(x)	(ei_local->reg_offset[x])
+#undef inb
+#undef inb_p
+#undef outb
+#undef outb_p
+
+#define inb(port)   in_8(port)
+#define outb(val,port)  out_8(port,val)
+#define inb_p(port)   in_8(port)
+#define outb_p(val,port)  out_8(port,val)
+
+#elif defined(CONFIG_ARM_ETHERH) || defined(CONFIG_ARM_ETHERH_MODULE)
+#define EI_SHIFT(x)	(ei_local->reg_offset[x])
+#undef inb
+#undef inb_p
+#undef outb
+#undef outb_p
+
+#define inb(_p)		readb(_p)
+#define outb(_v,_p)	writeb(_v,_p)
+#define inb_p(_p)	inb(_p)
+#define outb_p(_v,_p)	outb(_v,_p)
+
+#elif defined(CONFIG_NET_CBUS) || defined(CONFIG_NE_H8300) || defined(CONFIG_NE_H8300_MODULE)
 #define EI_SHIFT(x)	(ei_local->reg_offset[x])
 #else
 #define EI_SHIFT(x)	(x)

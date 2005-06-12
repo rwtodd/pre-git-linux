@@ -2,6 +2,7 @@
 #define _M68K_IRQ_H_
 
 #include <linux/config.h>
+#include <linux/interrupt.h>
 
 /*
  * # of m68k interrupts
@@ -45,7 +46,7 @@
 
 #define IRQ_SCHED_TIMER	(8)    /* interrupt source for scheduling timer */
 
-static __inline__ int irq_cannonicalize(int irq)
+static __inline__ int irq_canonicalize(int irq)
 {
 	return irq;
 }
@@ -63,7 +64,7 @@ static __inline__ int irq_cannonicalize(int irq)
  * All interrupt handling is actually machine specific so it is better
  * to use function pointers, as used by the Sparc port, and select the
  * interrupt handling functions when initializing the kernel. This way
- * we save some unnecessary overhead at run-time. 
+ * we save some unnecessary overhead at run-time.
  *                                                      01/11/97 - Jes
  */
 
@@ -73,17 +74,19 @@ extern void (*disable_irq)(unsigned int);
 #define disable_irq_nosync	disable_irq
 #define enable_irq_nosync	enable_irq
 
-extern int sys_request_irq(unsigned int, 
-	void (*)(int, void *, struct pt_regs *), 
-	unsigned long, const char *, void *);
-extern void sys_free_irq(unsigned int, void *);
+struct pt_regs;
+
+extern int cpu_request_irq(unsigned int,
+			   irqreturn_t (*)(int, void *, struct pt_regs *),
+			   unsigned long, const char *, void *);
+extern void cpu_free_irq(unsigned int, void *);
 
 /*
  * various flags for request_irq() - the Amiga now uses the standard
  * mechanism like all other architectures - SA_INTERRUPT and SA_SHIRQ
  * are your friends.
  */
-#ifndef CONFIG_AMIGA
+#ifndef MACH_AMIGA_ONLY
 #define IRQ_FLG_LOCK	(0x0001)	/* handler is not replaceable	*/
 #define IRQ_FLG_REPLACE	(0x0002)	/* replace existing handler	*/
 #define IRQ_FLG_FAST	(0x0004)
@@ -96,7 +99,7 @@ extern void sys_free_irq(unsigned int, void *);
  * interrupt source (if it supports chaining).
  */
 typedef struct irq_node {
-	void		(*handler)(int, void *, struct pt_regs *);
+	irqreturn_t	(*handler)(int, void *, struct pt_regs *);
 	unsigned long	flags;
 	void		*dev_id;
 	const char	*devname;
@@ -107,7 +110,7 @@ typedef struct irq_node {
  * This structure has only 4 elements for speed reasons
  */
 typedef struct irq_handler {
-	void		(*handler)(int, void *, struct pt_regs *);
+	irqreturn_t	(*handler)(int, void *, struct pt_regs *);
 	unsigned long	flags;
 	void		*dev_id;
 	const char	*devname;
@@ -120,5 +123,9 @@ extern volatile unsigned int num_spurious;
  * This function returns a new irq_node_t
  */
 extern irq_node_t *new_irq_node(void);
+
+struct irqaction;
+struct pt_regs;
+int handle_IRQ_event(unsigned int, struct pt_regs *, struct irqaction *);
 
 #endif /* _M68K_IRQ_H_ */

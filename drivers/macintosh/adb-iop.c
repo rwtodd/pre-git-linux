@@ -83,15 +83,14 @@ static void adb_iop_complete(struct iop_msg *msg, struct pt_regs *regs)
 	struct adb_request *req;
 	uint flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	req = current_req;
 	if ((adb_iop_state == sending) && req && req->reply_expected) {
 		adb_iop_state = awaiting_reply;
 	}
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 /*
@@ -106,19 +105,19 @@ static void adb_iop_listen(struct iop_msg *msg, struct pt_regs *regs)
 	struct adb_iopmsg *amsg = (struct adb_iopmsg *) msg->message;
 	struct adb_request *req;
 	uint flags;
+#ifdef DEBUG_ADB_IOP
+	int i;
+#endif
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	req = current_req;
 
 #ifdef DEBUG_ADB_IOP
-	printk("adb_iop_listen: rcvd packet, %d bytes: %02X %02X",
+	printk("adb_iop_listen %p: rcvd packet, %d bytes: %02X %02X", req,
 		(uint) amsg->count + 2, (uint) amsg->flags, (uint) amsg->cmd);
-	i = 0;
-	while (i < amsg->count) {
-		printk(" %02X", (uint) amsg->data[i++]);
-	}
+	for (i = 0; i < amsg->count; i++)
+		printk(" %02X", (uint) amsg->data[i]);
 	printk("\n");
 #endif
 
@@ -136,7 +135,7 @@ static void adb_iop_listen(struct iop_msg *msg, struct pt_regs *regs)
 			adb_iop_end_req(req, idle);
 		}
 	} else {
-		/* TODO: is it possible for more tha one chunk of data  */
+		/* TODO: is it possible for more than one chunk of data  */
 		/*       to arrive before the timeout? If so we need to */
 		/*       use reply_ptr here like the other drivers do.  */
 		if ((adb_iop_state == awaiting_reply) &&
@@ -150,7 +149,7 @@ static void adb_iop_listen(struct iop_msg *msg, struct pt_regs *regs)
 		memcpy(msg->reply, msg->message, IOP_MSG_LEN);
 	}
 	iop_complete_message(msg);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 /*
@@ -165,16 +164,18 @@ static void adb_iop_start(void)
 	unsigned long flags;
 	struct adb_request *req;
 	struct adb_iopmsg amsg;
+#ifdef DEBUG_ADB_IOP
+	int i;
+#endif
 
 	/* get the packet to send */
 	req = current_req;
 	if (!req) return;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 #ifdef DEBUG_ADB_IOP
-	printk("adb_iop_start: sending packet, %d bytes:", req->nbytes);
+	printk("adb_iop_start %p: sending packet, %d bytes:", req, req->nbytes);
 	for (i = 0 ; i < req->nbytes ; i++)
 		printk(" %02X", (uint) req->data[i]);
 	printk("\n");
@@ -192,7 +193,7 @@ static void adb_iop_start(void)
 
 	req->sent = 1;
 	adb_iop_state = sending;
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	/* Now send it. The IOP manager will call adb_iop_complete */
 	/* when the packet has been sent.                          */
@@ -236,8 +237,7 @@ static int adb_iop_write(struct adb_request *req)
 		return -EINVAL;
 	}
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	req->next = 0;
 	req->sent = 0;
@@ -252,7 +252,7 @@ static int adb_iop_write(struct adb_request *req)
 		last_req = req;
 	}
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 	if (adb_iop_state == idle) adb_iop_start();
 	return 0;
 }
@@ -271,13 +271,17 @@ void adb_iop_poll(void)
 
 int adb_iop_reset_bus(void)
 {
-	struct adb_request req;
+	struct adb_request req = {
+		.reply_expected = 0,
+		.nbytes = 2,
+		.data = { ADB_PACKET, 0 },
+	};
 
-	req.reply_expected = 0;
-	req.nbytes = 2;
-	req.data[0] = ADB_PACKET;
-	req.data[1] = 0; /* RESET */
 	adb_iop_write(&req);
-	while (!req.complete) adb_iop_poll();
+	while (!req.complete) {
+		adb_iop_poll();
+		schedule();
+	}
+
 	return 0;
 }

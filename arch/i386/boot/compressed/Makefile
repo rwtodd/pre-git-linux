@@ -4,46 +4,22 @@
 # create a compressed vmlinux image from the original vmlinux
 #
 
-HEAD = head.o
-SYSTEM = $(TOPDIR)/vmlinux
+targets		:= vmlinux vmlinux.bin vmlinux.bin.gz head.o misc.o piggy.o
+EXTRA_AFLAGS	:= -traditional
 
-OBJECTS = $(HEAD) misc.o
+LDFLAGS_vmlinux := -Ttext $(IMAGE_OFFSET) -e startup_32
 
-CFLAGS = $(CPPFLAGS) -O2 -DSTDC_HEADERS
-ZLDFLAGS = -e startup_32
+$(obj)/vmlinux: $(obj)/head.o $(obj)/misc.o $(obj)/piggy.o FORCE
+	$(call if_changed,ld)
+	@:
 
-#
-# ZIMAGE_OFFSET is the load offset of the compression loader
-# BZIMAGE_OFFSET is the load offset of the high loaded compression loader
-#
-ZIMAGE_OFFSET = 0x1000
-BZIMAGE_OFFSET = 0x100000
+$(obj)/vmlinux.bin: vmlinux FORCE
+	$(call if_changed,objcopy)
 
-ZLINKFLAGS = -Ttext $(ZIMAGE_OFFSET) $(ZLDFLAGS)
-BZLINKFLAGS = -Ttext $(BZIMAGE_OFFSET) $(ZLDFLAGS)
+$(obj)/vmlinux.bin.gz: $(obj)/vmlinux.bin FORCE
+	$(call if_changed,gzip)
 
-all: vmlinux
+LDFLAGS_piggy.o := -r --format binary --oformat elf32-i386 -T
 
-vmlinux: piggy.o $(OBJECTS)
-	$(LD) $(ZLINKFLAGS) -o vmlinux $(OBJECTS) piggy.o
-
-bvmlinux: piggy.o $(OBJECTS)
-	$(LD) $(BZLINKFLAGS) -o bvmlinux $(OBJECTS) piggy.o
-
-head.o: head.S
-	$(CC) $(AFLAGS) -traditional -c head.S
-
-misc.o: misc.c
-	$(CC) $(CFLAGS) -c misc.c
-
-piggy.o:	$(SYSTEM)
-	tmppiggy=_tmp_$$$$piggy; \
-	rm -f $$tmppiggy $$tmppiggy.gz $$tmppiggy.lnk; \
-	$(OBJCOPY) $(SYSTEM) $$tmppiggy; \
-	gzip -f -9 < $$tmppiggy > $$tmppiggy.gz; \
-	echo "SECTIONS { .data : { input_len = .; LONG(input_data_end - input_data) input_data = .; *(.data) input_data_end = .; }}" > $$tmppiggy.lnk; \
-	$(LD) -r -o piggy.o -b binary $$tmppiggy.gz -b elf32-i386 -T $$tmppiggy.lnk; \
-	rm -f $$tmppiggy $$tmppiggy.gz $$tmppiggy.lnk
-
-clean:
-	rm -f vmlinux bvmlinux _tmp_*
+$(obj)/piggy.o: $(obj)/vmlinux.scr $(obj)/vmlinux.bin.gz FORCE
+	$(call if_changed,ld)

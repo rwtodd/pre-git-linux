@@ -3,12 +3,13 @@
 /*
  * Pagetable related stuff.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998, 1999, 2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <linux/config.h>
 
+#include <asm/intrinsics.h>
 #include <asm/types.h>
 
 /*
@@ -30,6 +31,24 @@
 #define PAGE_MASK		(~(PAGE_SIZE - 1))
 #define PAGE_ALIGN(addr)	(((addr) + PAGE_SIZE - 1) & PAGE_MASK)
 
+#define PERCPU_PAGE_SHIFT	16	/* log2() of max. size of per-CPU area */
+#define PERCPU_PAGE_SIZE	(__IA64_UL_CONST(1) << PERCPU_PAGE_SHIFT)
+
+#define RGN_MAP_LIMIT	((1UL << (4*PAGE_SHIFT - 12)) - PAGE_SIZE)	/* per region addr limit */
+
+#ifdef CONFIG_HUGETLB_PAGE
+# define REGION_HPAGE		(4UL)	/* note: this is hardcoded in reload_context()!*/
+# define REGION_SHIFT		61
+# define HPAGE_REGION_BASE	(REGION_HPAGE << REGION_SHIFT)
+# define HPAGE_SHIFT		hpage_shift
+# define HPAGE_SHIFT_DEFAULT	28	/* check ia64 SDM for architecture supported size */
+# define HPAGE_SIZE		(__IA64_UL_CONST(1) << HPAGE_SHIFT)
+# define HPAGE_MASK		(~(HPAGE_SIZE - 1))
+
+# define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
+# define ARCH_HAS_HUGEPAGE_ONLY_RANGE
+#endif /* CONFIG_HUGETLB_PAGE */
+
 #ifdef __ASSEMBLY__
 # define __pa(x)		((x) - PAGE_OFFSET)
 # define __va(x)		((x) + PAGE_OFFSET)
@@ -40,66 +59,55 @@
 extern void clear_page (void *page);
 extern void copy_page (void *to, void *from);
 
-#  ifdef STRICT_MM_TYPECHECKS
 /*
- * These are used to make use of C type-checking..
+ * clear_user_page() and copy_user_page() can't be inline functions because
+ * flush_dcache_page() can't be defined until later...
  */
-typedef struct { unsigned long pte; } pte_t;
-typedef struct { unsigned long pmd; } pmd_t;
-typedef struct { unsigned long pgd; } pgd_t;
-typedef struct { unsigned long pgprot; } pgprot_t;
+#define clear_user_page(addr, vaddr, page)	\
+do {						\
+	clear_page(addr);			\
+	flush_dcache_page(page);		\
+} while (0)
 
-#define pte_val(x)	((x).pte)
-#define pmd_val(x)	((x).pmd)
-#define pgd_val(x)	((x).pgd)
-#define pgprot_val(x)	((x).pgprot)
+#define copy_user_page(to, from, vaddr, page)	\
+do {						\
+	copy_page((to), (from));		\
+	flush_dcache_page(page);		\
+} while (0)
 
-#define __pte(x)	((pte_t) { (x) } )
-#define __pgprot(x)	((pgprot_t) { (x) } )
 
-#  else /* !STRICT_MM_TYPECHECKS */
-/*
- * .. while these make it easier on the compiler
- */
-typedef unsigned long pte_t;
-typedef unsigned long pmd_t;
-typedef unsigned long pgd_t;
-typedef unsigned long pgprot_t;
+#define alloc_zeroed_user_highpage(vma, vaddr) \
+({						\
+	struct page *page = alloc_page_vma(GFP_HIGHUSER | __GFP_ZERO, vma, vaddr); \
+	if (page)				\
+ 		flush_dcache_page(page);	\
+	page;					\
+})
 
-#define pte_val(x)	(x)
-#define pmd_val(x)	(x)
-#define pgd_val(x)	(x)
-#define pgprot_val(x)	(x)
+#define __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
 
-#define __pte(x)	(x)
-#define __pgd(x)	(x)
-#define __pgprot(x)	(x)
+#define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
 
-#  endif /* !STRICT_MM_TYPECHECKS */
-
-/*
- * Note: the MAP_NR_*() macro can't use __pa() because MAP_NR_*(X) MUST
- * map to something >= max_mapnr if X is outside the identity mapped
- * kernel space.
- */
-
-/*
- * The dense variant can be used as long as the size of memory holes isn't
- * very big.
- */
-#define MAP_NR_DENSE(addr)	(((unsigned long) (addr) - PAGE_OFFSET) >> PAGE_SHIFT)
-
-#ifdef CONFIG_IA64_GENERIC
-# include <asm/machvec.h>
-# define virt_to_page(kaddr)	(mem_map + platform_map_nr(kaddr))
-#elif defined (CONFIG_IA64_SGI_SN1)
-# ifndef CONFIG_DISCONTIGMEM
-#  define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
-# endif
+#ifdef CONFIG_VIRTUAL_MEM_MAP
+extern int ia64_pfn_valid (unsigned long pfn);
 #else
-# define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
+# define ia64_pfn_valid(pfn) 1
 #endif
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+
+#ifndef CONFIG_DISCONTIGMEM
+# define pfn_valid(pfn)		(((pfn) < max_mapnr) && ia64_pfn_valid(pfn))
+# define page_to_pfn(page)	((unsigned long) (page - mem_map))
+# define pfn_to_page(pfn)	(mem_map + (pfn))
+#else
+extern struct page *vmem_map;
+extern unsigned long max_low_pfn;
+# define pfn_valid(pfn)		(((pfn) < max_low_pfn) && ia64_pfn_valid(pfn))
+# define page_to_pfn(page)	((unsigned long) (page - vmem_map))
+# define pfn_to_page(pfn)	(vmem_map + (pfn))
+#endif
+
+#define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
+#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 
 typedef union ia64_va {
 	struct {
@@ -123,18 +131,25 @@ typedef union ia64_va {
 #define REGION_OFFSET(x)	({ia64_va _v; _v.l = (long) (x); _v.f.off;})
 
 #define REGION_SIZE		REGION_NUMBER(1)
-#define REGION_KERNEL	7
+#define REGION_KERNEL		7
 
-#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
-#define PAGE_BUG(page) do { BUG(); } while (0)
+#ifdef CONFIG_HUGETLB_PAGE
+# define htlbpage_to_page(x)	(((unsigned long) REGION_NUMBER(x) << 61)			\
+				 | (REGION_OFFSET(x) >> (HPAGE_SHIFT-PAGE_SHIFT)))
+# define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
+# define is_hugepage_only_range(addr, len)		\
+	 (REGION_NUMBER(addr) == REGION_HPAGE &&	\
+	  REGION_NUMBER((addr)+(len)) == REGION_HPAGE)
+extern unsigned int hpage_shift;
+#endif
 
 static __inline__ int
 get_order (unsigned long size)
 {
-	double d = size - 1;
+	long double d = size - 1;
 	long order;
-                
-	__asm__ ("getf.exp %0=%1" : "=r"(order) : "f"(d));
+
+	order = ia64_getf_exp(d);
 	order = order - PAGE_SHIFT - 0xffff + 1;
 	if (order < 0)
 		order = 0;
@@ -142,8 +157,51 @@ get_order (unsigned long size)
 }
 
 # endif /* __KERNEL__ */
-#endif /* !ASSEMBLY */
+#endif /* !__ASSEMBLY__ */
 
-#define PAGE_OFFSET		0xe000000000000000
+#ifdef STRICT_MM_TYPECHECKS
+  /*
+   * These are used to make use of C type-checking..
+   */
+  typedef struct { unsigned long pte; } pte_t;
+  typedef struct { unsigned long pmd; } pmd_t;
+  typedef struct { unsigned long pgd; } pgd_t;
+  typedef struct { unsigned long pgprot; } pgprot_t;
+
+# define pte_val(x)	((x).pte)
+# define pmd_val(x)	((x).pmd)
+# define pgd_val(x)	((x).pgd)
+# define pgprot_val(x)	((x).pgprot)
+
+# define __pte(x)	((pte_t) { (x) } )
+# define __pgprot(x)	((pgprot_t) { (x) } )
+
+#else /* !STRICT_MM_TYPECHECKS */
+  /*
+   * .. while these make it easier on the compiler
+   */
+# ifndef __ASSEMBLY__
+    typedef unsigned long pte_t;
+    typedef unsigned long pmd_t;
+    typedef unsigned long pgd_t;
+    typedef unsigned long pgprot_t;
+# endif
+
+# define pte_val(x)	(x)
+# define pmd_val(x)	(x)
+# define pgd_val(x)	(x)
+# define pgprot_val(x)	(x)
+
+# define __pte(x)	(x)
+# define __pgd(x)	(x)
+# define __pgprot(x)	(x)
+#endif /* !STRICT_MM_TYPECHECKS */
+
+#define PAGE_OFFSET			__IA64_UL_CONST(0xe000000000000000)
+
+#define VM_DATA_DEFAULT_FLAGS		(VM_READ | VM_WRITE |					\
+					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC |		\
+					 (((current->personality & READ_IMPLIES_EXEC) != 0)	\
+					  ? VM_EXEC : 0))
 
 #endif /* _ASM_IA64_PAGE_H */

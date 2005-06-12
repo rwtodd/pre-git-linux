@@ -9,11 +9,11 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
-#include <linux/locks.h>
+#include <linux/pagemap.h>
 #include <linux/smp_lock.h>
 
 #include <linux/coda.h>
@@ -26,30 +26,30 @@ static int coda_symlink_filler(struct file *file, struct page *page)
 {
 	struct inode *inode = page->mapping->host;
 	int error;
-	struct coda_inode_info *cnp;
+	struct coda_inode_info *cii;
 	unsigned int len = PAGE_SIZE;
 	char *p = kmap(page);
 
 	lock_kernel();
-        cnp = ITOC(inode);
+	cii = ITOC(inode);
 	coda_vfs_stat.follow_link++;
 
-	error = venus_readlink(inode->i_sb, &(cnp->c_fid), p, &len);
+	error = venus_readlink(inode->i_sb, &cii->c_fid, p, &len);
 	unlock_kernel();
 	if (error)
 		goto fail;
 	SetPageUptodate(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
 
 fail:
 	SetPageError(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return error;
 }
 
 struct address_space_operations coda_symlink_aops = {
-	readpage:	coda_symlink_filler
+	.readpage	= coda_symlink_filler,
 };

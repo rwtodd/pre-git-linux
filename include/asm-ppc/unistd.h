@@ -4,7 +4,7 @@
 /*
  * This file contains the system call numbers.
  */
-
+#define __NR_restart_syscall	  0
 #define __NR_exit		  1
 #define __NR_fork		  2
 #define __NR_read		  3
@@ -183,8 +183,8 @@
 #define __NR_rt_sigtimedwait	176
 #define __NR_rt_sigqueueinfo	177
 #define __NR_rt_sigsuspend	178
-#define __NR_pread		179
-#define __NR_pwrite		180
+#define __NR_pread64		179
+#define __NR_pwrite64		180
 #define __NR_chown		181
 #define __NR_getcwd		182
 #define __NR_capget		183
@@ -195,6 +195,7 @@
 #define __NR_putpmsg		188	/* some people actually want streams */
 #define __NR_vfork		189
 #define __NR_ugetrlimit		190	/* SuS compliant getrlimit */
+#define __NR_readahead		191
 #define __NR_mmap2		192
 #define __NR_truncate64		193
 #define __NR_ftruncate64	194
@@ -206,180 +207,205 @@
 #define __NR_pciconfig_iobase	200
 #define __NR_multiplexer	201
 #define __NR_getdents64		202
+#define __NR_pivot_root		203
+#define __NR_fcntl64		204
+#define __NR_madvise		205
+#define __NR_mincore		206
+#define __NR_gettid		207
+#define __NR_tkill		208
+#define __NR_setxattr		209
+#define __NR_lsetxattr		210
+#define __NR_fsetxattr		211
+#define __NR_getxattr		212
+#define __NR_lgetxattr		213
+#define __NR_fgetxattr		214
+#define __NR_listxattr		215
+#define __NR_llistxattr		216
+#define __NR_flistxattr		217
+#define __NR_removexattr	218
+#define __NR_lremovexattr	219
+#define __NR_fremovexattr	220
+#define __NR_futex		221
+#define __NR_sched_setaffinity	222
+#define __NR_sched_getaffinity	223
+/* 224 currently unused */
+#define __NR_tuxcall		225
+#define __NR_sendfile64		226
+#define __NR_io_setup		227
+#define __NR_io_destroy		228
+#define __NR_io_getevents	229
+#define __NR_io_submit		230
+#define __NR_io_cancel		231
+#define __NR_set_tid_address	232
+#define __NR_fadvise64		233
+#define __NR_exit_group		234
+#define __NR_lookup_dcookie	235
+#define __NR_epoll_create	236
+#define __NR_epoll_ctl		237
+#define __NR_epoll_wait		238
+#define __NR_remap_file_pages	239
+#define __NR_timer_create	240
+#define __NR_timer_settime	241
+#define __NR_timer_gettime	242
+#define __NR_timer_getoverrun	243
+#define __NR_timer_delete	244
+#define __NR_clock_settime	245
+#define __NR_clock_gettime	246
+#define __NR_clock_getres	247
+#define __NR_clock_nanosleep	248
+#define __NR_swapcontext	249
+#define __NR_tgkill		250
+#define __NR_utimes		251
+#define __NR_statfs64		252
+#define __NR_fstatfs64		253
+#define __NR_fadvise64_64	254
+#define __NR_rtas		255
+#define __NR_sys_debug_setcontext 256
+/* Number 257 is reserved for vserver */
+/* Number 258 is reserved for new sys_remap_file_pages */
+/* Number 259 is reserved for new sys_mbind */
+/* Number 260 is reserved for new sys_get_mempolicy */
+/* Number 261 is reserved for new sys_set_mempolicy */
+#define __NR_mq_open		262
+#define __NR_mq_unlink		263
+#define __NR_mq_timedsend	264
+#define __NR_mq_timedreceive	265
+#define __NR_mq_notify		266
+#define __NR_mq_getsetattr	267
+#define __NR_kexec_load		268
+#define __NR_add_key		269
+#define __NR_request_key	270
+#define __NR_keyctl		271
+
+#define __NR_syscalls		272
 
 #define __NR(n)	#n
 
+/* On powerpc a system call basically clobbers the same registers like a
+ * function call, with the exception of LR (which is needed for the
+ * "sc; bnslr" sequence) and CR (where only CR0.SO is clobbered to signal
+ * an error return status).
+ */
 
-#define __syscall_return(type) \
-	return (__sc_err & 0x10000000 ? errno = __sc_ret, __sc_ret = -1 : 0), \
-	       (type) __sc_ret
+#define __syscall_nr(nr, type, name, args...)				\
+	unsigned long __sc_ret, __sc_err;				\
+	{								\
+		register unsigned long __sc_0  __asm__ ("r0");		\
+		register unsigned long __sc_3  __asm__ ("r3");		\
+		register unsigned long __sc_4  __asm__ ("r4");		\
+		register unsigned long __sc_5  __asm__ ("r5");		\
+		register unsigned long __sc_6  __asm__ ("r6");		\
+		register unsigned long __sc_7  __asm__ ("r7");		\
+									\
+		__sc_loadargs_##nr(name, args);				\
+		__asm__ __volatile__					\
+			("sc           \n\t"				\
+			 "mfcr %0      "				\
+			: "=&r" (__sc_0),				\
+			  "=&r" (__sc_3),  "=&r" (__sc_4),		\
+			  "=&r" (__sc_5),  "=&r" (__sc_6),		\
+			  "=&r" (__sc_7)				\
+			: __sc_asm_input_##nr				\
+			: "cr0", "ctr", "memory",			\
+			  "r8", "r9", "r10","r11", "r12");		\
+		__sc_ret = __sc_3;					\
+		__sc_err = __sc_0;					\
+	}								\
+	if (__sc_err & 0x10000000)					\
+	{								\
+		errno = __sc_ret;					\
+		__sc_ret = -1;						\
+	}								\
+	return (type) __sc_ret
 
-#define __syscall_clobbers \
-	"r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12"
+#define __sc_loadargs_0(name, dummy...)					\
+	__sc_0 = __NR_##name
+#define __sc_loadargs_1(name, arg1)					\
+	__sc_loadargs_0(name);						\
+	__sc_3 = (unsigned long) (arg1)
+#define __sc_loadargs_2(name, arg1, arg2)				\
+	__sc_loadargs_1(name, arg1);					\
+	__sc_4 = (unsigned long) (arg2)
+#define __sc_loadargs_3(name, arg1, arg2, arg3)				\
+	__sc_loadargs_2(name, arg1, arg2);				\
+	__sc_5 = (unsigned long) (arg3)
+#define __sc_loadargs_4(name, arg1, arg2, arg3, arg4)			\
+	__sc_loadargs_3(name, arg1, arg2, arg3);			\
+	__sc_6 = (unsigned long) (arg4)
+#define __sc_loadargs_5(name, arg1, arg2, arg3, arg4, arg5)		\
+	__sc_loadargs_4(name, arg1, arg2, arg3, arg4);			\
+	__sc_7 = (unsigned long) (arg5)
+
+#define __sc_asm_input_0 "0" (__sc_0)
+#define __sc_asm_input_1 __sc_asm_input_0, "1" (__sc_3)
+#define __sc_asm_input_2 __sc_asm_input_1, "2" (__sc_4)
+#define __sc_asm_input_3 __sc_asm_input_2, "3" (__sc_5)
+#define __sc_asm_input_4 __sc_asm_input_3, "4" (__sc_6)
+#define __sc_asm_input_5 __sc_asm_input_4, "5" (__sc_7)
 
 #define _syscall0(type,name)						\
 type name(void)								\
 {									\
-	unsigned long __sc_ret, __sc_err;				\
-	{								\
-		register unsigned long __sc_0 __asm__ ("r0");		\
-		register unsigned long __sc_3 __asm__ ("r3");		\
-									\
-		__sc_0 = __NR_##name;					\
-		__asm__ __volatile__					\
-			("sc           \n\t"				\
-			 "mfcr %1      "				\
-			: "=&r" (__sc_3), "=&r" (__sc_0)		\
-			: "0"   (__sc_3), "1"   (__sc_0)		\
-			: __syscall_clobbers);				\
-		__sc_ret = __sc_3;					\
-		__sc_err = __sc_0;					\
-	}								\
-	__syscall_return (type);					\
+	__syscall_nr(0, type, name);					\
 }
 
 #define _syscall1(type,name,type1,arg1)					\
 type name(type1 arg1)							\
 {									\
-	unsigned long __sc_ret, __sc_err;				\
-	{								\
-		register unsigned long __sc_0 __asm__ ("r0");		\
-		register unsigned long __sc_3 __asm__ ("r3");		\
-									\
-		__sc_3 = (unsigned long) (arg1);			\
-		__sc_0 = __NR_##name;					\
-		__asm__ __volatile__					\
-			("sc           \n\t"				\
-			 "mfcr %1      "				\
-			: "=&r" (__sc_3), "=&r" (__sc_0)		\
-			: "0"   (__sc_3), "1"   (__sc_0)		\
-			: __syscall_clobbers);				\
-		__sc_ret = __sc_3;					\
-		__sc_err = __sc_0;					\
-	}								\
-	__syscall_return (type);					\
+	__syscall_nr(1, type, name, arg1);				\
 }
 
 #define _syscall2(type,name,type1,arg1,type2,arg2)			\
 type name(type1 arg1, type2 arg2)					\
 {									\
-	unsigned long __sc_ret, __sc_err;				\
-	{								\
-		register unsigned long __sc_0 __asm__ ("r0");		\
-		register unsigned long __sc_3 __asm__ ("r3");		\
-		register unsigned long __sc_4 __asm__ ("r4");		\
-									\
-		__sc_3 = (unsigned long) (arg1);			\
-		__sc_4 = (unsigned long) (arg2);			\
-		__sc_0 = __NR_##name;					\
-		__asm__ __volatile__					\
-			("sc           \n\t"				\
-			 "mfcr %1      "				\
-			: "=&r" (__sc_3), "=&r" (__sc_0)		\
-			: "0"   (__sc_3), "1"   (__sc_0),		\
-			  "r"   (__sc_4)				\
-			: __syscall_clobbers);				\
-		__sc_ret = __sc_3;					\
-		__sc_err = __sc_0;					\
-	}								\
-	__syscall_return (type);					\
+	__syscall_nr(2, type, name, arg1, arg2);			\
 }
 
 #define _syscall3(type,name,type1,arg1,type2,arg2,type3,arg3)		\
 type name(type1 arg1, type2 arg2, type3 arg3)				\
 {									\
-	unsigned long __sc_ret, __sc_err;				\
-	{								\
-		register unsigned long __sc_0 __asm__ ("r0");		\
-		register unsigned long __sc_3 __asm__ ("r3");		\
-		register unsigned long __sc_4 __asm__ ("r4");		\
-		register unsigned long __sc_5 __asm__ ("r5");		\
-									\
-		__sc_3 = (unsigned long) (arg1);			\
-		__sc_4 = (unsigned long) (arg2);			\
-		__sc_5 = (unsigned long) (arg3);			\
-		__sc_0 = __NR_##name;					\
-		__asm__ __volatile__					\
-			("sc           \n\t"				\
-			 "mfcr %1      "				\
-			: "=&r" (__sc_3), "=&r" (__sc_0)		\
-			: "0"   (__sc_3), "1"   (__sc_0),		\
-			  "r"   (__sc_4),				\
-			  "r"   (__sc_5)				\
-			: __syscall_clobbers);				\
-		__sc_ret = __sc_3;					\
-		__sc_err = __sc_0;					\
-	}								\
-	__syscall_return (type);					\
+	__syscall_nr(3, type, name, arg1, arg2, arg3);			\
 }
 
 #define _syscall4(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4) \
 type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4)		\
 {									\
-	unsigned long __sc_ret, __sc_err;				\
-	{								\
-		register unsigned long __sc_0 __asm__ ("r0");		\
-		register unsigned long __sc_3 __asm__ ("r3");		\
-		register unsigned long __sc_4 __asm__ ("r4");		\
-		register unsigned long __sc_5 __asm__ ("r5");		\
-		register unsigned long __sc_6 __asm__ ("r6");		\
-									\
-		__sc_3 = (unsigned long) (arg1);			\
-		__sc_4 = (unsigned long) (arg2);			\
-		__sc_5 = (unsigned long) (arg3);			\
-		__sc_6 = (unsigned long) (arg4);			\
-		__sc_0 = __NR_##name;					\
-		__asm__ __volatile__					\
-			("sc           \n\t"				\
-			 "mfcr %1      "				\
-			: "=&r" (__sc_3), "=&r" (__sc_0)		\
-			: "0"   (__sc_3), "1"   (__sc_0),		\
-			  "r"   (__sc_4),				\
-			  "r"   (__sc_5),				\
-			  "r"   (__sc_6)				\
-			: __syscall_clobbers);				\
-		__sc_ret = __sc_3;					\
-		__sc_err = __sc_0;					\
-	}								\
-	__syscall_return (type);					\
+	__syscall_nr(4, type, name, arg1, arg2, arg3, arg4);		\
 }
 
 #define _syscall5(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4,type5,arg5) \
 type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
 {									\
-	unsigned long __sc_ret, __sc_err;				\
-	{								\
-		register unsigned long __sc_0 __asm__ ("r0");		\
-		register unsigned long __sc_3 __asm__ ("r3");		\
-		register unsigned long __sc_4 __asm__ ("r4");		\
-		register unsigned long __sc_5 __asm__ ("r5");		\
-		register unsigned long __sc_6 __asm__ ("r6");		\
-		register unsigned long __sc_7 __asm__ ("r7");		\
-									\
-		__sc_3 = (unsigned long) (arg1);			\
-		__sc_4 = (unsigned long) (arg2);			\
-		__sc_5 = (unsigned long) (arg3);			\
-		__sc_6 = (unsigned long) (arg4);			\
-		__sc_7 = (unsigned long) (arg5);			\
-		__sc_0 = __NR_##name;					\
-		__asm__ __volatile__					\
-			("sc           \n\t"				\
-			 "mfcr %1      "				\
-			: "=&r" (__sc_3), "=&r" (__sc_0)		\
-			: "0"   (__sc_3), "1"   (__sc_0),		\
-			  "r"   (__sc_4),				\
-			  "r"   (__sc_5),				\
-			  "r"   (__sc_6),				\
-			  "r"   (__sc_7)				\
-			: __syscall_clobbers);				\
-		__sc_ret = __sc_3;					\
-		__sc_err = __sc_0;					\
-	}								\
-	__syscall_return (type);					\
+	__syscall_nr(5, type, name, arg1, arg2, arg3, arg4, arg5);	\
 }
 
+#ifdef __KERNEL__
 
-#ifdef __KERNEL_SYSCALLS__
+#define __NR__exit __NR_exit
+#define NR_syscalls	__NR_syscalls
+
+#define __ARCH_WANT_IPC_PARSE_VERSION
+#define __ARCH_WANT_OLD_READDIR
+#define __ARCH_WANT_OLD_STAT
+#define __ARCH_WANT_STAT64
+#define __ARCH_WANT_SYS_ALARM
+#define __ARCH_WANT_SYS_GETHOSTNAME
+#define __ARCH_WANT_SYS_PAUSE
+#define __ARCH_WANT_SYS_SGETMASK
+#define __ARCH_WANT_SYS_SIGNAL
+#define __ARCH_WANT_SYS_TIME
+#define __ARCH_WANT_SYS_UTIME
+#define __ARCH_WANT_SYS_WAITPID
+#define __ARCH_WANT_SYS_SOCKETCALL
+#define __ARCH_WANT_SYS_FADVISE64
+#define __ARCH_WANT_SYS_GETPGRP
+#define __ARCH_WANT_SYS_LLSEEK
+#define __ARCH_WANT_SYS_NICE
+#define __ARCH_WANT_SYS_OLD_GETRLIMIT
+#define __ARCH_WANT_SYS_OLDUMOUNT
+#define __ARCH_WANT_SYS_SIGPENDING
+#define __ARCH_WANT_SYS_SIGPROCMASK
+#define __ARCH_WANT_SYS_RT_SIGACTION
 
 /*
  * Forking from kernel space will result in the child getting a new,
@@ -389,29 +415,62 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
  * the child.
  */
 
+#ifdef __KERNEL_SYSCALLS__
+
+#include <linux/compiler.h>
+#include <linux/types.h>
+
 /*
  * System call prototypes.
  */
-#define __NR__exit __NR_exit
-static inline _syscall0(int,pause)
-static inline _syscall0(int,sync)
-static inline _syscall0(pid_t,setsid)
-static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
-static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
-static inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
-static inline _syscall1(int,dup,int,fd)
-static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
-static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
-static inline _syscall1(int,close,int,fd)
-static inline _syscall1(int,_exit,int,exitcode)
-static inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-static inline _syscall1(int,delete_module,const char *,name)
+extern pid_t setsid(void);
+extern int write(int fd, const char *buf, off_t count);
+extern int read(int fd, char *buf, off_t count);
+extern off_t lseek(int fd, off_t offset, int count);
+extern int dup(int fd);
+extern int execve(const char *file, char **argv, char **envp);
+extern int open(const char *file, int flag, int mode);
+extern int close(int fd);
+extern pid_t waitpid(pid_t pid, int *wait_stat, int options);
 
-static inline pid_t wait(int * wait_stat) 
-{
-	return waitpid(-1,wait_stat,0);
-}
+unsigned long sys_mmap(unsigned long addr, size_t len,
+			unsigned long prot, unsigned long flags,
+			unsigned long fd, off_t offset);
+unsigned long sys_mmap2(unsigned long addr, size_t len,
+			unsigned long prot, unsigned long flags,
+			unsigned long fd, unsigned long pgoff);
+struct pt_regs;
+int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
+		unsigned long a3, unsigned long a4, unsigned long a5,
+		struct pt_regs *regs);
+int sys_clone(unsigned long clone_flags, unsigned long usp,
+	      int __user *parent_tidp, void __user *child_threadptr,
+	      int __user *child_tidp, int p6,
+	      struct pt_regs *regs);
+int sys_fork(int p1, int p2, int p3, int p4, int p5, int p6,
+		struct pt_regs *regs);
+int sys_vfork(int p1, int p2, int p3, int p4, int p5, int p6,
+		struct pt_regs *regs);
+int sys_pipe(int __user *fildes);
+int sys_ptrace(long request, long pid, long addr, long data);
+struct sigaction;
+long sys_rt_sigaction(int sig,
+		      const struct sigaction __user *act,
+		      struct sigaction __user *oact,
+		      size_t sigsetsize);
 
 #endif /* __KERNEL_SYSCALLS__ */
+
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
+ * but it doesn't work on all toolchains, so we just do it by hand
+ */
+#ifndef cond_syscall
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
+#endif
+
+#endif /* __KERNEL__ */
 
 #endif /* _ASM_PPC_UNISTD_H_ */

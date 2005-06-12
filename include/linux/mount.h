@@ -12,24 +12,30 @@
 #define _LINUX_MOUNT_H
 #ifdef __KERNEL__
 
-#define MNT_VISIBLE	1
+#include <linux/list.h>
+#include <linux/spinlock.h>
+#include <asm/atomic.h>
+
+#define MNT_NOSUID	1
+#define MNT_NODEV	2
+#define MNT_NOEXEC	4
 
 struct vfsmount
 {
+	struct list_head mnt_hash;
+	struct vfsmount *mnt_parent;	/* fs we are mounted on */
 	struct dentry *mnt_mountpoint;	/* dentry of mountpoint */
 	struct dentry *mnt_root;	/* root of the mounted tree */
-	struct vfsmount *mnt_parent;	/* fs we are mounted on */
-	struct list_head mnt_instances;	/* other vfsmounts of the same fs */
-	struct list_head mnt_clash;	/* those who are mounted on (other */
-					/* instances) of the same dentry */
 	struct super_block *mnt_sb;	/* pointer to superblock */
 	struct list_head mnt_mounts;	/* list of children, anchored here */
 	struct list_head mnt_child;	/* and going through their mnt_child */
 	atomic_t mnt_count;
 	int mnt_flags;
+	int mnt_expiry_mark;		/* true if marked for expiry */
 	char *mnt_devname;		/* Name of device e.g. /dev/dsk/hda1 */
 	struct list_head mnt_list;
-	uid_t mnt_owner;
+	struct list_head mnt_fslink;	/* link in fs-specific expiry list */
+	struct namespace *mnt_namespace; /* containing namespace */
 };
 
 static inline struct vfsmount *mntget(struct vfsmount *mnt)
@@ -39,13 +45,37 @@ static inline struct vfsmount *mntget(struct vfsmount *mnt)
 	return mnt;
 }
 
-static inline void mntput(struct vfsmount *mnt)
+extern void __mntput(struct vfsmount *mnt);
+
+static inline void _mntput(struct vfsmount *mnt)
 {
 	if (mnt) {
 		if (atomic_dec_and_test(&mnt->mnt_count))
-			BUG();
+			__mntput(mnt);
 	}
 }
+
+static inline void mntput(struct vfsmount *mnt)
+{
+	if (mnt) {
+		mnt->mnt_expiry_mark = 0;
+		_mntput(mnt);
+	}
+}
+
+extern void free_vfsmnt(struct vfsmount *mnt);
+extern struct vfsmount *alloc_vfsmnt(const char *name);
+extern struct vfsmount *do_kern_mount(const char *fstype, int flags,
+				      const char *name, void *data);
+
+struct nameidata;
+
+extern int do_add_mount(struct vfsmount *newmnt, struct nameidata *nd,
+			int mnt_flags, struct list_head *fslist);
+
+extern void mark_mounts_for_expiry(struct list_head *mounts);
+
+extern spinlock_t vfsmount_lock;
 
 #endif
 #endif /* _LINUX_MOUNT_H */

@@ -286,8 +286,8 @@
 #define __NR_pciconfig_write		346
 #define __NR_query_module		347
 #define __NR_prctl			348
-#define __NR_pread			349
-#define __NR_pwrite			350
+#define __NR_pread64			349
+#define __NR_pwrite64			350
 #define __NR_rt_sigreturn		351
 #define __NR_rt_sigaction		352
 #define __NR_rt_sigprocmask		353
@@ -315,6 +315,67 @@
 #define __NR_mincore			375
 #define __NR_pciconfig_iobase		376
 #define __NR_getdents64			377
+#define __NR_gettid			378
+#define __NR_readahead			379
+/* 380 is unused */
+#define __NR_tkill			381
+#define __NR_setxattr			382
+#define __NR_lsetxattr			383
+#define __NR_fsetxattr			384
+#define __NR_getxattr			385
+#define __NR_lgetxattr			386
+#define __NR_fgetxattr			387
+#define __NR_listxattr			388
+#define __NR_llistxattr			389
+#define __NR_flistxattr			390
+#define __NR_removexattr		391
+#define __NR_lremovexattr		392
+#define __NR_fremovexattr		393
+#define __NR_futex			394
+#define __NR_sched_setaffinity		395     
+#define __NR_sched_getaffinity		396
+#define __NR_tuxcall			397
+#define __NR_io_setup			398
+#define __NR_io_destroy			399
+#define __NR_io_getevents		400
+#define __NR_io_submit			401
+#define __NR_io_cancel			402
+#define __NR_exit_group			405
+#define __NR_lookup_dcookie		406
+#define __NR_sys_epoll_create		407
+#define __NR_sys_epoll_ctl		408
+#define __NR_sys_epoll_wait		409
+#define __NR_remap_file_pages		410
+#define __NR_set_tid_address		411
+#define __NR_restart_syscall		412
+#define __NR_fadvise64			413
+#define __NR_timer_create		414
+#define __NR_timer_settime		415
+#define __NR_timer_gettime		416
+#define __NR_timer_getoverrun		417
+#define __NR_timer_delete		418
+#define __NR_clock_settime		419
+#define __NR_clock_gettime		420
+#define __NR_clock_getres		421
+#define __NR_clock_nanosleep		422
+#define __NR_semtimedop			423
+#define __NR_tgkill			424
+#define __NR_stat64			425
+#define __NR_lstat64			426
+#define __NR_fstat64			427
+#define __NR_vserver			428
+#define __NR_mbind			429
+#define __NR_get_mempolicy		430
+#define __NR_set_mempolicy		431
+#define __NR_mq_open			432
+#define __NR_mq_unlink			433
+#define __NR_mq_timedsend		434
+#define __NR_mq_timedreceive		435
+#define __NR_mq_notify			436
+#define __NR_mq_getsetattr		437
+#define __NR_waitid			438
+
+#define NR_SYSCALLS			439
 
 #if defined(__GNUC__)
 
@@ -498,24 +559,33 @@ type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5, type6 arg6)\
 
 #endif /* __LIBRARY__ && __GNUC__ */
 
+#ifdef __KERNEL__
+#define __ARCH_WANT_IPC_PARSE_VERSION
+#define __ARCH_WANT_OLD_READDIR
+#define __ARCH_WANT_STAT64
+#define __ARCH_WANT_SYS_GETHOSTNAME
+#define __ARCH_WANT_SYS_SOCKETCALL
+#define __ARCH_WANT_SYS_FADVISE64
+#define __ARCH_WANT_SYS_GETPGRP
+#define __ARCH_WANT_SYS_OLD_GETRLIMIT
+#define __ARCH_WANT_SYS_OLDUMOUNT
+#define __ARCH_WANT_SYS_SIGPENDING
+#endif
+
 #ifdef __KERNEL_SYSCALLS__
 
+#include <linux/compiler.h>
+#include <linux/types.h>
 #include <linux/string.h>
 #include <linux/signal.h>
+#include <linux/syscalls.h>
+#include <asm/ptrace.h>
 
-extern void sys_idle(void);
-static inline void idle(void)
-{
-	sys_idle();
-}
-
-extern long sys_open(const char *, int, int);
 static inline long open(const char * name, int mode, int flags)
 {
 	return sys_open(name, mode, flags);
 }
 
-extern long sys_dup(int);
 static inline long dup(int fd)
 {
 	return sys_dup(fd);
@@ -526,69 +596,61 @@ static inline long close(int fd)
 	return sys_close(fd);
 }
 
-extern off_t sys_lseek(int, off_t, int);
-static inline off_t lseek(int fd, off_t off, int whense)
+static inline off_t lseek(int fd, off_t off, int whence)
 {
-	return sys_lseek(fd, off, whense);
+	return sys_lseek(fd, off, whence);
 }
 
-extern long sys_exit(int);
-static inline long _exit(int value)
+static inline void _exit(int value)
 {
-	return sys_exit(value);
+	sys_exit(value);
 }
 
 #define exit(x) _exit(x)
 
-extern long sys_write(int, const char *, int);
-static inline long write(int fd, const char * buf, int nr)
+static inline long write(int fd, const char * buf, size_t nr)
 {
 	return sys_write(fd, buf, nr);
 }
 
-extern long sys_read(int, char *, int);
-static inline long read(int fd, char * buf, int nr)
+static inline long read(int fd, char * buf, size_t nr)
 {
 	return sys_read(fd, buf, nr);
 }
 
-extern int __kernel_execve(char *, char **, char **, struct pt_regs *);
-static inline long execve(char * file, char ** argvp, char ** envp)
-{
-	struct pt_regs regs;
-	memset(&regs, 0, sizeof(regs));
-	return __kernel_execve(file, argvp, envp, &regs);
-}
+extern int execve(char *, char **, char **);
 
-extern long sys_setsid(void);
 static inline long setsid(void)
 {
 	return sys_setsid();
 }
 
-extern long sys_sync(void);
-static inline long sync(void)
-{
-	return sys_sync();
-}
-
-extern long sys_wait4(int, int *, int, struct rusage *);
 static inline pid_t waitpid(int pid, int * wait_stat, int flags)
 {
 	return sys_wait4(pid, wait_stat, flags, NULL);
 }
 
-static inline pid_t wait(int * wait_stat)
-{
-	return waitpid(-1,wait_stat,0);
-}
+asmlinkage int sys_execve(char *ufilename, char **argv, char **envp,
+			unsigned long a3, unsigned long a4, unsigned long a5,
+			struct pt_regs regs);
+asmlinkage long sys_rt_sigaction(int sig,
+				const struct sigaction __user *act,
+				struct sigaction __user *oact,
+				size_t sigsetsize,
+				void *restorer);
 
-extern long sys_delete_module(const char *name);
-static inline long delete_module(const char *name)
-{
-	return sys_delete_module(name);
-}
+#endif /* __KERNEL_SYSCALLS__ */
 
-#endif
+/* "Conditional" syscalls.  What we want is
+
+	__attribute__((weak,alias("sys_ni_syscall")))
+
+   but that raises the problem of what type to give the symbol.  If we use
+   a prototype, it'll conflict with the definition given in this file and
+   others.  If we use __typeof, we discover that not all symbols actually
+   have declarations.  If we use no prototype, then we get warnings from
+   -Wstrict-prototypes.  Ho hum.  */
+
+#define cond_syscall(x)  asm(".weak\t" #x "\n" #x " = sys_ni_syscall");
 
 #endif /* _ALPHA_UNISTD_H */

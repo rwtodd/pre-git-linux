@@ -20,7 +20,9 @@
    of the stack frame of math_emulate() */
 #define SETUP_DATA_AREA(arg)	FPU_info = (struct info *) &arg
 
-#define LDT_DESCRIPTOR(s)	(((struct desc_struct *)current->mm->context.segments)[(s) >> 3])
+/* s is always from a cpu register, and the cpu does bounds checking
+ * during register load --> no further bounds checks needed */
+#define LDT_DESCRIPTOR(s)	(((struct desc_struct *)current->mm->context.ldt)[(s) >> 3])
 #define SEG_D_SIZE(x)		((x).b & (3 << 21))
 #define SEG_G_BIT(x)		((x).b & (1 << 23))
 #define SEG_GRANULARITY(x)	(((x).b & (1 << 23)) ? 4096 : 1)
@@ -78,7 +80,7 @@
 /* A simpler test than verify_area() can probably be done for
    FPU_code_verify_area() because the only possible error is to step
    past the upper boundary of a legal code area. */
-#define	FPU_code_verify_area(z) FPU_verify_area(VERIFY_READ,(void *)FPU_EIP,z)
+#define	FPU_code_verify_area(z) FPU_verify_area(VERIFY_READ,(void __user *)FPU_EIP,z)
 #endif
 
 #define FPU_get_user(x,y)       get_user((x),(y))

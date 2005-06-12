@@ -1,146 +1,194 @@
-BOOKS	:= wanbook.sgml z8530book.sgml mcabook.sgml videobook.sgml \
-	   kernel-api.sgml parportbook.sgml kernel-hacking.sgml \
-	   kernel-locking.sgml via-audio.sgml mousedrivers.sgml sis900.sgml
+###
+# This makefile is used to generate the kernel documentation,
+# primarily based on in-line comments in various source files.
+# See Documentation/kernel-doc-nano-HOWTO.txt for instruction in how
+# to ducument the SRC - and how to read it.
+# To add a new book the only step required is to add the book to the
+# list of DOCBOOKS.
 
-PS	:=	$(patsubst %.sgml, %.ps, $(BOOKS))
-PDF	:=	$(patsubst %.sgml, %.pdf, $(BOOKS))
-HTML    :=      $(patsubst %.sgml, %, $(BOOKS))
-IMG-parportbook := parport-share.fig parport-multi.fig parport-structure.fig
-EPS-parportbook := $(patsubst %.fig, %.eps, $(IMG-parportbook))
-JPG-parportbook := $(patsubst %.fig, %.jpeg, $(IMG-parportbook))
+DOCBOOKS := wanbook.sgml z8530book.sgml mcabook.sgml videobook.sgml \
+	    kernel-hacking.sgml kernel-locking.sgml via-audio.sgml \
+	    deviceiobook.sgml procfs-guide.sgml tulip-user.sgml \
+	    writing_usb_driver.sgml scsidrivers.sgml sis900.sgml \
+	    kernel-api.sgml journal-api.sgml lsm.sgml usb.sgml \
+	    gadget.sgml libata.sgml mtdnand.sgml librs.sgml
 
-$(BOOKS): $(TOPDIR)/scripts/docproc
+###
+# The build process is as follows (targets):
+#              (sgmldocs)
+# file.tmpl --> file.sgml +--> file.ps  (psdocs)
+#                         +--> file.pdf  (pdfdocs)
+#                         +--> DIR=file  (htmldocs)
+#                         +--> man/      (mandocs)
 
-.PHONY:	books ps pdf html clean mrproper
+###
+# The targets that may be used.
+.PHONY:	sgmldocs psdocs pdfdocs htmldocs mandocs installmandocs
 
-books:	$(BOOKS)
+BOOKS := $(addprefix $(obj)/,$(DOCBOOKS))
+sgmldocs: $(BOOKS)
 
-ps:	$(PS)
+PS := $(patsubst %.sgml, %.ps, $(BOOKS))
+psdocs: $(PS)
 
-pdf:	$(PDF)
+PDF := $(patsubst %.sgml, %.pdf, $(BOOKS))
+pdfdocs: $(PDF)
 
-html:	$(HTML)
+HTML := $(patsubst %.sgml, %.html, $(BOOKS))
+htmldocs: $(HTML)
 
-%.eps: %.fig
-	-fig2dev -Leps $< $@
+MAN := $(patsubst %.sgml, %.9, $(BOOKS))
+mandocs: $(MAN)
 
-%.jpeg: %.fig
-	-fig2dev -Ljpeg $< $@
+installmandocs: mandocs
+	$(MAKEMAN) install Documentation/DocBook/man
 
-$(TOPDIR)/scripts/docproc:
-	$(MAKE) -C $(TOPDIR)/scripts docproc
+###
+#External programs used
+KERNELDOC = scripts/kernel-doc
+DOCPROC   = scripts/basic/docproc
+SPLITMAN  = $(PERL) $(srctree)/scripts/split-man
+MAKEMAN   = $(PERL) $(srctree)/scripts/makeman
 
-mousedrivers.sgml: mousedrivers.tmpl
-	$(TOPDIR)/scripts/docgen <$< >$@
+###
+# DOCPROC is used for two purposes:
+# 1) To generate a dependency list for a .tmpl file
+# 2) To preprocess a .tmpl file and call kernel-doc with
+#     appropriate parameters.
+# The following rules are used to generate the .sgml documentation
+# required to generate the final targets. (ps, pdf, html).
+quiet_cmd_docproc = DOCPROC $@
+      cmd_docproc = SRCTREE=$(srctree)/ $(DOCPROC) doc $< >$@
+define rule_docproc
+	set -e;								\
+        $(if $($(quiet)cmd_$(1)),echo '  $($(quiet)cmd_$(1))';) 	\
+        $(cmd_$(1)); 							\
+        ( 								\
+          echo 'cmd_$@ := $(cmd_$(1))'; 				\
+          echo $@: `SRCTREE=$(srctree) $(DOCPROC) depend $<`; 		\
+        ) > $(dir $@).$(notdir $@).cmd
+endef
 
-kernel-hacking.sgml: kernel-hacking.tmpl
-	$(TOPDIR)/scripts/docgen <$< >$@
+%.sgml: %.tmpl FORCE
+	$(call if_changed_rule,docproc)
 
-kernel-locking.sgml: kernel-locking.tmpl
-	$(TOPDIR)/scripts/docgen <$< >$@
+###
+#Read in all saved dependency files 
+cmd_files := $(wildcard $(foreach f,$(BOOKS),$(dir $(f)).$(notdir $(f)).cmd))
 
-wanbook.sgml: wanbook.tmpl $(TOPDIR)/drivers/net/wan/syncppp.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/net/wan/syncppp.c \
-		<wanbook.tmpl >wanbook.sgml
+ifneq ($(cmd_files),)
+  include $(cmd_files)
+endif
 
-z8530book.sgml: z8530book.tmpl $(TOPDIR)/drivers/net/wan/z85230.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/net/wan/z85230.c \
-		<z8530book.tmpl >z8530book.sgml
+###
+# Changes in kernel-doc force a rebuild of all documentation
+$(BOOKS): $(KERNELDOC)
 
-via-audio.sgml: via-audio.tmpl $(TOPDIR)/drivers/sound/via82cxxx_audio.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/sound/via82cxxx_audio.c \
-		<via-audio.tmpl >via-audio.sgml
+###
+# procfs guide uses a .c file as example code.
+# This requires an explicit dependency
+C-procfs-example = procfs_example.sgml
+C-procfs-example2 = $(addprefix $(obj)/,$(C-procfs-example))
+$(obj)/procfs-guide.sgml: $(C-procfs-example2)
 
-sis900.sgml: sis900.tmpl $(TOPDIR)/drivers/net/sis900.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/net/sis900.c \
-		<sis900.tmpl >sis900.sgml
+###
+# Rules to generate postscript, PDF and HTML
+# db2html creates a directory. Generate a html file used for timestamp
 
-mcabook.sgml: mcabook.tmpl $(TOPDIR)/arch/i386/kernel/mca.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/arch/i386/kernel/mca.c \
-		<mcabook.tmpl >mcabook.sgml
-
-videobook.sgml: videobook.tmpl $(TOPDIR)/drivers/media/video/videodev.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/media/video/videodev.c \
-		<videobook.tmpl >videobook.sgml
-
-APISOURCES :=	$(TOPDIR)/drivers/media/video/videodev.c \
-		$(TOPDIR)/arch/i386/kernel/mca.c \
-		$(TOPDIR)/arch/i386/kernel/mtrr.c \
-		$(TOPDIR)/drivers/char/misc.c \
-		$(TOPDIR)/drivers/net/net_init.c \
-		$(TOPDIR)/drivers/net/8390.c \
-		$(TOPDIR)/drivers/char/serial.c \
-		$(TOPDIR)/drivers/pci/pci.c \
-		$(TOPDIR)/drivers/block/ll_rw_blk.c \
-		$(TOPDIR)/drivers/sound/sound_core.c \
-		$(TOPDIR)/drivers/sound/sound_firmware.c \
-		$(TOPDIR)/drivers/net/wan/syncppp.c \
-		$(TOPDIR)/drivers/net/wan/z85230.c \
-		$(TOPDIR)/drivers/usb/usb.c \
-		$(TOPDIR)/fs/locks.c \
-		$(TOPDIR)/fs/devfs/base.c \
-		$(TOPDIR)/kernel/pm.c \
-		$(TOPDIR)/kernel/ksyms.c \
-		$(TOPDIR)/net/netsyms.c
- 
-kernel-api.sgml: kernel-api.tmpl $(APISOURCES)
-	$(TOPDIR)/scripts/docgen $(APISOURCES) \
-		<kernel-api.tmpl >kernel-api.sgml
-
-kernel-api-man: $(APISOURCES)
-	@rm -rf $(TOPDIR)/Documentation/man
-	$(TOPDIR)/scripts/kernel-doc -man $^ | \
-		$(PERL) $(TOPDIR)/scripts/split-man $(TOPDIR)/Documentation/man
-
-parportbook: $(JPG-parportbook)
-parportbook.ps: $(EPS-parportbook)
-parportbook.sgml: parportbook.tmpl $(TOPDIR)/drivers/parport/init.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/parport/init.c <$< >$@
-
-DVI	:=	$(patsubst %.sgml, %.dvi, $(BOOKS))
-AUX	:=	$(patsubst %.sgml, %.aux, $(BOOKS))
-TEX	:=	$(patsubst %.sgml, %.tex, $(BOOKS))
-LOG	:=	$(patsubst %.sgml, %.log, $(BOOKS))
-OUT	:=	$(patsubst %.sgml, %.out, $(BOOKS))
-
-clean:
-	-$(RM) core *~
-	-$(RM) $(BOOKS)
-	-$(RM) $(DVI) $(AUX) $(TEX) $(LOG) $(OUT)
-	-$(RM) $(JPG-parportbook) $(EPS-parportbook)
-
-mrproper: clean
-	-$(RM) $(PS) $(PDF)
-	-$(RM) -r $(HTML)
-	-$(RM) .depend
-	-$(RM) $(TOPDIR)/scripts/mkdep-docbook
-
+quiet_cmd_db2ps = DB2PS   $@
+      cmd_db2ps = db2ps -o $(dir $@) $<
 %.ps : %.sgml
 	@(which db2ps > /dev/null 2>&1) || \
 	 (echo "*** You need to install DocBook stylesheets ***"; \
 	  exit 1)
-	db2ps $<
+	$(call cmd,db2ps)
 
+quiet_cmd_db2pdf = DB2PDF  $@
+      cmd_db2pdf = db2pdf -o $(dir $@) $<
 %.pdf : %.sgml
 	@(which db2pdf > /dev/null 2>&1) || \
 	 (echo "*** You need to install DocBook stylesheets ***"; \
 	  exit 1)
-	db2pdf $<
+	$(call cmd,db2pdf)
 
-%:	%.sgml
+quiet_cmd_db2html = DB2HTML $@
+      cmd_db2html = db2html -o $(patsubst %.html,%,$@) $< &&		      \
+		echo '<a HREF="$(patsubst %.html,%,$(notdir $@))/book1.html"> \
+         Goto $(patsubst %.html,%,$(notdir $@))</a><p>' > $@
+
+%.html:	%.sgml
 	@(which db2html > /dev/null 2>&1) || \
 	 (echo "*** You need to install DocBook stylesheets ***"; \
 	  exit 1)
-	-$(RM) -r $@
-	db2html $<
-	if [ ! -z "$(JPG-$@)" ]; then cp $(JPG-$@) $@; fi
+	@rm -rf $@ $(patsubst %.html,%,$@)
+	$(call cmd,db2html)
+	@if [ ! -z "$(PNG-$(basename $(notdir $@)))" ]; then \
+            cp $(PNG-$(basename $(notdir $@))) $(patsubst %.html,%,$@); fi
 
-#
-# we could have our own dependency generator
-#
-#
-# .depend: $(TOPDIR)/scripts/mkdep-docbook
-#	$(TOPDIR)/scripts/mkdep-docbook $(wildcard *.tmpl) > .depend
+###
+# Rule to generate man files - output is placed in the man subdirectory
 
-include $(TOPDIR)/Rules.make
+%.9:	%.sgml
+ifneq ($(KBUILD_SRC),)
+	$(Q)mkdir -p $(objtree)/Documentation/DocBook/man
+endif
+	$(SPLITMAN) $< $(objtree)/Documentation/DocBook/man "$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)"
+	$(MAKEMAN) convert $(objtree)/Documentation/DocBook/man $<
 
+###
+# Rules to generate postscripts and PNG imgages from .fig format files
+quiet_cmd_fig2eps = FIG2EPS $@
+      cmd_fig2eps = fig2dev -Leps $< $@
+
+%.eps: %.fig
+	@(which fig2dev > /dev/null 2>&1) || \
+	 (echo "*** You need to install transfig ***"; \
+	  exit 1)
+	$(call cmd,fig2eps)
+
+quiet_cmd_fig2png = FIG2PNG $@
+      cmd_fig2png = fig2dev -Lpng $< $@
+
+%.png: %.fig
+	@(which fig2dev > /dev/null 2>&1) || \
+	 (echo "*** You need to install transfig ***"; \
+	  exit 1)
+	$(call cmd,fig2png)
+
+###
+# Rule to convert a .c file to inline SGML documentation
+%.sgml: %.c
+	@echo '  GEN     $@'
+	@(                            \
+	   echo "<programlisting>";   \
+	   expand --tabs=8 < $< |     \
+	   sed -e "s/&/\\&amp;/g"     \
+	       -e "s/</\\&lt;/g"      \
+	       -e "s/>/\\&gt;/g";     \
+	   echo "</programlisting>")  > $@
+
+###
+# Help targets as used by the top-level makefile
+dochelp:
+	@echo  '  Linux kernel internal documentation in different formats:'
+	@echo  '  sgmldocs (SGML), psdocs (Postscript), pdfdocs (PDF)'
+	@echo  '  htmldocs (HTML), mandocs (man pages, use installmandocs to install)'
+
+###
+# Temporary files left by various tools
+clean-files := $(DOCBOOKS) \
+	$(patsubst %.sgml, %.dvi,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.aux,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.tex,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.log,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.out,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.ps,   $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.pdf,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.html, $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.9,    $(DOCBOOKS)) \
+	$(C-procfs-example)
+
+clean-dirs := $(patsubst %.sgml,%,$(DOCBOOKS))
+
+#man put files in man subdir - traverse down
+subdir- := man/

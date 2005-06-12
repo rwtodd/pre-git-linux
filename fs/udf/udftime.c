@@ -32,15 +32,8 @@
  *  http://www.boulder.nist.gov/timefreq/pubs/bulletin/leapsecond.htm
  */
 
-#if defined(__linux__) && defined(__KERNEL__)
 #include <linux/types.h>
 #include <linux/kernel.h>
-#else
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/time.h>
-#endif
-
 #include "udfdecl.h"
 
 #define EPOCH_YEAR 1970
@@ -65,7 +58,7 @@ const unsigned short int __mon_yday[2][13] =
 #define SPD 0x15180 /*3600*24*/
 #define SPY(y,l,s) (SPD * (365*y+l)+s)
 
-time_t year_seconds[MAX_YEAR_SECONDS]= {
+static time_t year_seconds[MAX_YEAR_SECONDS]= {
 /*1970*/ SPY( 0, 0,0), SPY( 1, 0,0), SPY( 2, 0,0), SPY( 3, 1,0), 
 /*1974*/ SPY( 4, 1,0), SPY( 5, 1,0), SPY( 6, 1,0), SPY( 7, 2,0), 
 /*1978*/ SPY( 8, 2,0), SPY( 9, 2,0), SPY(10, 2,0), SPY(11, 3,0), 
@@ -86,25 +79,25 @@ time_t year_seconds[MAX_YEAR_SECONDS]= {
 /*2038*/ SPY(68,17,0)
 };
 
-#ifdef __KERNEL__
 extern struct timezone sys_tz;
-#endif
 
 #define SECS_PER_HOUR	(60 * 60)
 #define SECS_PER_DAY	(SECS_PER_HOUR * 24)
 
 time_t *
-udf_stamp_to_time(time_t *dest, long *dest_usec, timestamp src)
+udf_stamp_to_time(time_t *dest, long *dest_usec, kernel_timestamp src)
 {
 	int yday;
-	Uint8 type = src.typeAndTimezone >> 12;
-	Sint16 offset;
+	uint8_t type = src.typeAndTimezone >> 12;
+	int16_t offset;
 
 	if (type == 1)
 	{
 		offset = src.typeAndTimezone << 4;
 		/* sign extent offset */
 		offset = (offset >> 4);
+		if (offset == -2047) /* unspecified offset */
+			offset = 0;
 	}
 	else
 		offset = 0;
@@ -127,18 +120,13 @@ udf_stamp_to_time(time_t *dest, long *dest_usec, timestamp src)
 }
 
 
-timestamp *
-udf_time_to_stamp(timestamp *dest, time_t tv_sec, long tv_usec)
+kernel_timestamp *
+udf_time_to_stamp(kernel_timestamp *dest, struct timespec ts)
 {
 	long int days, rem, y;
 	const unsigned short int *ip;
-	Sint16 offset;
-#ifndef __KERNEL__
-	struct timeval tv;
-	struct timezone sys_tz;
+	int16_t offset;
 
-	gettimeofday(&tv, &sys_tz);
-#endif
 	offset = -sys_tz.tz_minuteswest;
 
 	if (!dest)
@@ -146,9 +134,9 @@ udf_time_to_stamp(timestamp *dest, time_t tv_sec, long tv_usec)
 
 	dest->typeAndTimezone = 0x1000 | (offset & 0x0FFF);
 
-	tv_sec += offset * 60;
-	days = tv_sec / SECS_PER_DAY;
-	rem = tv_sec % SECS_PER_DAY;
+	ts.tv_sec += offset * 60;
+	days = ts.tv_sec / SECS_PER_DAY;
+	rem = ts.tv_sec % SECS_PER_DAY;
 	dest->hour = rem / SECS_PER_HOUR;
 	rem %= SECS_PER_HOUR;
 	dest->minute = rem / 60;
@@ -176,9 +164,9 @@ udf_time_to_stamp(timestamp *dest, time_t tv_sec, long tv_usec)
 	dest->month = y + 1;
 	dest->day = days + 1;
 
-	dest->centiseconds = tv_usec / 10000;
-	dest->hundredsOfMicroseconds = (tv_usec - dest->centiseconds * 10000) / 100;
-	dest->microseconds = (tv_usec - dest->centiseconds * 10000 -
+	dest->centiseconds = ts.tv_nsec / 10000000;
+	dest->hundredsOfMicroseconds = (ts.tv_nsec / 1000 - dest->centiseconds * 10000) / 100;
+	dest->microseconds = (ts.tv_nsec / 1000 - dest->centiseconds * 10000 -
 		dest->hundredsOfMicroseconds * 100);
 	return dest;
 }

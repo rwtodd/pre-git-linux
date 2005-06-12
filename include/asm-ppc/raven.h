@@ -1,5 +1,5 @@
 /*
- *  asm-ppc/raven.h -- Raven MPIC chip.
+ *  include/asm-ppc/raven.h -- Raven MPIC chip.
  *
  *  Copyright (C) 1998 Johnnie Peters
  *
@@ -31,5 +31,5 @@
 extern struct hw_interrupt_type raven_pic;
 
 extern int raven_init(void);
-#endif _ASMPPC_RAVEN_H
+#endif /* _ASMPPC_RAVEN_H */
 #endif /* __KERNEL__ */

@@ -21,7 +21,8 @@ struct vm_area_struct;
 struct linux_hose_info;
 struct pci_dev;
 struct pci_ops;
-struct pci_controler;
+struct pci_controller;
+struct _alpha_agp_info;
 
 struct alpha_machine_vector
 {
@@ -33,39 +34,43 @@ struct alpha_machine_vector
 
 	int nr_irqs;
 	int rtc_port;
-	int max_asn;
-	unsigned long max_dma_address;
+	unsigned int max_asn;
+	unsigned long max_isa_dma_address;
 	unsigned long irq_probe_mask;
 	unsigned long iack_sc;
 	unsigned long min_io_address;
 	unsigned long min_mem_address;
+	unsigned long pci_dac_offset;
 
-	void (*mv_pci_tbi)(struct pci_controler *hose,
+	void (*mv_pci_tbi)(struct pci_controller *hose,
 			   dma_addr_t start, dma_addr_t end);
 
-	unsigned int (*mv_inb)(unsigned long);
-	unsigned int (*mv_inw)(unsigned long);
-	unsigned int (*mv_inl)(unsigned long);
+	unsigned int (*mv_ioread8)(void __iomem *);
+	unsigned int (*mv_ioread16)(void __iomem *);
+	unsigned int (*mv_ioread32)(void __iomem *);
 
-	void (*mv_outb)(unsigned char, unsigned long);
-	void (*mv_outw)(unsigned short, unsigned long);
-	void (*mv_outl)(unsigned int, unsigned long);
-	
-	unsigned long (*mv_readb)(unsigned long);
-	unsigned long (*mv_readw)(unsigned long);
-	unsigned long (*mv_readl)(unsigned long);
-	unsigned long (*mv_readq)(unsigned long);
+	void (*mv_iowrite8)(u8, void __iomem *);
+	void (*mv_iowrite16)(u16, void __iomem *);
+	void (*mv_iowrite32)(u32, void __iomem *);
 
-	void (*mv_writeb)(unsigned char, unsigned long);
-	void (*mv_writew)(unsigned short, unsigned long);
-	void (*mv_writel)(unsigned int, unsigned long);
-	void (*mv_writeq)(unsigned long, unsigned long);
+	u8 (*mv_readb)(const volatile void __iomem *);
+	u16 (*mv_readw)(const volatile void __iomem *);
+	u32 (*mv_readl)(const volatile void __iomem *);
+	u64 (*mv_readq)(const volatile void __iomem *);
 
-	unsigned long (*mv_ioremap)(unsigned long);
+	void (*mv_writeb)(u8, volatile void __iomem *);
+	void (*mv_writew)(u16, volatile void __iomem *);
+	void (*mv_writel)(u32, volatile void __iomem *);
+	void (*mv_writeq)(u64, volatile void __iomem *);
+
+	void __iomem *(*mv_ioportmap)(unsigned long);
+	void __iomem *(*mv_ioremap)(unsigned long, unsigned long);
+	void (*mv_iounmap)(volatile void __iomem *);
 	int (*mv_is_ioaddr)(unsigned long);
+	int (*mv_is_mmio)(const volatile void __iomem *);
 
 	void (*mv_switch_mm)(struct mm_struct *, struct mm_struct *,
-			     struct task_struct *, long);
+			     struct task_struct *);
 	void (*mv_activate_mm)(struct mm_struct *, struct mm_struct *);
 
 	void (*mv_flush_tlb_current)(struct mm_struct *);
@@ -78,6 +83,7 @@ struct alpha_machine_vector
 	void (*device_interrupt)(unsigned long vector, struct pt_regs *regs);
 	void (*machine_check)(u64 vector, u64 la, struct pt_regs *regs);
 
+	void (*smp_callin)(void);
 	void (*init_arch)(void);
 	void (*init_irq)(void);
 	void (*init_rtc)(void);
@@ -88,7 +94,15 @@ struct alpha_machine_vector
 	int (*pci_map_irq)(struct pci_dev *, u8, u8);
 	struct pci_ops *pci_ops;
 
+	struct _alpha_agp_info *(*agp_info)(void);
+
 	const char *vector_name;
+
+	/* NUMA information */
+	int (*pa_to_nid)(unsigned long);
+	int (*cpuid_to_nid)(int);
+	unsigned long (*node_mem_start)(int);
+	unsigned long (*node_mem_size)(int);
 
 	/* System specific parameters.  */
 	union {

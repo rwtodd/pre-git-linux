@@ -19,7 +19,7 @@
 
 static struct rpc_clnt *	nsm_create(void);
 
-extern struct rpc_program	nsm_program;
+static struct rpc_program	nsm_program;
 
 /*
  * Local NSM state
@@ -36,14 +36,16 @@ nsm_mon_unmon(struct nlm_host *host, u32 proc, struct nsm_res *res)
 	int		status;
 	struct nsm_args	args;
 
-	status = -EACCES;
 	clnt = nsm_create();
-	if (!clnt)
+	if (IS_ERR(clnt)) {
+		status = PTR_ERR(clnt);
 		goto out;
+	}
 
 	args.addr = host->h_addr.sin_addr.s_addr;
+	args.proto= (host->h_proto<<1) | host->h_server;
 	args.prog = NLM_PROGRAM;
-	args.vers = 1;
+	args.vers = host->h_version;
 	args.proc = NLMPROC_NSM_NOTIFY;
 	memset(res, 0, sizeof(*res));
 
@@ -103,7 +105,7 @@ static struct rpc_clnt *
 nsm_create(void)
 {
 	struct rpc_xprt		*xprt;
-	struct rpc_clnt		*clnt = NULL;
+	struct rpc_clnt		*clnt;
 	struct sockaddr_in	sin;
 
 	sin.sin_family = AF_INET;
@@ -111,43 +113,33 @@ nsm_create(void)
 	sin.sin_port = 0;
 
 	xprt = xprt_create_proto(IPPROTO_UDP, &sin, NULL);
-	if (!xprt)
-		goto out;
+	if (IS_ERR(xprt))
+		return (struct rpc_clnt *)xprt;
 
 	clnt = rpc_create_client(xprt, "localhost",
 				&nsm_program, SM_VERSION,
 				RPC_AUTH_NULL);
-	if (!clnt)
+	if (IS_ERR(clnt))
 		goto out_destroy;
 	clnt->cl_softrtry = 1;
 	clnt->cl_chatty   = 1;
 	clnt->cl_oneshot  = 1;
-out:
+	xprt->resvport = 1;	/* NSM requires a reserved port */
 	return clnt;
 
 out_destroy:
 	xprt_destroy(xprt);
-	goto out;
+	return clnt;
 }
 
 /*
  * XDR functions for NSM.
  */
-static int
-xdr_error(struct rpc_rqst *rqstp, u32 *p, void *dummy)
-{
-	return -EACCES;
-}
 
-static int
-xdr_encode_mon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
+static u32 *
+xdr_encode_common(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 {
 	char	buffer[20];
-	u32	addr = ntohl(argp->addr);
-
-	dprintk("nsm: xdr_encode_mon(%08x, %d, %d, %d)\n",
-			htonl(argp->addr), htonl(argp->proc),
-			htonl(argp->vers), htonl(argp->proc));
 
 	/*
 	 * Use the dotted-quad IP address of the remote host as
@@ -155,23 +147,37 @@ xdr_encode_mon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 	 * hostname first for whatever remote hostname it receives,
 	 * so this works alright.
 	 */
-	sprintf(buffer, "%d.%d.%d.%d", (addr>>24) & 0xff, (addr>>16) & 0xff,
-				 	(addr>>8) & 0xff,  (addr) & 0xff);
+	sprintf(buffer, "%u.%u.%u.%u", NIPQUAD(argp->addr));
 	if (!(p = xdr_encode_string(p, buffer))
 	 || !(p = xdr_encode_string(p, system_utsname.nodename)))
-		return -EIO;
+		return ERR_PTR(-EIO);
 	*p++ = htonl(argp->prog);
 	*p++ = htonl(argp->vers);
 	*p++ = htonl(argp->proc);
 
-	/* This is the private part. Needed only for SM_MON call */
-	if (rqstp->rq_task->tk_msg.rpc_proc == SM_MON) {
-		*p++ = argp->addr;
-		*p++ = 0;
-		*p++ = 0;
-		*p++ = 0;
-	}
+	return p;
+}
 
+static int
+xdr_encode_mon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
+{
+	p = xdr_encode_common(rqstp, p, argp);
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+	*p++ = argp->addr;
+	*p++ = argp->vers;
+	*p++ = argp->proto;
+	*p++ = 0;
+	rqstp->rq_slen = xdr_adjust_iovec(rqstp->rq_svec, p);
+	return 0;
+}
+
+static int
+xdr_encode_unmon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
+{
+	p = xdr_encode_common(rqstp, p, argp);
+	if (IS_ERR(p))
+		return PTR_ERR(p);
 	rqstp->rq_slen = xdr_adjust_iovec(rqstp->rq_svec, p);
 	return 0;
 }
@@ -205,46 +211,36 @@ xdr_decode_stat(struct rpc_rqst *rqstp, u32 *p, struct nsm_res *resp)
 #endif
 
 static struct rpc_procinfo	nsm_procedures[] = {
-        { "sm_null",
-		(kxdrproc_t) xdr_error,
-		(kxdrproc_t) xdr_error, 0, 0 },
-        { "sm_stat",
-		(kxdrproc_t) xdr_error,
-		(kxdrproc_t) xdr_error, 0, 0 },
-        { "sm_mon",
-		(kxdrproc_t) xdr_encode_mon,
-		(kxdrproc_t) xdr_decode_stat_res, MAX(SM_mon_sz, SM_monres_sz) << 2, 0 },
-        { "sm_unmon",
-		(kxdrproc_t) xdr_encode_mon,
-		(kxdrproc_t) xdr_decode_stat, MAX(SM_mon_id_sz, SM_unmonres_sz) << 2, 0 },
-        { "sm_unmon_all",
-		(kxdrproc_t) xdr_error,
-		(kxdrproc_t) xdr_error, 0, 0 },
-        { "sm_simu_crash",
-		(kxdrproc_t) xdr_error,
-		(kxdrproc_t) xdr_error, 0, 0 },
-        { "sm_notify",
-		(kxdrproc_t) xdr_error,
-		(kxdrproc_t) xdr_error, 0, 0 },
+[SM_MON] = {
+		.p_proc		= SM_MON,
+		.p_encode	= (kxdrproc_t) xdr_encode_mon,
+		.p_decode	= (kxdrproc_t) xdr_decode_stat_res,
+		.p_bufsiz	= MAX(SM_mon_sz, SM_monres_sz) << 2,
+	},
+[SM_UNMON] = {
+		.p_proc		= SM_UNMON,
+		.p_encode	= (kxdrproc_t) xdr_encode_unmon,
+		.p_decode	= (kxdrproc_t) xdr_decode_stat,
+		.p_bufsiz	= MAX(SM_mon_id_sz, SM_unmonres_sz) << 2,
+	},
 };
 
 static struct rpc_version	nsm_version1 = {
-	1, 
-	sizeof(nsm_procedures)/sizeof(nsm_procedures[0]),
-	nsm_procedures
+		.number		= 1, 
+		.nrprocs	= sizeof(nsm_procedures)/sizeof(nsm_procedures[0]),
+		.procs		= nsm_procedures
 };
 
 static struct rpc_version *	nsm_version[] = {
-	NULL,
-	&nsm_version1,
+	[1] = &nsm_version1,
 };
 
 static struct rpc_stat		nsm_stats;
 
-struct rpc_program		nsm_program = {
-	"statd",
-	SM_PROGRAM,
-	sizeof(nsm_version)/sizeof(nsm_version[0]),
-	nsm_version,
-	&nsm_stats
+static struct rpc_program	nsm_program = {
+		.name		= "statd",
+		.number		= SM_PROGRAM,
+		.nrvers		= sizeof(nsm_version)/sizeof(nsm_version[0]),
+		.version	= nsm_version,
+		.stats		= &nsm_stats
 };

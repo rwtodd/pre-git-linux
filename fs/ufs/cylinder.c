@@ -10,12 +10,11 @@
 
 #include <linux/fs.h>
 #include <linux/ufs_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/string.h>
-#include <linux/locks.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
 #include <asm/byteorder.h>
 
 #include "swab.h"
@@ -37,51 +36,50 @@
 static void ufs_read_cylinder (struct super_block * sb,
 	unsigned cgno, unsigned bitmap_nr)
 {
+	struct ufs_sb_info * sbi = UFS_SB(sb);
 	struct ufs_sb_private_info * uspi;
 	struct ufs_cg_private_info * ucpi;
 	struct ufs_cylinder_group * ucg;
 	unsigned i, j;
-	unsigned swab;
 
 	UFSD(("ENTER, cgno %u, bitmap_nr %u\n", cgno, bitmap_nr))
-	swab = sb->u.ufs_sb.s_swab;	
-	uspi = sb->u.ufs_sb.s_uspi;
-	ucpi = sb->u.ufs_sb.s_ucpi[bitmap_nr];
-	ucg = (struct ufs_cylinder_group *)sb->u.ufs_sb.s_ucg[cgno]->b_data;
+	uspi = sbi->s_uspi;
+	ucpi = sbi->s_ucpi[bitmap_nr];
+	ucg = (struct ufs_cylinder_group *)sbi->s_ucg[cgno]->b_data;
 
 	UCPI_UBH->fragment = ufs_cgcmin(cgno);
 	UCPI_UBH->count = uspi->s_cgsize >> sb->s_blocksize_bits;
 	/*
 	 * We have already the first fragment of cylinder group block in buffer
 	 */
-	UCPI_UBH->bh[0] = sb->u.ufs_sb.s_ucg[cgno];
+	UCPI_UBH->bh[0] = sbi->s_ucg[cgno];
 	for (i = 1; i < UCPI_UBH->count; i++)
-		if (!(UCPI_UBH->bh[i] = bread (sb->s_dev, UCPI_UBH->fragment + i, sb->s_blocksize)))
+		if (!(UCPI_UBH->bh[i] = sb_bread(sb, UCPI_UBH->fragment + i)))
 			goto failed;
-	sb->u.ufs_sb.s_cgno[bitmap_nr] = cgno;
+	sbi->s_cgno[bitmap_nr] = cgno;
 			
-	ucpi->c_cgx = SWAB32(ucg->cg_cgx);
-	ucpi->c_ncyl = SWAB16(ucg->cg_ncyl);
-	ucpi->c_niblk = SWAB16(ucg->cg_niblk);
-	ucpi->c_ndblk = SWAB32(ucg->cg_ndblk);
-	ucpi->c_rotor = SWAB32(ucg->cg_rotor);
-	ucpi->c_frotor = SWAB32(ucg->cg_frotor);
-	ucpi->c_irotor = SWAB32(ucg->cg_irotor);
-	ucpi->c_btotoff = SWAB32(ucg->cg_btotoff);
-	ucpi->c_boff = SWAB32(ucg->cg_boff);
-	ucpi->c_iusedoff = SWAB32(ucg->cg_iusedoff);
-	ucpi->c_freeoff = SWAB32(ucg->cg_freeoff);
-	ucpi->c_nextfreeoff = SWAB32(ucg->cg_nextfreeoff);
-	ucpi->c_clustersumoff = SWAB32(ucg->cg_u.cg_44.cg_clustersumoff);
-	ucpi->c_clusteroff = SWAB32(ucg->cg_u.cg_44.cg_clusteroff);
-	ucpi->c_nclusterblks = SWAB32(ucg->cg_u.cg_44.cg_nclusterblks);
+	ucpi->c_cgx	= fs32_to_cpu(sb, ucg->cg_cgx);
+	ucpi->c_ncyl	= fs16_to_cpu(sb, ucg->cg_ncyl);
+	ucpi->c_niblk	= fs16_to_cpu(sb, ucg->cg_niblk);
+	ucpi->c_ndblk	= fs32_to_cpu(sb, ucg->cg_ndblk);
+	ucpi->c_rotor	= fs32_to_cpu(sb, ucg->cg_rotor);
+	ucpi->c_frotor	= fs32_to_cpu(sb, ucg->cg_frotor);
+	ucpi->c_irotor	= fs32_to_cpu(sb, ucg->cg_irotor);
+	ucpi->c_btotoff	= fs32_to_cpu(sb, ucg->cg_btotoff);
+	ucpi->c_boff	= fs32_to_cpu(sb, ucg->cg_boff);
+	ucpi->c_iusedoff = fs32_to_cpu(sb, ucg->cg_iusedoff);
+	ucpi->c_freeoff	= fs32_to_cpu(sb, ucg->cg_freeoff);
+	ucpi->c_nextfreeoff = fs32_to_cpu(sb, ucg->cg_nextfreeoff);
+	ucpi->c_clustersumoff = fs32_to_cpu(sb, ucg->cg_u.cg_44.cg_clustersumoff);
+	ucpi->c_clusteroff = fs32_to_cpu(sb, ucg->cg_u.cg_44.cg_clusteroff);
+	ucpi->c_nclusterblks = fs32_to_cpu(sb, ucg->cg_u.cg_44.cg_nclusterblks);
 	UFSD(("EXIT\n"))
 	return;	
 	
 failed:
 	for (j = 1; j < i; j++)
-		brelse (sb->u.ufs_sb.s_ucg[j]);
-	sb->u.ufs_sb.s_cgno[bitmap_nr] = UFS_CGNO_EMPTY;
+		brelse (sbi->s_ucg[j]);
+	sbi->s_cgno[bitmap_nr] = UFS_CGNO_EMPTY;
 	ufs_error (sb, "ufs_read_cylinder", "can't read cylinder group block %u", cgno);
 }
 
@@ -91,24 +89,23 @@ failed:
  */
 void ufs_put_cylinder (struct super_block * sb, unsigned bitmap_nr)
 {
+	struct ufs_sb_info * sbi = UFS_SB(sb);
 	struct ufs_sb_private_info * uspi; 
 	struct ufs_cg_private_info * ucpi;
 	struct ufs_cylinder_group * ucg;
 	unsigned i;
-	unsigned swab;
 
 	UFSD(("ENTER, bitmap_nr %u\n", bitmap_nr))
 
-	swab = sb->u.ufs_sb.s_swab;
-	uspi = sb->u.ufs_sb.s_uspi;
-	if (sb->u.ufs_sb.s_cgno[bitmap_nr] == UFS_CGNO_EMPTY) {
+	uspi = sbi->s_uspi;
+	if (sbi->s_cgno[bitmap_nr] == UFS_CGNO_EMPTY) {
 		UFSD(("EXIT\n"))
 		return;
 	}
-	ucpi = sb->u.ufs_sb.s_ucpi[bitmap_nr];
+	ucpi = sbi->s_ucpi[bitmap_nr];
 	ucg = ubh_get_ucg(UCPI_UBH);
 
-	if (uspi->s_ncg > UFS_MAX_GROUP_LOADED && bitmap_nr >= sb->u.ufs_sb.s_cg_loaded) {
+	if (uspi->s_ncg > UFS_MAX_GROUP_LOADED && bitmap_nr >= sbi->s_cg_loaded) {
 		ufs_panic (sb, "ufs_put_cylinder", "internal error");
 		return;
 	}
@@ -116,15 +113,15 @@ void ufs_put_cylinder (struct super_block * sb, unsigned bitmap_nr)
 	 * rotor is not so important data, so we put it to disk 
 	 * at the end of working with cylinder
 	 */
-	ucg->cg_rotor = SWAB32(ucpi->c_rotor);
-	ucg->cg_frotor = SWAB32(ucpi->c_frotor);
-	ucg->cg_irotor = SWAB32(ucpi->c_irotor);
+	ucg->cg_rotor = cpu_to_fs32(sb, ucpi->c_rotor);
+	ucg->cg_frotor = cpu_to_fs32(sb, ucpi->c_frotor);
+	ucg->cg_irotor = cpu_to_fs32(sb, ucpi->c_irotor);
 	ubh_mark_buffer_dirty (UCPI_UBH);
 	for (i = 1; i < UCPI_UBH->count; i++) {
 		brelse (UCPI_UBH->bh[i]);
 	}
 
-	sb->u.ufs_sb.s_cgno[bitmap_nr] = UFS_CGNO_EMPTY;
+	sbi->s_cgno[bitmap_nr] = UFS_CGNO_EMPTY;
 	UFSD(("EXIT\n"))
 }
 
@@ -137,13 +134,14 @@ void ufs_put_cylinder (struct super_block * sb, unsigned bitmap_nr)
 struct ufs_cg_private_info * ufs_load_cylinder (
 	struct super_block * sb, unsigned cgno)
 {
+	struct ufs_sb_info * sbi = UFS_SB(sb);
 	struct ufs_sb_private_info * uspi;
 	struct ufs_cg_private_info * ucpi;
 	unsigned cg, i, j;
 
 	UFSD(("ENTER, cgno %u\n", cgno))
 
-	uspi = sb->u.ufs_sb.s_uspi;
+	uspi = sbi->s_uspi;
 	if (cgno >= uspi->s_ncg) {
 		ufs_panic (sb, "ufs_load_cylinder", "internal error, high number of cg");
 		return NULL;
@@ -151,61 +149,61 @@ struct ufs_cg_private_info * ufs_load_cylinder (
 	/*
 	 * Cylinder group number cg it in cache and it was last used
 	 */
-	if (sb->u.ufs_sb.s_cgno[0] == cgno) {
+	if (sbi->s_cgno[0] == cgno) {
 		UFSD(("EXIT\n"))
-		return sb->u.ufs_sb.s_ucpi[0];
+		return sbi->s_ucpi[0];
 	}
 	/*
 	 * Number of cylinder groups is not higher than UFS_MAX_GROUP_LOADED
 	 */
 	if (uspi->s_ncg <= UFS_MAX_GROUP_LOADED) {
-		if (sb->u.ufs_sb.s_cgno[cgno] != UFS_CGNO_EMPTY) {
-			if (sb->u.ufs_sb.s_cgno[cgno] != cgno) {
+		if (sbi->s_cgno[cgno] != UFS_CGNO_EMPTY) {
+			if (sbi->s_cgno[cgno] != cgno) {
 				ufs_panic (sb, "ufs_load_cylinder", "internal error, wrong number of cg in cache");
 				UFSD(("EXIT (FAILED)\n"))
 				return NULL;
 			}
 			else {
 				UFSD(("EXIT\n"))
-				return sb->u.ufs_sb.s_ucpi[cgno];
+				return sbi->s_ucpi[cgno];
 			}
 		} else {
 			ufs_read_cylinder (sb, cgno, cgno);
 			UFSD(("EXIT\n"))
-			return sb->u.ufs_sb.s_ucpi[cgno];
+			return sbi->s_ucpi[cgno];
 		}
 	}
 	/*
 	 * Cylinder group number cg is in cache but it was not last used, 
 	 * we will move to the first position
 	 */
-	for (i = 0; i < sb->u.ufs_sb.s_cg_loaded && sb->u.ufs_sb.s_cgno[i] != cgno; i++);
-	if (i < sb->u.ufs_sb.s_cg_loaded && sb->u.ufs_sb.s_cgno[i] == cgno) {
-		cg = sb->u.ufs_sb.s_cgno[i];
-		ucpi = sb->u.ufs_sb.s_ucpi[i];
+	for (i = 0; i < sbi->s_cg_loaded && sbi->s_cgno[i] != cgno; i++);
+	if (i < sbi->s_cg_loaded && sbi->s_cgno[i] == cgno) {
+		cg = sbi->s_cgno[i];
+		ucpi = sbi->s_ucpi[i];
 		for (j = i; j > 0; j--) {
-			sb->u.ufs_sb.s_cgno[j] = sb->u.ufs_sb.s_cgno[j-1];
-			sb->u.ufs_sb.s_ucpi[j] = sb->u.ufs_sb.s_ucpi[j-1];
+			sbi->s_cgno[j] = sbi->s_cgno[j-1];
+			sbi->s_ucpi[j] = sbi->s_ucpi[j-1];
 		}
-		sb->u.ufs_sb.s_cgno[0] = cg;
-		sb->u.ufs_sb.s_ucpi[0] = ucpi;
+		sbi->s_cgno[0] = cg;
+		sbi->s_ucpi[0] = ucpi;
 	/*
 	 * Cylinder group number cg is not in cache, we will read it from disk
 	 * and put it to the first position
 	 */
 	} else {
-		if (sb->u.ufs_sb.s_cg_loaded < UFS_MAX_GROUP_LOADED)
-			sb->u.ufs_sb.s_cg_loaded++;
+		if (sbi->s_cg_loaded < UFS_MAX_GROUP_LOADED)
+			sbi->s_cg_loaded++;
 		else
 			ufs_put_cylinder (sb, UFS_MAX_GROUP_LOADED-1);
-		ucpi = sb->u.ufs_sb.s_ucpi[sb->u.ufs_sb.s_cg_loaded - 1];
-		for (j = sb->u.ufs_sb.s_cg_loaded - 1; j > 0; j--) {
-			sb->u.ufs_sb.s_cgno[j] = sb->u.ufs_sb.s_cgno[j-1];
-			sb->u.ufs_sb.s_ucpi[j] = sb->u.ufs_sb.s_ucpi[j-1];
+		ucpi = sbi->s_ucpi[sbi->s_cg_loaded - 1];
+		for (j = sbi->s_cg_loaded - 1; j > 0; j--) {
+			sbi->s_cgno[j] = sbi->s_cgno[j-1];
+			sbi->s_ucpi[j] = sbi->s_ucpi[j-1];
 		}
-		sb->u.ufs_sb.s_ucpi[0] = ucpi;
+		sbi->s_ucpi[0] = ucpi;
 		ufs_read_cylinder (sb, cgno, 0);
 	}
 	UFSD(("EXIT\n"))
-	return sb->u.ufs_sb.s_ucpi[0];
+	return sbi->s_ucpi[0];
 }

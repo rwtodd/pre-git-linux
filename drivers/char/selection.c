@@ -3,10 +3,10 @@
  *
  * This module exports the functions:
  *
- *     'int set_selection(const unsigned long arg)'
+ *     'int set_selection(struct tiocl_selection __user *, struct tty_struct *)'
  *     'void clear_selection(void)'
- *     'int paste_selection(struct tty_struct *tty)'
- *     'int sel_loadlut(const unsigned long arg)'
+ *     'int paste_selection(struct tty_struct *)'
+ *     'int sel_loadlut(char __user *)'
  *
  * Now that /dev/vcs exists, most of this can disappear again.
  */
@@ -15,19 +15,16 @@
 #include <linux/tty.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <asm/uaccess.h>
 
 #include <linux/vt_kern.h>
 #include <linux/consolemap.h>
-#include <linux/console_struct.h>
 #include <linux/selection.h>
-
-#ifndef MIN
-#define MIN(a,b)	((a) < (b) ? (a) : (b))
-#endif
+#include <linux/tiocl.h>
+#include <linux/console.h>
 
 /* Don't take this from <ctype.h>: 011-015 on the screen aren't spaces */
 #define isspace(c)	((c) == ' ')
@@ -36,7 +33,7 @@ extern void poke_blanked_console(void);
 
 /* Variables for selection control. */
 /* Use a dynamic buffer, instead of static (Dec 1994) */
-       int sel_cons;		/* must not be disallocated */
+struct vc_data *sel_cons;		/* must not be disallocated */
 static volatile int sel_start = -1; 	/* cleared by clear_selection */
 static int sel_end;
 static int sel_buffer_lth;
@@ -47,20 +44,22 @@ static char *sel_buffer;
 
 /* set reverse video on characters s-e of console with selection. */
 inline static void
-highlight(const int s, const int e) {
+highlight(const int s, const int e)
+{
 	invert_screen(sel_cons, s, e-s+2, 1);
 }
 
 /* use complementary color to show the pointer */
 inline static void
-highlight_pointer(const int where) {
+highlight_pointer(const int where)
+{
 	complement_pos(sel_cons, where);
 }
 
 static unsigned char
 sel_pos(int n)
 {
-	return inverse_translate(vc_cons[sel_cons].d, screen_glyph(sel_cons, n));
+	return inverse_translate(sel_cons, screen_glyph(sel_cons, n));
 }
 
 /* remove the current selection highlight, if any,
@@ -94,13 +93,9 @@ static inline int inword(const unsigned char c) {
 }
 
 /* set inwordLut contents. Invoked by ioctl(). */
-int sel_loadlut(const unsigned long arg)
+int sel_loadlut(char __user *p)
 {
-	int err = -EFAULT;
-
-	if (!copy_from_user(inwordLut, (u32 *)(arg+4), 32))
-		err = 0;
-	return err;
+	return copy_from_user(inwordLut, (u32 __user *)(p+4), 32) ? -EFAULT : 0;
 }
 
 /* does screen address p correspond to character at LH/RH edge of screen? */
@@ -116,52 +111,40 @@ static inline unsigned short limit(const unsigned short v, const unsigned short 
 }
 
 /* set the current selection. Invoked by ioctl() or by kernel code. */
-int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
+int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *tty)
 {
+	struct vc_data *vc = vc_cons[fg_console].d;
 	int sel_mode, new_sel_start, new_sel_end, spc;
 	char *bp, *obp;
 	int i, ps, pe;
-	unsigned int currcons = fg_console;
 
-	unblank_screen();
 	poke_blanked_console();
 
-	{ unsigned short *args, xs, ys, xe, ye;
+	{ unsigned short xs, ys, xe, ye;
 
-	  args = (unsigned short *)(arg + 1);
-	  if (user) {
-	  	  int err;
-		  err = verify_area(VERIFY_READ, args, sizeof(short) * 5);
-		  if (err)
-		  	return err;
-		  get_user(xs, args++);
-		  get_user(ys, args++);
-		  get_user(xe, args++);
-		  get_user(ye, args++);
-		  get_user(sel_mode, args);
-	  } else {
-		  xs = *(args++); /* set selection from kernel */
-		  ys = *(args++);
-		  xe = *(args++);
-		  ye = *(args++);
-		  sel_mode = *args;
-	  }
+	  if (verify_area(VERIFY_READ, sel, sizeof(*sel)))
+		return -EFAULT;
+	  __get_user(xs, &sel->xs);
+	  __get_user(ys, &sel->ys);
+	  __get_user(xe, &sel->xe);
+	  __get_user(ye, &sel->ye);
+	  __get_user(sel_mode, &sel->sel_mode);
 	  xs--; ys--; xe--; ye--;
-	  xs = limit(xs, video_num_columns - 1);
-	  ys = limit(ys, video_num_lines - 1);
-	  xe = limit(xe, video_num_columns - 1);
-	  ye = limit(ye, video_num_lines - 1);
-	  ps = ys * video_size_row + (xs << 1);
-	  pe = ye * video_size_row + (xe << 1);
+	  xs = limit(xs, vc->vc_cols - 1);
+	  ys = limit(ys, vc->vc_rows - 1);
+	  xe = limit(xe, vc->vc_cols - 1);
+	  ye = limit(ye, vc->vc_rows - 1);
+	  ps = ys * vc->vc_size_row + (xs << 1);
+	  pe = ye * vc->vc_size_row + (xe << 1);
 
-	  if (sel_mode == 4) {
+	  if (sel_mode == TIOCL_SELCLEAR) {
 	      /* useful for screendump without selection highlights */
 	      clear_selection();
 	      return 0;
 	  }
 
-	  if (mouse_reporting() && (sel_mode & 16)) {
-	      mouse_report(tty, sel_mode & 15, xs, ys);
+	  if (mouse_reporting() && (sel_mode & TIOCL_SELMOUSEREPORT)) {
+	      mouse_report(tty, sel_mode & TIOCL_SELBUTTONMASK, xs, ys);
 	      return 0;
 	  }
         }
@@ -173,18 +156,18 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 		pe = tmp;
 	}
 
-	if (sel_cons != fg_console) {
+	if (sel_cons != vc_cons[fg_console].d) {
 		clear_selection();
-		sel_cons = fg_console;
+		sel_cons = vc_cons[fg_console].d;
 	}
 
 	switch (sel_mode)
 	{
-		case 0:	/* character-by-character selection */
+		case TIOCL_SELCHAR:	/* character-by-character selection */
 			new_sel_start = ps;
 			new_sel_end = pe;
 			break;
-		case 1:	/* word-by-word selection */
+		case TIOCL_SELWORD:	/* word-by-word selection */
 			spc = isspace(sel_pos(ps));
 			for (new_sel_start = ps; ; ps -= 2)
 			{
@@ -192,7 +175,7 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 				    (!spc && !inword(sel_pos(ps))))
 					break;
 				new_sel_start = ps;
-				if (!(ps % video_size_row))
+				if (!(ps % vc->vc_size_row))
 					break;
 			}
 			spc = isspace(sel_pos(pe));
@@ -202,16 +185,16 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 				    (!spc && !inword(sel_pos(pe))))
 					break;
 				new_sel_end = pe;
-				if (!((pe + 2) % video_size_row))
+				if (!((pe + 2) % vc->vc_size_row))
 					break;
 			}
 			break;
-		case 2:	/* line-by-line selection */
-			new_sel_start = ps - ps % video_size_row;
-			new_sel_end = pe + video_size_row
-				    - pe % video_size_row - 2;
+		case TIOCL_SELLINE:	/* line-by-line selection */
+			new_sel_start = ps - ps % vc->vc_size_row;
+			new_sel_end = pe + vc->vc_size_row
+				    - pe % vc->vc_size_row - 2;
 			break;
-		case 3:
+		case TIOCL_SELPOINTER:
 			highlight_pointer(pe);
 			return 0;
 		default:
@@ -223,11 +206,11 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 
 	/* select to end of line if on trailing space */
 	if (new_sel_end > new_sel_start &&
-		!atedge(new_sel_end, video_size_row) &&
+		!atedge(new_sel_end, vc->vc_size_row) &&
 		isspace(sel_pos(new_sel_end))) {
 		for (pe = new_sel_end + 2; ; pe += 2)
 			if (!isspace(sel_pos(pe)) ||
-			    atedge(pe, video_size_row))
+			    atedge(pe, vc->vc_size_row))
 				break;
 		if (isspace(sel_pos(pe)))
 			new_sel_end = pe;
@@ -274,7 +257,7 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 		*bp = sel_pos(i);
 		if (!isspace(*bp++))
 			obp = bp;
-		if (! ((i + 2) % video_size_row)) {
+		if (! ((i + 2) % vc->vc_size_row)) {
 			/* strip trailing blanks from line and add newline,
 			   unless non-space at end of line. */
 			if (obp != bp) {
@@ -296,9 +279,15 @@ int paste_selection(struct tty_struct *tty)
 {
 	struct vt_struct *vt = (struct vt_struct *) tty->driver_data;
 	int	pasted = 0, count;
+	struct  tty_ldisc *ld;
 	DECLARE_WAITQUEUE(wait, current);
 
+	acquire_console_sem();
 	poke_blanked_console();
+	release_console_sem();
+
+	ld = tty_ldisc_ref_wait(tty);
+	
 	add_wait_queue(&vt->paste_wait, &wait);
 	while (sel_buffer && sel_buffer_lth > pasted) {
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -307,14 +296,13 @@ int paste_selection(struct tty_struct *tty)
 			continue;
 		}
 		count = sel_buffer_lth - pasted;
-		count = MIN(count, tty->ldisc.receive_room(tty));
-		tty->ldisc.receive_buf(tty, sel_buffer + pasted, 0, count);
+		count = min(count, tty->ldisc.receive_room(tty));
+		tty->ldisc.receive_buf(tty, sel_buffer + pasted, NULL, count);
 		pasted += count;
 	}
 	remove_wait_queue(&vt->paste_wait, &wait);
 	current->state = TASK_RUNNING;
+
+	tty_ldisc_deref(ld);
 	return 0;
 }
-
-EXPORT_SYMBOL(set_selection);
-EXPORT_SYMBOL(paste_selection);

@@ -40,6 +40,7 @@
 #include <linux/tty_flip.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
+#include <linux/interrupt.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
@@ -47,8 +48,8 @@
 #define ENABLE_PCI
 #endif /* CONFIG_PCI */
 
-#define putUser(arg1, arg2) put_user(arg1, (unsigned long *)arg2)
-#define getUser(arg1, arg2) get_user(arg1, (unsigned int *)arg2)
+#define putUser(arg1, arg2) put_user(arg1, (unsigned long __user *)arg2)
+#define getUser(arg1, arg2) get_user(arg1, (unsigned __user *)arg2)
 
 #ifdef ENABLE_PCI
 #include <linux/pci.h>
@@ -60,6 +61,10 @@
 #include "epca.h"
 #include "epcaconfig.h"
 
+#if BITS_PER_LONG != 32
+#  error FIXME: this driver only works on 32-bit platforms
+#endif
+
 /* ---------------------- Begin defines ------------------------ */
 
 #define VERSION            "1.3.0.1-LK"
@@ -69,7 +74,6 @@
 #define DIGIINFOMAJOR       35  /* For Digi specific ioctl */ 
 
 
-#define MIN(a,b)	((a) < (b) ? (a) : (b))
 #define MAXCARDS 7
 #define epcaassert(x, msg)  if (!(x)) epca_error(__LINE__, msg)
 
@@ -78,7 +82,7 @@
 /* ----------------- Begin global definitions ------------------- */
 
 static char mesg[100];
-static int pc_refcount, nbdevs, num_cards, liloconfig;
+static int nbdevs, num_cards, liloconfig;
 static int digi_poller_inhibited = 1 ;
 
 static int setup_error_code;
@@ -93,20 +97,8 @@ static struct board_info boards[MAXBOARDS];
 
 /* ------------- Begin structures used for driver registeration ---------- */
 
-struct tty_driver pc_driver;
-struct tty_driver pc_callout;
-struct tty_driver pc_info;
-
-/* The below structures are used to initialize the tty_driver structures. */
-
-/*	-------------------------------------------------------------------------
-	Note : MAX_ALLOC is currently limited to 0x100.  This restriction is 
-	placed on us by Linux not Digi.
-----------------------------------------------------------------------------*/
-static struct tty_struct *pc_table[MAX_ALLOC];
-static struct termios *pc_termios[MAX_ALLOC];
-static struct termios *pc_termios_locked[MAX_ALLOC];
-
+static struct tty_driver *pc_driver;
+static struct tty_driver *pc_info;
 
 /* ------------------ Begin Digi specific structures -------------------- */
 
@@ -137,12 +129,6 @@ static struct timer_list epca_timer;
 	configured.
 ----------------------------------------------------------------------- */
 	
-
-#ifdef MODULE
-int                init_module(void);
-void               cleanup_module(void);
-#endif /* MODULE */
-
 static inline void memwinon(struct board_info *b, unsigned int win);
 static inline void memwinoff(struct board_info *b, unsigned int win);
 static inline void globalwinon(struct channel *ch);
@@ -218,6 +204,8 @@ static void epcaparam(struct tty_struct *, struct channel *);
 static void receive_data(struct channel *);
 static int pc_ioctl(struct tty_struct *, struct file *,
                     unsigned int, unsigned long);
+static int info_ioctl(struct tty_struct *, struct file *,
+                    unsigned int, unsigned long);
 static void pc_set_termios(struct tty_struct *, struct termios *);
 static void do_softint(void *);
 static void pc_stop(struct tty_struct *);
@@ -229,8 +217,8 @@ static void setup_empty_event(struct tty_struct *tty, struct channel *ch);
 void epca_setup(char *, int *);
 void console_print(const char *);
 
-static int get_termio(struct tty_struct *, struct termio *);
-static int pc_write(struct tty_struct *, int, const unsigned char *, int);
+static int get_termio(struct tty_struct *, struct termio __user *);
+static int pc_write(struct tty_struct *, const unsigned char *, int);
 int pc_init(void);
 
 #ifdef ENABLE_PCI
@@ -483,9 +471,7 @@ static inline void pc_sched_event(struct channel *ch, int event)
 	-------------------------------------------------------------------------*/
 
 	ch->event |= 1 << event;
-	MOD_INC_USE_COUNT;
-	if (schedule_task(&ch->tqueue) == 0)
-		MOD_DEC_USE_COUNT;
+	schedule_work(&ch->tqueue);
 
 
 } /* End pc_sched_event */
@@ -506,12 +492,6 @@ static void pc_close(struct tty_struct * tty, struct file * filp)
 
 	struct channel *ch;
 	unsigned long flags;
-
-	if (tty->driver.subtype == SERIAL_TYPE_INFO) 
-	{
-		return;
-	}
-
 
 	/* ---------------------------------------------------------
 		verifyChannel returns the channel from the tty struct
@@ -558,17 +538,6 @@ static void pc_close(struct tty_struct * tty, struct file * filp)
 
 		ch->asyncflags |= ASYNC_CLOSING;
 	
-		/* -------------------------------------------------------------
-			Save the termios structure, since this port may have
-			separate termios for callout and dialin.
-		--------------------------------------------------------------- */
-
-		if (ch->asyncflags & ASYNC_NORMAL_ACTIVE)
-			ch->normal_termios = *tty->termios;
-
-		if (ch->asyncflags & ASYNC_CALLOUT_ACTIVE)
-			ch->callout_termios = *tty->termios;
-
 		tty->closing = 1;
 
 		if (ch->asyncflags & ASYNC_INITIALIZED) 
@@ -578,12 +547,10 @@ static void pc_close(struct tty_struct * tty, struct file * filp)
 			tty_wait_until_sent(tty, 3000); /* 30 seconds timeout */
 		}
 	
-		if (tty->driver.flush_buffer)
-			tty->driver.flush_buffer(tty);
+		if (tty->driver->flush_buffer)
+			tty->driver->flush_buffer(tty);
 
-		if (tty->ldisc.flush_buffer)
-			tty->ldisc.flush_buffer(tty);
-
+		tty_ldisc_flush(tty);
 		shutdown(ch);
 		tty->closing = 0;
 		ch->event = 0;
@@ -594,8 +561,7 @@ static void pc_close(struct tty_struct * tty, struct file * filp)
 
 			if (ch->close_delay) 
 			{
-				current->state = TASK_INTERRUPTIBLE;
-				schedule_timeout(ch->close_delay);
+				msleep_interruptible(jiffies_to_msecs(ch->close_delay));
 			}
 
 			wake_up_interruptible(&ch->open_wait);
@@ -603,12 +569,9 @@ static void pc_close(struct tty_struct * tty, struct file * filp)
 		} /* End if blocked_open */
 
 		ch->asyncflags &= ~(ASYNC_NORMAL_ACTIVE | ASYNC_INITIALIZED | 
-		                      ASYNC_CALLOUT_ACTIVE | ASYNC_CLOSING);
+		                      ASYNC_CLOSING);
 		wake_up_interruptible(&ch->close_wait);
 
-#ifdef MODULE
-		MOD_DEC_USE_COUNT;
-#endif
 
 		restore_flags(flags);
 
@@ -688,25 +651,16 @@ static void pc_hangup(struct tty_struct *tty)
 
 		save_flags(flags);
 		cli();
-		if (tty->driver.flush_buffer)
-			tty->driver.flush_buffer(tty);
-
-		if (tty->ldisc.flush_buffer)
-			tty->ldisc.flush_buffer(tty);
-
+		if (tty->driver->flush_buffer)
+			tty->driver->flush_buffer(tty);
+		tty_ldisc_flush(tty);
 		shutdown(ch);
-
-#ifdef MODULE
-		if (ch->count)
-			MOD_DEC_USE_COUNT;
-#endif /* MODULE */
-		
 
 		ch->tty   = NULL;
 		ch->event = 0;
 		ch->count = 0;
 		restore_flags(flags);
-		ch->asyncflags &= ~(ASYNC_NORMAL_ACTIVE | ASYNC_INITIALIZED | ASYNC_CALLOUT_ACTIVE);
+		ch->asyncflags &= ~(ASYNC_NORMAL_ACTIVE | ASYNC_INITIALIZED);
 		wake_up_interruptible(&ch->open_wait);
 
 	} /* End if ch != NULL */
@@ -715,7 +669,7 @@ static void pc_hangup(struct tty_struct *tty)
 
 /* ------------------ Begin pc_write  ------------------------- */
 
-static int pc_write(struct tty_struct * tty, int from_user,
+static int pc_write(struct tty_struct * tty,
                     const unsigned char *buf, int bytesAvailable)
 { /* Begin pc_write */
 
@@ -740,13 +694,6 @@ static int pc_write(struct tty_struct * tty, int from_user,
 		brought into the driver.  
 	------------------------------------------------------------------- */
 
-	/* Stop users from hurting themselves on control minor */
-
-	if (tty->driver.subtype == SERIAL_TYPE_INFO) 
-	{
-		return (0) ;
-	}
-
 	/* ---------------------------------------------------------
 		verifyChannel returns the channel from the tty struct
 		if it is valid.  This serves as a sanity check.
@@ -759,169 +706,6 @@ static int pc_write(struct tty_struct * tty, int from_user,
 
 	bc   = ch->brdchan;
 	size = ch->txbufsize;
-
-	if (from_user) 
-	{ /* Begin from_user */
-
-		save_flags(flags);
-		cli();
-
-		globalwinon(ch);
-
-		/* -----------------------------------------------------------------	
-			Anding against size will wrap the pointer back to its begining 
-			position if it is necessary.  This will only work if size is
-			a power of 2 which should always be the case.  Size is determined 
-			by the cards on board FEP/OS.
-		-------------------------------------------------------------------- */	
-
-		/* head refers to the next empty location in which data may be stored */ 
-
-		head = bc->tin & (size - 1);
-
-		/* tail refers to the next data byte to be transmitted */ 
-
-		tail = bc->tout;
-
-		/* Consider changing this to a do statement to make sure */
-
-		if (tail != bc->tout)
-			tail = bc->tout;
-
-		/* ------------------------------------------------------------------	
-			Anding against size will wrap the pointer back to its begining 
-			position if it is necessary.  This will only work if size is
-			a power of 2 which should always be the case.  Size is determined 
-			by the cards on board FEP/OS.
-		--------------------------------------------------------------------- */	
-
-		tail &= (size - 1);
-
-		/* -----------------------------------------------------------------
-			Two situations can affect how space in the transmit buffer
-			is calculated.  You can have a situation where the transmit
-			in pointer (tin) head has wrapped around and actually has a 
-			lower address than the transmit out pointer (tout) tail; or
-			the transmit in pointer (tin) head will not be wrapped around
-			yet, and have a higher address than the transmit out pointer
-			(tout) tail.  Obviously space available in the transmit buffer
-			is calculated differently for each case.
-
-			Example 1:
-			
-			Consider a 10 byte buffer where head is a pointer to the next
-			empty location in the buffer and tail is a pointer to the next 
-			byte to transmit.  In this example head will not have wrapped 
-			around and therefore head > tail.  
-
-			0      1      2      3      4      5      6      7      8      9   
-		                tail                               head
-
-			The above diagram shows that buffer locations 2,3,4,5 and 6 have
-			data to be transmited, while head points at the next empty
-			location.  To calculate how much space is available first we have
-			to determine if the head pointer (tin) has wrapped.  To do this
-			compare the head pointer to the tail pointer,  If head is equal
-			or greater than tail; then it has not wrapped; and the space may
-			be calculated by subtracting tail from head and then subtracting
-			that value from the buffers size.  A one is subtracted from the
-			new value to indicate how much space is available between the 
-			head pointer and end of buffer; as well as the space between the
-			begining of the buffer and the tail.  If the head is not greater
-			or equal to the tail this indicates that the head has wrapped
-			around to the begining of the buffer.  To calculate the space 
-			available in this case simply subtract head from tail.  This new 
-			value minus one represents the space available betwwen the head 
-			and tail pointers.  In this example head (7) is greater than tail (2)
-			and therefore has not wrapped around.  We find the space by first
-			subtracting tail from head (7-2=5).  We then subtract this value
-			from the buffer size of ten and subtract one (10-5-1=4).  The space
-			remaining is 4 bytes. 
-
-			Example 2:
-			
-			Consider a 10 byte buffer where head is a pointer to the next
-			empty location in the buffer and tail is a pointer to the next 
-			byte to transmit.  In this example head will wrapped around and 
-			therefore head < tail.  
-
-			0      1      2      3      4      5      6      7      8      9   
-		                head                               tail
-
-			The above diagram shows that buffer locations 7,8,9,0 and 1 have
-			data to be transmited, while head points at the next empty
-			location.  To find the space available we compare head to tail.  If
-			head is not equal to, or greater than tail this indicates that head
-			has wrapped around. In this case head (2) is not equal to, or
-			greater than tail (7) and therefore has already wrapped around.  To
-			calculate the available space between the two pointers we subtract
-			head from tail (7-2=5).  We then subtract one from this new value
-			(5-1=4).  We have 5 bytes empty remaining in the buffer.  Unlike the
-			previous example these five bytes are located between the head and
-			tail pointers. 
-
-		----------------------------------------------------------------------- */
-
-		dataLen = (head >= tail) ? (size - (head - tail) - 1) : (tail - head - 1);
-
-		/* ----------------------------------------------------------------------
-			In this case bytesAvailable has been passed into pc_write and
-			represents the amount of data that needs to be written.  dataLen
-			represents the amount of space available on the card.  Whichever
-			value is smaller will be the amount actually written. 
-			bytesAvailable will then take on this newly calculated value.
-		---------------------------------------------------------------------- */
-
-		bytesAvailable = MIN(dataLen, bytesAvailable);
-
-		/* First we read the data in from the file system into a temp buffer */
-
-		if (bytesAvailable) 
-		{ /* Begin bytesAvailable */
-
-			/* Can the user buffer be accessed at the moment ? */
-			if (verify_area(VERIFY_READ, (char*)buf, bytesAvailable))
-				bytesAvailable = 0; /* Can't do; try again later */
-			else  /* Evidently it can, began transmission */
-			{ /* Begin if area verified */
-				/* ---------------------------------------------------------------
-					The below function reads data from user memory.  This routine
-					can not be used in an interrupt routine. (Because it may 
-					generate a page fault)  It can only be called while we can the
-					user context is accessible. 
-
-					The prototype is :
-					inline void copy_from_user(void * to, const void * from,
-					                          unsigned long count);
-
-					You must include <asm/segment.h>
-					I also think (Check hackers guide) that optimization must
-					be turned ON.  (Which sounds strange to me...)
-	
-					Remember copy_from_user WILL generate a page fault if the
-					user memory being accessed has been swapped out.  This can
-					cause this routine to temporarily sleep while this page
-					fault is occuring.
-				
-				----------------------------------------------------------------- */
-
-				copy_from_user(ch->tmp_buf, buf, bytesAvailable);
-
-			} /* End if area verified */
-
-		} /* End bytesAvailable */
-
-		/* ------------------------------------------------------------------ 
-			Set buf to this address for the moment.  tmp_buf was allocated in
-			post_fep_init.
-		--------------------------------------------------------------------- */
-		buf = ch->tmp_buf;
-		memoff(ch);
-		restore_flags(flags);
-
-	} /* End from_user */
-
-	/* All data is now local */
 
 	amountCopied = 0;
 	save_flags(flags);
@@ -965,7 +749,7 @@ static int pc_write(struct tty_struct * tty, int from_user,
 			space; reduce the amount of data to fit the space.
 	---------------------------------------------------------------------- */
 
-	bytesAvailable = MIN(remain, bytesAvailable);
+	bytesAvailable = min(remain, bytesAvailable);
 
 	txwinon(ch);
 	while (bytesAvailable > 0) 
@@ -976,7 +760,7 @@ static int pc_write(struct tty_struct * tty, int from_user,
 			data copy fills to the end of card buffer.
 		------------------------------------------------------------------- */
 
-		dataLen = MIN(bytesAvailable, dataLen);
+		dataLen = min(bytesAvailable, dataLen);
 		memcpy(ch->txptr + head, buf, dataLen);
 		buf += dataLen;
 		head += dataLen;
@@ -1013,7 +797,7 @@ static void pc_put_char(struct tty_struct *tty, unsigned char c)
 { /* Begin pc_put_char */
 
    
-	pc_write(tty, 0, &c, 1);
+	pc_write(tty, &c, 1);
 	return;
 
 } /* End pc_put_char */
@@ -1173,8 +957,7 @@ static void pc_flush_buffer(struct tty_struct *tty)
 	restore_flags(flags);
 
 	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 
 } /* End pc_flush_buffer */
 
@@ -1244,31 +1027,6 @@ static int block_til_ready(struct tty_struct *tty,
 			return -ERESTARTSYS;
 	}
 
-	/* ----------------------------------------------------------------- 
-	   If this is a callout device, then just make sure the normal
-	   device isn't being used.
-	-------------------------------------------------------------------- */
-
-	if (tty->driver.subtype == SERIAL_TYPE_CALLOUT) 
-	{ /* A cud device has been opened */
-		if (ch->asyncflags & ASYNC_NORMAL_ACTIVE)
-			return -EBUSY;
-
-		if ((ch->asyncflags & ASYNC_CALLOUT_ACTIVE) &&
-		    (ch->asyncflags & ASYNC_SESSION_LOCKOUT) &&
-		    (ch->session != current->session))
-		    return -EBUSY;
-
-		if ((ch->asyncflags & ASYNC_CALLOUT_ACTIVE) &&
-		    (ch->asyncflags & ASYNC_PGRP_LOCKOUT) &&
-		    (ch->pgrp != current->pgrp))
-		    return -EBUSY;
- 
-		ch->asyncflags |= ASYNC_CALLOUT_ACTIVE;
-
-		return 0;
-	} /* End a cud device has been opened */
-
 	if (filp->f_flags & O_NONBLOCK) 
 	{
 		/* ----------------------------------------------------------------- 
@@ -1276,25 +1034,14 @@ static int block_til_ready(struct tty_struct *tty,
 	  	 and then exit.
 		-------------------------------------------------------------------- */
 
-		if (ch->asyncflags & ASYNC_CALLOUT_ACTIVE)
-			return -EBUSY;
-
 		ch->asyncflags |= ASYNC_NORMAL_ACTIVE;
 
 		return 0;
 	}
 
 
-	if (ch->asyncflags & ASYNC_CALLOUT_ACTIVE) 
-	{
-		if (ch->normal_termios.c_cflag & CLOCAL)
-			do_clocal = 1;
-	}
-	else 
-	{
-		if (tty->termios->c_cflag & CLOCAL)
-			do_clocal = 1;
-	}
+	if (tty->termios->c_cflag & CLOCAL)
+		do_clocal = 1;
 	
    /* Block waiting for the carrier detect and the line to become free */
 	
@@ -1328,7 +1075,6 @@ static int block_til_ready(struct tty_struct *tty,
 		}
 
 		if (!(ch->asyncflags & ASYNC_CLOSING) && 
-		    !(ch->asyncflags & ASYNC_CALLOUT_ACTIVE) &&
 			  (do_clocal || (ch->imodem & ch->dcd)))
 			break;
 
@@ -1339,7 +1085,7 @@ static int block_til_ready(struct tty_struct *tty,
 		}
 
 		/* ---------------------------------------------------------------
-			Allow someone else to be scheduled.  We will occasionaly go
+			Allow someone else to be scheduled.  We will occasionally go
 			through this loop until one of the above conditions change.
 			The below schedule call will allow other processes to enter and
 			prevent this loop from hogging the cpu.
@@ -1377,14 +1123,7 @@ static int pc_open(struct tty_struct *tty, struct file * filp)
 	volatile struct board_chan *bc;
 	volatile unsigned int head;
 
-	/* Nothing "real" happens in open of control device */
-
-	if (tty->driver.subtype == SERIAL_TYPE_INFO) 
-	{
-		return (0) ;
-	}
-
-	line = MINOR(tty->device) - tty->driver.minor_start;
+	line = tty->index;
 	if (line < 0 || line >= nbdevs) 
 	{
 		printk(KERN_ERR "<Error> - pc_open : line out of range in pc_open\n");
@@ -1392,11 +1131,6 @@ static int pc_open(struct tty_struct *tty, struct file * filp)
 		return(-ENODEV);
 	}
 
-#ifdef MODULE
-
-	MOD_INC_USE_COUNT;
-
-#endif
 
 	ch = &digi_channels[line];
 	boardnum = ch->boardnum;
@@ -1466,18 +1200,6 @@ static int pc_open(struct tty_struct *tty, struct file * filp)
 		the tty->termios struct otherwise let pc_close handle it.
 	-------------------------------------------------------------------- */
 
-	/* Should this be here except for SPLIT termios ? */
-	if (ch->count == 1) 
-	{
-		if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
-			*tty->termios = ch->normal_termios;
-		else 
-			*tty->termios = ch->callout_termios;
-	}
-
-	ch->session = current->session;
-	ch->pgrp = current->pgrp;
-
 	save_flags(flags);
 	cli();
 
@@ -1535,8 +1257,7 @@ static int pc_open(struct tty_struct *tty, struct file * filp)
 } /* End pc_open */
 
 #ifdef MODULE
-/* -------------------- Begin init_module ---------------------- */
-int __init init_module()
+static int __init epca_module_init(void)
 { /* Begin init_module */
 
 	unsigned long	flags;
@@ -1549,8 +1270,9 @@ int __init init_module()
 	restore_flags(flags);
 
 	return(0);
-} /* End init_module */
+}
 
+module_init(epca_module_init);
 #endif
 
 #ifdef ENABLE_PCI
@@ -1560,8 +1282,8 @@ static struct pci_driver epca_driver;
 #ifdef MODULE
 /* -------------------- Begin cleanup_module  ---------------------- */
 
-void cleanup_module()
-{ /* Begin cleanup_module */
+static void __exit epca_module_exit(void)
+{
 
 	int               count, crd;
 	struct board_info *bd;
@@ -1573,13 +1295,15 @@ void cleanup_module()
 	save_flags(flags);
 	cli();
 
-	if ((tty_unregister_driver(&pc_driver)) ||  
-	    (tty_unregister_driver(&pc_callout)))
+	if ((tty_unregister_driver(pc_driver)) ||  
+	    (tty_unregister_driver(pc_info)))
 	{
 		printk(KERN_WARNING "<Error> - DIGI : cleanup_module failed to un-register tty driver\n");
 		restore_flags(flags);
 		return;
 	}
+	put_tty_driver(pc_driver);
+	put_tty_driver(pc_info);
 
 	for (crd = 0; crd < num_cards; crd++) 
 	{ /* Begin for each card */
@@ -1613,8 +1337,37 @@ void cleanup_module()
 
 	restore_flags(flags);
 
-} /* End cleanup_module */
+}
+module_exit(epca_module_exit);
 #endif /* MODULE */
+
+static struct tty_operations pc_ops = {
+	.open = pc_open,
+	.close = pc_close,
+	.write = pc_write,
+	.write_room = pc_write_room,
+	.flush_buffer = pc_flush_buffer,
+	.chars_in_buffer = pc_chars_in_buffer,
+	.flush_chars = pc_flush_chars,
+	.put_char = pc_put_char,
+	.ioctl = pc_ioctl,
+	.set_termios = pc_set_termios,
+	.stop = pc_stop,
+	.start = pc_start,
+	.throttle = pc_throttle,
+	.unthrottle = pc_unthrottle,
+	.hangup = pc_hangup,
+};
+
+static int info_open(struct tty_struct *tty, struct file * filp)
+{
+	return 0;
+}
+
+static struct tty_operations info_ops = {
+	.open = info_open,
+	.ioctl = info_ioctl,
+};
 
 /* ------------------ Begin pc_init  ---------------------- */
 
@@ -1640,13 +1393,22 @@ int __init pc_init(void)
 	int crd;
 	struct board_info *bd;
 	unsigned char board_id = 0;
-	
 
 #ifdef ENABLE_PCI
 	int pci_boards_found, pci_count;
 
 	pci_count = 0;
 #endif /* ENABLE_PCI */
+
+	pc_driver = alloc_tty_driver(MAX_ALLOC);
+	if (!pc_driver)
+		return -ENOMEM;
+
+	pc_info = alloc_tty_driver(MAX_ALLOC);
+	if (!pc_info) {
+		put_tty_driver(pc_driver);
+		return -ENOMEM;
+	}
 
 	/* -----------------------------------------------------------------------
 		If epca_setup has not been ran by LILO set num_cards to defaults; copy
@@ -1685,7 +1447,7 @@ int __init pc_init(void)
 		       the boards array is correct.  This could be wrong if
 		       the card in question is PCI (And therefore has no ports 
 		       entry in the boards structure.)  The rest of the 
-		       information will be valid for PCI because the begining
+		       information will be valid for PCI because the beginning
 		       of pc_init scans for PCI and determines i/o and base
 		       memory addresses.  I am not sure if it is possible to 
 		       read the number of ports supported by the card prior to
@@ -1701,80 +1463,40 @@ int __init pc_init(void)
 	--------------------------------------------------------------------- */
   
 	pci_boards_found = 0;
-	if (pci_present())
-	{
-		if(num_cards < MAXBOARDS)
-			pci_boards_found += init_PCI();
-		num_cards += pci_boards_found;
-	}
-	else 
-	{
-		printk(KERN_ERR "<Error> - No PCI BIOS found\n");
-	}
+	if(num_cards < MAXBOARDS)
+		pci_boards_found += init_PCI();
+	num_cards += pci_boards_found;
 
 #endif /* ENABLE_PCI */
 
-	memset(&pc_driver, 0, sizeof(struct tty_driver));
-	memset(&pc_callout, 0, sizeof(struct tty_driver));
-	memset(&pc_info, 0, sizeof(struct tty_driver));
+	pc_driver->owner = THIS_MODULE;
+	pc_driver->name = "ttyD"; 
+	pc_driver->devfs_name = "tts/D";
+	pc_driver->major = DIGI_MAJOR; 
+	pc_driver->minor_start = 0;
+	pc_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	pc_driver->subtype = SERIAL_TYPE_NORMAL;
+	pc_driver->init_termios = tty_std_termios;
+	pc_driver->init_termios.c_iflag = 0;
+	pc_driver->init_termios.c_oflag = 0;
+	pc_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | CLOCAL | HUPCL;
+	pc_driver->init_termios.c_lflag = 0;
+	pc_driver->flags = TTY_DRIVER_REAL_RAW;
+	tty_set_operations(pc_driver, &pc_ops);
 
-	pc_driver.magic = TTY_DRIVER_MAGIC;
-	pc_driver.name = "ttyD"; 
-	pc_driver.major = DIGI_MAJOR; 
-	pc_driver.minor_start = 0;
-	pc_driver.num = MAX_ALLOC;
-	pc_driver.type = TTY_DRIVER_TYPE_SERIAL;
-	pc_driver.subtype = SERIAL_TYPE_NORMAL;
-	pc_driver.init_termios = tty_std_termios;
-	pc_driver.init_termios.c_iflag = 0;
-	pc_driver.init_termios.c_oflag = 0;
-
-	pc_driver.init_termios.c_cflag = B9600 | CS8 | CREAD | CLOCAL | HUPCL;
-	pc_driver.init_termios.c_lflag = 0;
-	pc_driver.flags = TTY_DRIVER_REAL_RAW;
-	pc_driver.refcount = &pc_refcount;
-	pc_driver.table = pc_table;
-	
-	/* pc_termios is an array of pointers pointing at termios structs */
-	/* The below should get the first pointer */
-	pc_driver.termios = pc_termios;
-	pc_driver.termios_locked = pc_termios_locked;
-
-	/* ------------------------------------------------------------------
-		Setup entry points for the driver.  These are primarily called by 
-		the kernel in tty_io.c and n_tty.c
-	--------------------------------------------------------------------- */
-
-	pc_driver.open = pc_open;
-	pc_driver.close = pc_close;
-	pc_driver.write = pc_write;
-	pc_driver.write_room = pc_write_room;
-	pc_driver.flush_buffer = pc_flush_buffer;
-	pc_driver.chars_in_buffer = pc_chars_in_buffer;
-	pc_driver.flush_chars = pc_flush_chars;
-	pc_driver.put_char = pc_put_char;
-	pc_driver.ioctl = pc_ioctl;
-	pc_driver.set_termios = pc_set_termios;
-	pc_driver.stop = pc_stop;
-	pc_driver.start = pc_start;
-	pc_driver.throttle = pc_throttle;
-	pc_driver.unthrottle = pc_unthrottle;
-	pc_driver.hangup = pc_hangup;
-	pc_callout = pc_driver;
-
-	pc_callout.name = "cud";
-	pc_callout.major = DIGICU_MAJOR;
-	pc_callout.minor_start = 0;
-	pc_callout.init_termios.c_cflag = B9600 | CS8 | CREAD | CLOCAL | HUPCL;
-	pc_callout.subtype = SERIAL_TYPE_CALLOUT;
-
-	pc_info = pc_driver;
-	pc_info.name = "digi_ctl";
-	pc_info.major = DIGIINFOMAJOR;
-	pc_info.minor_start = 0;
-	pc_info.num = 1;
-	pc_info.init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL;
-	pc_info.subtype = SERIAL_TYPE_INFO;
+	pc_info->owner = THIS_MODULE;
+	pc_info->name = "digi_ctl";
+	pc_info->major = DIGIINFOMAJOR;
+	pc_info->minor_start = 0;
+	pc_info->type = TTY_DRIVER_TYPE_SERIAL;
+	pc_info->subtype = SERIAL_TYPE_INFO;
+	pc_info->init_termios = tty_std_termios;
+	pc_info->init_termios.c_iflag = 0;
+	pc_info->init_termios.c_oflag = 0;
+	pc_info->init_termios.c_lflag = 0;
+	pc_info->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL;
+	pc_info->flags = TTY_DRIVER_REAL_RAW;
+	tty_set_operations(pc_info, &info_ops);
 
 
 	save_flags(flags);
@@ -1870,7 +1592,7 @@ int __init pc_init(void)
 			case PCXI:
 				board_id = inb((int)bd->port);
 				if ((board_id & 0x1) == 0x1) 
-				{ /* Begin its an XI card */ 
+				{ /* Begin it's an XI card */ 
 
 					/* Is it a 64K board */
 					if ((board_id & 0x30) == 0) 
@@ -1899,13 +1621,10 @@ int __init pc_init(void)
 
 	} /* End for each card */
 
-	if (tty_register_driver(&pc_driver))
+	if (tty_register_driver(pc_driver))
 		panic("Couldn't register Digi PC/ driver");
 
-	if (tty_register_driver(&pc_callout))
-		panic("Couldn't register Digi PC/ callout");
-
-	if (tty_register_driver(&pc_info))
+	if (tty_register_driver(pc_info))
 		panic("Couldn't register Digi PC/ info ");
 
 	/* -------------------------------------------------------------------
@@ -1937,7 +1656,7 @@ static void post_fep_init(unsigned int crd)
  
 	/*  -------------------------------------------------------------
 		This call is made by the user via. the ioctl call DIGI_INIT.
-		It is resposible for setting up all the card specific stuff.
+		It is responsible for setting up all the card specific stuff.
 	---------------------------------------------------------------- */
 	bd = &boards[crd];
 
@@ -2022,7 +1741,8 @@ static void post_fep_init(unsigned int crd)
 	    (*(ushort *)((ulong)memaddr + XEPORTS) < 3))
 		shrinkmem = 1;
 	if (bd->type < PCIXEM)
-		request_region((int)bd->port, 4, board_desc[bd->type]);
+		if (!request_region((int)bd->port, 4, board_desc[bd->type]))
+			return;		
 
 	memwinon(bd, 0);
 
@@ -2038,8 +1758,7 @@ static void post_fep_init(unsigned int crd)
 
 		ch->brdchan        = bc;
 		ch->mailbox        = gd; 
-		ch->tqueue.routine = do_softint;
-		ch->tqueue.data    = ch;
+		INIT_WORK(&ch->tqueue, do_softint, ch);
 		ch->board          = &boards[crd];
 
 		switch (bd->type)
@@ -2092,7 +1811,7 @@ static void post_fep_init(unsigned int crd)
 		ch->boardnum   = crd;
 		ch->channelnum = i;
 		ch->magic      = EPCA_MAGIC;
-		ch->tty        = 0;
+		ch->tty        = NULL;
 
 		if (shrinkmem) 
 		{
@@ -2178,17 +1897,19 @@ static void post_fep_init(unsigned int crd)
 		ch->close_delay = 50;
 		ch->count = 0;
 		ch->blocked_open = 0;
-		ch->callout_termios = pc_callout.init_termios;
-		ch->normal_termios = pc_driver.init_termios;
 		init_waitqueue_head(&ch->open_wait);
 		init_waitqueue_head(&ch->close_wait);
 		ch->tmp_buf = kmalloc(ch->txbufsize,GFP_KERNEL);
 		if (!(ch->tmp_buf))
 		{
 			printk(KERN_ERR "POST FEP INIT : kmalloc failed for port 0x%x\n",i);
-
+			release_region((int)bd->port, 4);
+			while(i-- > 0)
+				kfree((ch--)->tmp_buf);
+			return;
 		}
-		memset((void *)ch->tmp_buf,0,ch->txbufsize);
+		else 
+			memset((void *)ch->tmp_buf,0,ch->txbufsize);
 	} /* End for each port */
 
 	printk(KERN_INFO 
@@ -2216,7 +1937,7 @@ static void epcapoll(unsigned long ignored)
 
 	/* -------------------------------------------------------------------
 		This routine is called upon every timer interrupt.  Even though
-		the Digi series cards are capable of generating interupts this 
+		the Digi series cards are capable of generating interrupts this 
 		method of non-looping polling is more efficient.  This routine
 		checks for card generated events (Such as receive data, are transmit
 		buffer empty) and acts on those events.
@@ -2377,9 +2098,7 @@ static void doevent(int crd)
 				{ /* Begin if LOWWAIT */
 
 					ch->statusflags &= ~LOWWAIT;
-					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-						  tty->ldisc.write_wakeup)
-						(tty->ldisc.write_wakeup)(tty);
+					tty_wakeup(tty);
 					wake_up_interruptible(&tty->write_wait);
 
 				} /* End if LOWWAIT */
@@ -2396,9 +2115,7 @@ static void doevent(int crd)
 				{ /* Begin if EMPTYWAIT */
 
 					ch->statusflags &= ~EMPTYWAIT;
-					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-						  tty->ldisc.write_wakeup)
-						(tty->ldisc.write_wakeup)(tty);
+					tty_wakeup(tty);
 
 					wake_up_interruptible(&tty->write_wait);
 
@@ -2721,7 +2438,7 @@ static void epcaparam(struct tty_struct *tty, struct channel *ch)
 			the driver will wait on carrier detect.
 		------------------------------------------------------------------- */
 
-		if ((ts->c_cflag & CLOCAL) || (tty->driver.subtype == SERIAL_TYPE_CALLOUT))
+		if (ts->c_cflag & CLOCAL)
 		{ /* Begin it is a cud device or a ttyD device with CLOCAL on */
 			ch->asyncflags &= ~ASYNC_CHECK_CD;
 		} /* End it is a cud device or a ttyD device with CLOCAL on */
@@ -2744,11 +2461,11 @@ static void epcaparam(struct tty_struct *tty, struct channel *ch)
 
 		/* ---------------------------------------------------------------
 			Command sets channels iflag structure on the board. Such things 
-			as input soft flow control, handeling of parity errors, and
-			break handeling are all set here.
+			as input soft flow control, handling of parity errors, and
+			break handling are all set here.
 		------------------------------------------------------------------- */
 
-		/* break handeling, parity handeling, input stripping, flow control chars */
+		/* break handling, parity handling, input stripping, flow control chars */
 		fepcmd(ch, SETIFLAGS, (unsigned int) ch->fepiflag, 0, 0, 0);
 	}
 
@@ -2806,7 +2523,7 @@ static void epcaparam(struct tty_struct *tty, struct channel *ch)
 		ch->fepstopc = ch->stopc;
 
 		/* ------------------------------------------------------------
-			The XON / XOFF characters have changed; propogate these
+			The XON / XOFF characters have changed; propagate these
 			changes to the card.	
 		--------------------------------------------------------------- */
 
@@ -2820,7 +2537,7 @@ static void epcaparam(struct tty_struct *tty, struct channel *ch)
 
 		/* ---------------------------------------------------------------
 			Similar to the above, this time the auxilarly XON / XOFF 
-			characters have changed; propogate these changes to the card.
+			characters have changed; propagate these changes to the card.
 		------------------------------------------------------------------ */
 
 		fepcmd(ch, SAUXONOFFC, ch->fepstartca, ch->fepstopca, 0, 1);
@@ -2834,7 +2551,7 @@ static void receive_data(struct channel *ch)
 { /* Begin receive_data */
 
 	unchar *rptr;
-	struct termios *ts = 0;
+	struct termios *ts = NULL;
 	struct tty_struct *tty;
 	volatile struct board_chan *bc;
 	register int dataToRead, wrapgap, bytesAvailable;
@@ -2897,7 +2614,7 @@ static void receive_data(struct channel *ch)
 	if (bc->orun) 
 	{
 		bc->orun = 0;
-		printk(KERN_WARNING "overrun! DigiBoard device minor = %d\n",MINOR(tty->device));
+		printk(KERN_WARNING "overrun! DigiBoard device %s\n",tty->name);
 	}
 
 	rxwinon(ch);
@@ -2954,102 +2671,186 @@ static void receive_data(struct channel *ch)
 
 } /* End receive_data */
 
+static int info_ioctl(struct tty_struct *tty, struct file * file,
+		    unsigned int cmd, unsigned long arg)
+{
+	switch (cmd) 
+	{ /* Begin switch cmd */
+
+		case DIGI_GETINFO:
+		{ /* Begin case DIGI_GETINFO */
+
+			struct digi_info di ;
+			int brd;
+
+			getUser(brd, (unsigned int __user *)arg);
+
+			if ((brd < 0) || (brd >= num_cards) || (num_cards == 0))
+				return (-ENODEV);
+
+			memset(&di, 0, sizeof(di));
+
+			di.board = brd ; 
+			di.status = boards[brd].status;
+			di.type = boards[brd].type ;
+			di.numports = boards[brd].numports ;
+			di.port = boards[brd].port ;
+			di.membase = boards[brd].membase ;
+
+			if (copy_to_user((void __user *)arg, &di, sizeof (di)))
+				return -EFAULT;
+			break;
+
+		} /* End case DIGI_GETINFO */
+
+		case DIGI_POLLER:
+		{ /* Begin case DIGI_POLLER */
+
+			int brd = arg & 0xff000000 >> 16 ; 
+			unsigned char state = arg & 0xff ; 
+
+			if ((brd < 0) || (brd >= num_cards))
+			{
+				printk(KERN_ERR "<Error> - DIGI POLLER : brd not valid!\n");
+				return (-ENODEV);
+			}
+
+			digi_poller_inhibited = state ;
+			break ; 
+
+		} /* End case DIGI_POLLER */
+
+		case DIGI_INIT:
+		{ /* Begin case DIGI_INIT */
+
+			/* ------------------------------------------------------------
+				This call is made by the apps to complete the initilization
+				of the board(s).  This routine is responsible for setting
+				the card to its initial state and setting the drivers control
+				fields to the sutianle settings for the card in question.
+			---------------------------------------------------------------- */
+		
+			int crd ; 
+			for (crd = 0; crd < num_cards; crd++) 
+				post_fep_init (crd);
+
+			break ; 
+
+		} /* End case DIGI_INIT */
+
+
+		default:
+			return -ENOIOCTLCMD;
+
+	} /* End switch cmd */
+	return (0) ;
+}
 /* --------------------- Begin pc_ioctl  ----------------------- */
+
+static int pc_tiocmget(struct tty_struct *tty, struct file *file)
+{
+	struct channel *ch = (struct channel *) tty->driver_data;
+	volatile struct board_chan *bc;
+	unsigned int mstat, mflag = 0;
+	unsigned long flags;
+
+	if (ch)
+		bc = ch->brdchan;
+	else
+	{
+		printk(KERN_ERR "<Error> - ch is NULL in pc_tiocmget!\n");
+		return(-EINVAL);
+	}
+
+	save_flags(flags);
+	cli();
+	globalwinon(ch);
+	mstat = bc->mstat;
+	memoff(ch);
+	restore_flags(flags);
+
+	if (mstat & ch->m_dtr)
+		mflag |= TIOCM_DTR;
+
+	if (mstat & ch->m_rts)
+		mflag |= TIOCM_RTS;
+
+	if (mstat & ch->m_cts)
+		mflag |= TIOCM_CTS;
+
+	if (mstat & ch->dsr)
+		mflag |= TIOCM_DSR;
+
+	if (mstat & ch->m_ri)
+		mflag |= TIOCM_RI;
+
+	if (mstat & ch->dcd)
+		mflag |= TIOCM_CD;
+
+	return mflag;
+}
+
+static int pc_tiocmset(struct tty_struct *tty, struct file *file,
+		       unsigned int set, unsigned int clear)
+{
+	struct channel *ch = (struct channel *) tty->driver_data;
+	unsigned long flags;
+
+	if (!ch) {
+		printk(KERN_ERR "<Error> - ch is NULL in pc_tiocmset!\n");
+		return(-EINVAL);
+	}
+
+	save_flags(flags);
+	cli();
+	/*
+	 * I think this modemfake stuff is broken.  It doesn't
+	 * correctly reflect the behaviour desired by the TIOCM*
+	 * ioctls.  Therefore this is probably broken.
+	 */
+	if (set & TIOCM_RTS) {
+		ch->modemfake |= ch->m_rts;
+		ch->modem |= ch->m_rts;
+	}
+	if (set & TIOCM_DTR) {
+		ch->modemfake |= ch->m_dtr;
+		ch->modem |= ch->m_dtr;
+	}
+	if (clear & TIOCM_RTS) {
+		ch->modemfake |= ch->m_rts;
+		ch->modem &= ~ch->m_rts;
+	}
+	if (clear & TIOCM_DTR) {
+		ch->modemfake |= ch->m_dtr;
+		ch->modem &= ~ch->m_dtr;
+	}
+
+	globalwinon(ch);
+
+	/*  --------------------------------------------------------------
+		The below routine generally sets up parity, baud, flow control
+		issues, etc.... It effect both control flags and input flags.
+	------------------------------------------------------------------ */
+
+	epcaparam(tty,ch);
+	memoff(ch);
+	restore_flags(flags);
+	return 0;
+}
 
 static int pc_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg)
 { /* Begin pc_ioctl */
 
 	digiflow_t dflow;
-	int retval, error;
+	int retval;
 	unsigned long flags;
 	unsigned int mflag, mstat;
 	unsigned char startc, stopc;
 	volatile struct board_chan *bc;
 	struct channel *ch = (struct channel *) tty->driver_data;
+	void __user *argp = (void __user *)arg;
 	
-	/* The control device has it's own set of commands */
-	if (tty->driver.subtype == SERIAL_TYPE_INFO) 
-	{ /* Begin if subtype is the control device */
-
-		switch (cmd) 
-		{ /* Begin switch cmd */
-
-			case DIGI_GETINFO:
-			{ /* Begin case DIGI_GETINFO */
-
-				struct digi_info di ;
-				int brd;
-
-				getUser(brd, (unsigned int *)arg);
-
-				if ((error = verify_area(VERIFY_WRITE, (char*)arg, sizeof(di))))
-				{
-					printk(KERN_ERR "DIGI_GETINFO : verify area size 0x%x failed\n",sizeof(di));
-					return(error);
-				}
-
-				if ((brd < 0) || (brd >= num_cards) || (num_cards == 0))
-					return (-ENODEV);
-
-				memset(&di, 0, sizeof(di));
-
-				di.board = brd ; 
-				di.status = boards[brd].status;
-				di.type = boards[brd].type ;
-				di.numports = boards[brd].numports ;
-				di.port = boards[brd].port ;
-				di.membase = boards[brd].membase ;
-
-				copy_to_user((char *)arg, &di, sizeof (di));
-				break;
-
-			} /* End case DIGI_GETINFO */
-
-			case DIGI_POLLER:
-			{ /* Begin case DIGI_POLLER */
-
-				int brd = arg & 0xff000000 >> 16 ; 
-				unsigned char state = arg & 0xff ; 
-
-				if ((brd < 0) || (brd >= num_cards))
-				{
-					printk(KERN_ERR "<Error> - DIGI POLLER : brd not valid!\n");
-					return (-ENODEV);
-				}
-
-				digi_poller_inhibited = state ;
-				break ; 
-
-			} /* End case DIGI_POLLER */
-
-			case DIGI_INIT:
-			{ /* Begin case DIGI_INIT */
-
-				/* ------------------------------------------------------------
-					This call is made by the apps to complete the initilization
-					of the board(s).  This routine is responsible for setting
-					the card to its initial state and setting the drivers control
-					fields to the sutianle settings for the card in question.
-				---------------------------------------------------------------- */
-			
-				int crd ; 
-				for (crd = 0; crd < num_cards; crd++) 
-					post_fep_init (crd);
-
-			 	break ; 
-
-			} /* End case DIGI_INIT */
-
-
-			default:
-				return -ENOIOCTLCMD;
-
-		} /* End switch cmd */
-		return (0) ;
-
-	} /* End if subtype is the control device */
-
 	if (ch)
 		bc = ch->brdchan;
 	else 
@@ -3070,18 +2871,13 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 	{ /* Begin switch cmd */
 
 		case TCGETS:
-			retval = verify_area(VERIFY_WRITE, (void *)arg,
-                              sizeof(struct termios));
-			
-			if (retval)
-				return(retval);
-
-			copy_to_user((struct termios *)arg, 
-			             tty->termios, sizeof(struct termios));
+			if (copy_to_user(argp, 
+					 tty->termios, sizeof(struct termios)))
+				return -EFAULT;
 			return(0);
 
 		case TCGETA:
-			return get_termio(tty, (struct termio *)arg);
+			return get_termio(tty, argp);
 
 		case TCSBRK:	/* SVID version: non-zero arg --> no break */
 
@@ -3111,21 +2907,16 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			return 0;
 
 		case TIOCGSOFTCAR:
-
-			error = verify_area(VERIFY_WRITE, (void *) arg,sizeof(long));
-			if (error)
-				return error;
-
-			putUser(C_CLOCAL(tty) ? 1 : 0,
-			            (unsigned long *) arg);
+			if (put_user(C_CLOCAL(tty)?1:0, (unsigned long __user *)arg))
+				return -EFAULT;
 			return 0;
 
 		case TIOCSSOFTCAR:
-			/*RONNIE PUT VERIFY_READ (See above) check here */
 		{
 			unsigned int value;
 
-			getUser(value, (unsigned int *)arg);
+			if (get_user(value, (unsigned __user *)argp))
+				return -EFAULT;
 			tty->termios->c_cflag =
 				((tty->termios->c_cflag & ~CLOCAL) |
 				 (value ? CLOCAL : 0));
@@ -3133,90 +2924,15 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 		}
 
 		case TIOCMODG:
-		case TIOCMGET:
-
-			mflag = 0;
-
-			cli();
-			globalwinon(ch);
-			mstat = bc->mstat;
-			memoff(ch);
-			restore_flags(flags);
-
-			if (mstat & ch->m_dtr)
-				mflag |= TIOCM_DTR;
-
-			if (mstat & ch->m_rts)
-				mflag |= TIOCM_RTS;
-
-			if (mstat & ch->m_cts)
-				mflag |= TIOCM_CTS;
-
-			if (mstat & ch->dsr)
-				mflag |= TIOCM_DSR;
-
-			if (mstat & ch->m_ri)
-				mflag |= TIOCM_RI;
-
-			if (mstat & ch->dcd)
-				mflag |= TIOCM_CD;
-
-			error = verify_area(VERIFY_WRITE, (void *) arg,sizeof(long));
-
-			if (error)
-				return error;
-
-			putUser(mflag, (unsigned int *) arg);
-
+			mflag = pc_tiocmget(tty, file);
+			if (put_user(mflag, (unsigned long __user *)argp))
+				return -EFAULT;
 			break;
 
-		case TIOCMBIS:
-		case TIOCMBIC:
 		case TIOCMODS:
-		case TIOCMSET:
-
-			getUser(mstat, (unsigned int *)arg);
-
-			mflag = 0;
-			if (mstat & TIOCM_DTR)
-				mflag |= ch->m_dtr;
-
-			if (mstat & TIOCM_RTS)
-				mflag |= ch->m_rts;
-
-			switch (cmd) 
-			{ /* Begin switch cmd */
-
-				case TIOCMODS:
-				case TIOCMSET:
-					ch->modemfake = ch->m_dtr|ch->m_rts;
-					ch->modem = mflag;
-					break;
-
-				case TIOCMBIS:
-					ch->modemfake |= mflag;
-					ch->modem |= mflag;
-					break;
-
-				case TIOCMBIC:
-					ch->modemfake |= mflag;
-					ch->modem &= ~mflag;
-					break;
-
-			} /* End switch cmd */
-
-			cli();
-			globalwinon(ch);
-
-			/*  --------------------------------------------------------------
-				The below routine generally sets up parity, baud, flow control 
-				issues, etc.... It effect both control flags and input flags.
-			------------------------------------------------------------------ */
-
-			epcaparam(tty,ch);
-			memoff(ch);
-			restore_flags(flags);
-			break;
+			if (get_user(mstat, (unsigned __user *)argp))
+				return -EFAULT;
+			return pc_tiocmset(tty, file, mstat, ~mstat);
 
 		case TIOCSDTR:
 			ch->omodem |= ch->m_dtr;
@@ -3237,14 +2953,8 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			break;
 
 		case DIGI_GETA:
-			if ((error=
-				verify_area(VERIFY_WRITE, (char*)arg, sizeof(digi_t))))
-			{
-				printk(KERN_ERR "<Error> - Digi GETA failed\n");
-				return(error);
-			}
-
-			copy_to_user((char*)arg, &ch->digiext, sizeof(digi_t));
+			if (copy_to_user(argp, &ch->digiext, sizeof(digi_t)))
+				return -EFAULT;
 			break;
 
 		case DIGI_SETAW:
@@ -3258,6 +2968,7 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			}
 			else 
 			{
+				/* ldisc lock already held in ioctl */
 				if (tty->ldisc.flush_buffer)
 					tty->ldisc.flush_buffer(tty);
 			}
@@ -3265,11 +2976,8 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			/* Fall Thru */
 
 		case DIGI_SETA:
-			if ((error =
-				verify_area(VERIFY_READ, (char*)arg,sizeof(digi_t))))
-				return(error);
-
-			copy_from_user(&ch->digiext, (char*)arg, sizeof(digi_t));
+			if (copy_from_user(&ch->digiext, argp, sizeof(digi_t)))
+				return -EFAULT;
 			
 			if (ch->digiext.digi_flags & DIGI_ALTPIN) 
 			{
@@ -3312,10 +3020,8 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			memoff(ch);
 			restore_flags(flags);
 
-			if ((error = verify_area(VERIFY_WRITE, (char*)arg,sizeof(dflow))))
-				return(error);
-
-			copy_to_user((char*)arg, &dflow, sizeof(dflow));
+			if (copy_to_user(argp, &dflow, sizeof(dflow)))
+				return -EFAULT;
 			break;
 
 		case DIGI_SETAFLOW:
@@ -3331,10 +3037,8 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 				stopc = ch->stopca;
 			}
 
-			if ((error = verify_area(VERIFY_READ, (char*)arg,sizeof(dflow))))
-				return(error);
-
-			copy_from_user(&dflow, (char*)arg, sizeof(dflow));
+			if (copy_from_user(&dflow, argp, sizeof(dflow)))
+				return -EFAULT;
 
 			if (dflow.startc != startc || dflow.stopc != stopc) 
 			{ /* Begin  if setflow toggled */
@@ -3430,13 +3134,12 @@ static void do_softint(void *private_)
 
 				tty_hangup(tty);	/* FIXME: module removal race here - AKPM */
 				wake_up_interruptible(&ch->open_wait);
-				ch->asyncflags &= ~(ASYNC_NORMAL_ACTIVE | ASYNC_CALLOUT_ACTIVE);
+				ch->asyncflags &= ~ASYNC_NORMAL_ACTIVE;
 
 			} /* End if clear_bit */
 		}
 
 	} /* End EPCA_MAGIC */
-	MOD_DEC_USE_COUNT;
 } /* End do_softint */
 
 /* ------------------------------------------------------------
@@ -3532,7 +3235,7 @@ static void pc_start(struct tty_struct *tty)
 /* ------------------------------------------------------------------
 	The below routines pc_throttle and pc_unthrottle are used 
 	to slow (And resume) the receipt of data into the kernels
-	receive buffers.  The exact occurence of this depends on the
+	receive buffers.  The exact occurrence of this depends on the
 	size of the kernels receive buffer and what the 'watermarks'
 	are set to for that buffer.  See the n_ttys.c file for more
 	details. 
@@ -3662,17 +3365,9 @@ static void setup_empty_event(struct tty_struct *tty, struct channel *ch)
 
 /* --------------------- Begin get_termio ----------------------- */
 
-static int get_termio(struct tty_struct * tty, struct termio * termio)
+static int get_termio(struct tty_struct * tty, struct termio __user * termio)
 { /* Begin get_termio */
-	int error;
-
-	error = verify_area(VERIFY_WRITE, termio, sizeof (struct termio));
-	if (error)
-		return error;
-
-	kernel_termios_to_user_termio(termio, tty->termios);
-
-	return 0;
+	return kernel_termios_to_user_termio(termio, tty->termios);
 } /* End get_termio */
 /* ---------------------- Begin epca_setup  -------------------------- */
 void epca_setup(char *str, int *ints)
@@ -3764,7 +3459,7 @@ void epca_setup(char *str, int *ints)
 
 			case 5:
 				board.port = (unsigned char *)ints[index];
-				if (board.port <= 0)
+				if (ints[index] <= 0)
 				{
 					printk(KERN_ERR "<Error> - epca_setup: Invalid io port 0x%x\n", (unsigned int)board.port);
 					invalid_lilo_config = 1;
@@ -3776,7 +3471,7 @@ void epca_setup(char *str, int *ints)
 
 			case 6:
 				board.membase = (unsigned char *)ints[index];
-				if (board.membase <= 0)
+				if (ints[index] <= 0)
 				{
 					printk(KERN_ERR "<Error> - epca_setup: Invalid memory base 0x%x\n",(unsigned int)board.membase);
 					invalid_lilo_config = 1;
@@ -3991,7 +3686,7 @@ static struct {
 };
 
 
-static int __init epca_init_one (struct pci_dev *pdev,
+static int __devinit epca_init_one (struct pci_dev *pdev,
 				 const struct pci_device_id *ent)
 {
 	static int board_num = -1;
@@ -4069,7 +3764,7 @@ err_out:
 }
 
 
-static struct pci_device_id epca_pci_tbl[] __initdata = {
+static struct pci_device_id epca_pci_tbl[] = {
 	{ PCI_VENDOR_DIGI, PCI_DEVICE_XR, PCI_ANY_ID, PCI_ANY_ID, 0, 0, brd_xr },
 	{ PCI_VENDOR_DIGI, PCI_DEVICE_XEM, PCI_ANY_ID, PCI_ANY_ID, 0, 0, brd_xem },
 	{ PCI_VENDOR_DIGI, PCI_DEVICE_CX, PCI_ANY_ID, PCI_ANY_ID, 0, 0, brd_cx },
@@ -4081,23 +3776,14 @@ MODULE_DEVICE_TABLE(pci, epca_pci_tbl);
 
 int __init init_PCI (void)
 { /* Begin init_PCI */
-	
-	int pci_count;
-	
 	memset (&epca_driver, 0, sizeof (epca_driver));
 	epca_driver.name = "epca";
 	epca_driver.id_table = epca_pci_tbl;
 	epca_driver.probe = epca_init_one;
 
-	pci_count = pci_register_driver (&epca_driver);
-	
-	if (pci_count <= 0) {
-		pci_unregister_driver (&epca_driver);
-		pci_count = 0;
-	}
-
-	return(pci_count);
-
+	return pci_register_driver(&epca_driver);
 } /* End init_PCI */
 
 #endif /* ENABLE_PCI */
+
+MODULE_LICENSE("GPL");

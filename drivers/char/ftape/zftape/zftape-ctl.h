@@ -47,13 +47,12 @@ extern int zft_resid;
 extern void zft_reset_position(zft_position *pos);
 extern int  zft_check_write_access(zft_position *pos);
 extern int  zft_def_idle_state(void);
-extern int  zft_dirty(void);
 
 /*  hooks for the VFS interface 
  */
 extern int  _zft_open(unsigned int dev_minor, unsigned int access_mode);
 extern int  _zft_close(void);
-extern int  _zft_ioctl(unsigned int command, void *arg);
+extern int  _zft_ioctl(unsigned int command, void __user *arg);
 #endif
 
 

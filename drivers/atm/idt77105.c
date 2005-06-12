@@ -15,6 +15,7 @@
 #include <linux/init.h>
 #include <linux/capability.h>
 #include <linux/atm_idt77105.h>
+#include <linux/spinlock.h>
 #include <asm/system.h>
 #include <asm/param.h>
 #include <asm/uaccess.h>
@@ -38,6 +39,7 @@ struct idt77105_priv {
         unsigned char old_mcr;          /* storage of MCR reg while signal lost */
 };
 
+static DEFINE_SPINLOCK(idt77105_priv_lock);
 
 #define PRIV(dev) ((struct idt77105_priv *) dev->phy_data)
 
@@ -48,12 +50,10 @@ static void idt77105_stats_timer_func(unsigned long);
 static void idt77105_restart_timer_func(unsigned long);
 
 
-static struct timer_list stats_timer = {
-    function:	&idt77105_stats_timer_func
-};
-static struct timer_list restart_timer = {
-    function:	&idt77105_restart_timer_func
-};
+static struct timer_list stats_timer =
+    TIMER_INITIALIZER(idt77105_stats_timer_func, 0, 0);
+static struct timer_list restart_timer =
+    TIMER_INITIALIZER(idt77105_restart_timer_func, 0, 0);
 static int start_timer = 1;
 static struct idt77105_priv *idt77105_all = NULL;
 
@@ -141,21 +141,20 @@ static void idt77105_restart_timer_func(unsigned long dummy)
 }
 
 
-static int fetch_stats(struct atm_dev *dev,struct idt77105_stats *arg,int zero)
+static int fetch_stats(struct atm_dev *dev,struct idt77105_stats __user *arg,int zero)
 {
 	unsigned long flags;
-	int error;
+	struct idt77105_stats stats;
 
-	error = 0;
-	save_flags(flags);
-	cli();
-	if (arg)
-		error = copy_to_user(arg,&PRIV(dev)->stats,
-		    sizeof(struct idt77105_stats));
-	if (zero && !error)
-		memset(&PRIV(dev)->stats,0,sizeof(struct idt77105_stats));
-	restore_flags(flags);
-	return error ? -EFAULT : sizeof(struct idt77105_stats);
+	spin_lock_irqsave(&idt77105_priv_lock, flags);
+	memcpy(&stats, &PRIV(dev)->stats, sizeof(struct idt77105_stats));
+	if (zero)
+		memset(&PRIV(dev)->stats, 0, sizeof(struct idt77105_stats));
+	spin_unlock_irqrestore(&idt77105_priv_lock, flags);
+	if (arg == NULL)
+		return 0;
+	return copy_to_user(arg, &PRIV(dev)->stats,
+		    sizeof(struct idt77105_stats)) ? -EFAULT : 0;
 }
 
 
@@ -189,7 +188,7 @@ static int set_loopback(struct atm_dev *dev,int mode)
 }
 
 
-static int idt77105_ioctl(struct atm_dev *dev,unsigned int cmd,void *arg)
+static int idt77105_ioctl(struct atm_dev *dev,unsigned int cmd,void __user *arg)
 {
         printk(KERN_NOTICE "%s(%d) idt77105_ioctl() called\n",dev->type,dev->number);
 	switch (cmd) {
@@ -197,16 +196,15 @@ static int idt77105_ioctl(struct atm_dev *dev,unsigned int cmd,void *arg)
 			if (!capable(CAP_NET_ADMIN)) return -EPERM;
 			/* fall through */
 		case IDT77105_GETSTAT:
-			return fetch_stats(dev,(struct idt77105_stats *) arg,
-			    cmd == IDT77105_GETSTATZ);
+			return fetch_stats(dev, arg, cmd == IDT77105_GETSTATZ);
 		case ATM_SETLOOP:
-			return set_loopback(dev,(int) (long) arg);
+			return set_loopback(dev,(int)(unsigned long) arg);
 		case ATM_GETLOOP:
-			return put_user(PRIV(dev)->loop_mode,(int *) arg) ?
+			return put_user(PRIV(dev)->loop_mode,(int __user *)arg) ?
 			    -EFAULT : 0;
 		case ATM_QUERYLOOP:
 			return put_user(ATM_LM_LOC_ATM | ATM_LM_RMT_ATM,
-			    (int *) arg) ? -EFAULT : 0;
+			    (int __user *) arg) ? -EFAULT : 0;
 		default:
 			return -ENOIOCTLCMD;
 	}
@@ -266,14 +264,13 @@ static int idt77105_start(struct atm_dev *dev)
 {
 	unsigned long flags;
 
-	if (!(PRIV(dev) = kmalloc(sizeof(struct idt77105_priv),GFP_KERNEL)))
+	if (!(dev->dev_data = kmalloc(sizeof(struct idt77105_priv),GFP_KERNEL)))
 		return -ENOMEM;
 	PRIV(dev)->dev = dev;
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&idt77105_priv_lock, flags);
 	PRIV(dev)->next = idt77105_all;
 	idt77105_all = PRIV(dev);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&idt77105_priv_lock, flags);
 	memset(&PRIV(dev)->stats,0,sizeof(struct idt77105_stats));
         
         /* initialise dev->signal from Good Signal Bit */
@@ -307,11 +304,9 @@ static int idt77105_start(struct atm_dev *dev)
 	idt77105_stats_timer_func(0); /* clear 77105 counters */
 	(void) fetch_stats(dev,NULL,1); /* clear kernel counters */
         
-	cli();
-	if (!start_timer) restore_flags(flags);
-	else {
+	spin_lock_irqsave(&idt77105_priv_lock, flags);
+	if (start_timer) {
 		start_timer = 0;
-		restore_flags(flags);
                 
 		init_timer(&stats_timer);
 		stats_timer.expires = jiffies+IDT77105_STATS_TIMER_PERIOD;
@@ -323,33 +318,12 @@ static int idt77105_start(struct atm_dev *dev)
 		restart_timer.function = idt77105_restart_timer_func;
 		add_timer(&restart_timer);
 	}
+	spin_unlock_irqrestore(&idt77105_priv_lock, flags);
 	return 0;
 }
 
 
-static const struct atmphy_ops idt77105_ops = {
-	idt77105_start,
-	idt77105_ioctl,
-	idt77105_int
-};
-
-
-int __init idt77105_init(struct atm_dev *dev)
-{
-	MOD_INC_USE_COUNT;
-
-	dev->phy = &idt77105_ops;
-	return 0;
-}
-
-
-/*
- * TODO: this function should be called through phy_ops
- * but that will not be possible for some time as there is
- * currently a freeze on modifying that structure
- * -- Greg Banks, 13 Sep 1999
- */
-int idt77105_stop(struct atm_dev *dev)
+static int idt77105_stop(struct atm_dev *dev)
 {
 	struct idt77105_priv *walk, *prev;
 
@@ -368,36 +342,39 @@ int idt77105_stop(struct atm_dev *dev)
                 else
                     idt77105_all = walk->next;
 	        dev->phy = NULL;
-                PRIV(dev) = NULL;
+                dev->dev_data = NULL;
                 kfree(walk);
                 break;
             }
         }
 
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif /* MODULE */
 	return 0;
 }
 
 
+static const struct atmphy_ops idt77105_ops = {
+	.start = 	idt77105_start,
+	.ioctl =	idt77105_ioctl,
+	.interrupt =	idt77105_int,
+	.stop =		idt77105_stop,
+};
+
+
+int idt77105_init(struct atm_dev *dev)
+{
+	dev->phy = &idt77105_ops;
+	return 0;
+}
 
 EXPORT_SYMBOL(idt77105_init);
-EXPORT_SYMBOL(idt77105_stop);
 
-#ifdef MODULE
-
-int init_module(void)
-{
-	return 0;
-}
-
-
-void cleanup_module(void)
+static void __exit idt77105_exit(void)
 {
         /* turn off timers */
         del_timer(&stats_timer);
         del_timer(&restart_timer);
 }
 
-#endif
+module_exit(idt77105_exit);
+
+MODULE_LICENSE("GPL");

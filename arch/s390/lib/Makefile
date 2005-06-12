@@ -2,11 +2,8 @@
 # Makefile for s390-specific library files..
 #
 
-.S.o:
-	$(CC) $(AFLAGS) -traditional -c $< -o $*.o
+EXTRA_AFLAGS := -traditional
 
-L_TARGET = lib.a
-L_OBJS = checksum.o delay.o memset.o strcmp.o strncpy.o
-
-include $(TOPDIR)/Rules.make
-
+lib-y += delay.o string.o
+lib-$(CONFIG_ARCH_S390_31) += uaccess.o
+lib-$(CONFIG_ARCH_S390X) += uaccess64.o

@@ -16,6 +16,8 @@
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
 #include <linux/init.h>
+#include <linux/seq_file.h>
+#include <linux/interrupt.h>
 
 #include <asm/irq.h>
 #include <asm/amigahw.h>
@@ -23,21 +25,25 @@
 
 struct ciabase {
 	volatile struct CIA *cia;
-	u_char icr_mask, icr_data;
-	u_short int_mask;
+	unsigned char icr_mask, icr_data;
+	unsigned short int_mask;
 	int handler_irq, cia_irq, server_irq;
 	char *name;
 	irq_handler_t irq_list[CIA_IRQS];
 } ciaa_base = {
-	&ciaa, 0, 0, IF_PORTS,
-	IRQ_AMIGA_AUTO_2, IRQ_AMIGA_CIAA,
-	IRQ_AMIGA_PORTS,
-	"CIAA handler"
+	.cia		= &ciaa,
+	.int_mask	= IF_PORTS,
+	.handler_irq	= IRQ_AMIGA_AUTO_2,
+	.cia_irq	= IRQ_AMIGA_CIAA,
+	.server_irq	= IRQ_AMIGA_PORTS,
+	.name		= "CIAA handler"
 }, ciab_base = {
-	&ciab, 0, 0, IF_EXTER,
-	IRQ_AMIGA_AUTO_6, IRQ_AMIGA_CIAB,
-	IRQ_AMIGA_EXTER,
-	"CIAB handler"
+	.cia		= &ciab,
+	.int_mask	= IF_EXTER,
+	.handler_irq	= IRQ_AMIGA_AUTO_6,
+	.cia_irq	= IRQ_AMIGA_CIAB,
+	.server_irq	= IRQ_AMIGA_EXTER,
+	.name		= "CIAB handler"
 };
 
 /*
@@ -46,7 +52,7 @@ struct ciabase {
 
 unsigned char cia_set_irq(struct ciabase *base, unsigned char mask)
 {
-	u_char old;
+	unsigned char old;
 
 	old = (base->icr_data |= base->cia->icr);
 	if (mask & CIA_ICR_SETCLR)
@@ -65,7 +71,7 @@ unsigned char cia_set_irq(struct ciabase *base, unsigned char mask)
 
 unsigned char cia_able_irq(struct ciabase *base, unsigned char mask)
 {
-	u_char old, tmp;
+	unsigned char old, tmp;
 	int i;
 
 	old = base->icr_mask;
@@ -88,10 +94,10 @@ unsigned char cia_able_irq(struct ciabase *base, unsigned char mask)
 }
 
 int cia_request_irq(struct ciabase *base, unsigned int irq,
-                    void (*handler)(int, void *, struct pt_regs *),
+                    irqreturn_t (*handler)(int, void *, struct pt_regs *),
                     unsigned long flags, const char *devname, void *dev_id)
 {
-	u_char mask;
+	unsigned char mask;
 
 	base->irq_list[irq].handler = handler;
 	base->irq_list[irq].flags   = flags;
@@ -118,7 +124,7 @@ void cia_free_irq(struct ciabase *base, unsigned int irq, void *dev_id)
 	cia_able_irq(base, 1 << irq);
 }
 
-static void cia_handler(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t cia_handler(int irq, void *dev_id, struct pt_regs *fp)
 {
 	struct ciabase *base = (struct ciabase *)dev_id;
 	int mach_irq, i;
@@ -130,12 +136,13 @@ static void cia_handler(int irq, void *dev_id, struct pt_regs *fp)
 	custom.intreq = base->int_mask;
 	for (i = 0; i < CIA_IRQS; i++, irq++, mach_irq++) {
 		if (ints & 1) {
-			kstat.irqs[0][irq]++;
+			kstat_cpu(0).irqs[irq]++;
 			base->irq_list[i].handler(mach_irq, base->irq_list[i].dev_id, fp);
 		}
 		ints >>= 1;
 	}
 	amiga_do_irq_list(base->server_irq, fp);
+	return IRQ_HANDLED;
 }
 
 void __init cia_init_IRQ(struct ciabase *base)
@@ -158,16 +165,16 @@ void __init cia_init_IRQ(struct ciabase *base)
 	custom.intena = IF_SETCLR | base->int_mask;
 }
 
-int cia_get_irq_list(struct ciabase *base, char *buf)
+int cia_get_irq_list(struct ciabase *base, struct seq_file *p)
 {
-	int i, j, len = 0;
+	int i, j;
 
 	j = base->cia_irq;
 	for (i = 0; i < CIA_IRQS; i++) {
-		len += sprintf(buf+len, "cia  %2d: %10d ", j + i,
-			       kstat.irqs[0][SYS_IRQS + j + i]);
-			len += sprintf(buf+len, "  ");
-		len += sprintf(buf+len, "%s\n", base->irq_list[i].devname);
+		seq_printf(p, "cia  %2d: %10d ", j + i,
+			       kstat_cpu(0).irqs[SYS_IRQS + j + i]);
+		seq_puts(p, "  ");
+		seq_printf(p, "%s\n", base->irq_list[i].devname);
 	}
-	return len;
+	return 0;
 }

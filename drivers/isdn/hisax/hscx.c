@@ -1,14 +1,15 @@
-/* $Id: hscx.c,v 1.21 2000/11/24 17:05:37 kai Exp $
+/* $Id: hscx.c,v 1.24.2.4 2004/01/24 20:47:23 keil Exp $
  *
- * hscx.c   HSCX specific routines
+ * HSCX specific routines
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "hscx.h"
@@ -16,11 +17,11 @@
 #include "isdnl1.h"
 #include <linux/interrupt.h>
 
-static char *HSCXVer[] __initdata =
+static char *HSCXVer[] =
 {"A1", "?1", "A2", "?3", "A3", "V2.1", "?6", "?7",
  "?8", "?9", "?10", "?11", "?12", "?13", "?14", "???"};
 
-int __init
+int
 HscxVersion(struct IsdnCardState *cs, char *s)
 {
 	int verA, verB;
@@ -91,63 +92,60 @@ modehscx(struct BCState *bcs, int mode, int bc)
 }
 
 void
-hscx_sched_event(struct BCState *bcs, int event)
-{
-	bcs->event |= 1 << event;
-	queue_task(&bcs->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
-}
-
-void
 hscx_l2l1(struct PStack *st, int pr, void *arg)
 {
+	struct BCState *bcs = st->l1.bcs;
+	u_long flags;
 	struct sk_buff *skb = arg;
-	long flags;
 
 	switch (pr) {
 		case (PH_DATA | REQUEST):
-			save_flags(flags);
-			cli();
-			if (st->l1.bcs->tx_skb) {
-				skb_queue_tail(&st->l1.bcs->squeue, skb);
-				restore_flags(flags);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			if (bcs->tx_skb) {
+				skb_queue_tail(&bcs->squeue, skb);
 			} else {
-				st->l1.bcs->tx_skb = skb;
-				test_and_set_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-				st->l1.bcs->hw.hscx.count = 0;
-				restore_flags(flags);
-				st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
+				bcs->tx_skb = skb;
+				test_and_set_bit(BC_FLG_BUSY, &bcs->Flag);
+				bcs->hw.hscx.count = 0;
+				bcs->cs->BC_Send_Data(bcs);
 			}
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			break;
 		case (PH_PULL | INDICATION):
-			if (st->l1.bcs->tx_skb) {
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			if (bcs->tx_skb) {
 				printk(KERN_WARNING "hscx_l2l1: this shouldn't happen\n");
-				break;
+			} else {
+				test_and_set_bit(BC_FLG_BUSY, &bcs->Flag);
+				bcs->tx_skb = skb;
+				bcs->hw.hscx.count = 0;
+				bcs->cs->BC_Send_Data(bcs);
 			}
-			test_and_set_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-			st->l1.bcs->tx_skb = skb;
-			st->l1.bcs->hw.hscx.count = 0;
-			st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			break;
 		case (PH_PULL | REQUEST):
-			if (!st->l1.bcs->tx_skb) {
+			if (!bcs->tx_skb) {
 				test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 				st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
 			} else
 				test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 			break;
 		case (PH_ACTIVATE | REQUEST):
-			test_and_set_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			modehscx(st->l1.bcs, st->l1.mode, st->l1.bc);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			test_and_set_bit(BC_FLG_ACTIV, &bcs->Flag);
+			modehscx(bcs, st->l1.mode, st->l1.bc);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | REQUEST):
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | CONFIRM):
-			test_and_clear_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			test_and_clear_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-			modehscx(st->l1.bcs, 0, st->l1.bc);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			test_and_clear_bit(BC_FLG_ACTIV, &bcs->Flag);
+			test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
+			modehscx(bcs, 0, st->l1.bc);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			st->l1.l1l2(st, PH_DEACTIVATE | CONFIRM, NULL);
 			break;
 	}
@@ -166,8 +164,8 @@ close_hscxstate(struct BCState *bcs)
 			kfree(bcs->blog);
 			bcs->blog = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;
@@ -219,7 +217,7 @@ setstack_hscx(struct PStack *st, struct BCState *bcs)
 	return (0);
 }
 
-void __init
+void
 clear_pending_hscx_ints(struct IsdnCardState *cs)
 {
 	int val, eval;
@@ -245,7 +243,7 @@ clear_pending_hscx_ints(struct IsdnCardState *cs)
 	cs->BC_Write_Reg(cs, 1, HSCX_MASK, 0xFF);
 }
 
-void __init
+void
 inithscx(struct IsdnCardState *cs)
 {
 	cs->bcs[0].BC_SetStack = setstack_hscx;
@@ -262,7 +260,7 @@ inithscx(struct IsdnCardState *cs)
 	modehscx(cs->bcs + 1, 0, 0);
 }
 
-void __init
+void
 inithscxisac(struct IsdnCardState *cs, int part)
 {
 	if (part & 1) {

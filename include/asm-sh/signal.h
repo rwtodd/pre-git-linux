@@ -4,7 +4,12 @@
 #include <linux/types.h>
 
 /* Avoid too many header ordering problems.  */
+struct pt_regs;
 struct siginfo;
+
+#ifdef __KERNEL__
+/* Most things should be clean enough to redefine this at will, if care
+   is taken to make libc match.  */
 
 #define _NSIG		64
 #define _NSIG_BPW	32
@@ -15,6 +20,14 @@ typedef unsigned long old_sigset_t;		/* at least 32 bits */
 typedef struct {
 	unsigned long sig[_NSIG_WORDS];
 } sigset_t;
+
+#else
+/* Here we must cater to libcs that poke about in kernel headers.  */
+
+#define NSIG		32
+typedef unsigned long sigset_t;
+
+#endif /* __KERNEL__ */
 
 #define SIGHUP		 1
 #define SIGINT		 2
@@ -56,7 +69,7 @@ typedef struct {
 
 /* These should not be considered constants from userland.  */
 #define SIGRTMIN	32
-#define SIGRTMAX	(_NSIG-1)
+#define SIGRTMAX	_NSIG
 
 /*
  * SA_FLAGS values:
@@ -73,7 +86,7 @@ typedef struct {
  * Unix names RESETHAND and NODEFER respectively.
  */
 #define SA_NOCLDSTOP	0x00000001
-#define SA_NOCLDWAIT	0x00000002 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000002
 #define SA_SIGINFO	0x00000004
 #define SA_ONSTACK	0x08000000
 #define SA_RESTART	0x10000000
@@ -165,7 +178,7 @@ typedef struct sigaltstack {
 #ifdef __KERNEL__
 #include <asm/sigcontext.h>
 
-#define sigmask(sig)	(1UL << ((sig) - 1))
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
 
 #endif /* __KERNEL__ */
 

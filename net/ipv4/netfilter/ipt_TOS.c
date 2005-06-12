@@ -1,4 +1,13 @@
 /* This is a module which is used for setting the TOS field of a packet. */
+
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
@@ -7,26 +16,36 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_TOS.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables TOS mangling module");
+
 static unsigned int
 target(struct sk_buff **pskb,
-       unsigned int hooknum,
        const struct net_device *in,
        const struct net_device *out,
+       unsigned int hooknum,
        const void *targinfo,
        void *userinfo)
 {
-	struct iphdr *iph = (*pskb)->nh.iph;
 	const struct ipt_tos_target_info *tosinfo = targinfo;
 
-	if ((iph->tos & IPTOS_TOS_MASK) != tosinfo->tos) {
-		u_int8_t diffs[2];
+	if (((*pskb)->nh.iph->tos & IPTOS_TOS_MASK) != tosinfo->tos) {
+		u_int16_t diffs[2];
 
-		diffs[0] = iph->tos;
-		iph->tos = (iph->tos & IPTOS_PREC_MASK) | tosinfo->tos;
-		diffs[1] = iph->tos;
-		iph->check = csum_fold(csum_partial((char *)diffs,
-		                                    sizeof(diffs),
-		                                    iph->check^0xFFFF));
+		if (!skb_ip_make_writable(pskb, sizeof(struct iphdr)))
+			return NF_DROP;
+
+		diffs[0] = htons((*pskb)->nh.iph->tos) ^ 0xFFFF;
+		(*pskb)->nh.iph->tos
+			= ((*pskb)->nh.iph->tos & IPTOS_PREC_MASK)
+			| tosinfo->tos;
+		diffs[1] = htons((*pskb)->nh.iph->tos);
+		(*pskb)->nh.iph->check
+			= csum_fold(csum_partial((char *)diffs,
+						 sizeof(diffs),
+						 (*pskb)->nh.iph->check
+						 ^0xFFFF));
 		(*pskb)->nfcache |= NFC_ALTERED;
 	}
 	return IPT_CONTINUE;
@@ -65,15 +84,16 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_tos_reg
-= { { NULL, NULL }, "TOS", target, checkentry, NULL, THIS_MODULE };
+static struct ipt_target ipt_tos_reg = {
+	.name		= "TOS",
+	.target		= target,
+	.checkentry	= checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
-	if (ipt_register_target(&ipt_tos_reg))
-		return -EINVAL;
-
-	return 0;
+	return ipt_register_target(&ipt_tos_reg);
 }
 
 static void __exit fini(void)

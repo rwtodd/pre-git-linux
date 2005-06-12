@@ -10,9 +10,6 @@
 
 /* PMD_SHIFT determines the size of the area a second-level page table can map */
 #define SUN4C_PMD_SHIFT       22
-#define SUN4C_PMD_SIZE        (1UL << SUN4C_PMD_SHIFT)
-#define SUN4C_PMD_MASK        (~(SUN4C_PMD_SIZE-1))
-#define SUN4C_PMD_ALIGN(addr) (((addr)+SUN4C_PMD_SIZE-1)&SUN4C_PMD_MASK)
 
 /* PGDIR_SHIFT determines what a third-level page table entry can map */
 #define SUN4C_PGDIR_SHIFT       22
@@ -53,6 +50,7 @@
 #define _SUN4C_PAGE_NOCACHE      0x10000000   /* non-cacheable page */
 #define _SUN4C_PAGE_PRESENT      0x08000000   /* implemented in software */
 #define _SUN4C_PAGE_IO           0x04000000   /* I/O page */
+#define _SUN4C_PAGE_FILE         0x02000000   /* implemented in software */
 #define _SUN4C_PAGE_READ         0x00800000   /* implemented in software */
 #define _SUN4C_PAGE_WRITE        0x00400000   /* implemented in software */
 #define _SUN4C_PAGE_ACCESSED     0x00200000   /* implemented in software */
@@ -73,9 +71,24 @@
 #define SUN4C_PAGE_KERNEL	__pgprot(_SUN4C_READABLE|_SUN4C_WRITEABLE|\
 					 _SUN4C_PAGE_DIRTY|_SUN4C_PAGE_PRIV)
 
+/* SUN4C swap entry encoding
+ *
+ * We use 5 bits for the type and 19 for the offset.  This gives us
+ * 32 swapfiles of 4GB each.  Encoding looks like:
+ *
+ * RRRRRRRRooooooooooooooooooottttt
+ * fedcba9876543210fedcba9876543210
+ *
+ * The top 8 bits are reserved for protection and status bits, especially
+ * FILE and PRESENT.
+ */
+#define SUN4C_SWP_TYPE_MASK	0x1f
+#define SUN4C_SWP_OFF_MASK	0x7ffff
+#define SUN4C_SWP_OFF_SHIFT	5
+
 #ifndef __ASSEMBLY__
 
-extern __inline__ unsigned long sun4c_get_synchronous_error(void)
+static inline unsigned long sun4c_get_synchronous_error(void)
 {
 	unsigned long sync_err;
 
@@ -85,7 +98,7 @@ extern __inline__ unsigned long sun4c_get_synchronous_error(void)
 	return sync_err;
 }
 
-extern __inline__ unsigned long sun4c_get_synchronous_address(void)
+static inline unsigned long sun4c_get_synchronous_address(void)
 {
 	unsigned long sync_addr;
 
@@ -96,7 +109,7 @@ extern __inline__ unsigned long sun4c_get_synchronous_address(void)
 }
 
 /* SUN4C pte, segmap, and context manipulation */
-extern __inline__ unsigned long sun4c_get_segmap(unsigned long addr)
+static inline unsigned long sun4c_get_segmap(unsigned long addr)
 {
   register unsigned long entry;
 
@@ -107,15 +120,16 @@ extern __inline__ unsigned long sun4c_get_segmap(unsigned long addr)
   return entry;
 }
 
-extern __inline__ void sun4c_put_segmap(unsigned long addr, unsigned long entry)
+static inline void sun4c_put_segmap(unsigned long addr, unsigned long entry)
 {
 
   __asm__ __volatile__("\n\tstba %1, [%0] %2; nop; nop; nop;\n\t" : :
 		       "r" (addr), "r" (entry),
-		       "i" (ASI_SEGMAP));
+		       "i" (ASI_SEGMAP)
+		       : "memory");
 }
 
-extern __inline__ unsigned long sun4c_get_pte(unsigned long addr)
+static inline unsigned long sun4c_get_pte(unsigned long addr)
 {
   register unsigned long entry;
 
@@ -125,14 +139,15 @@ extern __inline__ unsigned long sun4c_get_pte(unsigned long addr)
   return entry;
 }
 
-extern __inline__ void sun4c_put_pte(unsigned long addr, unsigned long entry)
+static inline void sun4c_put_pte(unsigned long addr, unsigned long entry)
 {
   __asm__ __volatile__("\n\tsta %1, [%0] %2; nop; nop; nop;\n\t" : :
 		       "r" (addr), 
-		       "r" ((entry & ~(_SUN4C_PAGE_PRESENT))), "i" (ASI_PTE));
+		       "r" ((entry & ~(_SUN4C_PAGE_PRESENT))), "i" (ASI_PTE)
+		       : "memory");
 }
 
-extern __inline__ int sun4c_get_context(void)
+static inline int sun4c_get_context(void)
 {
   register int ctx;
 
@@ -143,10 +158,11 @@ extern __inline__ int sun4c_get_context(void)
   return ctx;
 }
 
-extern __inline__ int sun4c_set_context(int ctx)
+static inline int sun4c_set_context(int ctx)
 {
   __asm__ __volatile__("\n\tstba %0, [%1] %2; nop; nop; nop;\n\t" : :
-		       "r" (ctx), "r" (AC_CONTEXT), "i" (ASI_CONTROL));
+		       "r" (ctx), "r" (AC_CONTEXT), "i" (ASI_CONTROL)
+		       : "memory");
 
   return ctx;
 }

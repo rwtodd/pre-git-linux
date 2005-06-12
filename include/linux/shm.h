@@ -2,6 +2,7 @@
 #define _LINUX_SHM_H_
 
 #include <linux/ipc.h>
+#include <linux/errno.h>
 #include <asm/page.h>
 
 /*
@@ -43,6 +44,7 @@ struct shmid_ds {
 #define	SHM_RDONLY	010000	/* read-only access */
 #define	SHM_RND		020000	/* round attach address to SHMLBA boundary */
 #define	SHM_REMAP	040000	/* take-over region on attach */
+#define	SHM_EXEC	0100000	/* execution access */
 
 /* super user shmctl commands */
 #define SHM_LOCK 	11
@@ -71,16 +73,35 @@ struct shm_info {
 };
 
 #ifdef __KERNEL__
+struct shmid_kernel /* private to the kernel */
+{	
+	struct kern_ipc_perm	shm_perm;
+	struct file *		shm_file;
+	int			id;
+	unsigned long		shm_nattch;
+	unsigned long		shm_segsz;
+	time_t			shm_atim;
+	time_t			shm_dtim;
+	time_t			shm_ctim;
+	pid_t			shm_cprid;
+	pid_t			shm_lprid;
+	struct user_struct	*mlock_user;
+};
 
 /* shm_mode upper byte flags */
 #define	SHM_DEST	01000	/* segment will be destroyed on last detach */
 #define SHM_LOCKED      02000   /* segment will not be swapped */
+#define SHM_HUGETLB     04000   /* segment will use huge TLB pages */
 
-asmlinkage long sys_shmget (key_t key, size_t size, int flag);
-asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, unsigned long *addr);
-asmlinkage long sys_shmdt (char *shmaddr);
-asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds *buf);
-extern void shm_unuse(swp_entry_t entry, struct page *page);
+#ifdef CONFIG_SYSVIPC
+long do_shmat(int shmid, char __user *shmaddr, int shmflg, unsigned long *addr);
+#else
+static inline long do_shmat(int shmid, char __user *shmaddr,
+				int shmflg, unsigned long *addr)
+{
+	return -ENOSYS;
+}
+#endif
 
 #endif /* __KERNEL__ */
 

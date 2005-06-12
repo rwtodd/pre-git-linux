@@ -29,19 +29,19 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
-#include <linux/blk.h>
+#include <linux/slab.h>
+#include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/interrupt.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "NCR53C9x.h"
-#include "fastlane.h"
 
 #include <linux/zorro.h>
 #include <asm/irq.h>
-#include <asm/io.h>
+
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
 
@@ -53,9 +53,38 @@
 #define NODMAIRQ
 #endif
 
+/* The controller registers can be found in the Z2 config area at these
+ * offsets:
+ */
+#define FASTLANE_ESP_ADDR 0x1000001
+#define FASTLANE_DMA_ADDR 0x1000041
+
+
+/* The Fastlane DMA interface */
+struct fastlane_dma_registers {
+	volatile unsigned char cond_reg;	/* DMA status  (ro) [0x0000] */
+#define ctrl_reg  cond_reg			/* DMA control (wo) [0x0000] */
+	unsigned char dmapad1[0x3f];
+	volatile unsigned char clear_strobe;    /* DMA clear   (wo) [0x0040] */
+};
+
+
+/* DMA status bits */
+#define FASTLANE_DMA_MINT  0x80
+#define FASTLANE_DMA_IACT  0x40
+#define FASTLANE_DMA_CREQ  0x20
+
+/* DMA control bits */
+#define FASTLANE_DMA_FCODE 0xa0
+#define FASTLANE_DMA_MASK  0xf3
+#define FASTLANE_DMA_LED   0x10	/* HD led control 1 = on */
+#define FASTLANE_DMA_WRITE 0x08 /* 1 = write */
+#define FASTLANE_DMA_ENABLE 0x04 /* Enable DMA */
+#define FASTLANE_DMA_EDI   0x02	/* Enable DMA IRQ ? */
+#define FASTLANE_DMA_ESI   0x01	/* Enable SCSI IRQ */
+
 static int  dma_bytes_sent(struct NCR_ESP *esp, int fifo_count);
 static int  dma_can_transfer(struct NCR_ESP *esp, Scsi_Cmnd *sp);
-static inline void dma_clear(struct NCR_ESP *esp);
 static void dma_dump_state(struct NCR_ESP *esp);
 static void dma_init_read(struct NCR_ESP *esp, __u32 addr, int length);
 static void dma_init_write(struct NCR_ESP *esp, __u32 vaddr, int length);
@@ -74,11 +103,26 @@ static unsigned char ctrl_data = 0;	/* Keep backup of the stuff written
 				 * the hardware register!
 				 */
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
-				 * before they are transfered to the ESP chip
+				 * before they are transferred to the ESP chip
 				 * via PIO.
 				 */
+
+static inline void dma_clear(struct NCR_ESP *esp)
+{
+	struct fastlane_dma_registers *dregs =
+		(struct fastlane_dma_registers *) (esp->dregs);
+	unsigned long *t;
+
+	ctrl_data = (ctrl_data & FASTLANE_DMA_MASK);
+	dregs->ctrl_reg = ctrl_data;
+
+	t = (unsigned long *)(esp->edev);
+
+	dregs->clear_strobe = 0;
+	*t = 0 ;
+}
 
 /***************************************************************** Detection */
 int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
@@ -96,9 +140,7 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 		 * this ID value. Fortunately only Fastlane maps in Z3 space
 		 */
 		if (board < 0x1000000) {
-			release_mem_region(board+FASTLANE_ESP_ADDR,
-					   sizeof(struct ESP_regs));
-			return 0;
+			goto err_release;
 		}
 		esp = esp_allocate(tpnt, (void *)board+FASTLANE_ESP_ADDR);
 
@@ -142,14 +184,11 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 
 		/* Map the physical address space into virtual kernel space */
 		address = (unsigned long)
-			ioremap_nocache(board, z->resource.end-board+1);
+			z_ioremap(board, z->resource.end-board+1);
 
 		if(!address){
 			printk("Could not remap Fastlane controller memory!");
-			scsi_unregister (esp->ehost);
-			release_mem_region(board+FASTLANE_ESP_ADDR,
-					   sizeof(struct ESP_regs));
-			return 0;
+			goto err_unregister;
 		}
 
 
@@ -166,13 +205,16 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 		esp->edev = (void *) address;
 		
 		/* Set the command buffer */
-		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
+		esp->esp_command = cmd_buffer;
+		esp->esp_command_dvma = virt_to_bus((void *)cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
 		esp->slot = board+FASTLANE_ESP_ADDR;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
-			    "Fastlane SCSI", esp_intr);
+		if (request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
+				"Fastlane SCSI", esp->ehost)) {
+			printk(KERN_WARNING "Fastlane: Could not get IRQ%d, aborting.\n", IRQ_AMIGA_PORTS);
+			goto err_unmap;
+		}			
 
 		/* Controller ID */
 		esp->scsi_id = 7;
@@ -188,6 +230,15 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 		return esps_in_use;
 	    }
 	}
+	return 0;
+
+ err_unmap:
+	z_iounmap((void *)address);
+ err_unregister:
+	scsi_unregister (esp->ehost);
+ err_release:
+	release_mem_region(z->resource.start+FASTLANE_ESP_ADDR,
+			   sizeof(struct ESP_regs));
 	return 0;
 }
 
@@ -258,21 +309,6 @@ static void dma_init_write(struct NCR_ESP *esp, __u32 addr, int length)
 		     FASTLANE_DMA_ENABLE |
 		     FASTLANE_DMA_WRITE);
 	dregs->ctrl_reg = ctrl_data;
-}
-
-static inline void dma_clear(struct NCR_ESP *esp)
-{
-	struct fastlane_dma_registers *dregs = 
-		(struct fastlane_dma_registers *) (esp->dregs);
-	unsigned long *t;
-
-	ctrl_data = (ctrl_data & FASTLANE_DMA_MASK);
-	dregs->ctrl_reg = ctrl_data;
-
-	t = (unsigned long *)(esp->edev);
-
-	dregs->clear_strobe = 0;
-	*t = 0 ;
 }
 
 
@@ -349,11 +385,6 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 
 #define HOSTS_C
 
-#include "fastlane.h"
-
-static Scsi_Host_Template driver_template = SCSI_FASTLANE;
-#include "scsi_module.c"
-
 int fastlane_esp_release(struct Scsi_Host *instance)
 {
 #ifdef MODULE
@@ -365,3 +396,26 @@ int fastlane_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp-fastlane",
+	.proc_info		= esp_proc_info,
+	.name			= "Fastlane SCSI",
+	.detect			= fastlane_esp_detect,
+	.slave_alloc		= esp_slave_alloc,
+	.slave_destroy		= esp_slave_destroy,
+	.release		= fastlane_esp_release,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= ENABLE_CLUSTERING
+};
+
+#include "scsi_module.c"
+
+MODULE_LICENSE("GPL");

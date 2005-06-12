@@ -7,6 +7,10 @@
  *
  * This file contains the general definitions for the cyclades.c driver
  *$Log: cyclades.h,v $
+ *Revision 3.1  2002/01/29 11:36:16  henrique
+ *added throttle field on struct cyclades_port to indicate whether the
+ *port is throttled or not
+ *
  *Revision 3.1  2000/04/19 18:52:52  ivan
  *converted address fields to unsigned long and added fields for physical
  *addresses on cyclades_card structure;
@@ -503,21 +507,23 @@ struct ZFW_CTRL {
 #endif
 
 /* Per card data structure */
+struct resource;
 struct cyclades_card {
     unsigned long base_phys;
     unsigned long ctl_phys;
-    unsigned long base_addr;
-    unsigned long ctl_addr;
+    void __iomem *base_addr;
+    void __iomem *ctl_addr;
     int irq;
     int num_chips;	/* 0 if card absent, -1 if Z/PCI, else Y */
     int first_line;	/* minor number of first channel on card */
     int nports;		/* Number of ports in the card */
     int bus_index;	/* address shift - 0 for ISA, 1 for PCI */
     int	intr_enabled;	/* FW Interrupt flag - 0 disabled, 1 enabled */
+    struct pci_dev *pdev;
 #ifdef __KERNEL__
     spinlock_t card_lock;
 #else
-    uclong filler;
+    unsigned long filler;
 #endif
 };
 
@@ -533,9 +539,9 @@ struct cyclades_chip {
  * (required to support Alpha systems) *
  ***************************************/
 
-#define cy_writeb(port,val)     {writeb((ucchar)(val),(ulong)(port)); mb();}
-#define cy_writew(port,val)     {writew((ushort)(val),(ulong)(port)); mb();}
-#define cy_writel(port,val)     {writel((uclong)(val),(ulong)(port)); mb();}
+#define cy_writeb(port,val)     {writeb((val),(port)); mb();}
+#define cy_writew(port,val)     {writew((val),(port)); mb();}
+#define cy_writel(port,val)     {writel((val),(port)); mb();}
 
 #define cy_readb(port)  readb(port)
 #define cy_readw(port)  readw(port)
@@ -586,8 +592,6 @@ struct cyclades_port {
 	int                     breakon;
 	int                     breakoff;
 	int			blocked_open; /* # of blocked opens */
-	long			session; /* Session of opening process */
-	long			pgrp; /* pgrp of opening process */
 	unsigned char 		*xmit_buf;
 	int			xmit_head;
 	int			xmit_tail;
@@ -596,16 +600,15 @@ struct cyclades_port {
         int                     default_timeout;
 	unsigned long		jiffies[3];
 	unsigned long		rflush_count;
-	struct termios		normal_termios;
-	struct termios		callout_termios;
 	struct cyclades_monitor	mon;
 	struct cyclades_idle_stats	idle_stats;
 	struct cyclades_icount	icount;
-	struct tq_struct	tqueue;
+	struct work_struct	tqueue;
 	wait_queue_head_t       open_wait;
 	wait_queue_head_t       close_wait;
 	wait_queue_head_t       shutdown_wait;
 	wait_queue_head_t       delta_msr_wait;
+	int throttle;
 };
 
 /*

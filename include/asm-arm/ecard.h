@@ -41,8 +41,8 @@
 #define PROD_MORLEY_SCSI_UNCACHED	0x0067
 
 #define MANU_CUMANA		0x003a
-#define PROD_CUMANA_SCSI_1		0x00a0
 #define PROD_CUMANA_SCSI_2		0x003a
+#define PROD_CUMANA_SCSI_1		0x00a0
 
 #define MANU_ICS		0x003c
 #define PROD_ICS_IDE			0x00ae
@@ -53,12 +53,16 @@
 #define MANU_SERPORT		0x003f
 #define PROD_SERPORT_DSPORT		0x00b9
 
+#define MANU_ARXE		0x0041
+#define PROD_ARXE_SCSI			0x00be
+
 #define MANU_I3			0x0046
 #define PROD_I3_ETHERLAN500		0x00d4
 #define PROD_I3_ETHERLAN600		0x00ec
 #define PROD_I3_ETHERLAN600A		0x011e
 
 #define MANU_ANT		0x0053
+#define PROD_ANT_ETHERM			0x00d8
 #define PROD_ANT_ETHERB			0x00e4
 
 #define MANU_ALSYSTEMS		0x005b
@@ -94,10 +98,11 @@ typedef enum {				/* Speed for ECARD_IOC space	*/
 	ECARD_SYNC	 = 3
 } card_speed_t;
 
-typedef struct  {			/* Card ID structure		*/
-	unsigned short manufacturer;
-	unsigned short product;
-} card_ids;
+struct ecard_id {			/* Card ID structure		*/
+	unsigned short	manufacturer;
+	unsigned short	product;
+	void		*data;
+};
 
 struct in_ecid {			/* Packed card ID information	*/
 	unsigned short	product;	/* Product code			*/
@@ -125,11 +130,29 @@ typedef struct {			/* Card handler routines	*/
 	int  (*fiqpending)(ecard_t *ec);
 } expansioncard_ops_t;
 
+#define ECARD_NUM_RESOURCES	(6)
+
+#define ECARD_RES_IOCSLOW	(0)
+#define ECARD_RES_IOCMEDIUM	(1)
+#define ECARD_RES_IOCFAST	(2)
+#define ECARD_RES_IOCSYNC	(3)
+#define ECARD_RES_MEMC		(4)
+#define ECARD_RES_EASI		(5)
+
+#define ecard_resource_start(ec,nr)	((ec)->resource[nr].start)
+#define ecard_resource_end(ec,nr)	((ec)->resource[nr].end)
+#define ecard_resource_len(ec,nr)	((ec)->resource[nr].end - \
+					 (ec)->resource[nr].start + 1)
+#define ecard_resource_flags(ec,nr)	((ec)->resource[nr].flags)
+
 /*
  * This contains all the info needed on an expansion card
  */
 struct expansion_card {
 	struct expansion_card  *next;
+
+	struct device		dev;
+	struct resource		resource[ECARD_NUM_RESOURCES];
 
 	/* Public data */
 	volatile unsigned char *irqaddr;	/* address of IRQ register	*/
@@ -140,7 +163,7 @@ struct expansion_card {
 
 	void			*irq_data;	/* Data for use for IRQ by card	*/
 	void			*fiq_data;	/* Data for use for FIQ by card	*/
-	expansioncard_ops_t	*ops;		/* Enable/Disable Ops for card	*/
+	const expansioncard_ops_t *ops;		/* Enable/Disable Ops for card	*/
 
 	CONST unsigned int	slot_no;	/* Slot number			*/
 	CONST unsigned int	dma;		/* DMA number (for request_dma)	*/
@@ -153,6 +176,7 @@ struct expansion_card {
 	const char		*card_desc;	/* Card description		*/
 	CONST unsigned int	podaddr;	/* Base Linux address for card	*/
 	CONST loader_t		loader;		/* loader program */
+	u64			dma_mask;
 };
 
 struct in_chunk_dir {
@@ -174,16 +198,6 @@ struct in_chunk_dir {
 #define ecard_release(ec) ((ec)->claimed = 0)
 
 /*
- * Start finding cards from the top of the list
- */
-extern void ecard_startfind (void);
-
-/*
- * Find an expansion card with the correct cid, product and manufacturer code
- */
-extern struct expansion_card *ecard_find (int cid, const card_ids *ids);
- 
-/*
  * Read a chunk from an expansion card
  * cd : where to put read data
  * ec : expansion card info struct
@@ -195,7 +209,13 @@ extern int ecard_readchunk (struct in_chunk_dir *cd, struct expansion_card *ec, 
 /*
  * Obtain the address of a card
  */
-extern unsigned int ecard_address (struct expansion_card *ec, card_type_t card_type, card_speed_t speed);
+extern __deprecated unsigned int ecard_address (struct expansion_card *ec, card_type_t card_type, card_speed_t speed);
+
+/*
+ * Request and release ecard resources
+ */
+extern int ecard_request_resources(struct expansion_card *ec);
+extern void ecard_release_resources(struct expansion_card *ec);
 
 #ifdef ECARD_C
 /* Definitions internal to ecard.c - for it's use only!!
@@ -222,11 +242,11 @@ struct ex_ecid {
 
 	unsigned char	r_country;
 
-	unsigned char	r_irqmask;
-	unsigned char	r_irqoff[3];
-
 	unsigned char	r_fiqmask;
 	unsigned char	r_fiqoff[3];
+
+	unsigned char	r_irqmask;
+	unsigned char	r_irqoff[3];
 };
 
 /*
@@ -246,5 +266,26 @@ struct ex_chunk_dir {
 };
 
 #endif
+
+extern struct bus_type ecard_bus_type;
+
+#define ECARD_DEV(_d)	container_of((_d), struct expansion_card, dev)
+
+struct ecard_driver {
+	int			(*probe)(struct expansion_card *, const struct ecard_id *id);
+	void			(*remove)(struct expansion_card *);
+	void			(*shutdown)(struct expansion_card *);
+	const struct ecard_id	*id_table;
+	unsigned int		id;
+	struct device_driver	drv;
+};
+
+#define ECARD_DRV(_d)	container_of((_d), struct ecard_driver, drv)
+
+#define ecard_set_drvdata(ec,data)	dev_set_drvdata(&(ec)->dev, (data))
+#define ecard_get_drvdata(ec)		dev_get_drvdata(&(ec)->dev)
+
+int ecard_register_driver(struct ecard_driver *);
+void ecard_remove_driver(struct ecard_driver *);
 
 #endif

@@ -16,6 +16,13 @@
 
 #include <linux/config.h>
 
+#ifdef CONFIG_ARCH_IXDP2X01
+/* IXDP2401/IXDP2801 uses dword-aligned register addressing */
+#define CS89x0_PORT(reg) ((reg) * 2)
+#else
+#define CS89x0_PORT(reg) (reg)
+#endif
+
 #define PP_ChipID 0x0000	/* offset   0h -> Corp -ID              */
 				/* offset   2h -> Model/Product Number  */
 				/* offset   3h -> Chip Revision Number  */
@@ -324,16 +331,16 @@
 #define RAM_SIZE	0x1000       /*  The card has 4k bytes or RAM */
 #define PKT_START PP_TxFrame  /*  Start of packet RAM */
 
-#define RX_FRAME_PORT	0x0000
+#define RX_FRAME_PORT	CS89x0_PORT(0x0000)
 #define TX_FRAME_PORT RX_FRAME_PORT
-#define TX_CMD_PORT	0x0004
+#define TX_CMD_PORT	CS89x0_PORT(0x0004)
 #define TX_NOW		0x0000       /*  Tx packet after   5 bytes copied */
 #define TX_AFTER_381	0x0040       /*  Tx packet after 381 bytes copied */
 #define TX_AFTER_ALL	0x00c0       /*  Tx packet after all bytes copied */
-#define TX_LEN_PORT	0x0006
-#define ISQ_PORT	0x0008
-#define ADD_PORT	0x000A
-#define DATA_PORT	0x000C
+#define TX_LEN_PORT	CS89x0_PORT(0x0006)
+#define ISQ_PORT	CS89x0_PORT(0x0008)
+#define ADD_PORT	CS89x0_PORT(0x000A)
+#define DATA_PORT	CS89x0_PORT(0x000C)
 
 #define EEPROM_WRITE_EN		0x00F0
 #define EEPROM_WRITE_DIS	0x0000
@@ -385,11 +392,11 @@
 #define A_CNF_10B_T 0x0001
 #define A_CNF_AUI 0x0002
 #define A_CNF_10B_2 0x0004
-#define A_CNF_MEDIA_TYPE 0x0060
-#define A_CNF_MEDIA_AUTO 0x0000
+#define A_CNF_MEDIA_TYPE 0x0070
+#define A_CNF_MEDIA_AUTO 0x0070
 #define A_CNF_MEDIA_10B_T 0x0020
 #define A_CNF_MEDIA_AUI 0x0040
-#define A_CNF_MEDIA_10B_2 0x0060
+#define A_CNF_MEDIA_10B_2 0x0010
 #define A_CNF_DC_DC_POLARITY 0x0080
 #define A_CNF_NO_AUTO_POLARITY 0x2000
 #define A_CNF_LOW_RX_SQUELCH 0x4000
@@ -437,7 +444,11 @@
 #define IRQ_MAP_EEPROM_DATA 0x0046 /*  Offset into eeprom for the IRQ map */
 #define IRQ_MAP_LEN 0x0004 /*  No of bytes to read for the IRQ map */
 #define PNP_IRQ_FRMT 0x0022 /*  PNP small item IRQ format */
+#ifdef CONFIG_SH_HICOSH4
+#define CS8900_IRQ_MAP 0x0002 /* HiCO-SH4 board has its IRQ on #1 */
+#else
 #define CS8900_IRQ_MAP 0x1c20 /*  This IRQ map is fixed */
+#endif
 
 #define CS8920_NO_INTS 0x0F   /*  Max CS8920 interrupt select # */
 

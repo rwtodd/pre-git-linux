@@ -1,28 +1,43 @@
-/* $Id: timex.h,v 1.1 1998/08/25 09:22:03 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1998, 1999 by Ralf Baechle
- *
- * FIXME: For some of the supported machines this is dead wrong.
+ * Copyright (C) 1998, 1999, 2003 by Ralf Baechle
  */
-#ifndef __ASM_MIPS_TIMEX_H
-#define __ASM_MIPS_TIMEX_H
+#ifndef _ASM_TIMEX_H
+#define _ASM_TIMEX_H
 
-#define CLOCK_TICK_RATE	1193180 /* Underlying HZ */
-#define CLOCK_TICK_FACTOR	20	/* Factor of both 1000000 and CLOCK_TICK_RATE */
-#define FINETUNE ((((((long)LATCH * HZ - CLOCK_TICK_RATE) << SHIFT_HZ) * \
-	(1000000/CLOCK_TICK_FACTOR) / (CLOCK_TICK_RATE/CLOCK_TICK_FACTOR)) \
-		<< (SHIFT_SCALE-SHIFT_HZ)) / HZ)
+#include <asm/mipsregs.h>
 
-#ifdef __KERNEL__
+/*
+ * This is the frequency of the timer used for Linux's timer interrupt.
+ * The value should be defined as accurate as possible or under certain
+ * circumstances Linux timekeeping might become inaccurate or fail.
+ *
+ * For many system the exact clockrate of the timer isn't known but due to
+ * the way this value is used we can get away with a wrong value as long
+ * as this value is:
+ *
+ *  - a multiple of HZ
+ *  - a divisor of the actual rate
+ *
+ * 500000 is a good such cheat value.
+ *
+ * The obscure number 1193182 is the same as used by the original i8254
+ * time in legacy PC hardware; the chip unfortunately also found in a
+ * bunch of MIPS systems.  The last remaining user of the i8254 for the
+ * timer interrupt is the RM200; it's a very standard system so there is
+ * no reason to make this a separate architecture.
+ */
+
+#include <timex.h>
+
 /*
  * Standard way to access the cycle counter.
  * Currently only used on SMP for scheduling.
  *
- * Only the low 32 bits are available as a continuously counting entity. 
+ * Only the low 32 bits are available as a continuously counting entity.
  * But this only means we'll force a reschedule every 8 seconds or so,
  * which isn't an evil thing.
  *
@@ -34,8 +49,7 @@ extern cycles_t cacheflush_time;
 
 static inline cycles_t get_cycles (void)
 {
-	return read_32bit_cp0_register(CP0_COUNT);
+	return read_c0_count();
 }
-#endif /* __KERNEL__ */
 
-#endif /*  __ASM_MIPS_TIMEX_H */
+#endif /*  _ASM_TIMEX_H */

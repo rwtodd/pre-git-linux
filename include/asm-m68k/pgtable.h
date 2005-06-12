@@ -1,11 +1,14 @@
 #ifndef _M68K_PGTABLE_H
 #define _M68K_PGTABLE_H
 
+#include <asm-generic/4level-fixup.h>
+
 #include <linux/config.h>
 #include <asm/setup.h>
 
 #ifndef __ASSEMBLY__
 #include <asm/processor.h>
+#include <linux/sched.h>
 #include <linux/threads.h>
 
 /*
@@ -78,30 +81,20 @@
  */
 #define VMALLOC_OFFSET	(8*1024*1024)
 #define VMALLOC_START (((unsigned long) high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
-#define VMALLOC_VMADDR(x) ((unsigned long)(x))
 #define VMALLOC_END KMAP_START
 #else
 extern unsigned long vmalloc_end;
 #define VMALLOC_START 0x0f800000
-#define VMALLOC_VMADDR(x) ((unsigned long)(x))
 #define VMALLOC_END vmalloc_end
 #endif /* CONFIG_SUN3 */
 
 /* zero page used for uninitialized stuff */
-extern unsigned long empty_zero_page;
+extern void *empty_zero_page;
 
 /*
- * BAD_PAGETABLE is used when we need a bogus page-table, while
- * BAD_PAGE is used for a bogus page.
- *
  * ZERO_PAGE is a global shared page that is always zero: used
  * for zero-mapped memory areas etc..
  */
-extern pte_t __bad_page(void);
-extern pte_t * __bad_pagetable(void);
-
-#define BAD_PAGETABLE __bad_pagetable()
-#define BAD_PAGE __bad_page()
 #define ZERO_PAGE(vaddr)	(virt_to_page(empty_zero_page))
 
 /* number of bits that fit into a memory pointer */
@@ -123,7 +116,7 @@ extern pte_t * __bad_pagetable(void);
  * It makes no sense to consider whether we cross a memory boundary if
  * we support just one physical chunk of memory.
  */
-extern inline int mm_end_of_chunk (unsigned long addr, int len)
+static inline int mm_end_of_chunk(unsigned long addr, int len)
 {
 	return 0;
 }
@@ -138,37 +131,17 @@ extern void kernel_set_cachemode(void *addr, unsigned long size, int cmode);
  * tables contain all the necessary information.  The Sun3 does, but
  * they are updated on demand.
  */
-extern inline void update_mmu_cache(struct vm_area_struct * vma,
-	unsigned long address, pte_t pte)
+static inline void update_mmu_cache(struct vm_area_struct *vma,
+				    unsigned long address, pte_t pte)
 {
 }
 
-#ifdef CONFIG_SUN3
-/* Macros to (de)construct the fake PTEs representing swap pages. */
-#define SWP_TYPE(x)                ((x).val & 0x7F)
-#define SWP_OFFSET(x)      (((x).val) >> 7)
-#define SWP_ENTRY(type,offset) ((swp_entry_t) { ((type) | ((offset) << 7)) })
-#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
-#define swp_entry_to_pte(x)		((pte_t) { (x).val })
-
-#else
-
-/* Encode and de-code a swap entry (must be !pte_none(e) && !pte_present(e)) */
-#define SWP_TYPE(x)			(((x).val >> 1) & 0xff)
-#define SWP_OFFSET(x)			((x).val >> 10)
-#define SWP_ENTRY(type, offset)		((swp_entry_t) { ((type) << 1) | ((offset) << 10) })
-#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
-#define swp_entry_to_pte(x)		((pte_t) { (x).val })
-
-#endif CONFIG_SUN3
-
 #endif /* !__ASSEMBLY__ */
 
-/* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
-#define PageSkip(page)		(0)
 #define kern_addr_valid(addr)	(1)
 
-#define io_remap_page_range remap_page_range
+#define io_remap_page_range(vma, vaddr, paddr, size, prot)		\
+		remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
 
 /* MMU-specific headers */
 
@@ -180,6 +153,31 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
 
 #ifndef __ASSEMBLY__
 #include <asm-generic/pgtable.h>
+
+/*
+ * Macro to mark a page protection value as "uncacheable".
+ */
+#ifdef SUN3_PAGE_NOCACHE
+# define __SUN3_PAGE_NOCACHE	SUN3_PAGE_NOCACHE
+#else
+# define __SUN3_PAGE_NOCACHE	0
+#endif
+#define pgprot_noncached(prot)							\
+	(MMU_IS_SUN3								\
+	 ? (__pgprot(pgprot_val(prot) | __SUN3_PAGE_NOCACHE))			\
+	 : ((MMU_IS_851 || MMU_IS_030)						\
+	    ? (__pgprot(pgprot_val(prot) | _PAGE_NOCACHE030))			\
+	    : (MMU_IS_040 || MMU_IS_060)					\
+	    ? (__pgprot((pgprot_val(prot) & _CACHEMASK040) | _PAGE_NOCACHE_S))	\
+	    : (prot)))
+
 #endif /* !__ASSEMBLY__ */
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
+
+#define check_pgt_cache()	do { } while (0)
 
 #endif /* _M68K_PGTABLE_H */

@@ -10,6 +10,7 @@
 #include <linux/wait.h>
 #include <linux/list.h>
 #endif
+#include <linux/compiler.h>
 
 /* Responses from hook functions. */
 #define NF_DROP 0
@@ -19,9 +20,10 @@
 #define NF_REPEAT 4
 #define NF_MAX_VERDICT NF_REPEAT
 
-/* Generic cache responses from hook functions. */
-#define NFC_ALTERED 0x8000
+/* Generic cache responses from hook functions.
+   <= 0x2000 is used for protocol-flags. */
 #define NFC_UNKNOWN 0x4000
+#define NFC_ALTERED 0x8000
 
 #ifdef __KERNEL__
 #include <linux/config.h>
@@ -47,6 +49,7 @@ struct nf_hook_ops
 
 	/* User fills in from here down. */
 	nf_hookfn *hook;
+	struct module *owner;
 	int pf;
 	int hooknum;
 	/* Hooks are ordered in ascending priority. */
@@ -62,11 +65,11 @@ struct nf_sockopt_ops
 	/* Non-inclusive ranges: use 0/0/NULL to never get called. */
 	int set_optmin;
 	int set_optmax;
-	int (*set)(struct sock *sk, int optval, void *user, unsigned int len);
+	int (*set)(struct sock *sk, int optval, void __user *user, unsigned int len);
 
 	int get_optmin;
 	int get_optmax;
-	int (*get)(struct sock *sk, int optval, void *user, int *len);
+	int (*get)(struct sock *sk, int optval, void __user *user, int *len);
 
 	/* Number of users inside set() or get(). */
 	unsigned int use;
@@ -97,6 +100,24 @@ void nf_unregister_sockopt(struct nf_sockopt_ops *reg);
 
 extern struct list_head nf_hooks[NPROTO][NF_MAX_HOOKS];
 
+typedef void nf_logfn(unsigned int hooknum,
+		      const struct sk_buff *skb,
+		      const struct net_device *in,
+		      const struct net_device *out,
+		      const char *prefix);
+
+/* Function to register/unregister log function. */
+int nf_log_register(int pf, nf_logfn *logfn);
+void nf_log_unregister(int pf, nf_logfn *logfn);
+
+/* Calls the registered backend logging function */
+void nf_log_packet(int pf,
+		   unsigned int hooknum,
+		   const struct sk_buff *skb,
+		   const struct net_device *in,
+		   const struct net_device *out,
+		   const char *fmt, ...);
+                   
 /* Activate hook; either okfn or kfree_skb called, unless a hook
    returns NF_STOLEN (in which case, it's up to the hook to deal with
    the consequences).
@@ -117,22 +138,28 @@ extern struct list_head nf_hooks[NPROTO][NF_MAX_HOOKS];
 /* This is gross, but inline doesn't cut it for avoiding the function
    call in fast path: gcc doesn't inline (needs value tracking?). --RR */
 #ifdef CONFIG_NETFILTER_DEBUG
-#define NF_HOOK nf_hook_slow
+#define NF_HOOK(pf, hook, skb, indev, outdev, okfn)			\
+ nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn), INT_MIN)
+#define NF_HOOK_THRESH nf_hook_slow
 #else
 #define NF_HOOK(pf, hook, skb, indev, outdev, okfn)			\
 (list_empty(&nf_hooks[(pf)][(hook)])					\
  ? (okfn)(skb)								\
- : nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn)))
+ : nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn), INT_MIN))
+#define NF_HOOK_THRESH(pf, hook, skb, indev, outdev, okfn, thresh)	\
+(list_empty(&nf_hooks[(pf)][(hook)])					\
+ ? (okfn)(skb)								\
+ : nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn), (thresh)))
 #endif
 
 int nf_hook_slow(int pf, unsigned int hook, struct sk_buff *skb,
 		 struct net_device *indev, struct net_device *outdev,
-		 int (*okfn)(struct sk_buff *));
+		 int (*okfn)(struct sk_buff *), int thresh);
 
 /* Call setsockopt() */
-int nf_setsockopt(struct sock *sk, int pf, int optval, char *opt, 
+int nf_setsockopt(struct sock *sk, int pf, int optval, char __user *opt, 
 		  int len);
-int nf_getsockopt(struct sock *sk, int pf, int optval, char *opt,
+int nf_getsockopt(struct sock *sk, int pf, int optval, char __user *opt,
 		  int *len);
 
 /* Packet queuing */
@@ -145,37 +172,16 @@ extern void nf_reinject(struct sk_buff *skb,
 			struct nf_info *info,
 			unsigned int verdict);
 
-#ifdef CONFIG_NETFILTER_DEBUG
-extern void nf_dump_skb(int pf, struct sk_buff *skb);
-#endif
+extern void (*ip_ct_attach)(struct sk_buff *, struct sk_buff *);
+extern void nf_ct_attach(struct sk_buff *, struct sk_buff *);
 
 /* FIXME: Before cache is ever used, this must be implemented for real. */
 extern void nf_invalidate_cache(int pf);
 
 #else /* !CONFIG_NETFILTER */
 #define NF_HOOK(pf, hook, skb, indev, outdev, okfn) (okfn)(skb)
+static inline void nf_ct_attach(struct sk_buff *new, struct sk_buff *skb) {}
 #endif /*CONFIG_NETFILTER*/
 
-/* From arch/i386/kernel/smp.c:
- *
- *	Why isn't this somewhere standard ??
- *
- * Maybe because this procedure is horribly buggy, and does
- * not deserve to live.  Think about signedness issues for five
- * seconds to see why.		- Linus
- */
-
-/* Two signed, return a signed. */
-#define SMAX(a,b) ((ssize_t)(a)>(ssize_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
-#define SMIN(a,b) ((ssize_t)(a)<(ssize_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
-
-/* Two unsigned, return an unsigned. */
-#define UMAX(a,b) ((size_t)(a)>(size_t)(b) ? (size_t)(a) : (size_t)(b))
-#define UMIN(a,b) ((size_t)(a)<(size_t)(b) ? (size_t)(a) : (size_t)(b))
-
-/* Two unsigned, return a signed. */
-#define SUMAX(a,b) ((size_t)(a)>(size_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
-#define SUMIN(a,b) ((size_t)(a)<(size_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
 #endif /*__KERNEL__*/
-
 #endif /*__LINUX_NETFILTER_H*/

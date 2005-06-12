@@ -11,7 +11,11 @@
  *
  *	Most of this code is directly derived from his userspace driver.
  *	His driver works so send any reports to alan@redhat.com unless the
- *	userspace driver also doesnt work for you...
+ *	userspace driver also doesn't work for you...
+ *      
+ *      Changes:
+ *      08/07/2003        Daniele Bellucci <bellucda@tiscali.it>
+ *                        - pms_capture: report back -EFAULT 
  */
 
 #include <linux/module.h>
@@ -19,14 +23,13 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <asm/io.h>
 #include <linux/sched.h>
 #include <linux/videodev.h>
-#include <linux/version.h>
 #include <asm/uaccess.h>
 
 
@@ -41,6 +44,7 @@ struct pms_device
 	struct video_picture picture;
 	int height;
 	int width;
+	struct semaphore lock;
 };
 
 struct i2c_info
@@ -64,15 +68,17 @@ static int standard 		= 0;	/* 0 - auto 1 - ntsc 2 - pal 3 - secam */
 static int io_port		=	0x250;
 static int data_port		=	0x251;
 static int mem_base		=	0xC8000;
+static void __iomem *mem;
+static int video_nr             =       -1;
 
 	
 
-extern __inline__ void mvv_write(u8 index, u8 value)
+static inline void mvv_write(u8 index, u8 value)
 {
 	outw(index|(value<<8), io_port);
 }
 
-extern __inline__ u8 mvv_read(u8 index)
+static inline u8 mvv_read(u8 index)
 {
 	outb(index, io_port);
 	return inb(data_port);
@@ -620,11 +626,10 @@ static void pms_vcrinput(short input)
 }
 
 
-static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
+static int pms_capture(struct pms_device *dev, char __user *buf, int rgb555, int count)
 {
 	int y;
 	int dw = 2*dev->width;
-	u32 src = mem_base;
 
 	char tmp[dw+32]; /* using a temp buffer is faster than direct  */
 	int cnt = 0;
@@ -639,14 +644,14 @@ static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
   
 	for (y = 0; y < dev->height; y++ ) 
 	{
-		isa_writeb(0, src);  /* synchronisiert neue Zeile */
+		writeb(0, mem);  /* synchronisiert neue Zeile */
 		
 		/*
 		 *	This is in truth a fifo, be very careful as if you
 		 *	forgot this odd things will occur 8)
 		 */
 		 
-		isa_memcpy_fromio(tmp, src, dw+32); /* discard 16 word   */
+		memcpy_fromio(tmp, mem, dw+32); /* discard 16 word   */
 		cnt -= dev->height;
 		while (cnt <= 0) 
 		{ 
@@ -657,7 +662,8 @@ static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
 			if(dt+len>count)
 				dt=count-len;
 			cnt += dev->height;
-			copy_to_user(buf, tmp+32, dt);
+			if (copy_to_user(buf, tmp+32, dt))
+				return len ? len : -EFAULT;
 			buf += dt;    
 			len += dt;
 		}
@@ -670,118 +676,93 @@ static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
  *	Video4linux interfacing
  */
 
-static int pms_open(struct video_device *dev, int flags)
+static int pms_do_ioctl(struct inode *inode, struct file *file,
+			unsigned int cmd, void *arg)
 {
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static void pms_close(struct video_device *dev)
-{
-	MOD_DEC_USE_COUNT;
-}
-
-static long pms_write(struct video_device *v, const char *buf, unsigned long count, int noblock)
-{
-	return -EINVAL;
-}
-
-static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
-{
+	struct video_device *dev = video_devdata(file);
 	struct pms_device *pd=(struct pms_device *)dev;
 	
 	switch(cmd)
 	{
 		case VIDIOCGCAP:
 		{
-			struct video_capability b;
-			strcpy(b.name, "Mediavision PMS");
-			b.type = VID_TYPE_CAPTURE|VID_TYPE_SCALES;
-			b.channels = 4;
-			b.audios = 0;
-			b.maxwidth = 640;
-			b.maxheight = 480;
-			b.minwidth = 16;
-			b.minheight = 16;
-			if(copy_to_user(arg, &b,sizeof(b)))
-				return -EFAULT;
+			struct video_capability *b = arg;
+			strcpy(b->name, "Mediavision PMS");
+			b->type = VID_TYPE_CAPTURE|VID_TYPE_SCALES;
+			b->channels = 4;
+			b->audios = 0;
+			b->maxwidth = 640;
+			b->maxheight = 480;
+			b->minwidth = 16;
+			b->minheight = 16;
 			return 0;
 		}
 		case VIDIOCGCHAN:
 		{
-			struct video_channel v;
-			if(copy_from_user(&v, arg, sizeof(v)))
-				return -EFAULT;
-			if(v.channel<0 || v.channel>3)
+			struct video_channel *v = arg;
+			if(v->channel<0 || v->channel>3)
 				return -EINVAL;
-			v.flags=0;
-			v.tuners=1;
+			v->flags=0;
+			v->tuners=1;
 			/* Good question.. its composite or SVHS so.. */
-			v.type = VIDEO_TYPE_CAMERA;
-			switch(v.channel)
+			v->type = VIDEO_TYPE_CAMERA;
+			switch(v->channel)
 			{
 				case 0:
-					strcpy(v.name, "Composite");break;
+					strcpy(v->name, "Composite");break;
 				case 1:
-					strcpy(v.name, "SVideo");break;
+					strcpy(v->name, "SVideo");break;
 				case 2:
-					strcpy(v.name, "Composite(VCR)");break;
+					strcpy(v->name, "Composite(VCR)");break;
 				case 3:
-					strcpy(v.name, "SVideo(VCR)");break;
+					strcpy(v->name, "SVideo(VCR)");break;
 			}
-			if(copy_to_user(arg, &v, sizeof(v)))
-				return -EFAULT;
 			return 0;
 		}
 		case VIDIOCSCHAN:
 		{
-			int v;
-			if(copy_from_user(&v, arg,sizeof(v)))
-				return -EFAULT;
-			if(v<0 || v>3)
+			struct video_channel *v = arg;
+			if(v->channel<0 || v->channel>3)
 				return -EINVAL;
-			pms_videosource(v&1);
-			pms_vcrinput(v>>1);
+			down(&pd->lock);
+			pms_videosource(v->channel&1);
+			pms_vcrinput(v->channel>>1);
+			up(&pd->lock);
 			return 0;
 		}
 		case VIDIOCGTUNER:
 		{
-			struct video_tuner v;
-			if(copy_from_user(&v, arg, sizeof(v))!=0)
-				return -EFAULT;
-			if(v.tuner)
+			struct video_tuner *v = arg;
+			if(v->tuner)
 				return -EINVAL;
-			strcpy(v.name, "Format");
-			v.rangelow=0;
-			v.rangehigh=0;
-			v.flags= VIDEO_TUNER_PAL|VIDEO_TUNER_NTSC|VIDEO_TUNER_SECAM;
+			strcpy(v->name, "Format");
+			v->rangelow=0;
+			v->rangehigh=0;
+			v->flags= VIDEO_TUNER_PAL|VIDEO_TUNER_NTSC|VIDEO_TUNER_SECAM;
 			switch(standard)
 			{
 				case 0:
-					v.mode = VIDEO_MODE_AUTO;
+					v->mode = VIDEO_MODE_AUTO;
 					break;
 				case 1:
-					v.mode = VIDEO_MODE_NTSC;
+					v->mode = VIDEO_MODE_NTSC;
 					break;
 				case 2:
-					v.mode = VIDEO_MODE_PAL;
+					v->mode = VIDEO_MODE_PAL;
 					break;
 				case 3:
-					v.mode = VIDEO_MODE_SECAM;
+					v->mode = VIDEO_MODE_SECAM;
 					break;
 			}
-			if(copy_to_user(arg,&v,sizeof(v))!=0)
-				return -EFAULT;
 			return 0;
 		}
 		case VIDIOCSTUNER:
 		{
-			struct video_tuner v;
-			if(copy_from_user(&v, arg, sizeof(v))!=0)
-				return -EFAULT;
-			if(v.tuner)
+			struct video_tuner *v = arg;
+			if(v->tuner)
 				return -EINVAL;
-			switch(v.mode)
+			down(&pd->lock);
+			switch(v->mode)
 			{
 				case VIDEO_MODE_AUTO:
 					pms_framerate(25);
@@ -804,83 +785,72 @@ static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 					pms_format(2);
 					break;
 				default:
+					up(&pd->lock);
 					return -EINVAL;
 			}
+			up(&pd->lock);
 			return 0;
 		}
 		case VIDIOCGPICT:
 		{
-			struct video_picture p=pd->picture;
-			if(copy_to_user(arg, &p, sizeof(p)))
-				return -EFAULT;
+			struct video_picture *p = arg;
+			*p = pd->picture;
 			return 0;
 		}
 		case VIDIOCSPICT:
 		{
-			struct video_picture p;
-			if(copy_from_user(&p, arg, sizeof(p)))
-				return -EFAULT;
-			if(!((p.palette==VIDEO_PALETTE_RGB565 && p.depth==16)
-			    ||(p.palette==VIDEO_PALETTE_RGB555 && p.depth==15)))
+			struct video_picture *p = arg;
+			if(!((p->palette==VIDEO_PALETTE_RGB565 && p->depth==16)
+			    ||(p->palette==VIDEO_PALETTE_RGB555 && p->depth==15)))
 			    	return -EINVAL;
-			pd->picture=p;
+			pd->picture= *p;
 			
 			/*
 			 *	Now load the card.
 			 */
 
-			pms_brightness(p.brightness>>8);
-			pms_hue(p.hue>>8);
-			pms_colour(p.colour>>8);
-			pms_contrast(p.contrast>>8);	
+			down(&pd->lock);
+			pms_brightness(p->brightness>>8);
+			pms_hue(p->hue>>8);
+			pms_colour(p->colour>>8);
+			pms_contrast(p->contrast>>8);	
+			up(&pd->lock);
 			return 0;
 		}
 		case VIDIOCSWIN:
 		{
-			struct video_window vw;
-			if(copy_from_user(&vw, arg,sizeof(vw)))
-				return -EFAULT;
-			if(vw.flags)
+			struct video_window *vw = arg;
+			if(vw->flags)
 				return -EINVAL;
-			if(vw.clipcount)
+			if(vw->clipcount)
 				return -EINVAL;
-			if(vw.height<16||vw.height>480)
+			if(vw->height<16||vw->height>480)
 				return -EINVAL;
-			if(vw.width<16||vw.width>640)
+			if(vw->width<16||vw->width>640)
 				return -EINVAL;
-			pd->width=vw.width;
-			pd->height=vw.height;
+			pd->width=vw->width;
+			pd->height=vw->height;
+			down(&pd->lock);
 			pms_resolution(pd->width, pd->height);
-			/* Ok we figured out what to use from our wide choice */
+			up(&pd->lock);			/* Ok we figured out what to use from our wide choice */
 			return 0;
 		}
 		case VIDIOCGWIN:
 		{
-			struct video_window vw;
-			vw.x=0;
-			vw.y=0;
-			vw.width=pd->width;
-			vw.height=pd->height;
-			vw.chromakey=0;
-			vw.flags=0;
-			if(copy_to_user(arg, &vw, sizeof(vw)))
-				return -EFAULT;
+			struct video_window *vw = arg;
+			memset(vw,0,sizeof(*vw));
+			vw->width=pd->width;
+			vw->height=pd->height;
 			return 0;
 		}
-		case VIDIOCCAPTURE:
-			return -EINVAL;
-		case VIDIOCGFBUF:
-			return -EINVAL;
-		case VIDIOCSFBUF:
-			return -EINVAL;
 		case VIDIOCKEY:
 			return 0;
+		case VIDIOCCAPTURE:
+		case VIDIOCGFBUF:
+		case VIDIOCSFBUF:
 		case VIDIOCGFREQ:
-			return -EINVAL;
 		case VIDIOCSFREQ:
-			return -EINVAL;
 		case VIDIOCGAUDIO:
-			return -EINVAL;
 		case VIDIOCSAUDIO:
 			return -EINVAL;
 		default:
@@ -889,30 +859,44 @@ static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 	return 0;
 }
 
-static long pms_read(struct video_device *v, char *buf, unsigned long count,  int noblock)
+static int pms_ioctl(struct inode *inode, struct file *file,
+		     unsigned int cmd, unsigned long arg)
 {
+	return video_usercopy(inode, file, cmd, arg, pms_do_ioctl);
+}
+
+static ssize_t pms_read(struct file *file, char __user *buf,
+		    size_t count, loff_t *ppos)
+{
+	struct video_device *v = video_devdata(file);
 	struct pms_device *pd=(struct pms_device *)v;
 	int len;
 	
-	/* FIXME: semaphore this */
+	down(&pd->lock);
 	len=pms_capture(pd, buf, (pd->picture.depth==16)?0:1,count);
+	up(&pd->lock);
 	return len;
 }
 
- 
-struct video_device pms_template=
-{
-	name:		"Mediavision PMS",
-	type:		VID_TYPE_CAPTURE,
-	hardware:	VID_HARDWARE_PMS,
-	open:		pms_open,
-	close:		pms_close,
-	read:		pms_read,
-	write:		pms_write,
-	ioctl:		pms_ioctl,
+static struct file_operations pms_fops = {
+	.owner		= THIS_MODULE,
+	.open           = video_exclusive_open,
+	.release        = video_exclusive_release,
+	.ioctl          = pms_ioctl,
+	.read           = pms_read,
+	.llseek         = no_llseek,
 };
 
-struct pms_device pms_device;
+static struct video_device pms_template=
+{
+	.owner		= THIS_MODULE,
+	.name		= "Mediavision PMS",
+	.type		= VID_TYPE_CAPTURE,
+	.hardware	= VID_HARDWARE_PMS,
+	.fops           = &pms_fops,
+};
+
+static struct pms_device pms_device;
 
 
 /*
@@ -934,15 +918,22 @@ static int init_mediavision(void)
 		0x34,0x0A,0xF4,0xCE,
 		0xE4
 	};
+
+	mem = ioremap(mem_base, 0x800);
+	if (!mem)
+		return -ENOMEM;
 	
-	if(check_region(0x9A01,1))
+	if (!request_region(0x9A01, 1, "Mediavision PMS config"))
 	{
 		printk(KERN_WARNING "mediavision: unable to detect: 0x9A01 in use.\n");
+		iounmap(mem);
 		return -EBUSY;
 	}
-	if(check_region(io_port,3))
+	if (!request_region(io_port, 3, "Mediavision PMS"))
 	{
 		printk(KERN_WARNING "mediavision: I/O port %d in use.\n", io_port);
+		release_region(0x9A01, 1);
+		iounmap(mem);
 		return -EBUSY;
 	}
 	outb(0xB8, 0x9A01);		/* Unlock */
@@ -961,16 +952,17 @@ static int init_mediavision(void)
 	else 
 		idec=0;
 
-	printk(KERN_INFO "PMS type is %d\n", idec);		
-	if(idec==0)
-		return -ENODEV;	
+	printk(KERN_INFO "PMS type is %d\n", idec);
+	if(idec == 0) {
+		release_region(io_port, 3);
+		release_region(0x9A01, 1);
+		iounmap(mem);
+		return -ENODEV;
+	}
 
 	/*
 	 *	Ok we have a PMS of some sort
 	 */
-	 
-	request_region(io_port,3, "Mediavision PMS");
-	request_region(0x9A01, 1, "Mediavision PMS config");
 	
 	mvv_write(0x04, mem_base>>12);	/* Set the memory area */
 	
@@ -1036,15 +1028,19 @@ static int __init init_pms_cards(void)
 		return -ENODEV;
 	}
 	memcpy(&pms_device, &pms_template, sizeof(pms_template));
+	init_MUTEX(&pms_device.lock);
 	pms_device.height=240;
 	pms_device.width=320;
 	pms_swsense(75);
 	pms_resolution(320,240);
-	return video_register_device((struct video_device *)&pms_device, VFL_TYPE_GRABBER);
+	return video_register_device((struct video_device *)&pms_device, VFL_TYPE_GRABBER, video_nr);
 }
 
-MODULE_PARM(io_port,"i");
-MODULE_PARM(mem_base,"i");
+module_param(io_port, int, 0);
+module_param(mem_base, int, 0);
+module_param(video_nr, int, 0);
+MODULE_LICENSE("GPL");
+
 
 static void __exit shutdown_mediavision(void)
 {
@@ -1056,6 +1052,7 @@ static void __exit cleanup_pms_module(void)
 {
 	shutdown_mediavision();
 	video_unregister_device((struct video_device *)&pms_device);
+	iounmap(mem);
 }
 
 module_init(init_pms_cards);

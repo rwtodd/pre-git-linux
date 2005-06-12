@@ -11,7 +11,7 @@
  *   Little mods for all variable to reside either into rodata or bss segments
  *   by marking constant variables with 'const' and initializing all the others
  *   at run-time only.  This allows for the kernel uncompressor to run
- *   directly from Flash or ROM memory on embeded systems.
+ *   directly from Flash or ROM memory on embedded systems.
  */
 
 /*
@@ -102,6 +102,7 @@
       a repeat code (16, 17, or 18) to go across the boundary between
       the two sets of lengths.
  */
+#include <linux/compiler.h>
 
 #ifdef RCSID
 static char rcsid[] = "#Id: inflate.c,v 0.14 1993/06/10 13:27:04 jloup Exp #";
@@ -117,6 +118,10 @@ static char rcsid[] = "#Id: inflate.c,v 0.14 1993/06/10 13:27:04 jloup Exp #";
 #include "gzip.h"
 #define STATIC
 #endif /* !STATIC */
+
+#ifndef INIT
+#define INIT
+#endif
 	
 #define slide window
 
@@ -138,15 +143,15 @@ struct huft {
 
 
 /* Function prototypes */
-STATIC int huft_build OF((unsigned *, unsigned, unsigned, 
+STATIC int INIT huft_build OF((unsigned *, unsigned, unsigned, 
 		const ush *, const ush *, struct huft **, int *));
-STATIC int huft_free OF((struct huft *));
-STATIC int inflate_codes OF((struct huft *, struct huft *, int, int));
-STATIC int inflate_stored OF((void));
-STATIC int inflate_fixed OF((void));
-STATIC int inflate_dynamic OF((void));
-STATIC int inflate_block OF((int *));
-STATIC int inflate OF((void));
+STATIC int INIT huft_free OF((struct huft *));
+STATIC int INIT inflate_codes OF((struct huft *, struct huft *, int, int));
+STATIC int INIT inflate_stored OF((void));
+STATIC int INIT inflate_fixed OF((void));
+STATIC int INIT inflate_dynamic OF((void));
+STATIC int INIT inflate_block OF((int *));
+STATIC int INIT inflate OF((void));
 
 
 /* The inflate algorithm uses a sliding 32 K byte window on the uncompressed
@@ -221,7 +226,7 @@ STATIC const ush mask_bits[] = {
     0x01ff, 0x03ff, 0x07ff, 0x0fff, 0x1fff, 0x3fff, 0x7fff, 0xffff
 };
 
-#define NEXTBYTE()  (uch)get_byte()
+#define NEXTBYTE()  ({ int v = get_byte(); if (v < 0) goto underrun; (uch)v; })
 #define NEEDBITS(n) {while(k<(n)){b|=((ulg)NEXTBYTE())<<k;k+=8;}}
 #define DUMPBITS(n) {b>>=(n);k-=(n);}
 
@@ -271,14 +276,15 @@ STATIC const int dbits = 6;          /* bits in base distance lookup table */
 STATIC unsigned hufts;         /* track memory usage */
 
 
-STATIC int huft_build(b, n, s, d, e, t, m)
-unsigned *b;            /* code lengths in bits (all assumed <= BMAX) */
-unsigned n;             /* number of codes (assumed <= N_MAX) */
-unsigned s;             /* number of simple-valued codes (0..s-1) */
-const ush *d;                 /* list of base values for non-simple codes */
-const ush *e;                 /* list of extra bits for non-simple codes */
-struct huft **t;        /* result: starting table */
-int *m;                 /* maximum lookup bits, returns actual */
+STATIC int INIT huft_build(
+	unsigned *b,            /* code lengths in bits (all assumed <= BMAX) */
+	unsigned n,             /* number of codes (assumed <= N_MAX) */
+	unsigned s,             /* number of simple-valued codes (0..s-1) */
+	const ush *d,           /* list of base values for non-simple codes */
+	const ush *e,           /* list of extra bits for non-simple codes */
+	struct huft **t,        /* result: starting table */
+	int *m                  /* maximum lookup bits, returns actual */
+	)
 /* Given a list of code lengths and a maximum table size, make a set of
    tables to decode that set of codes.  Return zero on success, one if
    the given code set is incomplete (the tables are still built in this
@@ -489,8 +495,9 @@ DEBG("huft7 ");
 
 
 
-STATIC int huft_free(t)
-struct huft *t;         /* table to free */
+STATIC int INIT huft_free(
+	struct huft *t         /* table to free */
+	)
 /* Free the malloc'ed tables built by huft_build(), which makes a linked
    list of the tables it made, with the links in a dummy first entry of
    each table. */
@@ -510,9 +517,12 @@ struct huft *t;         /* table to free */
 }
 
 
-STATIC int inflate_codes(tl, td, bl, bd)
-struct huft *tl, *td;   /* literal/length and distance decoder tables */
-int bl, bd;             /* number of bits decoded by tl[] and td[] */
+STATIC int INIT inflate_codes(
+	struct huft *tl,    /* literal/length decoder tables */
+	struct huft *td,    /* distance decoder tables */
+	int bl,             /* number of bits decoded by tl[] */
+	int bd              /* number of bits decoded by td[] */
+	)
 /* inflate (decompress) the codes in a deflated (compressed) block.
    Return an error code or zero if it all goes ok. */
 {
@@ -615,11 +625,14 @@ int bl, bd;             /* number of bits decoded by tl[] and td[] */
 
   /* done */
   return 0;
+
+ underrun:
+  return 4;			/* Input underrun */
 }
 
 
 
-STATIC int inflate_stored()
+STATIC int INIT inflate_stored(void)
 /* "decompress" an inflated type 0 (stored) block. */
 {
   unsigned n;           /* number of bytes in block */
@@ -671,11 +684,16 @@ DEBG("<stor");
 
   DEBG(">");
   return 0;
+
+ underrun:
+  return 4;			/* Input underrun */
 }
 
 
-
-STATIC int inflate_fixed()
+/*
+ * We use `noinline' here to prevent gcc-3.5 from using too much stack space
+ */
+STATIC int noinline INIT inflate_fixed(void)
 /* decompress an inflated type 1 (fixed Huffman codes) block.  We should
    either replace this with a custom decoder, or at least precompute the
    Huffman tables. */
@@ -728,8 +746,10 @@ DEBG("<fix");
 }
 
 
-
-STATIC int inflate_dynamic()
+/*
+ * We use `noinline' here to prevent gcc-3.5 from using too much stack space
+ */
+STATIC int noinline INIT inflate_dynamic(void)
 /* decompress an inflated type 2 (dynamic Huffman codes) block. */
 {
   int i;                /* temporary variables */
@@ -866,7 +886,7 @@ DEBG("dyn5a ");
   {
 DEBG("dyn5b ");
     if (i == 1) {
-      error(" incomplete literal tree\n");
+      error("incomplete literal tree");
       huft_free(tl);
     }
     return i;                   /* incomplete code set */
@@ -877,7 +897,7 @@ DEBG("dyn5c ");
   {
 DEBG("dyn5d ");
     if (i == 1) {
-      error(" incomplete distance tree\n");
+      error("incomplete distance tree");
 #ifdef PKZIP_BUG_WORKAROUND
       i = 0;
     }
@@ -903,12 +923,16 @@ DEBG("dyn7 ");
 
   DEBG(">");
   return 0;
+
+ underrun:
+  return 4;			/* Input underrun */
 }
 
 
 
-STATIC int inflate_block(e)
-int *e;                 /* last block flag */
+STATIC int INIT inflate_block(
+	int *e                  /* last block flag */
+	)
 /* decompress an inflated block */
 {
   unsigned t;           /* block type */
@@ -950,11 +974,14 @@ int *e;                 /* last block flag */
 
   /* bad block type */
   return 2;
+
+ underrun:
+  return 4;			/* Input underrun */
 }
 
 
 
-STATIC int inflate()
+STATIC int INIT inflate(void)
 /* decompress an inflated entry */
 {
   int e;                /* last block flag */
@@ -1009,14 +1036,14 @@ STATIC int inflate()
 
 static ulg crc_32_tab[256];
 static ulg crc;		/* initialized in makecrc() so it'll reside in bss */
-#define CRC_VALUE (crc ^ 0xffffffffL)
+#define CRC_VALUE (crc ^ 0xffffffffUL)
 
 /*
  * Code to compute the CRC-32 table. Borrowed from 
  * gzip-1.0.3/makecrc.c.
  */
 
-static void
+static void INIT
 makecrc(void)
 {
 /* Not copyrighted 1990 Mark Adler	*/
@@ -1049,7 +1076,7 @@ makecrc(void)
   }
 
   /* this is initialized here so this code could reside in ROM */
-  crc = (ulg)0xffffffffL; /* shift register contents */
+  crc = (ulg)0xffffffffUL; /* shift register contents */
 }
 
 /* gzip flag byte */
@@ -1064,7 +1091,7 @@ makecrc(void)
 /*
  * Do the uncompression!
  */
-static int gunzip(void)
+static int INIT gunzip(void)
 {
     uch flags;
     unsigned char magic[2]; /* magic header */
@@ -1073,9 +1100,9 @@ static int gunzip(void)
     ulg orig_len = 0;       /* original uncompressed length */
     int res;
 
-    magic[0] = (unsigned char)get_byte();
-    magic[1] = (unsigned char)get_byte();
-    method = (unsigned char)get_byte();
+    magic[0] = NEXTBYTE();
+    magic[1] = NEXTBYTE();
+    method   = NEXTBYTE();
 
     if (magic[0] != 037 ||
 	((magic[1] != 0213) && (magic[1] != 0236))) {
@@ -1091,40 +1118,40 @@ static int gunzip(void)
 
     flags  = (uch)get_byte();
     if ((flags & ENCRYPTED) != 0) {
-	    error("Input is encrypted\n");
+	    error("Input is encrypted");
 	    return -1;
     }
     if ((flags & CONTINUATION) != 0) {
-	    error("Multi part input\n");
+	    error("Multi part input");
 	    return -1;
     }
     if ((flags & RESERVED) != 0) {
-	    error("Input has invalid flags\n");
+	    error("Input has invalid flags");
 	    return -1;
     }
-    (ulg)get_byte();	/* Get timestamp */
-    ((ulg)get_byte()) << 8;
-    ((ulg)get_byte()) << 16;
-    ((ulg)get_byte()) << 24;
+    NEXTBYTE();	/* Get timestamp */
+    NEXTBYTE();
+    NEXTBYTE();
+    NEXTBYTE();
 
-    (void)get_byte();  /* Ignore extra flags for the moment */
-    (void)get_byte();  /* Ignore OS type for the moment */
+    (void)NEXTBYTE();  /* Ignore extra flags for the moment */
+    (void)NEXTBYTE();  /* Ignore OS type for the moment */
 
     if ((flags & EXTRA_FIELD) != 0) {
-	    unsigned len = (unsigned)get_byte();
-	    len |= ((unsigned)get_byte())<<8;
-	    while (len--) (void)get_byte();
+	    unsigned len = (unsigned)NEXTBYTE();
+	    len |= ((unsigned)NEXTBYTE())<<8;
+	    while (len--) (void)NEXTBYTE();
     }
 
     /* Get original file name if it was truncated */
     if ((flags & ORIG_NAME) != 0) {
 	    /* Discard the old name */
-	    while (get_byte() != 0) /* null */ ;
+	    while (NEXTBYTE() != 0) /* null */ ;
     } 
 
     /* Discard file comment if any */
     if ((flags & COMMENT) != 0) {
-	    while (get_byte() != 0) /* null */ ;
+	    while (NEXTBYTE() != 0) /* null */ ;
     }
 
     /* Decompress */
@@ -1141,6 +1168,9 @@ static int gunzip(void)
 	    case 3:
 		    error("out of memory");
 		    break;
+	    case 4:
+		    error("out of input data");
+		    break;
 	    default:
 		    error("invalid compressed format (other)");
 	    }
@@ -1151,15 +1181,15 @@ static int gunzip(void)
     /* crc32  (see algorithm.doc)
      * uncompressed input size modulo 2^32
      */
-    orig_crc = (ulg) get_byte();
-    orig_crc |= (ulg) get_byte() << 8;
-    orig_crc |= (ulg) get_byte() << 16;
-    orig_crc |= (ulg) get_byte() << 24;
+    orig_crc = (ulg) NEXTBYTE();
+    orig_crc |= (ulg) NEXTBYTE() << 8;
+    orig_crc |= (ulg) NEXTBYTE() << 16;
+    orig_crc |= (ulg) NEXTBYTE() << 24;
     
-    orig_len = (ulg) get_byte();
-    orig_len |= (ulg) get_byte() << 8;
-    orig_len |= (ulg) get_byte() << 16;
-    orig_len |= (ulg) get_byte() << 24;
+    orig_len = (ulg) NEXTBYTE();
+    orig_len |= (ulg) NEXTBYTE() << 8;
+    orig_len |= (ulg) NEXTBYTE() << 16;
+    orig_len |= (ulg) NEXTBYTE() << 24;
     
     /* Validate decompression */
     if (orig_crc != CRC_VALUE) {
@@ -1171,6 +1201,10 @@ static int gunzip(void)
 	    return -1;
     }
     return 0;
+
+ underrun:			/* NEXTBYTE() goto's here if needed */
+    error("out of input data");
+    return -1;
 }
 
 

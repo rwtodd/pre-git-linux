@@ -1,20 +1,24 @@
-/* $Id: l3dss1.c,v 2.30 2000/11/19 17:02:48 kai Exp $
+/* $Id: l3dss1.c,v 2.32.2.3 2004/01/13 14:31:25 keil Exp $
  *
  * EURO/DSS1 D-channel protocol
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *              based on the teles driver from Jan den Ouden
+ * German 1TR6 D-channel protocol
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * Author       Karsten Keil
+ *              based on the teles driver from Jan den Ouden
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * For changes and modifications please read
+ * Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
  */
 
-#define __NO_VERSION__
 #include "hisax.h"
 #include "isdnl3.h"
 #include "l3dss1.h"
@@ -22,7 +26,7 @@
 #include <linux/config.h>
 
 extern char *HiSax_getrev(const char *revision);
-const char *dss1_revision = "$Revision: 2.30 $";
+const char *dss1_revision = "$Revision: 2.32.2.3 $";
 
 #define EXT_BEARER_CAPS 1
 
@@ -44,12 +48,9 @@ const char *dss1_revision = "$Revision: 2.30 $";
 static unsigned char new_invoke_id(struct PStack *p)
 {
 	unsigned char retval;
-	int flags,i;
+	int i;
   
 	i = 32; /* maximum search depth */
-
-	save_flags(flags);
-	cli();
 
 	retval = p->prot.dss1.last_invoke_id + 1; /* try new id */
 	while ((i) && (p->prot.dss1.invoke_used[retval >> 3] == 0xFF)) {
@@ -63,8 +64,6 @@ static unsigned char new_invoke_id(struct PStack *p)
 		retval = 0;
 	p->prot.dss1.last_invoke_id = retval;
 	p->prot.dss1.invoke_used[retval >> 3] |= (1 << (retval & 7));
-	restore_flags(flags);
-
 	return(retval);  
 } /* new_invoke_id */
 
@@ -72,14 +71,11 @@ static unsigned char new_invoke_id(struct PStack *p)
 /* free a used invoke id */
 /*************************/
 static void free_invoke_id(struct PStack *p, unsigned char id)
-{ int flags;
+{
 
   if (!id) return; /* 0 = invalid value */
 
-  save_flags(flags);
-  cli();
   p->prot.dss1.invoke_used[id >> 3] &= ~(1 << (id & 7));
-  restore_flags(flags);
 } /* free_invoke_id */  
 
 
@@ -426,9 +422,9 @@ l3dss1_parse_facility(struct PStack *st, struct l3_process *pc,
 #undef FOO1
 
 			}
-#else  not HISAX_DE_AOC
+#else  /* not HISAX_DE_AOC */
                         l3_debug(st, "invoke break");
-#endif not HISAX_DE_AOC 
+#endif /* not HISAX_DE_AOC */
 			break;
 		case 2:	/* return result */
 			 /* if no process available handle separately */ 
@@ -438,12 +434,12 @@ l3dss1_parse_facility(struct PStack *st, struct l3_process *pc,
                            return; 
                          }   
                         if ((pc->prot.dss1.invoke_id) && (pc->prot.dss1.invoke_id == id))
-                          { /* Diversion successfull */
+                          { /* Diversion successful */
                             free_invoke_id(st,pc->prot.dss1.invoke_id);
                             pc->prot.dss1.remote_result = 0; /* success */     
                             pc->prot.dss1.invoke_id = 0;
                             pc->redir_result = pc->prot.dss1.remote_result; 
-                            st->l3.l3l4(st, CC_REDIR | INDICATION, pc);                                  } /* Diversion successfull */
+                            st->l3.l3l4(st, CC_REDIR | INDICATION, pc);                                  } /* Diversion successful */
                         else
                           l3_debug(st,"return error unknown identifier");
 			break;
@@ -2112,7 +2108,7 @@ static void l3dss1_redir_req(struct l3_process *pc, u_char pr, void *arg)
         MsgHead(p, pc->callref, MT_FACILITY);
 
         for (subp = pc->chan->setup.phone; (*subp) && (*subp != '.'); subp++) len_phone++; /* len of phone number */
-        if (*subp++ == '.') len_sub = strlen(subp) + 2; /* length including info subadress element */ 
+        if (*subp++ == '.') len_sub = strlen(subp) + 2; /* length including info subaddress element */ 
 
 	*p++ = 0x1c;   /* Facility info element */
         *p++ = len_phone + len_sub + 2 + 2 + 8 + 3 + 3; /* length of element */
@@ -2138,7 +2134,7 @@ static void l3dss1_redir_req(struct l3_process *pc, u_char pr, void *arg)
 	 *p++ = pc->chan->setup.phone[l];
 
         if (len_sub)
-	  { *p++ = 0x04; /* called party subadress */
+	  { *p++ = 0x04; /* called party subaddress */
             *p++ = len_sub - 2;
             while (*subp) *p++ = *subp++;
           }

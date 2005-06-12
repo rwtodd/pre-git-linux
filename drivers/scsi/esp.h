@@ -1,4 +1,4 @@
-/* $Id: esp.h,v 1.28 2000/03/30 01:33:17 davem Exp $
+/* $Id: esp.h,v 1.29 2001/12/11 04:55:47 davem Exp $
  * esp.h:  Defines and structures for the Sparc ESP (Enhanced SCSI
  *         Processor) driver under Linux.
  *
@@ -62,11 +62,23 @@ enum esp_rev {
 	espunknown = 0x07
 };
 
+/* We allocate one of these for each scsi device and attach it to
+ * SDptr->hostdata for use in the driver
+ */
+struct esp_device {
+  unsigned char sync_min_period;
+  unsigned char sync_max_offset;
+  unsigned sync:1;
+  unsigned wide:1;
+  unsigned disconnect:1;
+};
+
+struct scsi_cmnd;
+
 /* We get one of these for each ESP probed. */
 struct esp {
-	spinlock_t		lock;
-	unsigned long		eregs;		/* ESP controller registers */
-	unsigned long		dregs;		/* DMA controller registers */
+	void __iomem		*eregs;		/* ESP controller registers */
+	void __iomem		*dregs;		/* DMA controller registers */
 	struct sbus_dma		*dma;		/* DMA controller sw state */
 	struct Scsi_Host	*ehost;		/* Backpointer to SCSI Host */
 	struct sbus_dev		*sdev;		/* Pointer to SBus entry */
@@ -169,9 +181,9 @@ struct esp {
 	int			bursts;		/* Burst sizes our DVMA supports */
 
 	/* Our command queues, only one cmd lives in the current_SC queue. */
-	Scsi_Cmnd		*issue_SC;	/* Commands to be issued */
-	Scsi_Cmnd		*current_SC;	/* Who is currently working the bus */
-	Scsi_Cmnd		*disconnected_SC;/* Commands disconnected from the bus */
+	struct scsi_cmnd	*issue_SC;	/* Commands to be issued */
+	struct scsi_cmnd	*current_SC;	/* Who is currently working the bus */
+	struct scsi_cmnd	*disconnected_SC;/* Commands disconnected from the bus */
 
 	/* Message goo */
 	u8			cur_msgout[16];
@@ -184,6 +196,7 @@ struct esp {
 	 * cannot be assosciated with any specific command.
 	 */
 	u8			resetting_bus;
+	wait_queue_head_t	reset_queue;
 };
 
 /* Bitfield meanings for the above registers. */
@@ -389,35 +402,6 @@ struct esp {
         ((ESP_BUS_TIMEOUT * ((mhz) / 1000)) / (8192 * (cfact)))
 #define ESP_MHZ_TO_CYCLE(mhertz)  ((1000000000) / ((mhertz) / 1000))
 #define ESP_TICK(ccf, cycle)  ((7682 * (ccf) * (cycle) / 1000))
-
-extern int esp_detect(struct SHT *);
-extern const char *esp_info(struct Scsi_Host *);
-extern int esp_queue(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-extern int esp_command(Scsi_Cmnd *);
-extern int esp_abort(Scsi_Cmnd *);
-extern int esp_reset(Scsi_Cmnd *, unsigned int);
-extern int esp_proc_info(char *buffer, char **start, off_t offset, int length,
-			 int hostno, int inout);
-extern int esp_revoke(Scsi_Device* SDptr);
-
-#define SCSI_SPARC_ESP {                                        \
-		proc_name:      "esp",				\
-		proc_info:      &esp_proc_info,			\
-		name:           "Sun ESP 100/100a/200",		\
-		detect:         esp_detect,			\
-		revoke:		esp_revoke,			\
-		info:           esp_info,			\
-		command:        esp_command,			\
-		queuecommand:   esp_queue,			\
-		abort:          esp_abort,			\
-		reset:          esp_reset,			\
-		can_queue:      7,				\
-		this_id:        7,				\
-		sg_tablesize:   SG_ALL,				\
-		cmd_per_lun:    1,				\
-		use_clustering: ENABLE_CLUSTERING,		\
-		use_new_eh_code: 0				\
-}
 
 /* For our interrupt engine. */
 #define for_each_esp(esp) \

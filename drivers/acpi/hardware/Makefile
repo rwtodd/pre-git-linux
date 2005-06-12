@@ -2,15 +2,8 @@
 # Makefile for all Linux ACPI interpreter subdirectories
 #
 
-O_TARGET := ../$(shell basename `pwd`).o
+obj-y := hwacpi.o  hwgpe.o  hwregs.o  hwsleep.o
 
-obj-$(CONFIG_ACPI) := $(patsubst %.c,%.o,$(wildcard *.c))
-
-EXTRA_CFLAGS += -I../include
+obj-$(ACPI_FUTURE_USAGE) += hwtimer.o
 
 EXTRA_CFLAGS += $(ACPI_CFLAGS)
-
-include $(TOPDIR)/Rules.make
-
-clean:
-	$(RM) *.o 

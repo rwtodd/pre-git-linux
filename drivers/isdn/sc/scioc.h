@@ -1,3 +1,7 @@
+/*
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ */
 
 /*
  * IOCTL Command Codes
@@ -23,7 +27,7 @@ typedef struct {
 	int device;
 	int channel;
 	unsigned long command;
-	void *dataptr;
+	void __user *dataptr;
 } scs_ioctl;
 
 /* Size of strings */

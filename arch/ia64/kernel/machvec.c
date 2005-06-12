@@ -1,4 +1,8 @@
 #include <linux/config.h>
+#include <linux/module.h>
+
+#include <asm/machvec.h>
+#include <asm/system.h>
 
 #ifdef CONFIG_IA64_GENERIC
 
@@ -6,19 +10,9 @@
 #include <linux/string.h>
 
 #include <asm/page.h>
-#include <asm/machvec.h>
 
 struct ia64_machine_vector ia64_mv;
-
-/*
- * Most platforms use this routine for mapping page frame addresses
- * into a memory map index.
- */
-unsigned long
-map_nr_dense (unsigned long addr)
-{
-	return MAP_NR_DENSE(addr);
-}
+EXPORT_SYMBOL(ia64_mv);
 
 static struct ia64_machine_vector *
 lookup_machvec (const char *name)
@@ -44,12 +38,33 @@ machvec_init (const char *name)
 		panic("generic kernel failed to find machine vector for platform %s!", name);
 	}
 	ia64_mv = *mv;
-	printk("booting generic kernel on platform %s\n", name);
+	printk(KERN_INFO "booting generic kernel on platform %s\n", name);
 }
 
 #endif /* CONFIG_IA64_GENERIC */
 
 void
-machvec_noop (void)
+machvec_setup (char **arg)
 {
 }
+EXPORT_SYMBOL(machvec_setup);
+
+void
+machvec_timer_interrupt (int irq, void *dev_id, struct pt_regs *regs)
+{
+}
+EXPORT_SYMBOL(machvec_timer_interrupt);
+
+void
+machvec_dma_sync_single (struct device *hwdev, dma_addr_t dma_handle, size_t size, int dir)
+{
+	mb();
+}
+EXPORT_SYMBOL(machvec_dma_sync_single);
+
+void
+machvec_dma_sync_sg (struct device *hwdev, struct scatterlist *sg, int n, int dir)
+{
+	mb();
+}
+EXPORT_SYMBOL(machvec_dma_sync_sg);

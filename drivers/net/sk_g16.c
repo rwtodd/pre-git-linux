@@ -2,7 +2,7 @@
  * Copyright (C) 1994 by PJD Weichmann & SWS Bern, Switzerland
  *
  * This software may be used and distributed according to the terms
- * of the GNU Public License, incorporated herein by reference.
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * Module         : sk_g16.c
  *
@@ -23,7 +23,7 @@
  *
 -*/
 
-static const char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
+static const char rcsid[] = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
 
 /*
  * The Schneider & Koch (SK) G16 Network device driver is based
@@ -60,24 +60,22 @@ static const char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/ptrace.h>
 #include <linux/fcntl.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h> 
 #include <linux/delay.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/bitops.h> 
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+#include <linux/bitops.h>
+
+#include <asm/system.h>
+#include <asm/io.h>
 
 #include "sk_g16.h"
 
@@ -218,9 +216,9 @@ static const char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
  *
  */ 
 
-#define SK_IOREG        (board->ioreg) /* LANCE data registers.     */ 
-#define SK_PORT         (board->port)  /* Control, Status register  */
-#define SK_IOCOM        (board->iocom) /* I/O Command               */
+#define SK_IOREG        (&board->ioreg) /* LANCE data registers.     */ 
+#define SK_PORT         (&board->port)  /* Control, Status register  */
+#define SK_IOCOM        (&board->iocom) /* I/O Command               */
 
 /* 
  * SK_G16 Status/Control Register bits
@@ -459,9 +457,7 @@ struct priv
 /* static variables */
 
 static SK_RAM *board;  /* pointer to our memory mapped board components */
-static struct net_device *SK_dev;
-unsigned long SK_ioaddr;
-static spinlock_t SK_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(SK_lock);
 
 /* Macros */
 
@@ -474,13 +470,12 @@ static spinlock_t SK_lock = SPIN_LOCK_UNLOCKED;
  * See for short explanation of each function its definitions header.
  */
 
-int          SK_init(struct net_device *dev);
 static int   SK_probe(struct net_device *dev, short ioaddr);
 
 static void  SK_timeout(struct net_device *dev);
 static int   SK_open(struct net_device *dev);
 static int   SK_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void  SK_interrupt(int irq, void *dev_id, struct pt_regs * regs);
+static irqreturn_t SK_interrupt(int irq, void *dev_id, struct pt_regs * regs);
 static void  SK_rxintr(struct net_device *dev);
 static void  SK_txintr(struct net_device *dev);
 static int   SK_close(struct net_device *dev);
@@ -532,144 +527,102 @@ void SK_print_ram(struct net_device *dev);
  *     YY/MM/DD  uid  Description
 -*/
 
+static int io;	/* 0 == probe */
+
 /* 
  * Check for a network adaptor of this type, and return '0' if one exists.
  * If dev->base_addr == 0, probe all likely locations.
  * If dev->base_addr == 1, always return failure.
- * If dev->base_addr == 2, allocate space for the device and return success
- *                         (detachable devices only).
  */
 
-int __init SK_init(struct net_device *dev)
+struct net_device * __init SK_init(int unit)
 {
-	int ioaddr;			   /* I/O port address used for POS regs */
 	int *port, ports[] = SK_IO_PORTS;  /* SK_G16 supported ports */
+	static unsigned version_printed;
+	struct net_device *dev = alloc_etherdev(sizeof(struct priv));
+	int err = -ENODEV;
 
-	/* get preconfigured base_addr from dev which is done in Space.c */
-	int base_addr = dev->base_addr; 
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
 
-        PRINTK(("%s: %s", SK_NAME, rcsid));
-        rcsid = NULL;                 /* We do not want to use this further */
-
-	if (base_addr > 0x0ff)        /* Check a single specified address */
-	{
-	    int rc = -ENODEV;
-
-	    ioaddr = base_addr;
-
-	    /* Check if on specified address is a SK_G16 */
-	    if (!request_region(ioaddr, ETHERCARD_TOTAL_SIZE, "sk_g16"))
-	    	return -EBUSY;
-
-	    if ( (inb(SK_POS0) == SK_IDLOW) ||
-		 (inb(SK_POS1) == SK_IDHIGH) )  
-	    {
-		rc = SK_probe(dev, ioaddr);
-	    }
-
-	    if (rc)
-	        release_region(ioaddr, ETHERCARD_TOTAL_SIZE);
-	    return rc;
-	}
-	else if (base_addr > 0)       /* Don't probe at all */
-	{
-		return -ENXIO;
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+		io = dev->base_addr;
 	}
 
-	/* Autoprobe base_addr */
+	if (version_printed++ == 0)
+	        PRINTK(("%s: %s", SK_NAME, rcsid));
 
-	for (port = &ports[0]; *port; port++) 
-	{
-	    ioaddr = *port;           /* we need ioaddr for accessing POS regs */
+	if (io > 0xff) {        /* Check a single specified address */
+		err = -EBUSY;
+		/* Check if on specified address is a SK_G16 */
+		if (request_region(io, ETHERCARD_TOTAL_SIZE, "sk_g16")) {
+			err = SK_probe(dev, io);
+			if (!err)
+				goto got_it;
+			release_region(io, ETHERCARD_TOTAL_SIZE);
+		}
+	} else if (io > 0) {       /* Don't probe at all */
+		err = -ENXIO;
+	} else {
+		/* Autoprobe base_addr */
+		for (port = &ports[0]; *port; port++) {
+			io = *port;
 
-	    /* Check if I/O Port region is used by another board */
+			/* Check if I/O Port region is used by another board */
+			if (!request_region(io, ETHERCARD_TOTAL_SIZE, "sk_g16"))
+				continue;       /* Try next Port address */
 
-	    if (!request_region(ioaddr, ETHERCARD_TOTAL_SIZE, "sk_g16"))
-	    {
-		continue;             /* Try next Port address */
-	    }
+			/* Check if at ioaddr is a SK_G16 */
+			if (SK_probe(dev, io) == 0)
+				goto got_it;
 
-	    /* Check if at ioaddr is a SK_G16 */
-
-	    if ( !(inb(SK_POS0) == SK_IDLOW) ||
-		 !(inb(SK_POS1) == SK_IDHIGH) )
-	    {
-	        release_region(ioaddr, ETHERCARD_TOTAL_SIZE);
-		continue;             /* Try next Port address */
-	    }
-
-	    dev->base_addr = ioaddr;  /* Set I/O Port Address */
-
-	    if (SK_probe(dev, ioaddr) == 0)  
-	    {
-		return 0; /* Card found and initialized */
-	    }
-
-	    release_region(ioaddr, ETHERCARD_TOTAL_SIZE);
+			release_region(io, ETHERCARD_TOTAL_SIZE);
+		}
 	}
+err_out:
+	free_netdev(dev);
+	return ERR_PTR(err);
 
-	dev->base_addr = base_addr;   /* Write back original base_addr */
-
-	return -ENODEV;                /* Failed to find or init driver */
+got_it:
+	err = register_netdev(dev);
+	if (err) {
+		release_region(dev->base_addr, ETHERCARD_TOTAL_SIZE);
+		goto err_out;
+	}
+	return dev;
 
 } /* End of SK_init */
 
 
 MODULE_AUTHOR("Patrick J.D. Weichmann");
 MODULE_DESCRIPTION("Schneider & Koch G16 Ethernet Device Driver");
+MODULE_LICENSE("GPL");
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "0 to probe common ports (unsafe), or the I/O base of the board");
 
 
 #ifdef MODULE
-static int io = 0; /* 0 == probe */
+
+static struct net_device *SK_dev;
 
 static int __init SK_init_module (void)
 {
-	int rc;
-	
-	SK_dev = init_etherdev (NULL, 0);
-	if (!SK_dev)
-		return -ENOMEM;
-	
-	SK_dev->base_addr = io;
-
-	rc = SK_init (SK_dev);
-	if (rc) {
-		unregister_netdev (SK_dev);
-		kfree (SK_dev);
-		SK_dev = NULL;
-	}
-	
-	return rc;
+ 	SK_dev = SK_init(-1);
+ 	return IS_ERR(SK_dev) ? PTR_ERR(SK_dev) : 0;
 }
-#endif /* MODULE */
-
 
 static void __exit SK_cleanup_module (void)
 {
-	if (SK_dev) {
-		if (SK_dev->priv) {
-			kfree(SK_dev->priv);
-			SK_dev->priv = NULL;
-		}
-		unregister_netdev(SK_dev);
-		kfree(SK_dev);
-		SK_dev = NULL;
-	}
-	if (SK_ioaddr) {
-		release_region(SK_ioaddr, ETHERCARD_TOTAL_SIZE);
-		SK_ioaddr = 0;
-	}
-		
+ 	unregister_netdev(SK_dev);
+ 	release_region(SK_dev->base_addr, ETHERCARD_TOTAL_SIZE);
+ 	free_netdev(SK_dev);
 }
 
-
-#ifdef MODULE
 module_init(SK_init_module);
-#endif
 module_exit(SK_cleanup_module);
-
+#endif
 
 
 /*-
@@ -697,7 +650,11 @@ int __init SK_probe(struct net_device *dev, short ioaddr)
     int sk_addr_flag = 0;   /* SK ADDR correct? 1 - no, 0 - yes */
     unsigned int rom_addr;  /* used to store RAM address used for POS_ADDR */
 
-    struct priv *p;         /* SK_G16 private structure */
+    struct priv *p = netdev_priv(dev);	/* SK_G16 private structure */
+
+    if (inb(SK_POS0) != SK_IDLOW || inb(SK_POS1) != SK_IDHIGH)
+	return -ENODEV;
+    dev->base_addr = ioaddr;
 
     if (SK_ADDR & 0x3fff || SK_ADDR < 0xa0000)
     {
@@ -810,7 +767,7 @@ int __init SK_probe(struct net_device *dev, short ioaddr)
     SK_print_pos(dev, "POS registers after ROM, RAM config");
 #endif
 
-    board = (SK_RAM *) bus_to_virt(rom_addr);
+    board = (SK_RAM *) isa_bus_to_virt(rom_addr);
 
     /* Read in station address */
     for (i = 0, j = 0; i < ETH_ALEN; i++, j+=2)
@@ -839,12 +796,6 @@ int __init SK_probe(struct net_device *dev, short ioaddr)
 	    dev->dev_addr[4],
 	    dev->dev_addr[5]);
 
-    /* Allocate memory for private structure */
-    p = dev->priv = (void *) kmalloc(sizeof(struct priv), GFP_KERNEL);
-    if (p == NULL) {
-	   printk("%s: ERROR - no memory for driver data!\n", dev->name);
-	   return -ENOMEM;
-    }
     memset((char *) dev->priv, 0, sizeof(struct priv)); /* clear memory */
 
     /* Assign our Device Driver functions */
@@ -858,10 +809,6 @@ int __init SK_probe(struct net_device *dev, short ioaddr)
     dev->watchdog_timeo		= HZ/7;
 
 
-    /* Set the generic fields of the device structure */
-
-    ether_setup(dev);
-    
     dev->flags &= ~IFF_MULTICAST;
 
     /* Initialize private structure */
@@ -886,12 +833,7 @@ int __init SK_probe(struct net_device *dev, short ioaddr)
     SK_print_pos(dev, "End of SK_probe");
     SK_print_ram(dev);
 #endif 
-
-    SK_dev = dev;
-    SK_ioaddr = ioaddr;
-
     return 0;                            /* Initialization done */
-
 } /* End of SK_probe() */
 
 
@@ -927,7 +869,7 @@ static int SK_open(struct net_device *dev)
 
     int irqtab[] = SK_IRQS; 
 
-    struct priv *p = (struct priv *)dev->priv;
+    struct priv *p = netdev_priv(dev);
 
     PRINTK(("## %s: At beginning of SK_open(). CSR0: %#06x\n", 
            SK_NAME, SK_read_reg(CSR0)));
@@ -1081,7 +1023,7 @@ static int SK_lance_init(struct net_device *dev, unsigned short mode)
 {
     int i;
     unsigned long flags;
-    struct priv *p = (struct priv *) dev->priv; 
+    struct priv *p = netdev_priv(dev);
     struct tmd  *tmdp;
     struct rmd  *rmdp;
 
@@ -1102,7 +1044,7 @@ static int SK_lance_init(struct net_device *dev, unsigned short mode)
 	writel((unsigned long) p->tmdbufs[i], tmdp->u.buffer); /* assign buffer */
 	
 	/* Mark TMD as start and end of packet */
-	writeb(TX_STP | TX_ENP, tmdp->u.s.status);
+	writeb(TX_STP | TX_ENP, &tmdp->u.s.status);
     }
 
 
@@ -1122,32 +1064,32 @@ static int SK_lance_init(struct net_device *dev, unsigned short mode)
 	 * receiving packets, set status and release RMD 
 	 */
 
-	writeb(RX_OWN, rmdp->u.s.status);
+	writeb(RX_OWN, &rmdp->u.s.status);
 
-	writew(-PKT_BUF_SZ, rmdp->blen); /* Buffer Size (two's complement) */
+	writew(-PKT_BUF_SZ, &rmdp->blen); /* Buffer Size (two's complement) */
 
-	writeb(0, rmdp->mlen);           /* init message length */       
+	writeb(0, &rmdp->mlen);           /* init message length */       
 	
     }
 
     /* Fill LANCE Initialize Block */
 
-    writew(mode, (p->ram)->ib.mode); /* Set operation mode */
+    writew(mode, (&((p->ram)->ib.mode))); /* Set operation mode */
 
     for (i = 0; i < ETH_ALEN; i++)   /* Set physical address */
     {
-	writeb(dev->dev_addr[i], (p->ram)->ib.paddr[i]); 
+	writeb(dev->dev_addr[i], (&((p->ram)->ib.paddr[i]))); 
     }
 
     for (i = 0; i < 8; i++)          /* Set multicast, logical address */
     {
-	writeb(0, (p->ram)->ib.laddr[i]); /* We do not use logical addressing */
+	writeb(0, (&((p->ram)->ib.laddr[i]))); /* We do not use logical addressing */
     } 
 
     /* Set ring descriptor pointers and set number of descriptors */
 
-    writel((int)p->rmdhead | RMDNUMMASK, (p->ram)->ib.rdrp);
-    writel((int)p->tmdhead | TMDNUMMASK, (p->ram)->ib.tdrp);
+    writel((int)p->rmdhead | RMDNUMMASK, (&((p->ram)->ib.rdrp)));
+    writel((int)p->tmdhead | TMDNUMMASK, (&((p->ram)->ib.tdrp)));
 
     /* Prepare LANCE Control and Status Registers */
 
@@ -1248,14 +1190,15 @@ static void SK_timeout(struct net_device *dev)
 {
 	printk(KERN_WARNING "%s: xmitter timed out, try to restart!\n", dev->name);
 	SK_lance_init(dev, MODE_NORMAL); /* Reinit LANCE */
-	netif_start_queue(dev);		 /* Clear Transmitter flag */
+	netif_wake_queue(dev);		 /* Clear Transmitter flag */
 	dev->trans_start = jiffies;      /* Mark Start of transmission */
 }
 
 static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-    struct priv *p = (struct priv *) dev->priv;
+    struct priv *p = netdev_priv(dev);
     struct tmd *tmdp;
+    static char pad[64];
 
     PRINTK2(("## %s: SK_send_packet() called, CSR0 %#04x.\n", 
 	    SK_NAME, SK_read_reg(CSR0)));
@@ -1280,8 +1223,10 @@ static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
 	/* Copy data into dual ported ram */
 
 	memcpy_toio((tmdp->u.buffer & 0x00ffffff), skb->data, skb->len);
+	if (len != skb->len)
+		memcpy_toio((tmdp->u.buffer & 0x00ffffff) + skb->len, pad, len-skb->len);
 
-	writew(-len, tmdp->blen);            /* set length to transmit */
+	writew(-len, &tmdp->blen);            /* set length to transmit */
 
 	/* 
 	 * Packet start and end is always set because we use the maximum
@@ -1289,7 +1234,7 @@ static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
 	 * Relinquish ownership to LANCE
 	 */
 
-	writeb(TX_OWN | TX_STP | TX_ENP, tmdp->u.s.status);
+	writeb(TX_OWN | TX_STP | TX_ENP, &tmdp->u.s.status);
 	
 	/* Start Demand Transmission */
 	SK_write_reg(CSR0, CSR0_TDMD | CSR0_INEA);
@@ -1301,7 +1246,7 @@ static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
 	p->tmdnum &= TMDNUM-1; 
 
 	/* Do we own the next transmit buffer ? */
-	if (! (readb((p->tmdhead + p->tmdnum)->u.s.status) & TX_OWN) )
+	if (! (readb(&((p->tmdhead + p->tmdnum)->u.s.status)) & TX_OWN) )
 	{
 	   /* 
 	    * We own next buffer and are ready to transmit, so
@@ -1336,11 +1281,11 @@ static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
  *     YY/MM/DD  uid  Description
 -*/
 
-static void SK_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t SK_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
     int csr0;
     struct net_device *dev = dev_id;
-    struct priv *p = (struct priv *) dev->priv;
+    struct priv *p = netdev_priv(dev);
 
 
     PRINTK2(("## %s: SK_interrupt(). status: %#06x\n", 
@@ -1385,6 +1330,7 @@ static void SK_interrupt(int irq, void *dev_id, struct pt_regs * regs)
     SK_write_reg(CSR0, CSR0_INEA); /* Enable Interrupts */
 
     spin_unlock (&SK_lock);
+    return IRQ_HANDLED;
 } /* End of SK_interrupt() */ 
 
 
@@ -1409,7 +1355,7 @@ static void SK_txintr(struct net_device *dev)
 {
     int tmdstat;
     struct tmd *tmdp;
-    struct priv *p = (struct priv *) dev->priv;
+    struct priv *p = netdev_priv(dev);
 
 
     PRINTK2(("## %s: SK_txintr() status: %#06x\n", 
@@ -1421,7 +1367,7 @@ static void SK_txintr(struct net_device *dev)
     p->tmdlast++;
     p->tmdlast &= TMDNUM-1;
 
-    tmdstat = readb(tmdp->u.s.status);
+    tmdstat = readb(&tmdp->u.s.status);
 
     /* 
      * We check status of transmitted packet.
@@ -1429,7 +1375,7 @@ static void SK_txintr(struct net_device *dev)
      */
     if (tmdstat & TX_ERR) /* Error occurred */
     {
-	int stat2 = readw(tmdp->status2);
+	int stat2 = readw(&tmdp->status2);
 
 	printk("%s: TX error: %04x %04x\n", dev->name, tmdstat, stat2);
 
@@ -1458,7 +1404,7 @@ static void SK_txintr(struct net_device *dev)
 	
 	p->stats.tx_errors++;
 
-	writew(0, tmdp->status2);             /* Clear error flags */
+	writew(0, &tmdp->status2);             /* Clear error flags */
     }
     else if (tmdstat & TX_MORE)        /* Collisions occurred ? */
     {
@@ -1523,7 +1469,7 @@ static void SK_rxintr(struct net_device *dev)
 
     struct rmd *rmdp;
     int rmdstat;
-    struct priv *p = (struct priv *) dev->priv;
+    struct priv *p = netdev_priv(dev);
 
     PRINTK2(("## %s: SK_rxintr(). CSR0: %#06x\n", 
             SK_NAME, SK_read_reg(CSR0)));
@@ -1534,7 +1480,7 @@ static void SK_rxintr(struct net_device *dev)
      * it up to higher layer 
      */
 
-    while (!( (rmdstat = readb(rmdp->u.s.status)) & RX_OWN))
+    while (!( (rmdstat = readb(&rmdp->u.s.status)) & RX_OWN))
     {
 	/* 
          * Start and end of packet must be set, because we use 
@@ -1564,7 +1510,7 @@ static void SK_rxintr(struct net_device *dev)
 	     * packets. 
 	     */
 
-	    writeb(RX_OWN, rmdp->u.s.status); /* Relinquish ownership to LANCE */ 
+	    writeb(RX_OWN, &rmdp->u.s.status); /* Relinquish ownership to LANCE */ 
 
 	}
 	else if (rmdstat & RX_ERR)          /* Receive Error ? */
@@ -1576,13 +1522,13 @@ static void SK_rxintr(struct net_device *dev)
 	    if (rmdstat & RX_FRAM) p->stats.rx_frame_errors++;
 	    if (rmdstat & RX_CRC)  p->stats.rx_crc_errors++;
 
-	    writeb(RX_OWN, rmdp->u.s.status); /* Relinquish ownership to LANCE */
+	    writeb(RX_OWN, &rmdp->u.s.status); /* Relinquish ownership to LANCE */
 
 	}
 	else /* We have a packet which can be queued for the upper layers */
 	{
 
-	    int len = readw(rmdp->mlen) & 0x0fff;  /* extract message length from receive buffer */
+	    int len = readw(&rmdp->mlen) & 0x0fff;  /* extract message length from receive buffer */
 	    struct sk_buff *skb;
 
 	    skb = dev_alloc_skb(len+2); /* allocate socket buffer */ 
@@ -1595,7 +1541,7 @@ static void SK_rxintr(struct net_device *dev)
 		 * to Lance, update statistics and go ahead.
 		 */
 
-		writeb(RX_OWN, rmdp->u.s.status); /* Relinquish ownership to LANCE */
+		writeb(RX_OWN, &rmdp->u.s.status); /* Relinquish ownership to LANCE */
 		printk("%s: Couldn't allocate sk_buff, deferring packet.\n",
 		       dev->name);
 		p->stats.rx_dropped++;
@@ -1633,7 +1579,8 @@ static void SK_rxintr(struct net_device *dev)
 	     * free our descriptor and update statistics 
 	     */
 
-	    writeb(RX_OWN, rmdp->u.s.status);
+	    writeb(RX_OWN, &rmdp->u.s.status);
+	    dev->last_rx = jiffies;
 	    p->stats.rx_packets++;
 	    p->stats.rx_bytes += len;
 
@@ -1706,7 +1653,7 @@ static int SK_close(struct net_device *dev)
 static struct net_device_stats *SK_get_stats(struct net_device *dev)
 {
 
-    struct priv *p = (struct priv *) dev->priv;
+    struct priv *p = netdev_priv(dev);
 
     PRINTK(("## %s: SK_get_stats(). CSR0: %#06x\n", 
            SK_NAME, SK_read_reg(CSR0)));
@@ -2079,11 +2026,11 @@ void SK_print_dev(struct net_device *dev, char *text)
  *     YY/MM/DD  uid  Description
 -*/
 
-void SK_print_ram(struct net_device *dev)
+void __init SK_print_ram(struct net_device *dev)
 {
 
     int i;    
-    struct priv *p = (struct priv *) dev->priv;
+    struct priv *p = netdev_priv(dev);
 
     printk("## %s: RAM Details.\n"
            "##   RAM at %#08x tmdhead: %#08x rmdhead: %#08x initblock: %#08x\n",

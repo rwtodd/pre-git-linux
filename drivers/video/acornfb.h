@@ -47,24 +47,18 @@ union palette {
 };
 
 struct acornfb_par {
-	unsigned long	screen_base;
-	unsigned long	screen_base_p;
+	struct device	*dev;
 	unsigned long	screen_end;
-	unsigned long	screen_size;
 	unsigned int	dram_size;
 	unsigned int	vram_half_sam;
 	unsigned int	palette_size;
 	  signed int	montype;
-	  signed int	currcon;
 	unsigned int	using_vram	: 1;
 	unsigned int	dpms		: 1;
 
 	union palette palette[VIDC_PALETTE_SIZE];
 
-	union {
-		unsigned short cfb16[16];
-		unsigned long  cfb32[16];
-	} cmap;
+	u32		pseudo_palette[16];
 };
 
 struct vidc_timing {
@@ -115,6 +109,7 @@ struct modex_params {
 #define VID_CTL_25MHz		(1)
 #define VID_CTL_36MHz		(2)
 
+#define VIDC_CTRL_CSYNC		(1 << 7)
 #define VIDC_CTRL_INTERLACE	(1 << 6)
 #define VIDC_CTRL_FIFO_0_4	(0 << 4)
 #define VIDC_CTRL_FIFO_1_5	(1 << 4)

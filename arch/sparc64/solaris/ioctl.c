@@ -1,4 +1,4 @@
-/* $Id: ioctl.c,v 1.16 2000/11/18 02:10:59 davem Exp $
+/* $Id: ioctl.c,v 1.17 2002/02/08 03:57:14 davem Exp $
  * ioctl.c: Solaris ioctl emulation.
  *
  * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -17,12 +17,16 @@
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/syscalls.h>
 #include <linux/ioctl.h>
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/netdevice.h>
 #include <linux/mtio.h>
 #include <linux/time.h>
+#include <linux/compat.h>
+
+#include <net/sock.h>
 
 #include <asm/uaccess.h>
 #include <asm/termios.h>
@@ -31,16 +35,14 @@
 #include "conv.h"
 #include "socksys.h"
 
-extern asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, 
-	unsigned long arg);
-extern asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd,
+extern asmlinkage int compat_sys_ioctl(unsigned int fd, unsigned int cmd,
 	u32 arg);
 asmlinkage int solaris_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 
-extern int timod_putmsg(unsigned int fd, char *ctl_buf, int ctl_len,
-			char *data_buf, int data_len, int flags);
-extern int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, int *ctl_len,
-			char *data_buf, int data_maxlen, int *data_len, int *flags);
+extern int timod_putmsg(unsigned int fd, char __user *ctl_buf, int ctl_len,
+			char __user *data_buf, int data_len, int flags);
+extern int timod_getmsg(unsigned int fd, char __user *ctl_buf, int ctl_maxlen, int __user *ctl_len,
+			char __user *data_buf, int data_maxlen, int __user *data_len, int *flags);
 
 /* termio* stuff {{{ */
 
@@ -115,16 +117,17 @@ static u32 linux_to_solaris_cflag(u32 cflag)
 
 static inline int linux_to_solaris_termio(unsigned int fd, unsigned int cmd, u32 arg)
 {
+	struct solaris_termio __user *p = A(arg);
 	int ret;
 	
-	ret = sys_ioctl(fd, cmd, A(arg));
+	ret = sys_ioctl(fd, cmd, (unsigned long)p);
 	if (!ret) {
 		u32 cflag;
 		
-		if (__get_user (cflag, &((struct solaris_termio *)A(arg))->c_cflag))
+		if (__get_user (cflag, &p->c_cflag))
 			return -EFAULT;
 		cflag = linux_to_solaris_cflag(cflag);
-		if (__put_user (cflag, &((struct solaris_termio *)A(arg))->c_cflag))
+		if (__put_user (cflag, &p->c_cflag))
 			return -EFAULT;
 	}
 	return ret;
@@ -136,7 +139,7 @@ static int solaris_to_linux_termio(unsigned int fd, unsigned int cmd, u32 arg)
 	struct solaris_termio s;
 	mm_segment_t old_fs = get_fs();
 	
-	if (copy_from_user (&s, (struct solaris_termio *)A(arg), sizeof(struct solaris_termio)))
+	if (copy_from_user (&s, (struct solaris_termio __user *)A(arg), sizeof(struct solaris_termio)))
 		return -EFAULT;
 	s.c_cflag = solaris_to_linux_cflag(s.c_cflag);
 	set_fs(KERNEL_DS);
@@ -155,12 +158,13 @@ static inline int linux_to_solaris_termios(unsigned int fd, unsigned int cmd, u3
 	ret = sys_ioctl(fd, cmd, (unsigned long)&s);
 	set_fs(old_fs);
 	if (!ret) {
-		if (put_user (s.c_iflag, &((struct solaris_termios *)A(arg))->c_iflag) ||
-		    __put_user (s.c_oflag, &((struct solaris_termios *)A(arg))->c_oflag) ||
-		    __put_user (linux_to_solaris_cflag(s.c_cflag), &((struct solaris_termios *)A(arg))->c_cflag) ||
-		    __put_user (s.c_lflag, &((struct solaris_termios *)A(arg))->c_lflag) ||
-		    __copy_to_user (((struct solaris_termios *)A(arg))->c_cc, s.c_cc, 16) ||
-		    __clear_user (((struct solaris_termios *)A(arg))->c_cc + 16, 2))
+		struct solaris_termios __user *p = A(arg);
+		if (put_user (s.c_iflag, &p->c_iflag) ||
+		    __put_user (s.c_oflag, &p->c_oflag) ||
+		    __put_user (linux_to_solaris_cflag(s.c_cflag), &p->c_cflag) ||
+		    __put_user (s.c_lflag, &p->c_lflag) ||
+		    __copy_to_user (p->c_cc, s.c_cc, 16) ||
+		    __clear_user (p->c_cc + 16, 2))
 			return -EFAULT;
 	}
 	return ret;
@@ -170,17 +174,18 @@ static int solaris_to_linux_termios(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	int ret;
 	struct solaris_termios s;
+	struct solaris_termios __user *p = A(arg);
 	mm_segment_t old_fs = get_fs();
 
 	set_fs(KERNEL_DS);
 	ret = sys_ioctl(fd, TCGETS, (unsigned long)&s);
 	set_fs(old_fs);
 	if (ret) return ret;
-	if (put_user (s.c_iflag, &((struct solaris_termios *)A(arg))->c_iflag) ||
-	    __put_user (s.c_oflag, &((struct solaris_termios *)A(arg))->c_oflag) ||
-	    __put_user (s.c_cflag, &((struct solaris_termios *)A(arg))->c_cflag) ||
-	    __put_user (s.c_lflag, &((struct solaris_termios *)A(arg))->c_lflag) ||
-	    __copy_from_user (s.c_cc, ((struct solaris_termios *)A(arg))->c_cc, 16))
+	if (put_user (s.c_iflag, &p->c_iflag) ||
+	    __put_user (s.c_oflag, &p->c_oflag) ||
+	    __put_user (s.c_cflag, &p->c_cflag) ||
+	    __put_user (s.c_lflag, &p->c_lflag) ||
+	    __copy_from_user (s.c_cc, p->c_cc, 16))
 		return -EFAULT;
 	s.c_cflag = solaris_to_linux_cflag(s.c_cflag);
 	set_fs(KERNEL_DS);
@@ -289,17 +294,21 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	struct inode *ino;
 	/* I wonder which of these tests are superfluous... --patrik */
+	spin_lock(&current->files->file_lock);
 	if (! current->files->fd[fd] ||
 	    ! current->files->fd[fd]->f_dentry ||
 	    ! (ino = current->files->fd[fd]->f_dentry->d_inode) ||
-	    ! ino->i_sock)
+	    ! S_ISSOCK(ino->i_mode)) {
+		spin_unlock(&current->files->file_lock);
 		return TBADF;
+	}
+	spin_unlock(&current->files->file_lock);
 	
 	switch (cmd & 0xff) {
 	case 109: /* SI_SOCKPARAMS */
 	{
 		struct solaris_si_sockparams si;
-		if (copy_from_user (&si, (struct solaris_si_sockparams *) A(arg), sizeof(si)))
+		if (copy_from_user (&si, A(arg), sizeof(si)))
 			return (EFAULT << 8) | TSYSERR;
 
 		/* Should we modify socket ino->socket_i.ops and type? */
@@ -308,7 +317,8 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 	case 110: /* SI_GETUDATA */
 	{
 		int etsdusize, servtype;
-		switch (ino->u.socket_i.type) {
+		struct solaris_si_udata __user *p = A(arg);
+		switch (SOCKET_I(ino)->type) {
 		case SOCK_STREAM:
 			etsdusize = 1;
 			servtype = 2;
@@ -318,24 +328,25 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 			servtype = 3;
 			break;
 		}
-		if (put_user(16384, &((struct solaris_si_udata *)A(arg))->tidusize) ||
-		    __put_user(sizeof(struct sockaddr), &((struct solaris_si_udata *)A(arg))->addrsize) ||
-		    __put_user(-1, &((struct solaris_si_udata *)A(arg))->optsize) ||
-		    __put_user(etsdusize, &((struct solaris_si_udata *)A(arg))->etsdusize) ||
-		    __put_user(servtype, &((struct solaris_si_udata *)A(arg))->servtype) ||
-		    __put_user(0, &((struct solaris_si_udata *)A(arg))->so_state) ||
-		    __put_user(0, &((struct solaris_si_udata *)A(arg))->so_options) ||
-		    __put_user(16384, &((struct solaris_si_udata *)A(arg))->tsdusize) ||
-		    __put_user(ino->u.socket_i.ops->family, &((struct solaris_si_udata *)A(arg))->sockparams.sp_family) ||
-		    __put_user(ino->u.socket_i.type, &((struct solaris_si_udata *)A(arg))->sockparams.sp_type) ||
-		    __put_user(ino->u.socket_i.ops->family, &((struct solaris_si_udata *)A(arg))->sockparams.sp_protocol))
+		if (put_user(16384, &p->tidusize) ||
+		    __put_user(sizeof(struct sockaddr), &p->addrsize) ||
+		    __put_user(-1, &p->optsize) ||
+		    __put_user(etsdusize, &p->etsdusize) ||
+		    __put_user(servtype, &p->servtype) ||
+		    __put_user(0, &p->so_state) ||
+		    __put_user(0, &p->so_options) ||
+		    __put_user(16384, &p->tsdusize) ||
+		    __put_user(SOCKET_I(ino)->ops->family, &p->sockparams.sp_family) ||
+		    __put_user(SOCKET_I(ino)->type, &p->sockparams.sp_type) ||
+		    __put_user(SOCKET_I(ino)->ops->family, &p->sockparams.sp_protocol))
 			return (EFAULT << 8) | TSYSERR;
 		return 0;
 	}
 	case 101: /* O_SI_GETUDATA */
 	{
 		int etsdusize, servtype;
-		switch (ino->u.socket_i.type) {
+		struct solaris_o_si_udata __user *p = A(arg);
+		switch (SOCKET_I(ino)->type) {
 		case SOCK_STREAM:
 			etsdusize = 1;
 			servtype = 2;
@@ -345,14 +356,14 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 			servtype = 3;
 			break;
 		}
-		if (put_user(16384, &((struct solaris_o_si_udata *)A(arg))->tidusize) ||
-		    __put_user(sizeof(struct sockaddr), &((struct solaris_o_si_udata *)A(arg))->addrsize) ||
-		    __put_user(-1, &((struct solaris_o_si_udata *)A(arg))->optsize) ||
-		    __put_user(etsdusize, &((struct solaris_o_si_udata *)A(arg))->etsdusize) ||
-		    __put_user(servtype, &((struct solaris_o_si_udata *)A(arg))->servtype) ||
-		    __put_user(0, &((struct solaris_o_si_udata *)A(arg))->so_state) ||
-		    __put_user(0, &((struct solaris_o_si_udata *)A(arg))->so_options) ||
-		    __put_user(16384, &((struct solaris_o_si_udata *)A(arg))->tsdusize))
+		if (put_user(16384, &p->tidusize) ||
+		    __put_user(sizeof(struct sockaddr), &p->addrsize) ||
+		    __put_user(-1, &p->optsize) ||
+		    __put_user(etsdusize, &p->etsdusize) ||
+		    __put_user(servtype, &p->servtype) ||
+		    __put_user(0, &p->so_state) ||
+		    __put_user(0, &p->so_options) ||
+		    __put_user(16384, &p->tsdusize))
 			return (EFAULT << 8) | TSYSERR;
 		return 0;
 	}
@@ -363,12 +374,13 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 	case 106: /* SI_GETINTRANSIT */
 	case 107: /* SI_TCL_LINK */
 	case 108: /* SI_TCL_UNLINK */
+		;
 	}
 	return TNOTSUPPORT;
 }
 
 static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
-                                    int len, int *len_p)
+                                    int len, int __user *len_p)
 {
 	int ret;
 		
@@ -378,25 +390,25 @@ static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
 		int i;
 		u32 prim;
 		SOLD("TI_OPMGMT entry");
-		ret = timod_putmsg(fd, (char *)A(arg), len, NULL, -1, 0);
+		ret = timod_putmsg(fd, A(arg), len, NULL, -1, 0);
 		SOLD("timod_putmsg() returned");
 		if (ret)
 			return (-ret << 8) | TSYSERR;
 		i = MSG_HIPRI;
 		SOLD("calling timod_getmsg()");
-		ret = timod_getmsg(fd, (char *)A(arg), len, len_p, NULL, -1, NULL, &i);
+		ret = timod_getmsg(fd, A(arg), len, len_p, NULL, -1, NULL, &i);
 		SOLD("timod_getmsg() returned");
 		if (ret)
 			return (-ret << 8) | TSYSERR;
 		SOLD("ret ok");
-		if (get_user(prim, (u32 *)A(arg)))
+		if (get_user(prim, (u32 __user *)A(arg)))
 			return (EFAULT << 8) | TSYSERR;
 		SOLD("got prim");
 		if (prim == T_ERROR_ACK) {
 			u32 tmp, tmp2;
 			SOLD("prim is T_ERROR_ACK");
-			if (get_user(tmp, (u32 *)A(arg)+3) ||
-			    get_user(tmp2, (u32 *)A(arg)+2))
+			if (get_user(tmp, (u32 __user *)A(arg)+3) ||
+			    get_user(tmp2, (u32 __user *)A(arg)+2))
 				return (EFAULT << 8) | TSYSERR;
 			return (tmp2 << 8) | tmp;
 		}
@@ -408,26 +420,26 @@ static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
 		int i;
 		u32 prim;
 		SOLD("TI_BIND entry");
-		ret = timod_putmsg(fd, (char *)A(arg), len, NULL, -1, 0);
+		ret = timod_putmsg(fd, A(arg), len, NULL, -1, 0);
 		SOLD("timod_putmsg() returned");
 		if (ret)
 			return (-ret << 8) | TSYSERR;
 		len = 1024; /* Solaris allows arbitrary return size */
 		i = MSG_HIPRI;
 		SOLD("calling timod_getmsg()");
-		ret = timod_getmsg(fd, (char *)A(arg), len, len_p, NULL, -1, NULL, &i);
+		ret = timod_getmsg(fd, A(arg), len, len_p, NULL, -1, NULL, &i);
 		SOLD("timod_getmsg() returned");
 		if (ret)
 			return (-ret << 8) | TSYSERR;
 		SOLD("ret ok");
-		if (get_user(prim, (u32 *)A(arg)))
+		if (get_user(prim, (u32 __user *)A(arg)))
 			return (EFAULT << 8) | TSYSERR;
 		SOLD("got prim");
 		if (prim == T_ERROR_ACK) {
 			u32 tmp, tmp2;
 			SOLD("prim is T_ERROR_ACK");
-			if (get_user(tmp, (u32 *)A(arg)+3) ||
-			    get_user(tmp2, (u32 *)A(arg)+2))
+			if (get_user(tmp, (u32 __user *)A(arg)+3) ||
+			    get_user(tmp2, (u32 __user *)A(arg)+2))
 				return (EFAULT << 8) | TSYSERR;
 			return (tmp2 << 8) | tmp;
 		}
@@ -437,7 +449,7 @@ static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
 		SOLD("OK_ACK requested");
 		i = MSG_HIPRI;
 		SOLD("calling timod_getmsg()");
-		ret = timod_getmsg(fd, (char *)A(arg), len, len_p, NULL, -1, NULL, &i);
+		ret = timod_getmsg(fd, A(arg), len, len_p, NULL, -1, NULL, &i);
 		SOLD("timod_getmsg() returned");
 		if (ret)
 			return (-ret << 8) | TSYSERR;
@@ -450,6 +462,7 @@ static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
 	case 145: /* TI_GETPEERNAME */
 	case 146: /* TI_SETMYNAME */
 	case 147: /* TI_SETPEERNAME */
+		;
 	}
 	return TNOTSUPPORT;
 }
@@ -465,7 +478,7 @@ static inline int solaris_S(struct file *filp, unsigned int fd, unsigned int cmd
         struct module_info *mi;
 
         ino = filp->f_dentry->d_inode;
-        if (! ino->i_sock)
+        if (!S_ISSOCK(ino->i_mode))
 		return -EBADF;
         sock = filp->private_data;
         if (! sock) {
@@ -483,7 +496,7 @@ static inline int solaris_S(struct file *filp, unsigned int fd, unsigned int cmd
 		return -ENOSYS;
 	case 2: /* I_PUSH */
         {
-		p = getname ((char *)A(arg));
+		p = getname (A(arg));
 		if (IS_ERR (p))
 			return PTR_ERR(p);
                 ret = -EINVAL;
@@ -512,14 +525,14 @@ static inline int solaris_S(struct file *filp, unsigned int fd, unsigned int cmd
         	const char *p;
                 if (sock->modcount <= 0) return -EINVAL;
                 p = module_table[(unsigned)sock->module[sock->modcount]].name;
-                if (copy_to_user ((char *)A(arg), p, strlen(p)))
+                if (copy_to_user (A(arg), p, strlen(p)))
                 	return -EFAULT;
                 return 0;
         }
 	case 5: /* I_FLUSH */
 		return 0;
 	case 8: /* I_STR */
-		if (copy_from_user(&si, (struct strioctl *)A(arg), sizeof(struct strioctl)))
+		if (copy_from_user(&si, A(arg), sizeof(struct strioctl)))
 			return -EFAULT;
                 /* We ignore what module is actually at the top of stack. */
 		switch ((si.cmd >> 8) & 0xff) {
@@ -527,7 +540,7 @@ static inline int solaris_S(struct file *filp, unsigned int fd, unsigned int cmd
                         return solaris_sockmod(fd, si.cmd, si.data);
 		case 'T':
                         return solaris_timod(fd, si.cmd, si.data, si.len,
-                                                &((struct strioctl*)A(arg))->len);
+				&((struct strioctl __user *)A(arg))->len);
 		default:
 			return solaris_ioctl(fd, si.cmd, si.data);
 		}
@@ -543,7 +556,7 @@ static inline int solaris_S(struct file *filp, unsigned int fd, unsigned int cmd
 	case 11: /* I_FIND */
         {
                 int i;
-		p = getname ((char *)A(arg));
+		p = getname (A(arg));
 		if (IS_ERR (p))
 			return PTR_ERR(p);
                 ret = 0;
@@ -572,7 +585,7 @@ static inline int solaris_s(unsigned int fd, unsigned int cmd, u32 arg)
 		return 0; /* We don't support them */
 	case 1: /* SIOCGHIWAT */
 	case 3: /* SIOCGLOWAT */
-		if (put_user (0, (u32 *)A(arg)))
+		if (put_user (0, (u32 __user *)A(arg)))
 			return -EFAULT;
 		return 0; /* Lie */
 	case 7: /* SIOCATMARK */
@@ -589,9 +602,9 @@ static inline int solaris_r(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	switch (cmd & 0xff) {
 	case 10: /* SIOCADDRT */
-		return sys32_ioctl(fd, SIOCADDRT, arg);
+		return compat_sys_ioctl(fd, SIOCADDRT, arg);
 	case 11: /* SIOCDELRT */
-		return sys32_ioctl(fd, SIOCDELRT, arg);
+		return compat_sys_ioctl(fd, SIOCDELRT, arg);
 	}
 	return -ENOSYS;
 }
@@ -600,45 +613,45 @@ static inline int solaris_i(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	switch (cmd & 0xff) {
 	case 12: /* SIOCSIFADDR */
-		return sys32_ioctl(fd, SIOCSIFADDR, arg);
+		return compat_sys_ioctl(fd, SIOCSIFADDR, arg);
 	case 13: /* SIOCGIFADDR */
-		return sys32_ioctl(fd, SIOCGIFADDR, arg);
+		return compat_sys_ioctl(fd, SIOCGIFADDR, arg);
 	case 14: /* SIOCSIFDSTADDR */
-		return sys32_ioctl(fd, SIOCSIFDSTADDR, arg);
+		return compat_sys_ioctl(fd, SIOCSIFDSTADDR, arg);
 	case 15: /* SIOCGIFDSTADDR */
-		return sys32_ioctl(fd, SIOCGIFDSTADDR, arg);
+		return compat_sys_ioctl(fd, SIOCGIFDSTADDR, arg);
 	case 16: /* SIOCSIFFLAGS */
-		return sys32_ioctl(fd, SIOCSIFFLAGS, arg);
+		return compat_sys_ioctl(fd, SIOCSIFFLAGS, arg);
 	case 17: /* SIOCGIFFLAGS */
-		return sys32_ioctl(fd, SIOCGIFFLAGS, arg);
+		return compat_sys_ioctl(fd, SIOCGIFFLAGS, arg);
 	case 18: /* SIOCSIFMEM */
-		return sys32_ioctl(fd, SIOCSIFMEM, arg);
+		return compat_sys_ioctl(fd, SIOCSIFMEM, arg);
 	case 19: /* SIOCGIFMEM */
-		return sys32_ioctl(fd, SIOCGIFMEM, arg);
+		return compat_sys_ioctl(fd, SIOCGIFMEM, arg);
 	case 20: /* SIOCGIFCONF */
-		return sys32_ioctl(fd, SIOCGIFCONF, arg);
+		return compat_sys_ioctl(fd, SIOCGIFCONF, arg);
 	case 21: /* SIOCSIFMTU */
-		return sys32_ioctl(fd, SIOCSIFMTU, arg);
+		return compat_sys_ioctl(fd, SIOCSIFMTU, arg);
 	case 22: /* SIOCGIFMTU */
-		return sys32_ioctl(fd, SIOCGIFMTU, arg);
+		return compat_sys_ioctl(fd, SIOCGIFMTU, arg);
 	case 23: /* SIOCGIFBRDADDR */
-		return sys32_ioctl(fd, SIOCGIFBRDADDR, arg);
+		return compat_sys_ioctl(fd, SIOCGIFBRDADDR, arg);
 	case 24: /* SIOCSIFBRDADDR */
-		return sys32_ioctl(fd, SIOCSIFBRDADDR, arg);
+		return compat_sys_ioctl(fd, SIOCSIFBRDADDR, arg);
 	case 25: /* SIOCGIFNETMASK */
-		return sys32_ioctl(fd, SIOCGIFNETMASK, arg);
+		return compat_sys_ioctl(fd, SIOCGIFNETMASK, arg);
 	case 26: /* SIOCSIFNETMASK */
-		return sys32_ioctl(fd, SIOCSIFNETMASK, arg);
+		return compat_sys_ioctl(fd, SIOCSIFNETMASK, arg);
 	case 27: /* SIOCGIFMETRIC */
-		return sys32_ioctl(fd, SIOCGIFMETRIC, arg);
+		return compat_sys_ioctl(fd, SIOCGIFMETRIC, arg);
 	case 28: /* SIOCSIFMETRIC */
-		return sys32_ioctl(fd, SIOCSIFMETRIC, arg);
+		return compat_sys_ioctl(fd, SIOCSIFMETRIC, arg);
 	case 30: /* SIOCSARP */
-		return sys32_ioctl(fd, SIOCSARP, arg);
+		return compat_sys_ioctl(fd, SIOCSARP, arg);
 	case 31: /* SIOCGARP */
-		return sys32_ioctl(fd, SIOCGARP, arg);
+		return compat_sys_ioctl(fd, SIOCGARP, arg);
 	case 32: /* SIOCDARP */
-		return sys32_ioctl(fd, SIOCDARP, arg);
+		return compat_sys_ioctl(fd, SIOCDARP, arg);
 	case 52: /* SIOCGETNAME */
 	case 53: /* SIOCGETPEER */
 		{
@@ -655,7 +668,7 @@ static inline int solaris_i(unsigned int fd, unsigned int cmd, u32 arg)
 					args);
 			set_fs(old_fs);
 			if (ret >= 0) {
-				if (copy_to_user((char *)A(arg), &uaddr, uaddr_len))
+				if (copy_to_user(A(arg), &uaddr, uaddr_len))
 					return -EFAULT;
 			}
 			return ret;
@@ -673,7 +686,7 @@ static inline int solaris_i(unsigned int fd, unsigned int cmd, u32 arg)
 			for (d = dev_base; d; d = d->next) i++;
 			read_unlock_bh(&dev_base_lock);
 
-			if (put_user (i, (int *)A(arg)))
+			if (put_user (i, (int __user *)A(arg)))
 				return -EFAULT;
 			return 0;
 		}

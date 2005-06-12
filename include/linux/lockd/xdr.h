@@ -13,9 +13,8 @@
 #include <linux/nfs.h>
 #include <linux/sunrpc/xdr.h>
 
+#define NLM_MAXCOOKIELEN    	32
 #define NLM_MAXSTRLEN		1024
-
-#define QUADLEN(len)		(((len) + 3) >> 2)
 
 #define	nlm_granted		__constant_htonl(NLM_LCK_GRANTED)
 #define	nlm_lck_denied		__constant_htonl(NLM_LCK_DENIED)
@@ -26,19 +25,21 @@
 /* Lock info passed via NLM */
 struct nlm_lock {
 	char *			caller;
+	int			len; 	/* length of "caller" */
 	struct nfs_fh		fh;
 	struct xdr_netobj	oh;
 	struct file_lock	fl;
 };
 
 /*
- *	NLM cookies. Technically they can be 1K, Nobody uses over 8 bytes
- *	however.
+ *	NLM cookies. Technically they can be 1K, but Linux only uses 8 bytes.
+ *	FreeBSD uses 16, Apple Mac OS X 10.3 uses 20. Therefore we set it to
+ *	32 bytes.
  */
  
 struct nlm_cookie
 {
-	unsigned char data[8];
+	unsigned char data[NLM_MAXCOOKIELEN];
 	unsigned int len;
 };
 
@@ -75,6 +76,8 @@ struct nlm_reboot {
 	int		len;
 	u32		state;
 	u32		addr;
+	u32		vers;
+	u32		proto;
 };
 
 /*
@@ -82,7 +85,6 @@ struct nlm_reboot {
  */
 #define NLMSVC_XDRSIZE		sizeof(struct nlm_args)
 
-void	nlmxdr_init(void);
 int	nlmsvc_decode_testargs(struct svc_rqst *, u32 *, struct nlm_args *);
 int	nlmsvc_encode_testres(struct svc_rqst *, u32 *, struct nlm_res *);
 int	nlmsvc_decode_lockargs(struct svc_rqst *, u32 *, struct nlm_args *);

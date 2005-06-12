@@ -1,20 +1,26 @@
 /*
- * termbits stuff for Linux/MIPS.
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996 by Ralf Baechle
+ * Copyright (C) 1995, 1996, 1999, 2001 Ralf Baechle
+ * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 2001 MIPS Technologies, Inc.
  */
-#ifndef __ASM_MIPS_TERMBITS_H
-#define __ASM_MIPS_TERMBITS_H
+#ifndef _ASM_TERMBITS_H
+#define _ASM_TERMBITS_H
 
 #include <linux/posix_types.h>
 
 typedef unsigned char cc_t;
+#if (_MIPS_SZLONG == 32)
 typedef unsigned long speed_t;
 typedef unsigned long tcflag_t;
+#endif
+#if (_MIPS_SZLONG == 64)
+typedef __u32 speed_t;
+typedef __u32 tcflag_t;
+#endif
 
 /*
  * The ABI says nothing about NCC but seems to use NCCS as
@@ -26,9 +32,6 @@ struct termios {
 	tcflag_t c_oflag;		/* output mode flags */
 	tcflag_t c_cflag;		/* control mode flags */
 	tcflag_t c_lflag;		/* local mode flags */
-	/*
-	 * Seems nonexistent in the ABI, but Linux assumes existence ...
-	 */
 	cc_t c_line;			/* line discipline */
 	cc_t c_cc[NCCS];		/* control characters */
 };
@@ -69,21 +72,15 @@ struct termios {
 #define INLCR	0000100		/* Map NL to CR on input.  */
 #define IGNCR	0000200		/* Ignore CR.  */
 #define ICRNL	0000400		/* Map CR to NL on input.  */
-#if defined (__USE_BSD) || defined (__KERNEL__)
 #define IUCLC	0001000		/* Map upper case to lower case on input.  */
-#endif
 #define IXON	0002000		/* Enable start/stop output control.  */
-#if defined (__USE_BSD) || defined (__KERNEL__)
 #define IXANY	0004000		/* Any character will restart after stop.  */
-#endif
 #define IXOFF	0010000		/* Enable start/stop input control.  */
-#if defined (__USE_BSD) || defined (__KERNEL__)
 #define IMAXBEL	0020000		/* Ring bell when input queue is full.  */
-#endif
+#define IUTF8	0040000		/* Input is UTF8 */
 
 /* c_oflag bits */
 #define OPOST	0000001		/* Perform output processing.  */
-#if defined (__USE_BSD) || defined (__KERNEL__)
 #define OLCUC	0000002		/* Map lower case to upper case on output.  */
 #define ONLCR	0000004		/* Map NL to CR-NL on output.  */
 #define OCRNL	0000010
@@ -118,7 +115,6 @@ struct termios {
 #define PAGEOUT ???
 #define WRAP    ???
  */
-#endif
 
 /* c_cflag bit meaning */
 #define CBAUD	0010017
@@ -151,7 +147,6 @@ struct termios {
 #define PARODD	0001000		/* Odd parity instead of even.  */
 #define HUPCL	0002000		/* Hang up on last close.  */
 #define CLOCAL	0004000		/* Ignore modem status lines.  */
-#if defined (__USE_BSD) || defined (__KERNEL__)
 #define CBAUDEX 0010000
 #define    B57600 0010001
 #define   B115200 0010002
@@ -171,7 +166,6 @@ struct termios {
 #define CIBAUD	  002003600000	/* input baud rate (not used) */
 #define CMSPAR    010000000000	/* mark or space (stick) parity */
 #define CRTSCTS	  020000000000		/* flow control */
-#endif
 
 /* c_lflag bits */
 #define ISIG	0000001		/* Enable signals.  */
@@ -183,15 +177,11 @@ struct termios {
 #define ECHONL	0000100		/* Echo NL even if ECHO is off.  */
 #define NOFLSH	0000200		/* Disable flush after interrupt.  */
 #define IEXTEN	0000400		/* Enable DISCARD and LNEXT.  */
-#if defined (__USE_BSD) || defined (__KERNEL__)
 #define ECHOCTL	0001000		/* Echo control characters as ^X.  */
 #define ECHOPRT	0002000		/* Hardcopy visual erase.  */
 #define ECHOKE	0004000		/* Visual erase for KILL.  */
-#endif
 #define FLUSHO	0020000
-#if defined (__USE_BSD) || defined (__KERNEL__)
 #define PENDIN	0040000		/* Retype pending input (state).  */
-#endif
 #define TOSTOP	0100000		/* Send SIGTTOU for background output.  */
 #define ITOSTOP	TOSTOP
 
@@ -214,4 +204,4 @@ struct termios {
 #define	TCSADRAIN	TCSETSW	/* Change when pending output is written.  */
 #define	TCSAFLUSH	TCSETSF	/* Flush pending input before changing.  */
 
-#endif /* __ASM_MIPS_TERMBITS_H */
+#endif /* _ASM_TERMBITS_H */

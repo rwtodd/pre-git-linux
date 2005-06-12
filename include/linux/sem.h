@@ -2,6 +2,7 @@
 #define _LINUX_SEM_H
 
 #include <linux/ipc.h>
+#include <asm/atomic.h>
 
 /* semop flags */
 #define SEM_UNDO        0x1000  /* undo the operation on exit */
@@ -44,10 +45,10 @@ struct sembuf {
 /* arg for semctl system calls. */
 union semun {
 	int val;			/* value for SETVAL */
-	struct semid_ds *buf;		/* buffer for IPC_STAT & IPC_SET */
-	unsigned short *array;		/* array for GETALL & SETALL */
-	struct seminfo *__buf;		/* buffer for IPC_INFO */
-	void *__pad;
+	struct semid_ds __user *buf;	/* buffer for IPC_STAT & IPC_SET */
+	unsigned short __user *array;	/* array for GETALL & SETALL */
+	struct seminfo __user *__buf;	/* buffer for IPC_INFO */
+	void __user *__pad;
 };
 
 struct  seminfo {
@@ -68,11 +69,11 @@ struct  seminfo {
 #define SEMMNS  (SEMMNI*SEMMSL) /* <= INT_MAX max # of semaphores in system */
 #define SEMOPM  32	        /* <= 1 000 max num of ops per semop call */
 #define SEMVMX  32767           /* <= 32767 semaphore maximum value */
+#define SEMAEM  SEMVMX          /* adjust on exit max value */
 
 /* unused */
 #define SEMUME  SEMOPM          /* max num of undo entries per process */
 #define SEMMNU  SEMMNS          /* num of undo structures system wide */
-#define SEMAEM  (SEMVMX >> 1)   /* adjust on exit max value */
 #define SEMMAP  SEMMNS          /* # of entries in semaphore map */
 #define SEMUSZ  20		/* sizeof struct sem_undo */
 
@@ -108,7 +109,7 @@ struct sem_queue {
 	int			id;	 /* internal sem id */
 	struct sembuf *		sops;	 /* array of pending operations */
 	int			nsops;	 /* number of operations */
-	int			alter;	 /* operation will alter semaphore */
+	int			alter;   /* does the operation alter the array? */
 };
 
 /* Each task has a list of undo requests. They are executed automatically
@@ -121,9 +122,35 @@ struct sem_undo {
 	short *			semadj;		/* array of adjustments, one per semaphore */
 };
 
-asmlinkage long sys_semget (key_t key, int nsems, int semflg);
-asmlinkage long sys_semop (int semid, struct sembuf *sops, unsigned nsops);
-asmlinkage long sys_semctl (int semid, int semnum, int cmd, union semun arg);
+/* sem_undo_list controls shared access to the list of sem_undo structures
+ * that may be shared among all a CLONE_SYSVSEM task group.
+ */ 
+struct sem_undo_list {
+	atomic_t	refcnt;
+	spinlock_t	lock;
+	struct sem_undo	*proc_list;
+};
+
+struct sysv_sem {
+	struct sem_undo_list *undo_list;
+};
+
+#ifdef CONFIG_SYSVIPC
+
+extern int copy_semundo(unsigned long clone_flags, struct task_struct *tsk);
+extern void exit_sem(struct task_struct *tsk);
+
+#else
+static inline int copy_semundo(unsigned long clone_flags, struct task_struct *tsk)
+{
+	return 0;
+}
+
+static inline void exit_sem(struct task_struct *tsk)
+{
+	return;
+}
+#endif
 
 #endif /* __KERNEL__ */
 

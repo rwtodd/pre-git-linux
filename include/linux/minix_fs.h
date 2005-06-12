@@ -29,11 +29,6 @@
 #define MINIX_INODES_PER_BLOCK ((BLOCK_SIZE)/(sizeof (struct minix_inode)))
 #define MINIX2_INODES_PER_BLOCK ((BLOCK_SIZE)/(sizeof (struct minix2_inode)))
 
-#define MINIX_V1		0x0001		/* original minix fs */
-#define MINIX_V2		0x0002		/* minix V2 fs */
-
-#define INODE_VERSION(inode)	inode->i_sb->u.minix_sb.s_version
-
 /*
  * This is the original minix inode layout on disk.
  * Note the 8-bit gid and atime and ctime.
@@ -86,35 +81,5 @@ struct minix_dir_entry {
 	__u16 inode;
 	char name[0];
 };
-
-#ifdef __KERNEL__
-
-extern struct inode * minix_new_inode(const struct inode * dir, int * error);
-extern void minix_free_inode(struct inode * inode);
-extern unsigned long minix_count_free_inodes(struct super_block *sb);
-extern int minix_new_block(struct inode * inode);
-extern void minix_free_block(struct inode * inode, int block);
-extern unsigned long minix_count_free_blocks(struct super_block *sb);
-
-extern struct buffer_head * minix_getblk(struct inode *, int, int);
-extern struct buffer_head * minix_bread(struct inode *, int, int);
-
-extern void V1_minix_truncate(struct inode *);
-extern void V2_minix_truncate(struct inode *);
-extern void minix_truncate(struct inode *);
-extern int minix_sync_inode(struct inode *);
-extern int V1_minix_sync_file(struct inode *);
-extern int V2_minix_sync_file(struct inode *);
-extern int V1_minix_get_block(struct inode *, long, struct buffer_head *, int);
-extern int V2_minix_get_block(struct inode *, long, struct buffer_head *, int);
-
-extern struct address_space_operations minix_aops;
-extern struct inode_operations minix_file_inode_operations;
-extern struct inode_operations minix_dir_inode_operations;
-extern struct file_operations minix_file_operations;
-extern struct file_operations minix_dir_operations;
-extern struct dentry_operations minix_dentry_operations;
-
-#endif /* __KERNEL__ */
 
 #endif

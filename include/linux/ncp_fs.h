@@ -12,6 +12,8 @@
 #include <linux/in.h>
 #include <linux/types.h>
 
+#include <linux/ncp_fs_i.h>
+#include <linux/ncp_fs_sb.h>
 #include <linux/ipx.h>
 #include <linux/ncp_no.h>
 
@@ -22,7 +24,7 @@
 struct ncp_ioctl_request {
 	unsigned int function;
 	unsigned int size;
-	char *data;
+	char __user *data;
 };
 
 struct ncp_fs_info {
@@ -34,7 +36,7 @@ struct ncp_fs_info {
 				   used for read/write requests! */
 
 	int volume_number;
-	__u32 directory_id;
+	__le32 directory_id;
 };
 
 struct ncp_fs_info_v2 {
@@ -44,7 +46,7 @@ struct ncp_fs_info_v2 {
 	unsigned int buffer_size;
 
 	unsigned int volume_number;
-	__u32 directory_id;
+	__le32 directory_id;
 
 	__u32 dummy1;
 	__u32 dummy2;
@@ -76,7 +78,7 @@ struct ncp_setroot_ioctl
 {
 	int		volNumber;
 	int		namespace;
-	__u32		dirEntNum;
+	__le32		dirEntNum;
 };
 
 struct ncp_objectname_ioctl
@@ -86,13 +88,13 @@ struct ncp_objectname_ioctl
 #define NCP_AUTH_NDS	0x32
 	int		auth_type;
 	size_t		object_name_len;
-	void*		object_name;	/* an userspace data, in most cases user name */
+	void __user *	object_name;	/* an userspace data, in most cases user name */
 };
 
 struct ncp_privatedata_ioctl
 {
 	size_t		len;
-	void*		data;		/* ~1000 for NDS */
+	void __user *	data;		/* ~1000 for NDS */
 };
 
 /* NLS charsets by ioctl */
@@ -180,23 +182,28 @@ struct ncp_entry_info {
 	ino_t			ino;
 	int			opened;
 	int			access;
-	__u32			server_file_handle __attribute__((packed));
-	__u8			open_create_action __attribute__((packed));
-	__u8			file_handle[6] __attribute__((packed));
+	unsigned int		volume;
+	__u8			file_handle[6];
 };
 
 /* Guess, what 0x564c is :-) */
 #define NCP_SUPER_MAGIC  0x564c
 
 
-#define NCP_SBP(sb)		(&((sb)->u.ncpfs_sb))
+static inline struct ncp_server *NCP_SBP(struct super_block *sb)
+{
+	return sb->s_fs_info;
+}
 
 #define NCP_SERVER(inode)	NCP_SBP((inode)->i_sb)
-#define NCP_FINFO(inode)	(&((inode)->u.ncpfs_i))
+static inline struct ncp_inode_info *NCP_FINFO(struct inode *inode)
+{
+	return container_of(inode, struct ncp_inode_info, vfs_inode);
+}
 
 #ifdef DEBUG_NCP_MALLOC
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 extern int ncp_malloced;
 extern int ncp_current_malloced;
@@ -224,7 +231,6 @@ static inline void ncp_kfree_s(void *obj, int size)
 
 /* linux/fs/ncpfs/inode.c */
 int ncp_notify_change(struct dentry *, struct iattr *);
-struct super_block *ncp_read_super(struct super_block *, void *, int);
 struct inode *ncp_iget(struct super_block *, struct ncp_entry_info *);
 void ncp_update_inode(struct inode *, struct ncp_entry_info *);
 void ncp_update_inode2(struct inode *, struct ncp_entry_info *);
@@ -233,8 +239,8 @@ void ncp_update_inode2(struct inode *, struct ncp_entry_info *);
 extern struct inode_operations ncp_dir_inode_operations;
 extern struct file_operations ncp_dir_operations;
 int ncp_conn_logged_in(struct super_block *);
-int ncp_date_dos2unix(__u16 time, __u16 date);
-void ncp_date_unix2dos(int unix_date, __u16 * time, __u16 * date);
+int ncp_date_dos2unix(__le16 time, __le16 date);
+void ncp_date_unix2dos(int unix_date, __le16 * time, __le16 * date);
 
 /* linux/fs/ncpfs/ioctl.c */
 int ncp_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
@@ -242,7 +248,7 @@ int ncp_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 /* linux/fs/ncpfs/sock.c */
 int ncp_request2(struct ncp_server *server, int function,
 	void* reply, int max_reply_size);
-static int inline ncp_request(struct ncp_server *server, int function) {
+static inline int ncp_request(struct ncp_server *server, int function) {
 	return ncp_request2(server, function, server->packet, server->packet_size);
 }
 int ncp_connect(struct ncp_server *server);

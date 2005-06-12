@@ -30,11 +30,14 @@ struct pt_regs {
 	unsigned long mq;		/* 601 only (not used at present) */
 					/* Used on APUS to hold IPL value. */
 	unsigned long trap;		/* Reason for being here */
+	/* N.B. for critical exceptions on 4xx, the dar and dsisr
+	   fields are overloaded to hold srr0 and srr1. */
 	unsigned long dar;		/* Fault registers */
-	unsigned long dsisr;
+	unsigned long dsisr;		/* on 4xx/Book-E used for ESR */
 	unsigned long result; 		/* Result of a system call */
 };
-#endif
+
+#endif /* __ASSEMBLY__ */
 
 #ifdef __KERNEL__
 #define STACK_FRAME_OVERHEAD	16	/* size of minimum stack frame */
@@ -42,8 +45,38 @@ struct pt_regs {
 /* Size of stack frame allocated when calling signal handler. */
 #define __SIGNAL_FRAMESIZE	64
 
+#ifndef __ASSEMBLY__
 #define instruction_pointer(regs) ((regs)->nip)
+#ifdef CONFIG_SMP
+extern unsigned long profile_pc(struct pt_regs *regs);
+#else
+#define profile_pc(regs) instruction_pointer(regs)
+#endif
+
 #define user_mode(regs) (((regs)->msr & MSR_PR) != 0)
+
+#define force_successful_syscall_return()   \
+	do { \
+		current_thread_info()->local_flags |= _TIFL_FORCE_NOERROR; \
+	} while(0)
+
+/*
+ * We use the least-significant bit of the trap field to indicate
+ * whether we have saved the full set of registers, or only a
+ * partial set.  A 1 there means the partial set.
+ * On 4xx we use the next bit to indicate whether the exception
+ * is a critical exception (1 means it is).
+ */
+#define FULL_REGS(regs)		(((regs)->trap & 1) == 0)
+#define IS_CRITICAL_EXC(regs)	(((regs)->trap & 2) == 0)
+#define TRAP(regs)		((regs)->trap & ~0xF)
+
+#define CHECK_FULL_REGS(regs)						      \
+do {									      \
+	if ((regs)->trap & 1)						      \
+		printk(KERN_CRIT "%s: partial register set\n", __FUNCTION__); \
+} while (0)
+#endif /* __ASSEMBLY__ */
 
 #endif /* __KERNEL__ */
 
@@ -100,5 +133,13 @@ struct pt_regs {
 #define PT_FPR31 (PT_FPR0 + 2*31)
 #define PT_FPSCR (PT_FPR0 + 2*32 + 1)
 
-#endif
+/* Get/set all the altivec registers vr0..vr31, vscr, vrsave, in one go */
+#define PTRACE_GETVRREGS	18
+#define PTRACE_SETVRREGS	19
 
+/* Get/set all the upper 32-bits of the SPE registers, accumulator, and
+ * spefscr, in one go */
+#define PTRACE_GETEVRREGS	20
+#define PTRACE_SETEVRREGS	21
+
+#endif

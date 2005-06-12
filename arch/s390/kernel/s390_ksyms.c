@@ -4,24 +4,21 @@
  *  S390 version
  */
 #include <linux/config.h>
+#include <linux/highuid.h>
 #include <linux/module.h>
-#include <asm/irq.h>
-#include <asm/string.h>
+#include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/syscalls.h>
+#include <linux/interrupt.h>
+#include <linux/ioctl32.h>
 #include <asm/checksum.h>
-
-/*
- * I/O subsystem
- */
-EXPORT_SYMBOL(halt_IO);
-EXPORT_SYMBOL(do_IO);
-EXPORT_SYMBOL(resume_IO);
-EXPORT_SYMBOL(ioinfo);
-EXPORT_SYMBOL(get_dev_info_by_irq);
-EXPORT_SYMBOL(get_dev_info_by_devno);
-EXPORT_SYMBOL(get_irq_by_devno);
-EXPORT_SYMBOL(get_devno_by_irq);
-EXPORT_SYMBOL(get_irq_first);
-EXPORT_SYMBOL(get_irq_next);
+#include <asm/cpcmd.h>
+#include <asm/delay.h>
+#include <asm/pgalloc.h>
+#include <asm/setup.h>
+#ifdef CONFIG_IP_MULTICAST
+#include <net/arp.h>
+#endif
 
 /*
  * memory management
@@ -29,36 +26,40 @@ EXPORT_SYMBOL(get_irq_next);
 EXPORT_SYMBOL(_oi_bitmap);
 EXPORT_SYMBOL(_ni_bitmap);
 EXPORT_SYMBOL(_zb_findmap);
+EXPORT_SYMBOL(_sb_findmap);
+EXPORT_SYMBOL(__copy_from_user_asm);
+EXPORT_SYMBOL(__copy_to_user_asm);
+EXPORT_SYMBOL(__copy_in_user_asm);
+EXPORT_SYMBOL(__clear_user_asm);
+EXPORT_SYMBOL(__strncpy_from_user_asm);
+EXPORT_SYMBOL(__strnlen_user_asm);
+EXPORT_SYMBOL(diag10);
+EXPORT_SYMBOL(default_storage_key);
 
 /*
- * string functions
+ * semaphore ops
  */
-EXPORT_SYMBOL_NOVERS(memcmp);
-EXPORT_SYMBOL_NOVERS(memset);
-EXPORT_SYMBOL_NOVERS(memmove);
-EXPORT_SYMBOL_NOVERS(strchr);
-EXPORT_SYMBOL_NOVERS(strcmp);
-EXPORT_SYMBOL_NOVERS(strncat);
-EXPORT_SYMBOL_NOVERS(strncmp);
-EXPORT_SYMBOL_NOVERS(strncpy);
-EXPORT_SYMBOL_NOVERS(strnlen);
-EXPORT_SYMBOL_NOVERS(strrchr);
-EXPORT_SYMBOL_NOVERS(strtok);
-EXPORT_SYMBOL_NOVERS(strpbrk);
+EXPORT_SYMBOL(__up);
+EXPORT_SYMBOL(__down);
+EXPORT_SYMBOL(__down_interruptible);
+
+/*
+ * binfmt_elf loader 
+ */
+extern int dump_fpu (struct pt_regs * regs, s390_fp_regs *fpregs);
+EXPORT_SYMBOL(dump_fpu);
+EXPORT_SYMBOL(overflowuid);
+EXPORT_SYMBOL(overflowgid);
+EXPORT_SYMBOL(empty_zero_page);
 
 /*
  * misc.
  */
-#ifdef CONFIG_SMP
-#include <asm/smplock.h>
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);
-EXPORT_SYMBOL(global_bh_lock);
-EXPORT_SYMBOL(kernel_flag);
-#endif
+EXPORT_SYMBOL(machine_flags);
+EXPORT_SYMBOL(__udelay);
 EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(csum_fold);
-
-
+EXPORT_SYMBOL(console_mode);
+EXPORT_SYMBOL(console_devno);
+EXPORT_SYMBOL(console_irq);
+EXPORT_SYMBOL(sys_wait4);

@@ -53,9 +53,9 @@ struct  fbtype {
 struct  fbcmap {
         int             index;          /* first element (0 origin) */
         int             count;
-        unsigned char   *red;
-        unsigned char   *green;
-        unsigned char   *blue;
+        unsigned char   __user *red;
+        unsigned char   __user *green;
+        unsigned char   __user *blue;
 };
 
 #ifdef __KERNEL__
@@ -89,23 +89,6 @@ struct fbgattr {
 
 #define FBIOSVIDEO _IOW('F', 7, int)
 #define FBIOGVIDEO _IOR('F', 8, int)
-
-/* Cursor position */
-struct fbcurpos {
-#ifdef __KERNEL__
-	short fbx, fby;
-#else
-        short x, y;
-#endif
-};
-
-/* Cursor operations */
-#define FB_CUR_SETCUR   0x01	/* Enable/disable cursor display */
-#define FB_CUR_SETPOS   0x02	/* set cursor position */
-#define FB_CUR_SETHOT   0x04	/* set cursor hotspot */
-#define FB_CUR_SETCMAP  0x08	/* set color map for the cursor */
-#define FB_CUR_SETSHAPE 0x10	/* set shape */
-#define FB_CUR_SETALL   0x1F	/* all of the above */
 
 struct fbcursor {
         short set;              /* what to set, choose from the list above */

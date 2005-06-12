@@ -4,8 +4,8 @@
 /*
  * IA-64 Linux syscall numbers and inline-functions.
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2005 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <asm/break.h>
@@ -93,7 +93,7 @@
 #define __NR_setpriority		1102
 #define __NR_statfs			1103
 #define __NR_fstatfs			1104
-/* unused; used to be __NR_ioperm */
+#define __NR_gettid			1105
 #define __NR_semget			1106
 #define __NR_semop			1107
 #define __NR_semctl			1108
@@ -109,23 +109,23 @@
 #define __NR_syslog			1117
 #define __NR_setitimer			1118
 #define __NR_getitimer			1119
-#define __NR_old_stat			1120
-#define __NR_old_lstat			1121
-#define __NR_old_fstat			1122
+/* 1120 was __NR_old_stat */
+/* 1121 was __NR_old_lstat */
+/* 1122 was __NR_old_fstat */
 #define __NR_vhangup			1123
 #define __NR_lchown			1124
-#define __NR_vm86			1125
+#define __NR_remap_file_pages		1125
 #define __NR_wait4			1126
 #define __NR_sysinfo			1127
 #define __NR_clone			1128
 #define __NR_setdomainname		1129
 #define __NR_uname			1130
 #define __NR_adjtimex			1131
-#define __NR_create_module		1132
+/* 1132 was __NR_create_module */
 #define __NR_init_module		1133
 #define __NR_delete_module		1134
-#define __NR_get_kernel_syms		1135
-#define __NR_query_module		1136
+/* 1135 was __NR_get_kernel_syms */
+/* 1136 was __NR_query_module */
 #define __NR_quotactl			1137
 #define __NR_bdflush			1138
 #define __NR_sysfs			1139
@@ -137,8 +137,8 @@
 #define __NR_flock			1145
 #define __NR_readv			1146
 #define __NR_writev			1147
-#define __NR_pread			1148
-#define __NR_pwrite			1149
+#define __NR_pread64			1148
+#define __NR_pwrite64			1149
 #define __NR__sysctl			1150
 #define __NR_mmap			1151
 #define __NR_munmap			1152
@@ -204,109 +204,196 @@
 #define __NR_fstat			1212
 #define __NR_clone2			1213
 #define __NR_getdents64			1214
+#define __NR_getunwind			1215
+#define __NR_readahead			1216
+#define __NR_setxattr			1217
+#define __NR_lsetxattr			1218
+#define __NR_fsetxattr			1219
+#define __NR_getxattr			1220
+#define __NR_lgetxattr			1221
+#define __NR_fgetxattr			1222
+#define __NR_listxattr			1223
+#define __NR_llistxattr			1224
+#define __NR_flistxattr			1225
+#define __NR_removexattr		1226
+#define __NR_lremovexattr		1227
+#define __NR_fremovexattr		1228
+#define __NR_tkill			1229
+#define __NR_futex			1230
+#define __NR_sched_setaffinity		1231
+#define __NR_sched_getaffinity		1232
+#define __NR_set_tid_address		1233
+#define __NR_fadvise64			1234
+#define __NR_tgkill			1235
+#define __NR_exit_group			1236
+#define __NR_lookup_dcookie		1237
+#define __NR_io_setup			1238
+#define __NR_io_destroy			1239
+#define __NR_io_getevents		1240
+#define __NR_io_submit			1241
+#define __NR_io_cancel			1242
+#define __NR_epoll_create		1243
+#define __NR_epoll_ctl			1244
+#define __NR_epoll_wait			1245
+#define __NR_restart_syscall		1246
+#define __NR_semtimedop			1247
+#define __NR_timer_create		1248
+#define __NR_timer_settime		1249
+#define __NR_timer_gettime		1250
+#define __NR_timer_getoverrun		1251
+#define __NR_timer_delete		1252
+#define __NR_clock_settime		1253
+#define __NR_clock_gettime		1254
+#define __NR_clock_getres		1255
+#define __NR_clock_nanosleep		1256
+#define __NR_fstatfs64			1257
+#define __NR_statfs64			1258
+#define __NR_mbind			1259
+#define __NR_get_mempolicy		1260
+#define __NR_set_mempolicy		1261
+#define __NR_mq_open			1262
+#define __NR_mq_unlink			1263
+#define __NR_mq_timedsend		1264
+#define __NR_mq_timedreceive		1265
+#define __NR_mq_notify			1266
+#define __NR_mq_getsetattr		1267
+#define __NR_kexec_load			1268
+#define __NR_vserver			1269
+#define __NR_waitid			1270
+#define __NR_add_key			1271
+#define __NR_request_key		1272
+#define __NR_keyctl			1273
+
+#ifdef __KERNEL__
+
+#include <linux/config.h>
+
+#define NR_syscalls			256 /* length of syscall table */
+
+#define __ARCH_WANT_SYS_RT_SIGACTION
+
+#ifdef CONFIG_IA32_SUPPORT
+# define __ARCH_WANT_SYS_FADVISE64
+# define __ARCH_WANT_SYS_GETPGRP
+# define __ARCH_WANT_SYS_LLSEEK
+# define __ARCH_WANT_SYS_NICE
+# define __ARCH_WANT_SYS_OLD_GETRLIMIT
+# define __ARCH_WANT_SYS_OLDUMOUNT
+# define __ARCH_WANT_SYS_SIGPENDING
+# define __ARCH_WANT_SYS_SIGPROCMASK
+# define __ARCH_WANT_COMPAT_SYS_TIME
+#endif
 
 #if !defined(__ASSEMBLY__) && !defined(ASSEMBLER)
 
+#include <linux/types.h>
+#include <linux/linkage.h>
+#include <linux/compiler.h>
+
 extern long __ia64_syscall (long a0, long a1, long a2, long a3, long a4, long nr);
-
-#define _syscall0(type,name)						\
-type									\
-name (void)								\
-{									\
-	register long dummy1 __asm__ ("out0");				\
-	register long dummy2 __asm__ ("out1");				\
-	register long dummy3 __asm__ ("out2");				\
-	register long dummy4 __asm__ ("out3");				\
-	register long dummy5 __asm__ ("out4");				\
-									\
-	return __ia64_syscall(dummy1, dummy2, dummy3, dummy4, dummy5,	\
-			      __NR_##name);				\
-}
-
-#define _syscall1(type,name,type1,arg1)					\
-type									\
-name (type1 arg1)							\
-{									\
-	register long dummy2 __asm__ ("out1");				\
-	register long dummy3 __asm__ ("out2");				\
-	register long dummy4 __asm__ ("out3");				\
-	register long dummy5 __asm__ ("out4");				\
-									\
-	return __ia64_syscall((long) arg1, dummy2, dummy3, dummy4,	\
-			      dummy5, __NR_##name);			\
-}
-
-#define _syscall2(type,name,type1,arg1,type2,arg2)			\
-type									\
-name (type1 arg1, type2 arg2)						\
-{									\
-	register long dummy3 __asm__ ("out2");				\
-	register long dummy4 __asm__ ("out3");				\
-	register long dummy5 __asm__ ("out4");				\
-									\
-	return __ia64_syscall((long) arg1, (long) arg2, dummy3, dummy4,	\
-			      dummy5, __NR_##name);			\
-}
-
-#define _syscall3(type,name,type1,arg1,type2,arg2,type3,arg3)		\
-type									\
-name (type1 arg1, type2 arg2, type3 arg3)				\
-{									\
-	register long dummy4 __asm__ ("out3");				\
-	register long dummy5 __asm__ ("out4");				\
-									\
-	return __ia64_syscall((long) arg1, (long) arg2, (long) arg3,	\
-			      dummy4, dummy5, __NR_##name);		\
-}
-
-#define _syscall4(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4)	\
-type										\
-name (type1 arg1, type2 arg2, type3 arg3, type4 arg4)				\
-{										\
-	register long dummy5 __asm__ ("out4");					\
-										\
-	return __ia64_syscall((long) arg1, (long) arg2, (long) arg3,		\
-			      (long) arg4, dummy5, __NR_##name);		\
-}
-
-#define _syscall5(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4,type5,arg5)	\
-type											\
-name (type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)			\
-{											\
-	return __ia64_syscall((long) arg1, (long) arg2, (long) arg3,			\
-			      (long) arg4, (long) arg5, __NR_##name);			\
-}
 
 #ifdef __KERNEL_SYSCALLS__
 
-static inline _syscall0(int,sync)
-static inline _syscall0(pid_t,setsid)
-static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
-static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
-static inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
-static inline _syscall1(int,dup,int,fd)
-static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
-static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
-static inline _syscall1(int,close,int,fd)
-static inline _syscall4(pid_t,wait4,pid_t,pid,int *,wait_stat,int,options,struct rusage*, rusage)
-static inline _syscall1(int,delete_module,const char *,name)
-static inline _syscall2(pid_t,clone,unsigned long,flags,void*,sp);
+#include <linux/compiler.h>
+#include <linux/string.h>
+#include <linux/signal.h>
+#include <asm/ptrace.h>
+#include <linux/stringify.h>
+#include <linux/syscalls.h>
 
-#define __NR__exit __NR_exit
-static inline _syscall1(int,_exit,int,exitcode)
-
-static inline pid_t
-waitpid (int pid, int *wait_stat, int flags)
+static inline long
+open (const char * name, int mode, int flags)
 {
-	return wait4(pid, wait_stat, flags, NULL);
+	return sys_open(name, mode, flags);
+}
+
+static inline long
+dup (int fd)
+{
+	return sys_dup(fd);
+}
+
+static inline long
+close (int fd)
+{
+	return sys_close(fd);
+}
+
+static inline off_t
+lseek (int fd, off_t off, int whence)
+{
+	return sys_lseek(fd, off, whence);
+}
+
+static inline void
+_exit (int value)
+{
+	sys_exit(value);
+}
+
+#define exit(x) _exit(x)
+
+static inline long
+write (int fd, const char * buf, size_t nr)
+{
+	return sys_write(fd, buf, nr);
+}
+
+static inline long
+read (int fd, char * buf, size_t nr)
+{
+	return sys_read(fd, buf, nr);
+}
+
+
+static inline long
+setsid (void)
+{
+	return sys_setsid();
 }
 
 static inline pid_t
-wait (int * wait_stat)
+waitpid (int pid, int * wait_stat, int flags)
 {
-	return wait4(-1, wait_stat, 0, 0);
+	return sys_wait4(pid, wait_stat, flags, NULL);
 }
+
+
+extern int execve (const char *filename, char *const av[], char *const ep[]);
+extern pid_t clone (unsigned long flags, void *sp);
 
 #endif /* __KERNEL_SYSCALLS__ */
+
+asmlinkage unsigned long sys_mmap(
+				unsigned long addr, unsigned long len,
+				int prot, int flags,
+				int fd, long off);
+asmlinkage unsigned long sys_mmap2(
+				unsigned long addr, unsigned long len,
+				int prot, int flags,
+				int fd, long pgoff);
+struct pt_regs;
+struct sigaction;
+long sys_execve(char __user *filename, char __user * __user *argv,
+			   char __user * __user *envp, struct pt_regs *regs);
+asmlinkage long sys_pipe(void);
+asmlinkage long sys_ptrace(long request, pid_t pid,
+			   unsigned long addr, unsigned long data);
+asmlinkage long sys_rt_sigaction(int sig,
+				 const struct sigaction __user *act,
+				 struct sigaction __user *oact,
+				 size_t sigsetsize);
+
+/*
+ * "Conditional" syscalls
+ *
+ * Note, this macro can only be used in the file which defines sys_ni_syscall, i.e., in
+ * kernel/sys_ni.c.  This version causes warnings because the declaration isn't a
+ * proper prototype, but we can't use __typeof__ either, because not all cond_syscall()
+ * declarations have prototypes at the moment.
+ */
+#define cond_syscall(x) asmlinkage long x (void) __attribute__((weak,alias("sys_ni_syscall")));
+
 #endif /* !__ASSEMBLY__ */
+#endif /* __KERNEL__ */
 #endif /* _ASM_IA64_UNISTD_H */

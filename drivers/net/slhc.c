@@ -60,7 +60,6 @@
 
 #ifdef CONFIG_INET
 /* Entire module is for IP only */
-#include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
@@ -81,8 +80,6 @@
 #include <net/checksum.h>
 #include <asm/unaligned.h>
 
-int last_retran;
-
 static unsigned char *encode(unsigned char *cp, unsigned short n);
 static long decode(unsigned char **cpp);
 static unsigned char * put16(unsigned char *cp, unsigned short x);
@@ -98,7 +95,6 @@ slhc_init(int rslots, int tslots)
 	register struct cstate *ts;
 	struct slcompress *comp;
 
-	MOD_INC_USE_COUNT;
 	comp = (struct slcompress *)kmalloc(sizeof(struct slcompress),
 					    GFP_KERNEL);
 	if (! comp)
@@ -150,7 +146,6 @@ out_free2:
 out_free:
 	kfree((unsigned char *)comp);
 out_fail:
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
@@ -169,7 +164,6 @@ slhc_free(struct slcompress *comp)
 		kfree( comp->rstate );
 
 	kfree( comp );
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -256,8 +250,7 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	ip = (struct iphdr *) icp;
 
 	/* Bail if this packet isn't TCP, or is an IP fragment */
-	if(ip->protocol != IPPROTO_TCP || (ntohs(ip->frag_off) & 0x1fff) ||
-				       (ip->frag_off & 32)){
+	if (ip->protocol != IPPROTO_TCP || (ntohs(ip->frag_off) & 0x3fff)) {
 		/* Send as regular IP */
 		if(ip->protocol != IPPROTO_TCP)
 			comp->sls_o_nontcp++;
@@ -272,7 +265,7 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 
 	/*  Bail if the TCP packet isn't `compressible' (i.e., ACK isn't set or
 	 *  some other control bit is set). Also uncompressible if
-	 *  its a runt.
+	 *  it's a runt.
 	 */
 	if(hlen > isize || th->syn || th->fin || th->rst ||
 	    ! (th->ack)){
@@ -351,10 +344,9 @@ found:
 	 */
 	oth = &cs->cs_tcp;
 
-	if(last_retran
-	 || ip->version != cs->cs_ip.version || ip->ihl != cs->cs_ip.ihl
+	if(ip->version != cs->cs_ip.version || ip->ihl != cs->cs_ip.ihl
 	 || ip->tos != cs->cs_ip.tos
-	 || (ip->frag_off & 64) != (cs->cs_ip.frag_off & 64)
+	 || (ip->frag_off & htons(0x4000)) != (cs->cs_ip.frag_off & htons(0x4000))
 	 || ip->ttl != cs->cs_ip.ttl
 	 || th->doff != cs->cs_tcp.doff
 	 || (ip->ihl > 5 && memcmp(ip+1,cs->cs_ipopt,((ip->ihl)-5)*4) != 0)
@@ -690,7 +682,6 @@ slhc_remember(struct slcompress *comp, unsigned char *icp, int isize)
 	return isize;
 }
 
-
 int
 slhc_toss(struct slcompress *comp)
 {
@@ -801,3 +792,4 @@ EXPORT_SYMBOL(slhc_uncompress);
 EXPORT_SYMBOL(slhc_toss);
 
 #endif /* CONFIG_INET */
+MODULE_LICENSE("Dual BSD/GPL");

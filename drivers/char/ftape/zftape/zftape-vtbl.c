@@ -30,8 +30,7 @@
 
 #include <linux/errno.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
-#include <asm/segment.h>
+#include <linux/slab.h>
 
 #include <linux/zftape.h>
 #include "../zftape/zftape-init.h"
@@ -63,7 +62,7 @@ static zft_volinfo  tape_vtbl;
 static zft_volinfo  eot_vtbl;
 static zft_volinfo *cur_vtbl;
 
-inline void zft_new_vtbl_entry(void)
+static inline void zft_new_vtbl_entry(void)
 {
 	struct list_head *tmp = &zft_last_vtbl->node;
 	zft_volinfo *new = zft_kmalloc(sizeof(zft_volinfo));
@@ -144,7 +143,7 @@ static int vtbl_signature_valid(__u8 signature[4])
  * using the keyword "blocksize". The blocksize written to the
  * volume-label is in bytes.
  *
- * We use this now only for compatability with old zftape version. We
+ * We use this now only for compatibility with old zftape version. We
  * store the blocksize directly as binary number in the vendor
  * extension part of the volume entry.
  */
@@ -249,7 +248,7 @@ static void create_zft_volume(__u8 *entry, zft_volinfo *vtbl)
  * that buffer already contains the old volume-table, so that vtbl
  * entries without the zft_volume flag set can savely be ignored.
  */
-void zft_create_volume_headers(__u8 *buffer)
+static void zft_create_volume_headers(__u8 *buffer)
 {   
 	__u8 *entry;
 	struct list_head *tmp;
@@ -431,7 +430,7 @@ int zft_extract_volume_headers(__u8 *buffer)
 /* this functions translates the failed_sector_log, misused as
  * EOF-marker list, into a virtual volume table. The table mustn't be
  * written to tape, because this would occupy the first data segment,
- * which should be the volume table, but is actualy the first segment
+ * which should be the volume table, but is actually the first segment
  * that is filled with data (when using standard ftape).  We assume,
  * that we get a non-empty failed_sector_log.
  */

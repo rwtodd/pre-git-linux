@@ -1,9 +1,22 @@
 /* Kernel module to match NFMARK values. */
+
+/* (C) 1999-2001 Marc Boucher <marc@mbsi.ca>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 
-#include <linux/netfilter_ipv4/ipt_mark.h>
+#include <linux/netfilter_ipv6/ip6t_mark.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("ip6tables mark match");
 
 static int
 match(const struct sk_buff *skb,
@@ -11,11 +24,10 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
-      const void *hdr,
-      u_int16_t datalen,
+      unsigned int protoff,
       int *hotdrop)
 {
-	const struct ipt_mark_info *info = matchinfo;
+	const struct ip6t_mark_info *info = matchinfo;
 
 	return ((skb->nfmark & info->mask) == info->mark) ^ info->invert;
 }
@@ -27,14 +39,18 @@ checkentry(const char *tablename,
            unsigned int matchsize,
            unsigned int hook_mask)
 {
-	if (matchsize != IP6T_ALIGN(sizeof(struct ipt_mark_info)))
+	if (matchsize != IP6T_ALIGN(sizeof(struct ip6t_mark_info)))
 		return 0;
 
 	return 1;
 }
 
-static struct ip6t_match mark_match
-= { { NULL, NULL }, "mark", &match, &checkentry, NULL, THIS_MODULE };
+static struct ip6t_match mark_match = {
+	.name		= "mark",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

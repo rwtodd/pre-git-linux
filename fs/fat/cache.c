@@ -8,95 +8,257 @@
  *  May 1999. AV. Fixed the bogosity with FAT32 (read "FAT28"). Fscking lusers.
  */
 
+#include <linux/fs.h>
 #include <linux/msdos_fs.h>
-#include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/string.h>
-#include <linux/stat.h>
-#include <linux/fat_cvf.h>
+#include <linux/buffer_head.h>
 
-#include "msbuffer.h"
+/* this must be > 0. */
+#define FAT_MAX_CACHE	8
 
-#if 0
-#  define PRINTK(x) printk x
-#else
-#  define PRINTK(x)
-#endif
+struct fat_cache {
+	struct list_head cache_list;
+	int nr_contig;	/* number of contiguous clusters */
+	int fcluster;	/* cluster number in the file. */
+	int dcluster;	/* cluster number on disk. */
+};
 
-static struct fat_cache *fat_cache,cache[FAT_CACHE];
+struct fat_cache_id {
+	unsigned int id;
+	int nr_contig;
+	int fcluster;
+	int dcluster;
+};
 
-/* Returns the this'th FAT entry, -1 if it is an end-of-file entry. If
-   new_value is != -1, that FAT entry is replaced by it. */
-
-int fat_access(struct super_block *sb,int nr,int new_value)
+static inline int fat_max_cache(struct inode *inode)
 {
-	return MSDOS_SB(sb)->cvf_format->fat_access(sb,nr,new_value);
+	return FAT_MAX_CACHE;
 }
 
-int fat_bmap(struct inode *inode,int sector)
+static kmem_cache_t *fat_cache_cachep;
+
+static void init_once(void *foo, kmem_cache_t *cachep, unsigned long flags)
 {
-	return MSDOS_SB(inode->i_sb)->cvf_format->cvf_bmap(inode,sector);
+	struct fat_cache *cache = (struct fat_cache *)foo;
+
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+		INIT_LIST_HEAD(&cache->cache_list);
 }
 
-int default_fat_access(struct super_block *sb,int nr,int new_value)
+int __init fat_cache_init(void)
 {
-	struct buffer_head *bh,*bh2,*c_bh,*c_bh2;
-	unsigned char *p_first,*p_last;
-	int copy,first,last,next,b;
+	fat_cache_cachep = kmem_cache_create("fat_cache",
+				sizeof(struct fat_cache),
+				0, SLAB_RECLAIM_ACCOUNT,
+				init_once, NULL);
+	if (fat_cache_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
 
-	if ((unsigned) (nr-2) >= MSDOS_SB(sb)->clusters)
-		return 0;
-	if (MSDOS_SB(sb)->fat_bits == 32) {
+void __exit fat_cache_destroy(void)
+{
+	if (kmem_cache_destroy(fat_cache_cachep))
+		printk(KERN_INFO "fat_cache: not all structures were freed\n");
+}
+
+static inline struct fat_cache *fat_cache_alloc(struct inode *inode)
+{
+	return kmem_cache_alloc(fat_cache_cachep, SLAB_KERNEL);
+}
+
+static inline void fat_cache_free(struct fat_cache *cache)
+{
+	BUG_ON(!list_empty(&cache->cache_list));
+	kmem_cache_free(fat_cache_cachep, cache);
+}
+
+static inline void fat_cache_update_lru(struct inode *inode,
+					struct fat_cache *cache)
+{
+	if (MSDOS_I(inode)->cache_lru.next != &cache->cache_list)
+		list_move(&cache->cache_list, &MSDOS_I(inode)->cache_lru);
+}
+
+static int fat_cache_lookup(struct inode *inode, int fclus,
+			    struct fat_cache_id *cid,
+			    int *cached_fclus, int *cached_dclus)
+{
+	static struct fat_cache nohit = { .fcluster = 0, };
+
+	struct fat_cache *hit = &nohit, *p;
+	int offset = -1;
+
+	spin_lock(&MSDOS_I(inode)->cache_lru_lock);
+	list_for_each_entry(p, &MSDOS_I(inode)->cache_lru, cache_list) {
+		/* Find the cache of "fclus" or nearest cache. */
+		if (p->fcluster <= fclus && hit->fcluster < p->fcluster) {
+			hit = p;
+			if ((hit->fcluster + hit->nr_contig) < fclus) {
+				offset = hit->nr_contig;
+			} else {
+				offset = fclus - hit->fcluster;
+				break;
+			}
+		}
+	}
+	if (hit != &nohit) {
+		fat_cache_update_lru(inode, hit);
+
+		cid->id = MSDOS_I(inode)->cache_valid_id;
+		cid->nr_contig = hit->nr_contig;
+		cid->fcluster = hit->fcluster;
+		cid->dcluster = hit->dcluster;
+		*cached_fclus = cid->fcluster + offset;
+		*cached_dclus = cid->dcluster + offset;
+	}
+	spin_unlock(&MSDOS_I(inode)->cache_lru_lock);
+
+	return offset;
+}
+
+static struct fat_cache *fat_cache_merge(struct inode *inode,
+					 struct fat_cache_id *new)
+{
+	struct fat_cache *p;
+
+	list_for_each_entry(p, &MSDOS_I(inode)->cache_lru, cache_list) {
+		/* Find the same part as "new" in cluster-chain. */
+		if (p->fcluster == new->fcluster) {
+			BUG_ON(p->dcluster != new->dcluster);
+			if (new->nr_contig > p->nr_contig)
+				p->nr_contig = new->nr_contig;
+			return p;
+		}
+	}
+	return NULL;
+}
+
+static void fat_cache_add(struct inode *inode, struct fat_cache_id *new)
+{
+	struct fat_cache *cache, *tmp;
+
+	if (new->fcluster == -1) /* dummy cache */
+		return;
+
+	spin_lock(&MSDOS_I(inode)->cache_lru_lock);
+	if (new->id != FAT_CACHE_VALID &&
+	    new->id != MSDOS_I(inode)->cache_valid_id)
+		goto out;	/* this cache was invalidated */
+
+	cache = fat_cache_merge(inode, new);
+	if (cache == NULL) {
+		if (MSDOS_I(inode)->nr_caches < fat_max_cache(inode)) {
+			MSDOS_I(inode)->nr_caches++;
+			spin_unlock(&MSDOS_I(inode)->cache_lru_lock);
+
+			tmp = fat_cache_alloc(inode);
+			spin_lock(&MSDOS_I(inode)->cache_lru_lock);
+			cache = fat_cache_merge(inode, new);
+			if (cache != NULL) {
+				MSDOS_I(inode)->nr_caches--;
+				fat_cache_free(tmp);
+				goto out_update_lru;
+			}
+			cache = tmp;
+		} else {
+			struct list_head *p = MSDOS_I(inode)->cache_lru.prev;
+			cache = list_entry(p, struct fat_cache, cache_list);
+		}
+		cache->fcluster = new->fcluster;
+		cache->dcluster = new->dcluster;
+		cache->nr_contig = new->nr_contig;
+	}
+out_update_lru:
+	fat_cache_update_lru(inode, cache);
+out:
+	spin_unlock(&MSDOS_I(inode)->cache_lru_lock);
+}
+
+/*
+ * Cache invalidation occurs rarely, thus the LRU chain is not updated. It
+ * fixes itself after a while.
+ */
+static void __fat_cache_inval_inode(struct inode *inode)
+{
+	struct msdos_inode_info *i = MSDOS_I(inode);
+	struct fat_cache *cache;
+
+	while (!list_empty(&i->cache_lru)) {
+		cache = list_entry(i->cache_lru.next, struct fat_cache, cache_list);
+		list_del_init(&cache->cache_list);
+		i->nr_caches--;
+		fat_cache_free(cache);
+	}
+	/* Update. The copy of caches before this id is discarded. */
+	i->cache_valid_id++;
+	if (i->cache_valid_id == FAT_CACHE_VALID)
+		i->cache_valid_id++;
+}
+
+void fat_cache_inval_inode(struct inode *inode)
+{
+	spin_lock(&MSDOS_I(inode)->cache_lru_lock);
+	__fat_cache_inval_inode(inode);
+	spin_unlock(&MSDOS_I(inode)->cache_lru_lock);
+}
+
+static int __fat_access(struct super_block *sb, int nr, int new_value)
+{
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+	struct buffer_head *bh, *bh2, *c_bh, *c_bh2;
+	unsigned char *p_first, *p_last;
+	int copy, first, last, next, b;
+
+	if (sbi->fat_bits == 32) {
 		first = last = nr*4;
-	} else if (MSDOS_SB(sb)->fat_bits == 16) {
+	} else if (sbi->fat_bits == 16) {
 		first = last = nr*2;
 	} else {
 		first = nr*3/2;
 		last = first+1;
 	}
-	b = MSDOS_SB(sb)->fat_start + (first >> SECTOR_BITS);
-	if (!(bh = fat_bread(sb, b))) {
-		printk("bread in fat_access failed\n");
-		return 0;
+	b = sbi->fat_start + (first >> sb->s_blocksize_bits);
+	if (!(bh = sb_bread(sb, b))) {
+		printk(KERN_ERR "FAT: bread(block %d) in"
+		       " fat_access failed\n", b);
+		return -EIO;
 	}
-	if ((first >> SECTOR_BITS) == (last >> SECTOR_BITS)) {
+	if ((first >> sb->s_blocksize_bits) == (last >> sb->s_blocksize_bits)) {
 		bh2 = bh;
 	} else {
-		if (!(bh2 = fat_bread(sb, b+1))) {
-			fat_brelse(sb, bh);
-			printk("2nd bread in fat_access failed\n");
-			return 0;
+		if (!(bh2 = sb_bread(sb, b + 1))) {
+			brelse(bh);
+			printk(KERN_ERR "FAT: bread(block %d) in"
+			       " fat_access failed\n", b + 1);
+			return -EIO;
 		}
 	}
-	if (MSDOS_SB(sb)->fat_bits == 32) {
+	if (sbi->fat_bits == 32) {
 		p_first = p_last = NULL; /* GCC needs that stuff */
-		next = CF_LE_L(((__u32 *) bh->b_data)[(first &
-		    (SECTOR_SIZE-1)) >> 2]);
+		next = le32_to_cpu(((__le32 *) bh->b_data)[(first &
+		    (sb->s_blocksize - 1)) >> 2]);
 		/* Fscking Microsoft marketing department. Their "32" is 28. */
-		next &= 0xfffffff;
-		if (next >= 0xffffff7) next = -1;
-		PRINTK(("fat_bread: 0x%x, nr=0x%x, first=0x%x, next=0x%x\n", b, nr, first, next));
-
-	} else if (MSDOS_SB(sb)->fat_bits == 16) {
+		next &= 0x0fffffff;
+	} else if (sbi->fat_bits == 16) {
 		p_first = p_last = NULL; /* GCC needs that stuff */
-		next = CF_LE_W(((__u16 *) bh->b_data)[(first &
-		    (SECTOR_SIZE-1)) >> 1]);
-		if (next >= 0xfff7) next = -1;
+		next = le16_to_cpu(((__le16 *) bh->b_data)[(first &
+		    (sb->s_blocksize - 1)) >> 1]);
 	} else {
-		p_first = &((__u8 *) bh->b_data)[first & (SECTOR_SIZE-1)];
-		p_last = &((__u8 *) bh2->b_data)[(first+1) &
-		    (SECTOR_SIZE-1)];
-		if (nr & 1) next = ((*p_first >> 4) | (*p_last << 4)) & 0xfff;
-		else next = (*p_first+(*p_last << 8)) & 0xfff;
-		if (next >= 0xff7) next = -1;
+		p_first = &((__u8 *)bh->b_data)[first & (sb->s_blocksize - 1)];
+		p_last = &((__u8 *)bh2->b_data)[(first + 1) & (sb->s_blocksize - 1)];
+		if (nr & 1)
+			next = ((*p_first >> 4) | (*p_last << 4)) & 0xfff;
+		else
+			next = (*p_first+(*p_last << 8)) & 0xfff;
 	}
 	if (new_value != -1) {
-		if (MSDOS_SB(sb)->fat_bits == 32) {
-			((__u32 *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
-			    2] = CT_LE_L(new_value);
-		} else if (MSDOS_SB(sb)->fat_bits == 16) {
-			((__u16 *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
-			    1] = CT_LE_W(new_value);
+		if (sbi->fat_bits == 32) {
+			((__le32 *)bh->b_data)[(first & (sb->s_blocksize - 1)) >> 2]
+				= cpu_to_le32(new_value);
+		} else if (sbi->fat_bits == 16) {
+			((__le16 *)bh->b_data)[(first & (sb->s_blocksize - 1)) >> 1]
+				= cpu_to_le16(new_value);
 		} else {
 			if (nr & 1) {
 				*p_first = (*p_first & 0xf) | (new_value << 4);
@@ -106,232 +268,170 @@ int default_fat_access(struct super_block *sb,int nr,int new_value)
 				*p_first = new_value & 0xff;
 				*p_last = (*p_last & 0xf0) | (new_value >> 8);
 			}
-			fat_mark_buffer_dirty(sb, bh2);
+			mark_buffer_dirty(bh2);
 		}
-		fat_mark_buffer_dirty(sb, bh);
-		for (copy = 1; copy < MSDOS_SB(sb)->fats; copy++) {
-			b = MSDOS_SB(sb)->fat_start + (first >> SECTOR_BITS) +
-				MSDOS_SB(sb)->fat_length * copy;
-			if (!(c_bh = fat_bread(sb, b)))
+		mark_buffer_dirty(bh);
+		for (copy = 1; copy < sbi->fats; copy++) {
+			b = sbi->fat_start + (first >> sb->s_blocksize_bits)
+				+ sbi->fat_length * copy;
+			if (!(c_bh = sb_bread(sb, b)))
 				break;
-			memcpy(c_bh->b_data,bh->b_data,SECTOR_SIZE);
-			fat_mark_buffer_dirty(sb, c_bh);
 			if (bh != bh2) {
-				if (!(c_bh2 = fat_bread(sb, b+1))) {
-					fat_brelse(sb, c_bh);
+				if (!(c_bh2 = sb_bread(sb, b+1))) {
+					brelse(c_bh);
 					break;
 				}
-				memcpy(c_bh2->b_data,bh2->b_data,SECTOR_SIZE);
-				fat_brelse(sb, c_bh2);
+				memcpy(c_bh2->b_data, bh2->b_data, sb->s_blocksize);
+				mark_buffer_dirty(c_bh2);
+				brelse(c_bh2);
 			}
-			fat_brelse(sb, c_bh);
+			memcpy(c_bh->b_data, bh->b_data, sb->s_blocksize);
+			mark_buffer_dirty(c_bh);
+			brelse(c_bh);
 		}
 	}
-	fat_brelse(sb, bh);
+	brelse(bh);
 	if (bh != bh2)
-		fat_brelse(sb, bh2);
+		brelse(bh2);
 	return next;
 }
 
-
-void fat_cache_init(void)
+/*
+ * Returns the this'th FAT entry, -1 if it is an end-of-file entry. If
+ * new_value is != -1, that FAT entry is replaced by it.
+ */
+int fat_access(struct super_block *sb, int nr, int new_value)
 {
-	static int initialized = 0;
-	int count;
+	int next;
 
-	if (initialized) return;
-	fat_cache = &cache[0];
-	for (count = 0; count < FAT_CACHE; count++) {
-		cache[count].device = 0;
-		cache[count].next = count == FAT_CACHE-1 ? NULL :
-		    &cache[count+1];
+	next = -EIO;
+	if (nr < FAT_START_ENT || MSDOS_SB(sb)->max_cluster <= nr) {
+		fat_fs_panic(sb, "invalid access to FAT (entry 0x%08x)", nr);
+		goto out;
 	}
-	initialized = 1;
+	if (new_value == FAT_ENT_EOF)
+		new_value = EOF_FAT(sb);
+
+	next = __fat_access(sb, nr, new_value);
+	if (next < 0)
+		goto out;
+	if (next >= BAD_FAT(sb))
+		next = FAT_ENT_EOF;
+out:
+	return next;
 }
 
-
-void fat_cache_lookup(struct inode *inode,int cluster,int *f_clu,int *d_clu)
+static inline int cache_contiguous(struct fat_cache_id *cid, int dclus)
 {
-	struct fat_cache *walk;
-	int first = MSDOS_I(inode)->i_start;
-
-	if (!first)
-		return;
-	for (walk = fat_cache; walk; walk = walk->next)
-		if (inode->i_dev == walk->device
-		    && walk->start_cluster == first
-		    && walk->file_cluster <= cluster
-		    && walk->file_cluster > *f_clu) {
-			*d_clu = walk->disk_cluster;
-#ifdef DEBUG
-printk("cache hit: %d (%d)\n",walk->file_cluster,*d_clu);
-#endif
-			if ((*f_clu = walk->file_cluster) == cluster) return;
-		}
-#ifdef DEBUG
-printk("cache miss\n");
-#endif
+	cid->nr_contig++;
+	return ((cid->dcluster + cid->nr_contig) == dclus);
 }
 
-
-#ifdef DEBUG
-static void list_cache(void)
+static inline void cache_init(struct fat_cache_id *cid, int fclus, int dclus)
 {
-	struct fat_cache *walk;
-
-	for (walk = fat_cache; walk; walk = walk->next) {
-		if (walk->device)
-			printk("<%s,%d>(%d,%d) ", kdevname(walk->device),
-			       walk->start_cluster, walk->file_cluster,
-			       walk->disk_cluster);
-		else printk("-- ");
-	}
-	printk("\n");
-}
-#endif
-
-
-void fat_cache_add(struct inode *inode,int f_clu,int d_clu)
-{
-	struct fat_cache *walk,*last;
-	int first = MSDOS_I(inode)->i_start;
-
-	last = NULL;
-	for (walk = fat_cache; walk->next; walk = (last = walk)->next)
-		if (inode->i_dev == walk->device
-		    && walk->start_cluster == first
-		    && walk->file_cluster == f_clu) {
-			if (walk->disk_cluster != d_clu) {
-				printk("FAT cache corruption inode=%ld\n",
-					inode->i_ino);
-				fat_cache_inval_inode(inode);
-				return;
-			}
-			/* update LRU */
-			if (last == NULL) return;
-			last->next = walk->next;
-			walk->next = fat_cache;
-			fat_cache = walk;
-#ifdef DEBUG
-list_cache();
-#endif
-			return;
-		}
-	walk->device = inode->i_dev;
-	walk->start_cluster = first;
-	walk->file_cluster = f_clu;
-	walk->disk_cluster = d_clu;
-	last->next = NULL;
-	walk->next = fat_cache;
-	fat_cache = walk;
-#ifdef DEBUG
-list_cache();
-#endif
+	cid->id = FAT_CACHE_VALID;
+	cid->fcluster = fclus;
+	cid->dcluster = dclus;
+	cid->nr_contig = 0;
 }
 
-
-/* Cache invalidation occurs rarely, thus the LRU chain is not updated. It
-   fixes itself after a while. */
-
-void fat_cache_inval_inode(struct inode *inode)
+int fat_get_cluster(struct inode *inode, int cluster, int *fclus, int *dclus)
 {
-	struct fat_cache *walk;
-	int first = MSDOS_I(inode)->i_start;
+	struct super_block *sb = inode->i_sb;
+	const int limit = sb->s_maxbytes >> MSDOS_SB(sb)->cluster_bits;
+	struct fat_cache_id cid;
+	int nr;
 
-	for (walk = fat_cache; walk; walk = walk->next)
-		if (walk->device == inode->i_dev
-		    && walk->start_cluster == first)
-			walk->device = 0;
-}
+	BUG_ON(MSDOS_I(inode)->i_start == 0);
 
-
-void fat_cache_inval_dev(kdev_t device)
-{
-	struct fat_cache *walk;
-
-	for (walk = fat_cache; walk; walk = walk->next)
-		if (walk->device == device)
-			walk->device = 0;
-}
-
-
-int fat_get_cluster(struct inode *inode,int cluster)
-{
-	int nr,count;
-
-	if (!(nr = MSDOS_I(inode)->i_start)) return 0;
-	if (!cluster) return nr;
-	count = 0;
-	for (fat_cache_lookup(inode,cluster,&count,&nr); count < cluster;
-	    count++) {
-		if ((nr = fat_access(inode->i_sb,nr,-1)) == -1) return 0;
-		if (!nr) return 0;
-	}
-	fat_cache_add(inode,cluster,nr);
-	return nr;
-}
-
-int default_fat_bmap(struct inode *inode,int sector)
-{
-	struct msdos_sb_info *sb=MSDOS_SB(inode->i_sb);
-	int cluster,offset;
-
-	if ((sb->fat_bits != 32) &&
-	    (inode->i_ino == MSDOS_ROOT_INO || (S_ISDIR(inode->i_mode) &&
-	     !MSDOS_I(inode)->i_start))) {
-		if (sector >= sb->dir_entries >> MSDOS_DPS_BITS)
-			return 0;
-		return sector+sb->dir_start;
-	}
-	if (sector >= (MSDOS_I(inode)->mmu_private+511)>>9)
+	*fclus = 0;
+	*dclus = MSDOS_I(inode)->i_start;
+	if (cluster == 0)
 		return 0;
-	cluster = sector/sb->cluster_size;
-	offset = sector % sb->cluster_size;
-	if (!(cluster = fat_get_cluster(inode,cluster))) return 0;
-	return (cluster-2)*sb->cluster_size+sb->data_start+offset;
-}
 
+	if (fat_cache_lookup(inode, cluster, &cid, fclus, dclus) < 0) {
+		/*
+		 * dummy, always not contiguous
+		 * This is reinitialized by cache_init(), later.
+		 */
+		cache_init(&cid, -1, -1);
+	}
 
-/* Free all clusters after the skip'th cluster. Doesn't use the cache,
-   because this way we get an additional sanity check. */
-
-int fat_free(struct inode *inode,int skip)
-{
-	int nr,last;
-
-	if (!(nr = MSDOS_I(inode)->i_start)) return 0;
-	last = 0;
-	while (skip--) {
-		last = nr;
-		if ((nr = fat_access(inode->i_sb,nr,-1)) == -1) return 0;
-		if (!nr) {
-			printk("fat_free: skipped EOF\n");
+	while (*fclus < cluster) {
+		/* prevent the infinite loop of cluster chain */
+		if (*fclus > limit) {
+			fat_fs_panic(sb, "%s: detected the cluster chain loop"
+				     " (i_pos %lld)", __FUNCTION__,
+				     MSDOS_I(inode)->i_pos);
 			return -EIO;
 		}
-	}
-	if (last) {
-		fat_access(inode->i_sb,last,EOF_FAT(inode->i_sb));
-		fat_cache_inval_inode(inode);
-	} else {
-		fat_cache_inval_inode(inode);
-		MSDOS_I(inode)->i_start = 0;
-		MSDOS_I(inode)->i_logstart = 0;
-		mark_inode_dirty(inode);
-	}
-	lock_fat(inode->i_sb);
-	while (nr != -1) {
-		if (!(nr = fat_access(inode->i_sb,nr,0))) {
-			fat_fs_panic(inode->i_sb,"fat_free: deleting beyond EOF");
-			break;
+
+		nr = fat_access(sb, *dclus, -1);
+		if (nr < 0)
+			return nr;
+		else if (nr == FAT_ENT_FREE) {
+			fat_fs_panic(sb, "%s: invalid cluster chain"
+				     " (i_pos %lld)", __FUNCTION__,
+				     MSDOS_I(inode)->i_pos);
+			return -EIO;
+		} else if (nr == FAT_ENT_EOF) {
+			fat_cache_add(inode, &cid);
+			return FAT_ENT_EOF;
 		}
-		if (MSDOS_SB(inode->i_sb)->free_clusters != -1) {
-			MSDOS_SB(inode->i_sb)->free_clusters++;
-			if (MSDOS_SB(inode->i_sb)->fat_bits == 32) {
-				fat_clusters_flush(inode->i_sb);
-			}
-		}
-		inode->i_blocks -= MSDOS_SB(inode->i_sb)->cluster_size;
+		(*fclus)++;
+		*dclus = nr;
+		if (!cache_contiguous(&cid, *dclus))
+			cache_init(&cid, *fclus, *dclus);
 	}
-	unlock_fat(inode->i_sb);
+	fat_cache_add(inode, &cid);
+	return 0;
+}
+
+static int fat_bmap_cluster(struct inode *inode, int cluster)
+{
+	struct super_block *sb = inode->i_sb;
+	int ret, fclus, dclus;
+
+	if (MSDOS_I(inode)->i_start == 0)
+		return 0;
+
+	ret = fat_get_cluster(inode, cluster, &fclus, &dclus);
+	if (ret < 0)
+		return ret;
+	else if (ret == FAT_ENT_EOF) {
+		fat_fs_panic(sb, "%s: request beyond EOF (i_pos %lld)",
+			     __FUNCTION__, MSDOS_I(inode)->i_pos);
+		return -EIO;
+	}
+	return dclus;
+}
+
+int fat_bmap(struct inode *inode, sector_t sector, sector_t *phys)
+{
+	struct super_block *sb = inode->i_sb;
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+	sector_t last_block;
+	int cluster, offset;
+
+	*phys = 0;
+	if ((sbi->fat_bits != 32) &&
+	    (inode->i_ino == MSDOS_ROOT_INO || (S_ISDIR(inode->i_mode) &&
+	     !MSDOS_I(inode)->i_start))) {
+		if (sector < (sbi->dir_entries >> sbi->dir_per_block_bits))
+			*phys = sector + sbi->dir_start;
+		return 0;
+	}
+	last_block = (MSDOS_I(inode)->mmu_private + (sb->s_blocksize - 1))
+		>> sb->s_blocksize_bits;
+	if (sector >= last_block)
+		return 0;
+
+	cluster = sector >> (sbi->cluster_bits - sb->s_blocksize_bits);
+	offset  = sector & (sbi->sec_per_clus - 1);
+	cluster = fat_bmap_cluster(inode, cluster);
+	if (cluster < 0)
+		return cluster;
+	else if (cluster)
+		*phys = fat_clus_to_blknr(sbi, cluster) + offset;
 	return 0;
 }

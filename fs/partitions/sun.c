@@ -7,83 +7,85 @@
  *  Re-organised Feb 1998 Russell King
  */
 
-#include <linux/fs.h>
-#include <linux/genhd.h>
-#include <linux/kernel.h>
-#include <linux/major.h>
-#include <linux/string.h>
-#include <linux/blk.h>
-
-#include <asm/system.h>
-
 #include "check.h"
 #include "sun.h"
 
-int sun_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sector, int first_part_minor)
+int sun_partition(struct parsed_partitions *state, struct block_device *bdev)
 {
-	int i, csum;
-	unsigned short *ush;
-	struct buffer_head *bh;
+	int i;
+	__be16 csum;
+	int slot = 1;
+	__be16 *ush;
+	Sector sect;
 	struct sun_disklabel {
 		unsigned char info[128];   /* Informative text string */
-		unsigned char spare[292];  /* Boot information etc. */
-		unsigned short rspeed;     /* Disk rotational speed */
-		unsigned short pcylcount;  /* Physical cylinder count */
-		unsigned short sparecyl;   /* extra sects per cylinder */
+		unsigned char spare0[14];
+		struct sun_info {
+			unsigned char spare1;
+			unsigned char id;
+			unsigned char spare2;
+			unsigned char flags;
+		} infos[8];
+		unsigned char spare[246];  /* Boot information etc. */
+		__be16 rspeed;     /* Disk rotational speed */
+		__be16 pcylcount;  /* Physical cylinder count */
+		__be16 sparecyl;   /* extra sects per cylinder */
 		unsigned char spare2[4];   /* More magic... */
-		unsigned short ilfact;     /* Interleave factor */
-		unsigned short ncyl;       /* Data cylinder count */
-		unsigned short nacyl;      /* Alt. cylinder count */
-		unsigned short ntrks;      /* Tracks per cylinder */
-		unsigned short nsect;      /* Sectors per track */
+		__be16 ilfact;     /* Interleave factor */
+		__be16 ncyl;       /* Data cylinder count */
+		__be16 nacyl;      /* Alt. cylinder count */
+		__be16 ntrks;      /* Tracks per cylinder */
+		__be16 nsect;      /* Sectors per track */
 		unsigned char spare3[4];   /* Even more magic... */
 		struct sun_partition {
-			__u32 start_cylinder;
-			__u32 num_sectors;
+			__be32 start_cylinder;
+			__be32 num_sectors;
 		} partitions[8];
-		unsigned short magic;      /* Magic number */
-		unsigned short csum;       /* Label xor'd checksum */
+		__be16 magic;      /* Magic number */
+		__be16 csum;       /* Label xor'd checksum */
 	} * label;		
 	struct sun_partition *p;
 	unsigned long spc;
+	char b[BDEVNAME_SIZE];
 
-	if(!(bh = bread(dev, 0, get_ptable_blocksize(dev)))) {
-		if (warn_no_part) printk(KERN_WARNING "Dev %s: unable to read partition table\n",
-		       kdevname(dev));
+	label = (struct sun_disklabel *)read_dev_sector(bdev, 0, &sect);
+	if (!label)
 		return -1;
-	}
-	label = (struct sun_disklabel *) bh->b_data;
+
 	p = label->partitions;
 	if (be16_to_cpu(label->magic) != SUN_LABEL_MAGIC) {
 /*		printk(KERN_INFO "Dev %s Sun disklabel: bad magic %04x\n",
-		       kdevname(dev), be16_to_cpu(label->magic)); */
-		brelse(bh);
+		       bdevname(bdev, b), be16_to_cpu(label->magic)); */
+		put_dev_sector(sect);
 		return 0;
 	}
 	/* Look at the checksum */
-	ush = ((unsigned short *) (label+1)) - 1;
-	for(csum = 0; ush >= ((unsigned short *) label);)
+	ush = ((__be16 *) (label+1)) - 1;
+	for (csum = 0; ush >= ((__be16 *) label);)
 		csum ^= *ush--;
-	if(csum) {
+	if (csum) {
 		printk("Dev %s Sun disklabel: Csum bad, label corrupted\n",
-		       kdevname(dev));
-		brelse(bh);
+		       bdevname(bdev, b));
+		put_dev_sector(sect);
 		return 0;
 	}
+
 	/* All Sun disks have 8 partition entries */
 	spc = be16_to_cpu(label->ntrks) * be16_to_cpu(label->nsect);
-	for(i=0; i < 8; i++, p++) {
+	for (i = 0; i < 8; i++, p++) {
 		unsigned long st_sector;
 		int num_sectors;
 
-		st_sector = first_sector + be32_to_cpu(p->start_cylinder) * spc;
+		st_sector = be32_to_cpu(p->start_cylinder) * spc;
 		num_sectors = be32_to_cpu(p->num_sectors);
-		if (num_sectors)
-			add_gd_partition(hd, first_part_minor, st_sector, num_sectors);
-		first_part_minor++;
+		if (num_sectors) {
+			put_partition(state, slot, st_sector, num_sectors);
+			if (label->infos[i].id == LINUX_RAID_PARTITION)
+				state->parts[slot].flags = 1;
+		}
+		slot++;
 	}
 	printk("\n");
-	brelse(bh);
+	put_dev_sector(sect);
 	return 1;
 }
-

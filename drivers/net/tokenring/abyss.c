@@ -4,7 +4,7 @@
  *  Written 1999-2000 by Adam Fritzler
  *
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  *  This driver module supports the following cards:
  *      - Madge Smart 16/4 PCI Mk2
@@ -27,31 +27,32 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/netdevice.h>
+#include <linux/trdevice.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include <linux/netdevice.h>
-#include <linux/trdevice.h>
 #include "tms380tr.h"
 #include "abyss.h"            /* Madge-specific constants */
 
-static char version[] __initdata =
+static char version[] __devinitdata =
 "abyss.c: v1.02 23/11/2000 by Adam Fritzler\n";
 
 #define ABYSS_IO_EXTENT 64
 
-static struct pci_device_id abyss_pci_tbl[] __initdata = {
+static struct pci_device_id abyss_pci_tbl[] = {
 	{ PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_MK2,
 	  PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_NETWORK_TOKEN_RING << 8, 0x00ffffff, },
 	{ }			/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(pci, abyss_pci_tbl);
+
+MODULE_LICENSE("GPL");
 
 static int abyss_open(struct net_device *dev);
 static int abyss_close(struct net_device *dev);
@@ -91,7 +92,7 @@ static void abyss_sifwritew(struct net_device *dev, unsigned short val, unsigned
 	outw(val, dev->base_addr + reg);
 }
 
-static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_id *ent)
 {	
 	static int versionprinted;
 	struct net_device *dev;
@@ -111,9 +112,10 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 		
 	/* At this point we have found a valid card. */
 		
-	dev = init_trdev(NULL, 0);
+	dev = alloc_trdev(sizeof(struct net_local));
 	if (!dev)
 		return -ENOMEM;
+
 	SET_MODULE_OWNER(dev);
 
 	if (!request_region(pci_ioaddr, ABYSS_IO_EXTENT, dev->name)) {
@@ -137,7 +139,7 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 	 */
 	dev->base_addr += 0x10;
 		
-	ret = tmsdev_init(dev);
+	ret = tmsdev_init(dev, PCI_MAX_ADDRESS, pdev);
 	if (ret) {
 		printk("%s: unable to get memory for dev->priv.\n", 
 		       dev->name);
@@ -152,8 +154,7 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 		printk(":%2.2x", dev->dev_addr[i]);
 	printk("\n");
 
-	tp = dev->priv;
-	tp->dmalimit = 0; /* XXX: should be the max PCI32 DMA max */
+	tp = netdev_priv(dev);
 	tp->setnselout = abyss_setnselout_pins;
 	tp->sifreadb = abyss_sifreadb;
 	tp->sifreadw = abyss_sifreadw;
@@ -165,29 +166,30 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 	dev->open = abyss_open;
 	dev->stop = abyss_close;
 
-	ret = register_trdev(dev);
+	pci_set_drvdata(pdev, dev);
+	SET_NETDEV_DEV(dev, &pdev->dev);
+
+	ret = register_netdev(dev);
 	if (ret)
 		goto err_out_tmsdev;
-
-	pci_set_drvdata(pdev, dev);
 	return 0;
 
 err_out_tmsdev:
-	kfree(dev->priv);
+	pci_set_drvdata(pdev, NULL);
+	tmsdev_term(dev);
 err_out_irq:
 	free_irq(pdev->irq, dev);
 err_out_region:
 	release_region(pci_ioaddr, ABYSS_IO_EXTENT);
 err_out_trdev:
-	unregister_netdev(dev);
-	kfree(dev);
+	free_netdev(dev);
 	return ret;
 }
 
 static unsigned short abyss_setnselout_pins(struct net_device *dev)
 {
 	unsigned short val = 0;
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	
 	if(tp->DataRate == SPEED_4)
 		val |= 0x01;  /* Set 4Mbps */
@@ -397,7 +399,7 @@ static void abyss_read_eeprom(struct net_device *dev)
 	unsigned short val;
 	int i;
 	
-	tp = (struct net_local *)dev->priv;
+	tp = netdev_priv(dev);
 	ioaddr = dev->base_addr;
 	
 	/* Must enable glue chip first */
@@ -432,7 +434,7 @@ static int abyss_close(struct net_device *dev)
 	return 0;
 }
 
-static void __exit abyss_detach (struct pci_dev *pdev)
+static void __devexit abyss_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	
@@ -441,28 +443,21 @@ static void __exit abyss_detach (struct pci_dev *pdev)
 	unregister_netdev(dev);
 	release_region(dev->base_addr-0x10, ABYSS_IO_EXTENT);
 	free_irq(dev->irq, dev);
-	kfree(dev->priv);
-	kfree(dev);
+	tmsdev_term(dev);
+	free_netdev(dev);
 	pci_set_drvdata(pdev, NULL);
 }
 
 static struct pci_driver abyss_driver = {
-	name:		"abyss",
-	id_table:	abyss_pci_tbl,
-	probe:		abyss_attach,
-	remove:		abyss_detach,
+	.name		= "abyss",
+	.id_table	= abyss_pci_tbl,
+	.probe		= abyss_attach,
+	.remove		= __devexit_p(abyss_detach),
 };
 
 static int __init abyss_init (void)
 {
-	int rc = pci_register_driver (&abyss_driver);
-	if (rc < 0)
-		return rc;
-	if (rc == 0) {
-		pci_unregister_driver (&abyss_driver);
-		return -ENODEV;
-	}
-	return 0;
+	return pci_register_driver(&abyss_driver);
 }
 
 static void __exit abyss_rmmod (void)

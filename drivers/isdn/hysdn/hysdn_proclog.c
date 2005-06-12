@@ -1,27 +1,15 @@
-/* $Id: hysdn_proclog.c,v 1.9 2000/11/25 17:01:01 kai Exp $
-
+/* $Id: hysdn_proclog.c,v 1.9.6.3 2001/09/23 22:24:54 kai Exp $
+ *
  * Linux driver for HYSDN cards, /proc/net filesystem log functions.
- * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
  *
- * Copyright 1999  by Werner Cornelius (werner@titro.de)
+ * Author    Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Copyright 1999 by Werner Cornelius (werner@titro.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/poll.h>
@@ -110,7 +98,8 @@ put_log_buffer(hysdn_card * card, char *cp)
 {
 	struct log_data *ib;
 	struct procdata *pd = card->proclog;
-	int i, flags;
+	int i;
+	unsigned long flags;
 
 	if (!pd)
 		return;
@@ -153,15 +142,6 @@ put_log_buffer(hysdn_card * card, char *cp)
 }				/* put_log_buffer */
 
 
-/*************************/
-/* dummy file operations */
-/*************************/
-static loff_t
-hysdn_dummy_lseek(struct file *file, loff_t offset, int orig)
-{
-	return -ESPIPE;
-}				/* hysdn_dummy_lseek */
-
 /******************************/
 /* file operations and tables */
 /******************************/
@@ -170,16 +150,13 @@ hysdn_dummy_lseek(struct file *file, loff_t offset, int orig)
 /* write log file -> set log level bits */
 /****************************************/
 static ssize_t
-hysdn_log_write(struct file *file, const char *buf, size_t count, loff_t * off)
+hysdn_log_write(struct file *file, const char __user *buf, size_t count, loff_t * off)
 {
 	ulong u = 0;
 	int found = 0;
 	uchar *cp, valbuf[128];
 	long base = 10;
 	hysdn_card *card = (hysdn_card *) file->private_data;
-
-	if (&file->f_pos != off)	/* fs error check */
-		return (-ESPIPE);
 
 	if (count > (sizeof(valbuf) - 1))
 		count = sizeof(valbuf) - 1;	/* limit length */
@@ -223,12 +200,12 @@ hysdn_log_write(struct file *file, const char *buf, size_t count, loff_t * off)
 /* read log file */
 /******************/
 static ssize_t
-hysdn_log_read(struct file *file, char *buf, size_t count, loff_t * off)
+hysdn_log_read(struct file *file, char __user *buf, size_t count, loff_t * off)
 {
 	struct log_data *inf;
 	int len;
-	word ino;
-	struct procdata *pd;
+	struct proc_dir_entry *pde = PDE(file->f_dentry->d_inode);
+	struct procdata *pd = NULL;
 	hysdn_card *card;
 
 	if (!*((struct log_data **) file->private_data)) {
@@ -236,11 +213,10 @@ hysdn_log_read(struct file *file, char *buf, size_t count, loff_t * off)
 			return (-EAGAIN);
 
 		/* sorry, but we need to search the card */
-		ino = file->f_dentry->d_inode->i_ino & 0xFFFF;	/* low-ino */
 		card = card_root;
 		while (card) {
 			pd = card->proclog;
-			if (pd->log->low_ino == ino)
+			if (pd->log == pde)
 				break;
 			card = card->next;	/* search next entry */
 		}
@@ -254,11 +230,11 @@ hysdn_log_read(struct file *file, char *buf, size_t count, loff_t * off)
 		return (0);
 
 	inf->usage_cnt--;	/* new usage count */
-	(struct log_data **) file->private_data = &inf->next;	/* next structure */
+	file->private_data = &inf->next;	/* next structure */
 	if ((len = strlen(inf->log_start)) <= count) {
 		if (copy_to_user(buf, inf->log_start, len))
 			return -EFAULT;
-		file->f_pos += len;
+		*off += len;
 		return (len);
 	}
 	return (0);
@@ -271,14 +247,14 @@ static int
 hysdn_log_open(struct inode *ino, struct file *filep)
 {
 	hysdn_card *card;
-	struct procdata *pd;
+	struct procdata *pd = NULL;
 	ulong flags;
 
 	lock_kernel();
 	card = card_root;
 	while (card) {
 		pd = card->proclog;
-		if (pd->log->low_ino == (ino->i_ino & 0xFFFF))
+		if (pd->log == PDE(ino))
 			break;
 		card = card->next;	/* search next entry */
 	}
@@ -297,16 +273,16 @@ hysdn_log_open(struct inode *ino, struct file *filep)
 		cli();
 		pd->if_used++;
 		if (pd->log_head)
-			(struct log_data **) filep->private_data = &(pd->log_tail->next);
+			filep->private_data = &pd->log_tail->next;
 		else
-			(struct log_data **) filep->private_data = &(pd->log_head);
+			filep->private_data = &pd->log_head;
 		restore_flags(flags);
 	} else {		/* simultaneous read/write access forbidden ! */
 		unlock_kernel();
 		return (-EPERM);	/* no permission this time */
 	}
 	unlock_kernel();
-	return (0);
+	return nonseekable_open(ino, filep);
 }				/* hysdn_log_open */
 
 /*******************************************************************************/
@@ -322,7 +298,8 @@ hysdn_log_close(struct inode *ino, struct file *filep)
 	struct log_data *inf;
 	struct procdata *pd;
 	hysdn_card *card;
-	int flags, retval = 0;
+	int retval = 0;
+	unsigned long flags;
 
 
 	lock_kernel();
@@ -343,7 +320,7 @@ hysdn_log_close(struct inode *ino, struct file *filep)
 			card = card_root;
 			while (card) {
 				pd = card->proclog;
-				if (pd->log->low_ino == (ino->i_ino & 0xFFFF))
+				if (pd->log == PDE(ino))
 					break;
 				card = card->next;	/* search next entry */
 			}
@@ -379,19 +356,18 @@ static unsigned int
 hysdn_log_poll(struct file *file, poll_table * wait)
 {
 	unsigned int mask = 0;
-	word ino;
+	struct proc_dir_entry *pde = PDE(file->f_dentry->d_inode);
 	hysdn_card *card;
-	struct procdata *pd;
+	struct procdata *pd = NULL;
 
 	if ((file->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_WRITE)
 		return (mask);	/* no polling for write supported */
 
 	/* we need to search the card */
-	ino = file->f_dentry->d_inode->i_ino & 0xFFFF;	/* low-ino */
 	card = card_root;
 	while (card) {
 		pd = card->proclog;
-		if (pd->log->low_ino == ino)
+		if (pd->log == pde)
 			break;
 		card = card->next;	/* search next entry */
 	}
@@ -411,12 +387,12 @@ hysdn_log_poll(struct file *file, poll_table * wait)
 /**************************************************/
 static struct file_operations log_fops =
 {
-	llseek:         hysdn_dummy_lseek,
-	read:           hysdn_log_read,
-	write:          hysdn_log_write,
-	poll:           hysdn_log_poll,
-	open:           hysdn_log_open,
-	release:        hysdn_log_close,                                        
+	.llseek         = no_llseek,
+	.read           = hysdn_log_read,
+	.write          = hysdn_log_write,
+	.poll           = hysdn_log_poll,
+	.open           = hysdn_log_open,
+	.release        = hysdn_log_close,                                        
 };
 
 

@@ -1,7 +1,10 @@
-/* atomic.c: atomic operations which got too long to be inlined all over
- * the place.
+/*
+ * bitops.c: atomic operations which got too long to be inlined all over
+ *      the place.
  * 
- * Copyright 1999 Philipp Rumpf (prumpf@tux.org */
+ * Copyright 1999 Philipp Rumpf (prumpf@tux.org)
+ * Copyright 2000 Grant Grundler (grundler@cup.hp.com)
+ */
 
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -10,51 +13,72 @@
 #include <asm/atomic.h>
 
 #ifdef CONFIG_SMP
-spinlock_t __atomic_hash[ATOMIC_HASH_SIZE] = {
+spinlock_t __atomic_hash[ATOMIC_HASH_SIZE] __lock_aligned = {
 	[0 ... (ATOMIC_HASH_SIZE-1)]  = SPIN_LOCK_UNLOCKED
 };
 #endif
 
-spinlock_t __atomic_lock = SPIN_LOCK_UNLOCKED;
-
-#ifndef __LP64__
-unsigned long __xchg(unsigned long x, unsigned long *ptr, int size)
+#ifdef __LP64__
+unsigned long __xchg64(unsigned long x, unsigned long *ptr)
 {
 	unsigned long temp, flags;
 
-	if (size != sizeof x) {
-		printk("__xchg called with bad pointer\n");
-	}
-	spin_lock_irqsave(&__atomic_lock, flags);
+	_atomic_spin_lock_irqsave(ptr, flags);
 	temp = *ptr;
 	*ptr = x;
-	spin_unlock_irqrestore(&__atomic_lock, flags);
+	_atomic_spin_unlock_irqrestore(ptr, flags);
 	return temp;
 }
-#else
-unsigned long __xchg(unsigned long x, unsigned long *ptr, int size)
+#endif
+
+unsigned long __xchg32(int x, int *ptr)
 {
-	unsigned long temp, flags;
-	unsigned int *ptr32;
+	unsigned long flags;
+	long temp;
 
-	if (size == 8) {
-try_long:
-		spin_lock_irqsave(&__atomic_lock, flags);
-		temp = *ptr;
-		*ptr = x;
-		spin_unlock_irqrestore(&__atomic_lock, flags);
-		return temp;
-	}
-	if (size == 4) {
-		ptr32 = (unsigned int *)ptr;
-		spin_lock_irqsave(&__atomic_lock, flags);
-		temp = (unsigned long)*ptr32;
-		*ptr32 = (unsigned int)x;
-		spin_unlock_irqrestore(&__atomic_lock, flags);
-		return temp;
-	}
+	_atomic_spin_lock_irqsave(ptr, flags);
+	temp = (long) *ptr;	/* XXX - sign extension wanted? */
+	*ptr = x;
+	_atomic_spin_unlock_irqrestore(ptr, flags);
+	return (unsigned long)temp;
+}
 
-	printk("__xchg called with bad pointer\n");
-	goto try_long;
+
+unsigned long __xchg8(char x, char *ptr)
+{
+	unsigned long flags;
+	long temp;
+
+	_atomic_spin_lock_irqsave(ptr, flags);
+	temp = (long) *ptr;	/* XXX - sign extension wanted? */
+	*ptr = x;
+	_atomic_spin_unlock_irqrestore(ptr, flags);
+	return (unsigned long)temp;
+}
+
+
+#ifdef __LP64__
+unsigned long __cmpxchg_u64(volatile unsigned long *ptr, unsigned long old, unsigned long new)
+{
+	unsigned long flags;
+	unsigned long prev;
+
+	_atomic_spin_lock_irqsave(ptr, flags);
+	if ((prev = *ptr) == old)
+		*ptr = new;
+	_atomic_spin_unlock_irqrestore(ptr, flags);
+	return prev;
 }
 #endif
+
+unsigned long __cmpxchg_u32(volatile unsigned int *ptr, unsigned int old, unsigned int new)
+{
+	unsigned long flags;
+	unsigned int prev;
+
+	_atomic_spin_lock_irqsave(ptr, flags);
+	if ((prev = *ptr) == old)
+		*ptr = new;
+	_atomic_spin_unlock_irqrestore(ptr, flags);
+	return (unsigned long)prev;
+}

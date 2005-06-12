@@ -15,8 +15,8 @@ extern FILE *xmon_stdin, *xmon_stdout;
 #define fflush(f)	do {} while (0)
 #define fclose(f)	do {} while (0)
 extern char *fgets(char *, int, void *);
-extern void xmon_printf(const char *, ...);
 extern void xmon_fprintf(void *, const char *, ...);
 extern void xmon_sprintf(char *, const char *, ...);
+extern void xmon_puts(char*);
 
 #define perror(s)	printf("%s: no files!\n", (s))

@@ -14,178 +14,75 @@
 
 	Unblock all signals when we exec a usermode process.
 	Shuu Yamaguchi <shuu@wondernetworkresources.com> December 2000
-*/
 
+	call_usermodehelper wait flag, and remove exec_usermodehelper.
+	Rusty Russell <rusty@rustcorp.com.au>  Jan 2003
+*/
 #define __KERNEL_SYSCALLS__
 
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/syscalls.h>
 #include <linux/unistd.h>
 #include <linux/kmod.h>
 #include <linux/smp_lock.h>
-
+#include <linux/slab.h>
+#include <linux/namespace.h>
+#include <linux/completion.h>
+#include <linux/file.h>
+#include <linux/workqueue.h>
+#include <linux/security.h>
+#include <linux/mount.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
 #include <asm/uaccess.h>
 
 extern int max_threads;
 
-static inline void
-use_init_fs_context(void)
-{
-	struct fs_struct *our_fs, *init_fs;
-	struct dentry *root, *pwd;
-	struct vfsmount *rootmnt, *pwdmnt;
-
-	/*
-	 * Make modprobe's fs context be a copy of init's.
-	 *
-	 * We cannot use the user's fs context, because it
-	 * may have a different root than init.
-	 * Since init was created with CLONE_FS, we can grab
-	 * its fs context from "init_task".
-	 *
-	 * The fs context has to be a copy. If it is shared
-	 * with init, then any chdir() call in modprobe will
-	 * also affect init and the other threads sharing
-	 * init_task's fs context.
-	 *
-	 * We created the exec_modprobe thread without CLONE_FS,
-	 * so we can update the fields in our fs context freely.
-	 */
-
-	init_fs = init_task.fs;
-	read_lock(&init_fs->lock);
-	rootmnt = mntget(init_fs->rootmnt);
-	root = dget(init_fs->root);
-	pwdmnt = mntget(init_fs->pwdmnt);
-	pwd = dget(init_fs->pwd);
-	read_unlock(&init_fs->lock);
-
-	/* FIXME - unsafe ->fs access */
-	our_fs = current->fs;
-	our_fs->umask = init_fs->umask;
-	set_fs_root(our_fs, rootmnt, root);
-	set_fs_pwd(our_fs, pwdmnt, pwd);
-	write_lock(&our_fs->lock);
-	if (our_fs->altroot) {
-		struct vfsmount *mnt = our_fs->altrootmnt;
-		struct dentry *dentry = our_fs->altroot;
-		our_fs->altrootmnt = NULL;
-		our_fs->altroot = NULL;
-		write_unlock(&our_fs->lock);
-		dput(dentry);
-		mntput(mnt);
-	} else 
-		write_unlock(&our_fs->lock);
-	dput(root);
-	mntput(rootmnt);
-	dput(pwd);
-	mntput(pwdmnt);
-}
-
-int exec_usermodehelper(char *program_path, char *argv[], char *envp[])
-{
-	int i;
-	struct task_struct *curtask = current;
-
-	curtask->session = 1;
-	curtask->pgrp = 1;
-
-	use_init_fs_context();
-
-	/* Prevent parent user process from sending signals to child.
-	   Otherwise, if the modprobe program does not exist, it might
-	   be possible to get a user defined signal handler to execute
-	   as the super user right after the execve fails if you time
-	   the signal just right.
-	*/
-	spin_lock_irq(&curtask->sigmask_lock);
-	sigemptyset(&curtask->blocked);
-	flush_signals(curtask);
-	flush_signal_handlers(curtask);
-	recalc_sigpending(curtask);
-	spin_unlock_irq(&curtask->sigmask_lock);
-
-	for (i = 0; i < curtask->files->max_fds; i++ ) {
-		if (curtask->files->fd[i]) close(i);
-	}
-
-	/* Drop the "current user" thing */
-	{
-		struct user_struct *user = curtask->user;
-		curtask->user = INIT_USER;
-		atomic_inc(&INIT_USER->__count);
-		atomic_inc(&INIT_USER->processes);
-		atomic_dec(&user->processes);
-		free_uid(user);
-	}
-
-	/* Give kmod all effective privileges.. */
-	curtask->euid = curtask->fsuid = 0;
-	curtask->egid = curtask->fsgid = 0;
-	cap_set_full(curtask->cap_effective);
-
-	/* Allow execve args to be in kernel space. */
-	set_fs(KERNEL_DS);
-
-	/* Go, go, go... */
-	if (execve(program_path, argv, envp) < 0)
-		return -errno;
-	return 0;
-}
+static struct workqueue_struct *khelper_wq;
 
 #ifdef CONFIG_KMOD
 
 /*
 	modprobe_path is set via /proc/sys.
 */
-char modprobe_path[256] = "/sbin/modprobe";
-
-static int exec_modprobe(void * module_name)
-{
-	static char * envp[] = { "HOME=/", "TERM=linux", "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
-	char *argv[] = { modprobe_path, "-s", "-k", "--", (char*)module_name, NULL };
-	int ret;
-
-	ret = exec_usermodehelper(modprobe_path, argv, envp);
-	if (ret) {
-		printk(KERN_ERR
-		       "kmod: failed to exec %s -s -k %s, errno = %d\n",
-		       modprobe_path, (char*) module_name, errno);
-	}
-	return ret;
-}
+char modprobe_path[KMOD_PATH_LEN] = "/sbin/modprobe";
 
 /**
- *	request_module - try to load a kernel module
- *	@module_name: Name of module
+ * request_module - try to load a kernel module
+ * @fmt:     printf style format string for the name of the module
+ * @varargs: arguements as specified in the format string
  *
- * 	Load a module using the user mode module loader. The function returns
- *	zero on success or a negative errno code on failure. Note that a
- * 	successful module load does not mean the module did not then unload
- *	and exit on an error of its own. Callers must check that the service
- *	they requested is now available not blindly invoke it.
+ * Load a module using the user mode module loader. The function returns
+ * zero on success or a negative errno code on failure. Note that a
+ * successful module load does not mean the module did not then unload
+ * and exit on an error of its own. Callers must check that the service
+ * they requested is now available not blindly invoke it.
  *
- *	If module auto-loading support is disabled then this function
- *	becomes a no-operation.
+ * If module auto-loading support is disabled then this function
+ * becomes a no-operation.
  */
- 
-int request_module(const char * module_name)
+int request_module(const char *fmt, ...)
 {
-	pid_t pid;
-	int waitpid_result;
-	sigset_t tmpsig;
-	int i;
+	va_list args;
+	char module_name[MODULE_NAME_LEN];
+	unsigned int max_modprobes;
+	int ret;
+	char *argv[] = { modprobe_path, "-q", "--", module_name, NULL };
+	static char *envp[] = { "HOME=/",
+				"TERM=linux",
+				"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
+				NULL };
 	static atomic_t kmod_concurrent = ATOMIC_INIT(0);
 #define MAX_KMOD_CONCURRENT 50	/* Completely arbitrary value - KAO */
 	static int kmod_loop_msg;
 
-	/* Don't allow request_module() before the root fs is mounted!  */
-	if ( ! current->fs->root ) {
-		printk(KERN_ERR "request_module[%s]: Root fs not mounted\n",
-			module_name);
-		return -EPERM;
-	}
+	va_start(args, fmt);
+	ret = vsnprintf(module_name, MODULE_NAME_LEN, fmt, args);
+	va_end(args);
+	if (ret >= MODULE_NAME_LEN)
+		return -ENAMETOOLONG;
 
 	/* If modprobe needs a service that is in a module, we get a recursive
 	 * loop.  Limit the number of running kmod threads to max_threads/2 or
@@ -195,80 +92,36 @@ int request_module(const char * module_name)
 	 * process tables to get the command line, proc_pid_cmdline is static
 	 * and it is not worth changing the proc code just to handle this case. 
 	 * KAO.
+	 *
+	 * "trace the ppid" is simple, but will fail if someone's
+	 * parent exits.  I think this is as good as it gets. --RR
 	 */
-	i = max_threads/2;
-	if (i > MAX_KMOD_CONCURRENT)
-		i = MAX_KMOD_CONCURRENT;
+	max_modprobes = min(max_threads/2, MAX_KMOD_CONCURRENT);
 	atomic_inc(&kmod_concurrent);
-	if (atomic_read(&kmod_concurrent) > i) {
+	if (atomic_read(&kmod_concurrent) > max_modprobes) {
+		/* We may be blaming an innocent here, but unlikely */
 		if (kmod_loop_msg++ < 5)
 			printk(KERN_ERR
-			       "kmod: runaway modprobe loop assumed and stopped\n");
+			       "request_module: runaway loop modprobe %s\n",
+			       module_name);
 		atomic_dec(&kmod_concurrent);
 		return -ENOMEM;
 	}
 
-	pid = kernel_thread(exec_modprobe, (void*) module_name, 0);
-	if (pid < 0) {
-		printk(KERN_ERR "request_module[%s]: fork failed, errno %d\n", module_name, -pid);
-		atomic_dec(&kmod_concurrent);
-		return pid;
-	}
-
-	/* Block everything but SIGKILL/SIGSTOP */
-	spin_lock_irq(&current->sigmask_lock);
-	tmpsig = current->blocked;
-	siginitsetinv(&current->blocked, sigmask(SIGKILL) | sigmask(SIGSTOP));
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
-
-	waitpid_result = waitpid(pid, NULL, __WCLONE);
+	ret = call_usermodehelper(modprobe_path, argv, envp, 1);
 	atomic_dec(&kmod_concurrent);
-
-	/* Allow signals again.. */
-	spin_lock_irq(&current->sigmask_lock);
-	current->blocked = tmpsig;
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
-
-	if (waitpid_result != pid) {
-		printk(KERN_ERR "request_module[%s]: waitpid(%d,...) failed, errno %d\n",
-		       module_name, pid, -waitpid_result);
-	}
-	return 0;
+	return ret;
 }
+EXPORT_SYMBOL(request_module);
 #endif /* CONFIG_KMOD */
 
-
-#ifdef CONFIG_HOTPLUG
-/*
-	hotplug path is set via /proc/sys
-	invoked by hotplug-aware bus drivers,
-	with exec_usermodehelper and some thread-spawner
-
-	argv [0] = hotplug_path;
-	argv [1] = "usb", "scsi", "pci", "network", etc;
-	... plus optional type-specific parameters
-	argv [n] = 0;
-
-	envp [*] = HOME, PATH; optional type-specific parameters
-
-	a hotplug bus should invoke this for device add/remove
-	events.  the command is expected to load drivers when
-	necessary, and may perform additional system setup.
-*/
-char hotplug_path[256] = "/sbin/hotplug";
-
-EXPORT_SYMBOL(hotplug_path);
-
-#endif /* CONFIG_HOTPLUG */
-
 struct subprocess_info {
-	struct semaphore *sem;
+	struct completion *complete;
 	char *path;
 	char **argv;
 	char **envp;
-	pid_t retval;
+	int wait;
+	int retval;
 };
 
 /*
@@ -279,31 +132,82 @@ static int ____call_usermodehelper(void *data)
 	struct subprocess_info *sub_info = data;
 	int retval;
 
+	/* Unblock all signals. */
+	flush_signals(current);
+	spin_lock_irq(&current->sighand->siglock);
+	flush_signal_handlers(current, 1);
+	sigemptyset(&current->blocked);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
+
+	/* We can run anywhere, unlike our parent keventd(). */
+	set_cpus_allowed(current, CPU_MASK_ALL);
+
 	retval = -EPERM;
 	if (current->fs->root)
-		retval = exec_usermodehelper(sub_info->path, sub_info->argv, sub_info->envp);
+		retval = execve(sub_info->path, sub_info->argv,sub_info->envp);
 
 	/* Exec failed? */
-	sub_info->retval = (pid_t)retval;
+	sub_info->retval = retval;
 	do_exit(0);
 }
 
-/*
- * This is run by keventd.
- */
+/* Keventd can't block, but this (a child) can. */
+static int wait_for_helper(void *data)
+{
+	struct subprocess_info *sub_info = data;
+	pid_t pid;
+	struct k_sigaction sa;
+
+	/* Install a handler: if SIGCLD isn't handled sys_wait4 won't
+	 * populate the status, but will return -ECHILD. */
+	sa.sa.sa_handler = SIG_IGN;
+	sa.sa.sa_flags = 0;
+	siginitset(&sa.sa.sa_mask, sigmask(SIGCHLD));
+	do_sigaction(SIGCHLD, &sa, (struct k_sigaction *)0);
+	allow_signal(SIGCHLD);
+
+	pid = kernel_thread(____call_usermodehelper, sub_info, SIGCHLD);
+	if (pid < 0) {
+		sub_info->retval = pid;
+	} else {
+		/*
+		 * Normally it is bogus to call wait4() from in-kernel because
+		 * wait4() wants to write the exit code to a userspace address.
+		 * But wait_for_helper() always runs as keventd, and put_user()
+		 * to a kernel address works OK for kernel threads, due to their
+		 * having an mm_segment_t which spans the entire address space.
+		 *
+		 * Thus the __user pointer cast is valid here.
+		 */
+		sys_wait4(pid, (int __user *) &sub_info->retval, 0, NULL);
+	}
+
+	complete(sub_info->complete);
+	return 0;
+}
+
+/* This is run by khelper thread  */
 static void __call_usermodehelper(void *data)
 {
 	struct subprocess_info *sub_info = data;
 	pid_t pid;
 
-	/*
-	 * CLONE_VFORK: wait until the usermode helper has execve'd successfully
-	 * We need the data structures to stay around until that is done.
-	 */
-	pid = kernel_thread(____call_usermodehelper, sub_info, CLONE_VFORK | SIGCHLD);
-	if (pid < 0)
+	/* CLONE_VFORK: wait until the usermode helper has execve'd
+	 * successfully We need the data structures to stay around
+	 * until that is done.  */
+	if (sub_info->wait)
+		pid = kernel_thread(wait_for_helper, sub_info,
+				    CLONE_FS | CLONE_FILES | SIGCHLD);
+	else
+		pid = kernel_thread(____call_usermodehelper, sub_info,
+				    CLONE_VFORK | SIGCHLD);
+
+	if (pid < 0) {
 		sub_info->retval = pid;
-	up(sub_info->sem);
+		complete(sub_info->complete);
+	} else if (!sub_info->wait)
+		complete(sub_info->complete);
 }
 
 /**
@@ -311,63 +215,42 @@ static void __call_usermodehelper(void *data)
  * @path: pathname for the application
  * @argv: null-terminated argument list
  * @envp: null-terminated environment list
+ * @wait: wait for the application to finish and return status.
  *
- * Runs a user-space application.  The application is started asynchronously.  It
- * runs as a child of keventd.  It runs with full root capabilities.  keventd silently
- * reaps the child when it exits.
+ * Runs a user-space application.  The application is started
+ * asynchronously if wait is not set, and runs as a child of keventd.
+ * (ie. it runs with full root capabilities).
  *
- * Must be called from process context.  Returns zero on success, else a negative
- * error code.
+ * Must be called from process context.  Returns a negative error code
+ * if program was not execed successfully, or 0.
  */
-int call_usermodehelper(char *path, char **argv, char **envp)
+int call_usermodehelper(char *path, char **argv, char **envp, int wait)
 {
-	DECLARE_MUTEX_LOCKED(sem);
+	DECLARE_COMPLETION(done);
 	struct subprocess_info sub_info = {
-		sem:		&sem,
-		path:		path,
-		argv:		argv,
-		envp:		envp,
-		retval:		0,
+		.complete	= &done,
+		.path		= path,
+		.argv		= argv,
+		.envp		= envp,
+		.wait		= wait,
+		.retval		= 0,
 	};
-	struct tq_struct tqs = {
-		routine:	__call_usermodehelper,
-		data:		&sub_info,
-	};
+	DECLARE_WORK(work, __call_usermodehelper, &sub_info);
+
+	if (!khelper_wq)
+		return -EBUSY;
 
 	if (path[0] == '\0')
-		goto out;
+		return 0;
 
-	if (current_is_keventd()) {
-		/* We can't wait on keventd! */
-		__call_usermodehelper(&sub_info);
-	} else {
-		schedule_task(&tqs);
-		down(&sem);		/* Wait until keventd has started the subprocess */
-	}
-out:
+	queue_work(khelper_wq, &work);
+	wait_for_completion(&done);
 	return sub_info.retval;
 }
-
-/*
- * This is for the serialisation of device probe() functions
- * against device open() functions
- */
-static DECLARE_MUTEX(dev_probe_sem);
-
-void dev_probe_lock(void)
-{
-	down(&dev_probe_sem);
-}
-
-void dev_probe_unlock(void)
-{
-	up(&dev_probe_sem);
-}
-
-EXPORT_SYMBOL(exec_usermodehelper);
 EXPORT_SYMBOL(call_usermodehelper);
 
-#ifdef CONFIG_KMOD
-EXPORT_SYMBOL(request_module);
-#endif
-
+void __init usermodehelper_init(void)
+{
+	khelper_wq = create_singlethread_workqueue("khelper");
+	BUG_ON(!khelper_wq);
+}

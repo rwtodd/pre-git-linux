@@ -11,22 +11,18 @@
  * Code common to all CIA core logic chips.
  */
 
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/pci.h>
-#include <linux/sched.h>
-#include <linux/init.h>
-
-#include <asm/system.h>
-#include <asm/ptrace.h>
-#include <asm/hwrpb.h>
-
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
 #include <asm/core_cia.h>
 #undef __EXTERN_INLINE
 
+#include <linux/types.h>
+#include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/init.h>
 #include <linux/bootmem.h>
+
+#include <asm/ptrace.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -89,11 +85,10 @@
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
-	     unsigned char *type1)
+mk_conf_addr(struct pci_bus *bus_dev, unsigned int device_fn, int where,
+	     unsigned long *pci_addr, unsigned char *type1)
 {
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = bus_dev->number;
 
 	*type1 = (bus != 0);
 	*pci_addr = (bus << 16) | (device_fn << 8) | where;
@@ -113,7 +108,7 @@ conf_read(unsigned long addr, unsigned char type1)
 	int cia_cfg = 0;
 
 	DBGC(("conf_read(addr=0x%lx, type1=%d) ", addr, type1));
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vip)CIA_IOC_CIA_ERR;
@@ -154,7 +149,7 @@ conf_read(unsigned long addr, unsigned char type1)
 		*(vip)CIA_IOC_CFG;
 	}
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	DBGC(("done\n"));
 
 	return value;
@@ -167,7 +162,7 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 	int stat0, cia_cfg = 0;
 
 	DBGC(("conf_write(addr=0x%lx, type1=%d) ", addr, type1));
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vip)CIA_IOC_CIA_ERR;
@@ -204,92 +199,50 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 		*(vip)CIA_IOC_CFG;
 	}
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	DBGC(("done\n"));
 }
 
-static int
-cia_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+static int 
+cia_read_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		u32 *value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 	unsigned char type1;
+	int shift;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x00 + CIA_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
+	mask = (size - 1) * 8;
+	shift = (where & 3) * 8;
+	addr = (pci_addr << 5) + mask + CIA_CONF;
+	*value = conf_read(addr, type1) >> (shift);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int 
-cia_read_config_word(struct pci_dev *dev, int where, u16 *value)
+cia_write_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		 u32 value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x08 + CIA_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-cia_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr = (pci_addr << 5) + 0x18 + CIA_CONF;
-	*value = conf_read(addr, type1);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-cia_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
+	mask = (size - 1) * 8;
 	addr = (pci_addr << 5) + mask + CIA_CONF;
 	conf_write(addr, value << ((where & 3) * 8), type1);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int
-cia_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return cia_write_config(dev, where, value, 0x00);
-}
-
-static int 
-cia_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return cia_write_config(dev, where, value, 0x08);
-}
-
-static int 
-cia_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return cia_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops cia_pci_ops = 
 {
-	read_byte:	cia_read_config_byte,
-	read_word:	cia_read_config_word,
-	read_dword:	cia_read_config_dword,
-	write_byte:	cia_write_config_byte,
-	write_word:	cia_write_config_word,
-	write_dword:	cia_write_config_dword
+	.read = 	cia_read_config,
+	.write =	cia_write_config,
 };
 
 /*
@@ -299,7 +252,7 @@ struct pci_ops cia_pci_ops =
  */
 
 void
-cia_pci_tbi(struct pci_controler *hose, dma_addr_t start, dma_addr_t end)
+cia_pci_tbi(struct pci_controller *hose, dma_addr_t start, dma_addr_t end)
 {
 	wmb();
 	*(vip)CIA_IOC_PCI_TBIA = 3;	/* Flush all locked and unlocked.  */
@@ -308,66 +261,29 @@ cia_pci_tbi(struct pci_controler *hose, dma_addr_t start, dma_addr_t end)
 }
 
 /*
- * Fixup attempt number 1.
- *
- * Write zeros directly into the tag registers.
+ * On PYXIS, even if the tbia works, we cannot use it. It effectively locks
+ * the chip (as well as direct write to the tag registers) if there is a
+ * SG DMA operation in progress. This is true at least for PYXIS rev. 1,
+ * so always use the method below.
  */
-
-static void
-cia_pci_tbi_try1(struct pci_controler *hose,
-		 dma_addr_t start, dma_addr_t end)
-{
-	wmb();
-	*(vip)CIA_IOC_TB_TAGn(0) = 0;
-	*(vip)CIA_IOC_TB_TAGn(1) = 0;
-	*(vip)CIA_IOC_TB_TAGn(2) = 0;
-	*(vip)CIA_IOC_TB_TAGn(3) = 0;
-	*(vip)CIA_IOC_TB_TAGn(4) = 0;
-	*(vip)CIA_IOC_TB_TAGn(5) = 0;
-	*(vip)CIA_IOC_TB_TAGn(6) = 0;
-	*(vip)CIA_IOC_TB_TAGn(7) = 0;
-	mb();
-	*(vip)CIA_IOC_TB_TAGn(0);
-}
-
-#if 0
 /*
- * Fixup attempt number 2.  This is the method NT and NetBSD use.
+ * This is the method NT and NetBSD use.
  *
  * Allocate mappings, and put the chip into DMA loopback mode to read a
  * garbage page.  This works by causing TLB misses, causing old entries to
  * be purged to make room for the new entries coming in for the garbage page.
  */
 
-#define CIA_BROKEN_TBI_TRY2_BASE	0xE0000000
+#define CIA_BROKEN_TBIA_BASE	0x30000000
+#define CIA_BROKEN_TBIA_SIZE	1024
 
-static void __init
-cia_enable_broken_tbi_try2(void)
-{
-	unsigned long *ppte, pte;
-	long i;
-
-	ppte = __alloc_bootmem(PAGE_SIZE, 32768, 0);
-	pte = (virt_to_phys(ppte) >> (PAGE_SHIFT - 1)) | 1;
-
-	for (i = 0; i < PAGE_SIZE / sizeof(unsigned long); ++i)
-		ppte[i] = pte;
-
-	*(vip)CIA_IOC_PCI_W3_BASE = CIA_BROKEN_TBI_TRY2_BASE | 3;
-	*(vip)CIA_IOC_PCI_W3_MASK = (PAGE_SIZE - 1) & 0xfff00000;
-	*(vip)CIA_IOC_PCI_T3_BASE = virt_to_phys(ppte) >> 2;
-}
-
-static void
-cia_pci_tbi_try2(struct pci_controler *hose,
+/* Always called with interrupts disabled */
+void
+cia_pci_tbi_try2(struct pci_controller *hose,
 		 dma_addr_t start, dma_addr_t end)
 {
-	unsigned long flags;
-	unsigned long bus_addr;
+	void __iomem *bus_addr;
 	int ctrl;
-	long i;
-
-	__save_and_cli(flags);
 
 	/* Put the chip into PCI loopback mode.  */
 	mb();
@@ -382,10 +298,21 @@ cia_pci_tbi_try2(struct pci_controler *hose,
 	   TLB entries are not quite LRU, meaning that we need to read more
 	   times than there are actual tags.  The 2117x docs claim strict
 	   round-robin.  Oh well, we've come this far...  */
+	/* Even better - as seen on the PYXIS rev 1 the TLB tags 0-3 can
+	   be filled by the TLB misses *only once* after being invalidated
+	   (by tbia or direct write). Next misses won't update them even
+	   though the lock bits are cleared. Tags 4-7 are "quite LRU" though,
+	   so use them and read at window 3 base exactly 4 times. Reading
+	   more sometimes makes the chip crazy.  -ink */
 
-	bus_addr = cia_ioremap(CIA_BROKEN_TBI_TRY2_BASE);
-	for (i = 0; i < 12; ++i, bus_addr += 32768)
-		cia_readl(bus_addr);
+	bus_addr = cia_ioremap(CIA_BROKEN_TBIA_BASE, 32768 * 4);
+
+	cia_readl(bus_addr + 0x00000);
+	cia_readl(bus_addr + 0x08000);
+	cia_readl(bus_addr + 0x10000);
+	cia_readl(bus_addr + 0x18000);
+
+	cia_iounmap(bus_addr);
 
 	/* Restore normal PCI operation.  */
 	mb();
@@ -393,10 +320,26 @@ cia_pci_tbi_try2(struct pci_controler *hose,
 	mb();
 	*(vip)CIA_IOC_CIA_CTRL;
 	mb();
-
-	__restore_flags(flags);
 }
-#endif
+
+static inline void
+cia_prepare_tbia_workaround(int window)
+{
+	unsigned long *ppte, pte;
+	long i;
+
+	/* Use minimal 1K map. */
+	ppte = __alloc_bootmem(CIA_BROKEN_TBIA_SIZE, 32768, 0);
+	pte = (virt_to_phys(ppte) >> (PAGE_SHIFT - 1)) | 1;
+
+	for (i = 0; i < CIA_BROKEN_TBIA_SIZE / sizeof(unsigned long); ++i)
+		ppte[i] = pte;
+
+	*(vip)CIA_IOC_PCI_Wn_BASE(window) = CIA_BROKEN_TBIA_BASE | 3;
+	*(vip)CIA_IOC_PCI_Wn_MASK(window)
+	  = (CIA_BROKEN_TBIA_SIZE*1024 - 1) & 0xfff00000;
+	*(vip)CIA_IOC_PCI_Tn_BASE(window) = virt_to_phys(ppte) >> 2;
+}
 
 static void __init
 verify_tb_operation(void)
@@ -407,7 +350,12 @@ verify_tb_operation(void)
 
 	struct pci_iommu_arena *arena = pci_isa_hose->sg_isa;
 	int ctrl, addr0, tag0, pte0, data0;
-	int temp;
+	int temp, use_tbia_try2 = 0;
+	void __iomem *bus_addr;
+
+	/* pyxis -- tbia is broken */
+	if (pci_isa_hose->dense_io_base)
+		use_tbia_try2 = 1;
 
 	/* Put the chip into PCI loopback mode.  */
 	mb();
@@ -436,6 +384,9 @@ verify_tb_operation(void)
 	*(vip)CIA_IOC_TBn_PAGEm(0,2) = 0;
 	*(vip)CIA_IOC_TBn_PAGEm(0,3) = 0;
 	mb();
+
+	/* Get a usable bus address */
+	bus_addr = cia_ioremap(addr0, 8*PAGE_SIZE);
 
 	/* First, verify we can read back what we've written.  If
 	   this fails, we can't be sure of any of the other testing
@@ -472,7 +423,7 @@ verify_tb_operation(void)
 	mcheck_expected(0) = 1;
 	mcheck_taken(0) = 0;
 	mb();
-	temp = cia_readl(cia_ioremap(addr0));
+	temp = cia_readl(bus_addr);
 	mb();
 	mcheck_expected(0) = 0;
 	mb();
@@ -489,22 +440,15 @@ verify_tb_operation(void)
 
 	/* Third, try to invalidate the TLB.  */
 
-	cia_pci_tbi(arena->hose, 0, -1);
-	temp = *(vip)CIA_IOC_TB_TAGn(0);
-	if (temp & 1) {
-		cia_pci_tbi_try1(arena->hose, 0, -1);
-	
+	if (! use_tbia_try2) {
+		cia_pci_tbi(arena->hose, 0, -1);
 		temp = *(vip)CIA_IOC_TB_TAGn(0);
 		if (temp & 1) {
-			printk("pci: failed tbia test; "
-			       "no usable workaround\n");
-			goto failed;
+			use_tbia_try2 = 1;
+			printk("pci: failed tbia test; workaround available\n");
+		} else {
+			printk("pci: passed tbia test\n");
 		}
-
-		alpha_mv.mv_pci_tbi = cia_pci_tbi_try1;
-		printk("pci: failed tbia test; workaround 1 succeeded\n");
-	} else {
-		printk("pci: passed tbia test\n");
 	}
 
 	/* Fourth, verify the TLB snoops the EV5's caches when
@@ -516,7 +460,7 @@ verify_tb_operation(void)
 	mcheck_expected(0) = 1;
 	mcheck_taken(0) = 0;
 	mb();
-	temp = cia_readl(cia_ioremap(addr0 + 4*PAGE_SIZE));
+	temp = cia_readl(bus_addr + 4*PAGE_SIZE);
 	mb();
 	mcheck_expected(0) = 0;
 	mb();
@@ -540,7 +484,7 @@ verify_tb_operation(void)
 	mcheck_expected(0) = 1;
 	mcheck_taken(0) = 0;
 	mb();
-	temp = cia_readl(cia_ioremap(addr0 + 5*PAGE_SIZE));
+	temp = cia_readl(bus_addr + 5*PAGE_SIZE);
 	mb();
 	mcheck_expected(0) = 0;
 	mb();
@@ -564,7 +508,7 @@ verify_tb_operation(void)
 	mcheck_expected(0) = 1;
 	mcheck_taken(0) = 0;
 	mb();
-	temp = cia_readl(cia_ioremap(addr0 + 6*PAGE_SIZE));
+	temp = cia_readl(bus_addr + 6*PAGE_SIZE);
 	mb();
 	mcheck_expected(0) = 0;
 	mb();
@@ -574,9 +518,25 @@ verify_tb_operation(void)
 	/* Clean up after the tests.  */
 	arena->ptes[4] = 0;
 	arena->ptes[5] = 0;
+
+	if (use_tbia_try2) {
+		alpha_mv.mv_pci_tbi = cia_pci_tbi_try2;
+
+		/* Tags 0-3 must be disabled if we use this workaraund. */
+		wmb();
+		*(vip)CIA_IOC_TB_TAGn(0) = 2;
+		*(vip)CIA_IOC_TB_TAGn(1) = 2;
+		*(vip)CIA_IOC_TB_TAGn(2) = 2;
+		*(vip)CIA_IOC_TB_TAGn(3) = 2;
+
+		printk("pci: tbia workaround enabled\n");
+	}
 	alpha_mv.mv_pci_tbi(arena->hose, 0, -1);
 
 exit:
+	/* unmap the bus addr */
+	cia_iounmap(bus_addr);
+
 	/* Restore normal PCI operation.  */
 	mb();
 	*(vip)CIA_IOC_CIA_CTRL = ctrl;
@@ -588,20 +548,95 @@ exit:
 failed:
 	printk("pci: disabling sg translation window\n");
 	*(vip)CIA_IOC_PCI_W0_BASE = 0;
+	*(vip)CIA_IOC_PCI_W1_BASE = 0;
+	pci_isa_hose->sg_isa = NULL;
 	alpha_mv.mv_pci_tbi = NULL;
 	goto exit;
 }
 
+#if defined(ALPHA_RESTORE_SRM_SETUP)
+/* Save CIA configuration data as the console had it set up.  */
+struct 
+{
+    unsigned int hae_mem;
+    unsigned int hae_io;
+    unsigned int pci_dac_offset;
+    unsigned int err_mask;
+    unsigned int cia_ctrl;
+    unsigned int cia_cnfg;
+    struct {
+	unsigned int w_base;
+	unsigned int w_mask;
+	unsigned int t_base;
+    } window[4];
+} saved_config __attribute((common));
+
+void
+cia_save_srm_settings(int is_pyxis)
+{
+	int i;
+
+	/* Save some important registers. */
+	saved_config.err_mask       = *(vip)CIA_IOC_ERR_MASK;
+	saved_config.cia_ctrl       = *(vip)CIA_IOC_CIA_CTRL;
+	saved_config.hae_mem        = *(vip)CIA_IOC_HAE_MEM;
+	saved_config.hae_io         = *(vip)CIA_IOC_HAE_IO;
+	saved_config.pci_dac_offset = *(vip)CIA_IOC_PCI_W_DAC;
+
+	if (is_pyxis)
+	    saved_config.cia_cnfg   = *(vip)CIA_IOC_CIA_CNFG;
+	else
+	    saved_config.cia_cnfg   = 0;
+
+	/* Save DMA windows configuration. */
+	for (i = 0; i < 4; i++) {
+	    saved_config.window[i].w_base = *(vip)CIA_IOC_PCI_Wn_BASE(i);
+	    saved_config.window[i].w_mask = *(vip)CIA_IOC_PCI_Wn_MASK(i);
+	    saved_config.window[i].t_base = *(vip)CIA_IOC_PCI_Tn_BASE(i);
+	}
+	mb();
+}
+
+void
+cia_restore_srm_settings(void)
+{
+	int i;
+
+	for (i = 0; i < 4; i++) {
+	    *(vip)CIA_IOC_PCI_Wn_BASE(i) = saved_config.window[i].w_base;
+	    *(vip)CIA_IOC_PCI_Wn_MASK(i) = saved_config.window[i].w_mask;
+	    *(vip)CIA_IOC_PCI_Tn_BASE(i) = saved_config.window[i].t_base;
+	}
+
+	*(vip)CIA_IOC_HAE_MEM   = saved_config.hae_mem;
+	*(vip)CIA_IOC_HAE_IO    = saved_config.hae_io;
+	*(vip)CIA_IOC_PCI_W_DAC = saved_config.pci_dac_offset;	
+	*(vip)CIA_IOC_ERR_MASK  = saved_config.err_mask;
+	*(vip)CIA_IOC_CIA_CTRL  = saved_config.cia_ctrl;
+
+	if (saved_config.cia_cnfg) /* Must be pyxis. */
+	    *(vip)CIA_IOC_CIA_CNFG  = saved_config.cia_cnfg;
+
+	mb();
+}
+#else /* ALPHA_RESTORE_SRM_SETUP */
+#define cia_save_srm_settings(p)	do {} while (0)
+#define cia_restore_srm_settings()	do {} while (0)
+#endif /* ALPHA_RESTORE_SRM_SETUP */
+
+
 static void __init
 do_init_arch(int is_pyxis)
 {
-	struct pci_controler *hose;
-	int temp;
-	int cia_rev;
+	struct pci_controller *hose;
+	int temp, cia_rev, tbia_window;
 
 	cia_rev = *(vip)CIA_IOC_CIA_REV & CIA_REV_MASK;
 	printk("pci: cia revision %d%s\n",
 	       cia_rev, is_pyxis ? " (pyxis)" : "");
+
+	if (alpha_using_srm)
+		cia_save_srm_settings(is_pyxis);
 
 	/* Set up error reporting.  */
 	temp = *(vip)CIA_IOC_ERR_MASK;
@@ -628,14 +663,15 @@ do_init_arch(int is_pyxis)
 	*(vip)CIA_IOC_HAE_IO = 0;
 
 	/* For PYXIS, we always use BWX bus and i/o accesses.  To that end,
-	   make sure they're enabled on the controler.  */
+	   make sure they're enabled on the controller.  At the same time,
+	   enable the monster window.  */
 	if (is_pyxis) {
 		temp = *(vip)CIA_IOC_CIA_CNFG;
-		temp |= CIA_CNFG_IOA_BWEN;
+		temp |= CIA_CNFG_IOA_BWEN | CIA_CNFG_PCI_MWEN;
 		*(vip)CIA_IOC_CIA_CNFG = temp;
 	}
 
-	/* Syncronize with all previous changes.  */
+	/* Synchronize with all previous changes.  */
 	mb();
 	*(vip)CIA_IOC_CIA_REV;
 
@@ -643,7 +679,7 @@ do_init_arch(int is_pyxis)
 	 * Create our single hose.
 	 */
 
-	pci_isa_hose = hose = alloc_pci_controler();
+	pci_isa_hose = hose = alloc_pci_controller();
 	hose->io_space = &ioport_resource;
 	hose->mem_space = &iomem_resource;
 	hose->index = 0;
@@ -674,14 +710,10 @@ do_init_arch(int is_pyxis)
 	/*
 	 * Set up the PCI to main memory translation windows.
 	 *
-	 * Window 0 is scatter-gather 8MB at 8MB (for isa)
-	 * Window 1 is direct access 1GB at 1GB
-	 * Window 2 is direct access 1GB at 2GB
-	 *
-	 * We must actually use 2 windows to direct-map the 2GB space,
-	 * because of an idiot-syncrasy of the CYPRESS chip used on 
-	 * many PYXIS systems.  It may respond to a PCI bus address in
-	 * the last 1MB of the 4GB address range.
+	 * Window 0 is S/G 8MB at 8MB (for isa)
+	 * Window 1 is S/G 1MB at 768MB (for tbia) (unused for CIA rev 1)
+	 * Window 2 is direct access 2GB at 2GB
+	 * Window 3 is DAC access 4GB at 8GB (or S/G for tbia if CIA rev 1)
 	 *
 	 * ??? NetBSD hints that page tables must be aligned to 32K,
 	 * possibly due to a hardware bug.  This is over-aligned
@@ -691,22 +723,51 @@ do_init_arch(int is_pyxis)
 
 	hose->sg_pci = NULL;
 	hose->sg_isa = iommu_arena_new(hose, 0x00800000, 0x00800000, 32768);
-	__direct_map_base = 0x40000000;
+
+	__direct_map_base = 0x80000000;
 	__direct_map_size = 0x80000000;
 
 	*(vip)CIA_IOC_PCI_W0_BASE = hose->sg_isa->dma_base | 3;
 	*(vip)CIA_IOC_PCI_W0_MASK = (hose->sg_isa->size - 1) & 0xfff00000;
 	*(vip)CIA_IOC_PCI_T0_BASE = virt_to_phys(hose->sg_isa->ptes) >> 2;
 
-	*(vip)CIA_IOC_PCI_W1_BASE = 0x40000000 | 1;
-	*(vip)CIA_IOC_PCI_W1_MASK = (0x40000000 - 1) & 0xfff00000;
-	*(vip)CIA_IOC_PCI_T1_BASE = 0 >> 2;
+	*(vip)CIA_IOC_PCI_W2_BASE = __direct_map_base | 1;
+	*(vip)CIA_IOC_PCI_W2_MASK = (__direct_map_size - 1) & 0xfff00000;
+	*(vip)CIA_IOC_PCI_T2_BASE = 0 >> 2;
 
-	*(vip)CIA_IOC_PCI_W2_BASE = 0x80000000 | 1;
-	*(vip)CIA_IOC_PCI_W2_MASK = (0x40000000 - 1) & 0xfff00000;
-	*(vip)CIA_IOC_PCI_T2_BASE = 0x40000000 >> 2;
+	/* On PYXIS we have the monster window, selected by bit 40, so
+	   there is no need for window3 to be enabled.
 
-	*(vip)CIA_IOC_PCI_W3_BASE = 0;
+	   On CIA, we don't have true arbitrary addressing -- bits <39:32>
+	   are compared against W_DAC.  We can, however, directly map 4GB,
+	   which is better than before.  However, due to assumptions made
+	   elsewhere, we should not claim that we support DAC unless that
+	   4GB covers all of physical memory.
+
+	   On CIA rev 1, apparently W1 and W2 can't be used for SG. 
+	   At least, there are reports that it doesn't work for Alcor. 
+	   In that case, we have no choice but to use W3 for the TBIA 
+	   workaround, which means we can't use DAC at all. */ 
+
+	tbia_window = 1;
+	if (is_pyxis) {
+		*(vip)CIA_IOC_PCI_W3_BASE = 0;
+	} else if (cia_rev == 1) {
+		*(vip)CIA_IOC_PCI_W1_BASE = 0;
+		tbia_window = 3;
+	} else if (max_low_pfn > (0x100000000UL >> PAGE_SHIFT)) {
+		*(vip)CIA_IOC_PCI_W3_BASE = 0;
+	} else {
+		*(vip)CIA_IOC_PCI_W3_BASE = 0x00000000 | 1 | 8;
+		*(vip)CIA_IOC_PCI_W3_MASK = 0xfff00000;
+		*(vip)CIA_IOC_PCI_T3_BASE = 0 >> 2;
+
+		alpha_mv.pci_dac_offset = 0x200000000UL;
+		*(vip)CIA_IOC_PCI_W_DAC = alpha_mv.pci_dac_offset >> 32;
+	}
+
+	/* Prepare workaround for apparently broken tbia. */
+	cia_prepare_tbia_workaround(tbia_window);
 }
 
 void __init
@@ -740,6 +801,13 @@ pyxis_init_arch(void)
 	do_init_arch(1);
 }
 
+void
+cia_kill_arch(int mode)
+{
+	if (alpha_using_srm)
+		cia_restore_srm_settings();
+}
+
 void __init
 cia_init_pci(void)
 {
@@ -759,6 +827,7 @@ cia_pci_clr_err(void)
 	*(vip)CIA_IOC_CIA_ERR;		/* re-read to force write.  */
 }
 
+#ifdef CONFIG_VERBOSE_MCHECK
 static void
 cia_decode_pci_error(struct el_CIA_sysdata_mcheck *cia, const char *msg)
 {
@@ -1026,13 +1095,14 @@ cia_decode_parity_error(struct el_CIA_sysdata_mcheck *cia)
 	printk(KERN_CRIT "  Command: %s, Parity bit: %d\n", cmd, par);
 	printk(KERN_CRIT "  Address: %#010lx, Mask: %#lx\n", addr, mask);
 }
+#endif /* CONFIG_VERBOSE_MCHECK */
+
 
 static int
 cia_decode_mchk(unsigned long la_ptr)
 {
 	struct el_common *com;
 	struct el_CIA_sysdata_mcheck *cia;
-	int which;
 
 	com = (void *)la_ptr;
 	cia = (void *)(la_ptr + com->sys_offset);
@@ -1040,8 +1110,11 @@ cia_decode_mchk(unsigned long la_ptr)
 	if ((cia->cia_err & CIA_ERR_VALID) == 0)
 		return 0;
 
-	which = cia->cia_err & 0xfff;
-	switch (ffs(which) - 1) {
+#ifdef CONFIG_VERBOSE_MCHECK
+	if (!alpha_verbose_mcheck)
+		return 1;
+
+	switch (ffs(cia->cia_err & 0xfff) - 1) {
 	case 0: /* CIA_ERR_COR_ERR */
 		cia_decode_ecc_error(cia, "Corrected ECC error");
 		break;
@@ -1113,6 +1186,7 @@ cia_decode_mchk(unsigned long la_ptr)
 	if (cia->cia_err & CIA_ERR_LOST_IOA_TIMEOUT)
 		printk(KERN_CRIT "CIA lost machine check: "
 		       "I/O timeout\n");
+#endif /* CONFIG_VERBOSE_MCHECK */
 
 	return 1;
 }

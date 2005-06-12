@@ -1,69 +1,70 @@
-/* $Id: setup.c,v 1.20 2000/03/05 02:44:41 gniibe Exp $
+/* $Id: setup.c,v 1.30 2003/10/13 07:21:19 lethal Exp $
  *
  *  linux/arch/sh/kernel/setup.c
  *
  *  Copyright (C) 1999  Niibe Yutaka
- *
+ *  Copyright (C) 2002, 2003  Paul Mundt
  */
 
 /*
  * This file handles the architecture-dependent parts of initialization
  */
 
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/stddef.h>
-#include <linux/unistd.h>
-#include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/tty.h>
 #include <linux/ioport.h>
-#include <linux/delay.h>
-#include <linux/config.h>
 #include <linux/init.h>
-#ifdef CONFIG_BLK_DEV_RAM
-#include <linux/blk.h>
-#endif
+#include <linux/initrd.h>
 #include <linux/bootmem.h>
 #include <linux/console.h>
-#include <linux/ctype.h>
-#include <asm/processor.h>
-#include <asm/page.h>
-#include <asm/pgtable.h>
+#include <linux/seq_file.h>
+#include <linux/root_dev.h>
+#include <linux/utsname.h>
+#include <linux/cpu.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/io_generic.h>
-#include <asm/smp.h>
-#include <asm/machvec.h>
-#ifdef CONFIG_SH_EARLY_PRINTK
-#include <asm/sh_bios.h>
-#endif
+#include <asm/sections.h>
+#include <asm/irq.h>
+#include <asm/setup.h>
 
+#ifdef CONFIG_SH_KGDB
+#include <asm/kgdb.h>
+static int kgdb_parse_options(char *options);
+#endif
+extern void * __rd_start, * __rd_end;
 /*
  * Machine setup..
  */
 
-struct sh_cpuinfo boot_cpu_data = { CPU_SH_NONE, 0, 0, 0, };
+/*
+ * Initialize loops_per_jiffy as 10000000 (1000MIPS).
+ * This value will be used at the very early stage of serial setup.
+ * The bigger value means no problem.
+ */
+struct sh_cpuinfo boot_cpu_data = { CPU_SH_NONE, 0, 10000000, };
 struct screen_info screen_info;
+unsigned char aux_device_present = 0xaa;
 
-#ifdef CONFIG_BLK_DEV_RAM
-extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
-extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
-extern int rd_image_start;	/* starting block # of image */
-#endif
-
-#if defined(CONFIG_SH_GENERIC) || defined(CONFIG_SH_UNKNOWN)
+#if defined(CONFIG_SH_UNKNOWN)
 struct sh_machine_vector sh_mv;
 #endif
 
-extern void fpu_init(void);
+/* We need this to satisfy some external references. */
+struct screen_info screen_info = {
+        0, 25,                  /* orig-x, orig-y */
+        0,                      /* unused */
+        0,                      /* orig-video-page */
+        0,                      /* orig-video-mode */
+        80,                     /* orig-video-cols */
+        0,0,0,                  /* ega_ax, ega_bx, ega_cx */
+        25,                     /* orig-video-lines */
+        0,                      /* orig-video-isVGA */
+        16                      /* orig-video-points */
+};
+
+extern void platform_setup(void);
+extern char *get_system_type(void);
 extern int root_mountflags;
-extern int _text, _etext, _edata, _end;
 
 #define MV_NAME_SIZE 32
 
@@ -82,14 +83,12 @@ static struct sh_machine_vector* __init get_mv_byname(const char* name);
 #define INITRD_SIZE (*(unsigned long *) (PARAM+0x014))
 /* ... */
 #define COMMAND_LINE ((char *) (PARAM+0x100))
-#define COMMAND_LINE_SIZE 256
 
 #define RAMDISK_IMAGE_START_MASK  	0x07FF
 #define RAMDISK_PROMPT_FLAG		0x8000
 #define RAMDISK_LOAD_FLAG		0x4000	
 
 static char command_line[COMMAND_LINE_SIZE] = { 0, };
-       char saved_command_line[COMMAND_LINE_SIZE];
 
 struct resource standard_io_resources[] = {
 	{ "dma1", 0x00, 0x1f },
@@ -115,78 +114,7 @@ static struct resource ram_resources[] = {
 	{ "Kernel data", 0, 0 }
 };
 
-static unsigned long memory_start, memory_end;
-
-#ifdef CONFIG_SH_EARLY_PRINTK
-/*
- *	Print a string through the BIOS
- */
-static void sh_console_write(struct console *co, const char *s,
-				 unsigned count)
-{
-    	sh_bios_console_write(s, count);
-}
-
-/*
- *	Receive character from the serial port
- */
-static int sh_console_wait_key(struct console *co)
-{
-	/* Not implemented yet */
-	return 0;
-}
-
-static kdev_t sh_console_device(struct console *c)
-{
-    	/* TODO: this is totally bogus */
-	/* return MKDEV(SCI_MAJOR, SCI_MINOR_START + c->index); */
-	return 0;
-}
-
-/*
- *	Setup initial baud/bits/parity. We do two things here:
- *	- construct a cflag setting for the first rs_open()
- *	- initialize the serial port
- *	Return non-zero if we didn't find a serial port.
- */
-static int __init sh_console_setup(struct console *co, char *options)
-{
-	int	cflag = CREAD | HUPCL | CLOCAL;
-
-	/*
-	 *	Now construct a cflag setting.
-	 *  	TODO: this is a totally bogus cflag, as we have
-	 *  	no idea what serial settings the BIOS is using, or
-	 *  	even if its using the serial port at all.
-	 */
-    	cflag |= B115200 | CS8 | /*no parity*/0;
-
-	co->cflag = cflag;
-
-	return 0;
-}
-
-static struct console sh_console = {
-	name:		"bios",
-	write:		sh_console_write,
-	device:		sh_console_device,
-	wait_key:	sh_console_wait_key,
-	setup:		sh_console_setup,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
-};
-
-void sh_console_init(void)
-{
-	register_console(&sh_console);
-}
-
-void sh_console_unregister(void)
-{
-	unregister_console(&sh_console);
-}
-
-#endif
+unsigned long memory_start, memory_end;
 
 static inline void parse_cmdline (char ** cmdline_p, char mv_name[MV_NAME_SIZE],
 				  struct sh_machine_vector** mvp,
@@ -201,8 +129,7 @@ static inline void parse_cmdline (char ** cmdline_p, char mv_name[MV_NAME_SIZE],
 	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
 
 	memory_start = (unsigned long)PAGE_OFFSET+__MEMORY_START;
-	/* Default is 4Mbyte. */
-	memory_end = (unsigned long)PAGE_OFFSET+0x00400000+__MEMORY_START;
+	memory_end = memory_start + __MEMORY_SIZE;
 
 	for (;;) {
 		/*
@@ -258,39 +185,15 @@ static inline void parse_cmdline (char ** cmdline_p, char mv_name[MV_NAME_SIZE],
 	*cmdline_p = command_line;
 }
 
-void __init setup_arch(char **cmdline_p)
+static int __init sh_mv_setup(char **cmdline_p)
 {
+#if defined(CONFIG_SH_UNKNOWN)
 	extern struct sh_machine_vector mv_unknown;
+#endif
 	struct sh_machine_vector *mv = NULL;
 	char mv_name[MV_NAME_SIZE] = "";
 	unsigned long mv_io_base = 0;
 	int mv_mmio_enable = 0;
-	unsigned long bootmap_size;
-	unsigned long start_pfn, max_pfn, max_low_pfn;
-
-#ifdef CONFIG_SH_EARLY_PRINTK
-	sh_console_init();
-#endif
-	
-	ROOT_DEV = to_kdev_t(ORIG_ROOT_DEV);
-
-#ifdef CONFIG_BLK_DEV_RAM
-	rd_image_start = RAMDISK_FLAGS & RAMDISK_IMAGE_START_MASK;
-	rd_prompt = ((RAMDISK_FLAGS & RAMDISK_PROMPT_FLAG) != 0);
-	rd_doload = ((RAMDISK_FLAGS & RAMDISK_LOAD_FLAG) != 0);
-#endif
-
-	if (!MOUNT_ROOT_RDONLY)
-		root_mountflags &= ~MS_RDONLY;
-	init_mm.start_code = (unsigned long)&_text;
-	init_mm.end_code = (unsigned long) &_etext;
-	init_mm.end_data = (unsigned long) &_edata;
-	init_mm.brk = (unsigned long) &_end;
-
-	code_resource.start = virt_to_bus(&_text);
-	code_resource.end = virt_to_bus(&_etext)-1;
-	data_resource.start = virt_to_bus(&_etext);
-	data_resource.end = virt_to_bus(&_edata)-1;
 
 	parse_cmdline(cmdline_p, mv_name, &mv, &mv_io_base, &mv_mmio_enable);
 
@@ -308,45 +211,91 @@ void __init setup_arch(char **cmdline_p)
 	sh_mv = mv_unknown;
 #endif
 
-#if defined(CONFIG_SH_GENERIC) || defined(CONFIG_SH_UNKNOWN)
-	if (mv_io_base != 0) {
-		sh_mv.mv_inb = generic_inb;
-		sh_mv.mv_inw = generic_inw;
-		sh_mv.mv_inl = generic_inl;
-		sh_mv.mv_outb = generic_outb;
-		sh_mv.mv_outw = generic_outw;
-		sh_mv.mv_outl = generic_outl;
+	/*
+	 * Manually walk the vec, fill in anything that the board hasn't yet
+	 * by hand, wrapping to the generic implementation.
+	 */
+#define mv_set(elem) do { \
+	if (!sh_mv.mv_##elem) \
+		sh_mv.mv_##elem = generic_##elem; \
+} while (0)
 
-		sh_mv.mv_inb_p = generic_inb_p;
-		sh_mv.mv_inw_p = generic_inw_p;
-		sh_mv.mv_inl_p = generic_inl_p;
-		sh_mv.mv_outb_p = generic_outb_p;
-		sh_mv.mv_outw_p = generic_outw_p;
-		sh_mv.mv_outl_p = generic_outl_p;
+	mv_set(inb);	mv_set(inw);	mv_set(inl);
+	mv_set(outb);	mv_set(outw);	mv_set(outl);
 
-		sh_mv.mv_insb = generic_insb;
-		sh_mv.mv_insw = generic_insw;
-		sh_mv.mv_insl = generic_insl;
-		sh_mv.mv_outsb = generic_outsb;
-		sh_mv.mv_outsw = generic_outsw;
-		sh_mv.mv_outsl = generic_outsl;
+	mv_set(inb_p);	mv_set(inw_p);	mv_set(inl_p);
+	mv_set(outb_p);	mv_set(outw_p);	mv_set(outl_p);
 
-		sh_mv.mv_isa_port2addr = generic_isa_port2addr;
-		generic_io_base = mv_io_base;
-	}
-	if (mv_mmio_enable != 0) {
-		sh_mv.mv_readb = generic_readb;
-		sh_mv.mv_readw = generic_readw;
-		sh_mv.mv_readl = generic_readl;
-		sh_mv.mv_writeb = generic_writeb;
-		sh_mv.mv_writew = generic_writew;
-		sh_mv.mv_writel = generic_writel;
-	}
+	mv_set(insb);	mv_set(insw);	mv_set(insl);
+	mv_set(outsb);	mv_set(outsw);	mv_set(outsl);
+
+	mv_set(readb);	mv_set(readw);	mv_set(readl);
+	mv_set(writeb);	mv_set(writew);	mv_set(writel);
+
+	mv_set(ioremap);
+	mv_set(iounmap);
+
+	mv_set(isa_port2addr);
+	mv_set(irq_demux);
+
+#ifdef CONFIG_SH_UNKNOWN
+	__set_io_port_base(mv_io_base);
 #endif
+
+	return 0;
+}
+
+void __init setup_arch(char **cmdline_p)
+{
+	unsigned long bootmap_size;
+	unsigned long start_pfn, max_pfn, max_low_pfn;
+
+#ifdef CONFIG_EARLY_PRINTK
+	extern void enable_early_printk(void);
+
+	enable_early_printk();
+#endif
+#ifdef CONFIG_CMDLINE_BOOL
+        strcpy(COMMAND_LINE, CONFIG_CMDLINE);
+#endif
+
+	ROOT_DEV = old_decode_dev(ORIG_ROOT_DEV);
+
+#ifdef CONFIG_BLK_DEV_RAM
+	rd_image_start = RAMDISK_FLAGS & RAMDISK_IMAGE_START_MASK;
+	rd_prompt = ((RAMDISK_FLAGS & RAMDISK_PROMPT_FLAG) != 0);
+	rd_doload = ((RAMDISK_FLAGS & RAMDISK_LOAD_FLAG) != 0);
+#endif
+
+	if (!MOUNT_ROOT_RDONLY)
+		root_mountflags &= ~MS_RDONLY;
+	init_mm.start_code = (unsigned long) _text;
+	init_mm.end_code = (unsigned long) _etext;
+	init_mm.end_data = (unsigned long) _edata;
+	init_mm.brk = (unsigned long) _end;
+
+	code_resource.start = virt_to_bus(_text);
+	code_resource.end = virt_to_bus(_etext)-1;
+	data_resource.start = virt_to_bus(_etext);
+	data_resource.end = virt_to_bus(_edata)-1;
+
+	sh_mv_setup(cmdline_p);
 
 #define PFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
 #define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
 #define PFN_PHYS(x)	((x) << PAGE_SHIFT)
+
+#ifdef CONFIG_DISCONTIGMEM
+	NODE_DATA(0)->bdata = &discontig_node_bdata[0];
+	NODE_DATA(1)->bdata = &discontig_node_bdata[1];
+
+	bootmap_size = init_bootmem_node(NODE_DATA(1), 
+					 PFN_UP(__MEMORY_START_2ND),
+					 PFN_UP(__MEMORY_START_2ND),
+					 PFN_DOWN(__MEMORY_START_2ND+__MEMORY_SIZE_2ND));
+	free_bootmem_node(NODE_DATA(1), __MEMORY_START_2ND, __MEMORY_SIZE_2ND);
+	reserve_bootmem_node(NODE_DATA(1), __MEMORY_START_2ND, bootmap_size);
+#endif
 
 	/*
 	 * Find the highest page frame number we have available
@@ -362,16 +311,16 @@ void __init setup_arch(char **cmdline_p)
 	 * Partially used pages are not usable - thus
 	 * we are rounding upwards:
  	 */
-	start_pfn = PFN_UP(__pa(&_end));
+	start_pfn = PFN_UP(__pa(_end));
+
 	/*
 	 * Find a proper area for the bootmem bitmap. After this
 	 * bootstrap step all allocations (until the page allocator
 	 * is intact) must be done via bootmem_alloc().
 	 */
 	bootmap_size = init_bootmem_node(NODE_DATA(0), start_pfn,
-					 __MEMORY_START>>PAGE_SHIFT, 
+					 __MEMORY_START>>PAGE_SHIFT,
 					 max_low_pfn);
-
 	/*
 	 * Register fully available low RAM pages with the bootmem allocator.
 	 */
@@ -391,7 +340,8 @@ void __init setup_arch(char **cmdline_p)
 			last_pfn = max_low_pfn;
 
 		pages = last_pfn - curr_pfn;
-		free_bootmem(PFN_PHYS(curr_pfn), PFN_PHYS(pages));
+		free_bootmem_node(NODE_DATA(0), PFN_PHYS(curr_pfn),
+				  PFN_PHYS(pages));
 	}
 
 	/*
@@ -401,19 +351,26 @@ void __init setup_arch(char **cmdline_p)
 	 * case of us accidentally initializing the bootmem allocator with
 	 * an invalid RAM area.
 	 */
-	reserve_bootmem(__MEMORY_START+PAGE_SIZE, (PFN_PHYS(start_pfn) + 
-			bootmap_size + PAGE_SIZE-1) - __MEMORY_START);
+	reserve_bootmem_node(NODE_DATA(0), __MEMORY_START+PAGE_SIZE,
+		(PFN_PHYS(start_pfn)+bootmap_size+PAGE_SIZE-1)-__MEMORY_START);
 
 	/*
 	 * reserve physical page 0 - it's a special BIOS page on many boxes,
 	 * enabling clean reboots, SMP operation, laptop functions.
 	 */
-	reserve_bootmem(__MEMORY_START, PAGE_SIZE);
+	reserve_bootmem_node(NODE_DATA(0), __MEMORY_START, PAGE_SIZE);
 
 #ifdef CONFIG_BLK_DEV_INITRD
+ 	ROOT_DEV = MKDEV(RAMDISK_MAJOR, 0);
+ 	if (&__rd_start != &__rd_end) {
+		LOADER_TYPE = 1;
+		INITRD_START = PHYSADDR((unsigned long)&__rd_start) - __MEMORY_START;
+		INITRD_SIZE = (unsigned long)&__rd_end - (unsigned long)&__rd_start;
+ 	}
+
 	if (LOADER_TYPE && INITRD_START) {
 		if (INITRD_START + INITRD_SIZE <= (max_low_pfn << PAGE_SHIFT)) {
-			reserve_bootmem(INITRD_START+__MEMORY_START, INITRD_SIZE);
+			reserve_bootmem_node(NODE_DATA(0), INITRD_START+__MEMORY_START, INITRD_SIZE);
 			initrd_start =
 				INITRD_START ? INITRD_START + PAGE_OFFSET + __MEMORY_START : 0;
 			initrd_end = initrd_start + INITRD_SIZE;
@@ -427,41 +384,13 @@ void __init setup_arch(char **cmdline_p)
 	}
 #endif
 
-#if 0
-	/*
-	 * Request the standard RAM and ROM resources -
-	 * they eat up PCI memory space
-	 */
-	request_resource(&iomem_resource, ram_resources+0);
-	request_resource(&iomem_resource, ram_resources+1);
-	request_resource(&iomem_resource, ram_resources+2);
-	request_resource(ram_resources+1, &code_resource);
-	request_resource(ram_resources+1, &data_resource);
-	probe_roms();
-
-	/* request I/O space for devices used on all i[345]86 PCs */
-	for (i = 0; i < STANDARD_IO_RESOURCES; i++)
-		request_resource(&ioport_resource, standard_io_resources+i);
-#endif
-
-#ifdef CONFIG_VT
-#if defined(CONFIG_VGA_CONSOLE)
-	conswitchp = &vga_con;
-#elif defined(CONFIG_DUMMY_CONSOLE)
+#ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
-#endif
 #endif
 
 	/* Perform the machine specific initialisation */
-	if (sh_mv.mv_init_arch != NULL) {
-		sh_mv.mv_init_arch();
-	}
+	platform_setup();
 
-#if defined(__SH4__)
-	/* We already grab/initialized FPU in head.S.  Make it consisitent. */
-	init_task.used_math = 1;
-	init_task.flags |= PF_USEDFPU;
-#endif
 	paging_init();
 }
 
@@ -480,41 +409,242 @@ struct sh_machine_vector* __init get_mv_byname(const char* name)
 		struct sh_machine_vector *mv = &all_vecs[i];
 		if (mv == NULL)
 			continue;
-		if (strcasecmp(name, mv->mv_name) == 0) {
+		if (strcasecmp(name, get_system_type()) == 0) {
 			return mv;
 		}
 	}
 	return NULL;
 }
 
+static struct cpu cpu[NR_CPUS];
+
+static int __init topology_init(void)
+{
+	int cpu_id;
+
+	for (cpu_id = 0; cpu_id < NR_CPUS; cpu_id++)
+		if (cpu_possible(cpu_id))
+			register_cpu(&cpu[cpu_id], cpu_id, NULL);
+
+	return 0;
+}
+
+subsys_initcall(topology_init);
+
+static const char *cpu_name[] = {
+	[CPU_SH7604]	= "SH7604",
+	[CPU_SH7705]	= "SH7705",
+	[CPU_SH7708]	= "SH7708",
+	[CPU_SH7729]	= "SH7729",
+	[CPU_SH7300]	= "SH7300",
+	[CPU_SH7750]	= "SH7750",
+	[CPU_SH7750S]	= "SH7750S",
+	[CPU_SH7750R]	= "SH7750R",
+	[CPU_SH7751]	= "SH7751",
+	[CPU_SH7751R]	= "SH7751R",
+	[CPU_SH7760]	= "SH7760",
+	[CPU_SH73180]	= "SH73180",
+	[CPU_ST40RA]	= "ST40RA",
+	[CPU_ST40GX1]	= "ST40GX1",
+	[CPU_SH4_202]	= "SH4-202",
+	[CPU_SH4_501]	= "SH4-501",
+	[CPU_SH_NONE]	= "Unknown"
+};
+
+const char *get_cpu_subtype(void)
+{
+	return cpu_name[boot_cpu_data.type];
+}
+
+#ifdef CONFIG_PROC_FS
+static const char *cpu_flags[] = {
+	"none", "fpu", "p2flush", "mmuassoc", "dsp", "perfctr",
+};
+
+static void show_cpuflags(struct seq_file *m)
+{
+	unsigned long i;
+
+	seq_printf(m, "cpu flags\t:");
+
+	if (!cpu_data->flags) {
+		seq_printf(m, " %s\n", cpu_flags[0]);
+		return;
+	}
+
+	for (i = 0; i < cpu_data->flags; i++)
+		if ((cpu_data->flags & (1 << i)))
+			seq_printf(m, " %s", cpu_flags[i+1]);
+
+	seq_printf(m, "\n");
+}
+
+static void show_cacheinfo(struct seq_file *m, const char *type, struct cache_info info)
+{
+	unsigned int cache_size;
+
+	cache_size = info.ways * info.sets * info.linesz;
+
+	seq_printf(m, "%s size\t: %dKiB\n", type, cache_size >> 10);
+}
+
 /*
  *	Get CPU information for use by the procfs.
  */
-#ifdef CONFIG_PROC_FS
-int get_cpuinfo(char *buffer)
+static int show_cpuinfo(struct seq_file *m, void *v)
 {
-	char *p = buffer;
+	unsigned int cpu = smp_processor_id();
 
-#if defined(__sh3__)
-	p += sprintf(p,"cpu family\t: SH-3\n"
-		       "cache size\t: 8K-byte\n");
-#elif defined(__SH4__)
-	p += sprintf(p,"cpu family\t: SH-4\n"
-		       "cache size\t: 8K-byte/16K-byte\n");
-#endif
-	p += sprintf(p, "bogomips\t: %lu.%02lu\n\n",
-		     (loops_per_jiffy+2500)/(500000/HZ),
-		     ((loops_per_jiffy+2500)/(5000/HZ)) % 100);
-	p += sprintf(p, "Machine: %s\n", sh_mv.mv_name);
+	if (!cpu && cpu_online(cpu))
+		seq_printf(m, "machine\t\t: %s\n", get_system_type());
+
+	seq_printf(m, "processor\t: %d\n", cpu);
+	seq_printf(m, "cpu family\t: %s\n", system_utsname.machine);
+	seq_printf(m, "cpu type\t: %s\n", get_cpu_subtype());
+
+	show_cpuflags(m);
+
+	seq_printf(m, "cache type\t: ");
+
+	/*
+	 * Check for what type of cache we have, we support both the
+	 * unified cache on the SH-2 and SH-3, as well as the harvard
+	 * style cache on the SH-4.
+	 */
+	if (test_bit(SH_CACHE_COMBINED, &(boot_cpu_data.icache.flags))) {
+		seq_printf(m, "unified\n");
+		show_cacheinfo(m, "cache", boot_cpu_data.icache);
+	} else {
+		seq_printf(m, "split (harvard)\n");
+		show_cacheinfo(m, "icache", boot_cpu_data.icache);
+		show_cacheinfo(m, "dcache", boot_cpu_data.dcache);
+	}
+
+	seq_printf(m, "bogomips\t: %lu.%02lu\n",
+		     boot_cpu_data.loops_per_jiffy/(500000/HZ),
+		     (boot_cpu_data.loops_per_jiffy/(5000/HZ)) % 100);
 
 #define PRINT_CLOCK(name, value) \
-	p += sprintf(p, name " clock: %d.%02dMHz\n", \
+	seq_printf(m, name " clock\t: %d.%02dMHz\n", \
 		     ((value) / 1000000), ((value) % 1000000)/10000)
 	
-	PRINT_CLOCK("CPU", boot_cpu_data.cpu_clock);
-	PRINT_CLOCK("Bus", boot_cpu_data.bus_clock);
-	PRINT_CLOCK("Peripheral module", boot_cpu_data.module_clock);
-
-	return p - buffer;
-}
+	PRINT_CLOCK("cpu", boot_cpu_data.cpu_clock);
+	PRINT_CLOCK("bus", boot_cpu_data.bus_clock);
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+	PRINT_CLOCK("memory", boot_cpu_data.memory_clock);
 #endif
+	PRINT_CLOCK("module", boot_cpu_data.module_clock);
+
+	return 0;
+}
+
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	return *pos < NR_CPUS ? cpu_data + *pos : NULL;
+}
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return c_start(m, pos);
+}
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+struct seq_operations cpuinfo_op = {
+	.start	= c_start,
+	.next	= c_next,
+	.stop	= c_stop,
+	.show	= show_cpuinfo,
+};
+#endif /* CONFIG_PROC_FS */
+
+#ifdef CONFIG_SH_KGDB
+/*
+ * Parse command-line kgdb options.  By default KGDB is enabled,
+ * entered on error (or other action) using default serial info.
+ * The command-line option can include a serial port specification
+ * and an action to override default or configured behavior.
+ */
+struct kgdb_sermap kgdb_sci_sermap =
+{ "ttySC", 5, kgdb_sci_setup, NULL };
+
+struct kgdb_sermap *kgdb_serlist = &kgdb_sci_sermap;
+struct kgdb_sermap *kgdb_porttype = &kgdb_sci_sermap;
+
+void kgdb_register_sermap(struct kgdb_sermap *map)
+{
+	struct kgdb_sermap *last;
+
+	for (last = kgdb_serlist; last->next; last = last->next)
+		;
+	last->next = map;
+	if (!map->namelen) {
+		map->namelen = strlen(map->name);
+	}
+}
+
+static int __init kgdb_parse_options(char *options)
+{
+	char c;
+	int baud;
+
+	/* Check for port spec (or use default) */
+
+	/* Determine port type and instance */
+	if (!memcmp(options, "tty", 3)) {
+		struct kgdb_sermap *map = kgdb_serlist;
+
+		while (map && memcmp(options, map->name, map->namelen))
+			map = map->next;
+
+		if (!map) {
+			KGDB_PRINTK("unknown port spec in %s\n", options);
+			return -1;
+		}
+
+		kgdb_porttype = map;
+		kgdb_serial_setup = map->setup_fn;
+		kgdb_portnum = options[map->namelen] - '0';
+		options += map->namelen + 1;
+
+		options = (*options == ',') ? options+1 : options;
+		
+		/* Read optional parameters (baud/parity/bits) */
+		baud = simple_strtoul(options, &options, 10);
+		if (baud != 0) {
+			kgdb_baud = baud;
+
+			c = toupper(*options);
+			if (c == 'E' || c == 'O' || c == 'N') {
+				kgdb_parity = c;
+				options++;
+			}
+
+			c = *options;
+			if (c == '7' || c == '8') {
+				kgdb_bits = c;
+				options++;
+			}
+			options = (*options == ',') ? options+1 : options;
+		}
+	}
+
+	/* Check for action specification */
+	if (!memcmp(options, "halt", 4)) {
+		kgdb_halt = 1;
+		options += 4;
+	} else if (!memcmp(options, "disabled", 8)) {
+		kgdb_enabled = 0;
+		options += 8;
+	}
+
+	if (*options) {
+                KGDB_PRINTK("ignored unknown options: %s\n", options);
+		return 0;
+	}
+	return 1;
+}
+__setup("kgdb=", kgdb_parse_options);
+#endif /* CONFIG_SH_KGDB */
+

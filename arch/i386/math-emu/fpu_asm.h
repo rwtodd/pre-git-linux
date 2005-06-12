@@ -12,7 +12,7 @@
 
 #include <linux/linkage.h>
 
-#define	EXCEPTION	SYMBOL_NAME(FPU_exception)
+#define	EXCEPTION	FPU_exception
 
 
 #define PARAM1	8(%ebp)
@@ -29,4 +29,4 @@
 #define	SIGL(x)	SIGL_OFFSET##(x)
 #define	SIGH(x)	4(x)
 
-#endif _FPU_ASM_H_
+#endif /* _FPU_ASM_H_ */

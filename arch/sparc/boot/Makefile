@@ -4,43 +4,55 @@
 # Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
 # Copyright (C) 1997,1998 Jakub Jelinek (jj@ultra.linux.cz)
 
-ROOT_IMG	=/usr/src/root.img
-ELFTOAOUT	=elftoaout
+ROOT_IMG	:= /usr/src/root.img
+ELFTOAOUT	:= elftoaout
 
-all: btfix.o
+hostprogs-y	:= piggyback btfixupprep
+targets		:= tftpboot.img btfix.o btfix.S image
 
-tftpboot.img: piggyback
-	$(ELFTOAOUT) $(TOPDIR)/vmlinux -o tftpboot.img
-	./piggyback tftpboot.img $(TOPDIR)/System.map $(ROOT_IMG)
+quiet_cmd_elftoaout	= ELFTOAOUT $@
+      cmd_elftoaout	= $(ELFTOAOUT) $(obj)/image -o $@
+quiet_cmd_piggy		= PIGGY   $@
+      cmd_piggy		= $(obj)/piggyback $@ $(obj)/System.map $(ROOT_IMG)
+quiet_cmd_btfix		= BTFIX   $@
+      cmd_btfix		= $(OBJDUMP) -x vmlinux | $(obj)/btfixupprep > $@
+quiet_cmd_sysmap        = SYSMAP  $(obj)/System.map
+      cmd_sysmap        = $(CONFIG_SHELL) $(srctree)/scripts/mksysmap
+quiet_cmd_image = LD      $@
+      cmd_image = $(LD) $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDFLAGS_$(@F)) -o $@
 
-piggyback: piggyback.c
-	$(HOSTCC) $(HOSTCFLAGS) -o piggyback piggyback.c
+define rule_image
+	$(if $($(quiet)cmd_image),               \
+	  echo '  $($(quiet)cmd_image)' &&)      \
+	  $(cmd_image);                          \
+	$(if $($(quiet)cmd_sysmap),              \
+	  echo '  $($(quiet)cmd_sysmap)' &&)  \
+	$(cmd_sysmap) $@ $(obj)/System.map;      \
+	if [ $$? -ne 0 ]; then                   \
+		rm -f $@;                        \
+		/bin/false;                      \
+	fi;                                      \
+	echo 'cmd_$@ := $(cmd_image)' > $(@D)/.$(@F).cmd
+endef
 
-btfixupprep: btfixupprep.c
-	$(HOSTCC) $(HOSTCFLAGS) -o btfixupprep btfixupprep.c
+BTOBJS := $(HEAD_Y) $(INIT_Y)
+BTLIBS := $(CORE_Y) $(LIBS_Y) $(DRIVERS_Y) $(NET_Y)
+LDFLAGS_image := -T arch/sparc/kernel/vmlinux.lds $(BTOBJS) \
+                  --start-group $(BTLIBS) --end-group \
+                  $(kallsyms.o) $(obj)/btfix.o
 
-clean:
-	rm -f btfixupprep piggyback tftpboot.img btfix.o btfix.s
+# Link the final image including btfixup'ed symbols.
+# This is a replacement for the link done in the top-level Makefile.
+# Note: No dependency on the prerequisite files since that would require
+# make to try check if they are updated - and due to changes
+# in gcc options (path for example) this would result in
+# these files being recompiled for each build.
+$(obj)/image: $(obj)/btfix.o FORCE
+	$(call if_changed_rule,image)
 
-BTOBJS := $(HEAD) init/main.o init/version.o
-BTLIBS := $(CORE_FILES_NO_BTFIX) $(FILESYSTEMS) \
-	$(DRIVERS) $(NETWORKS)
+$(obj)/tftpboot.img: $(obj)/piggyback $(obj)/System.map $(obj)/image FORCE
+	$(call if_changed,elftoaout)
+	$(call if_changed,piggy)
 
-# I wanted to make this depend upon BTOBJS so that a parallel
-# build would work, but this fails because $(HEAD) cannot work
-# properly as it will cause head.o to be built with the implicit
-# rules not the ones in kernel/Makefile.  Someone please fix. --DaveM
-vmlinux.o: dummy
-	$(LD) -r $(patsubst %,$(TOPDIR)/%,$(BTOBJS)) \
-		--start-group \
-		$(patsubst %,$(TOPDIR)/%,$(BTLIBS)) \
-		$(LIBS) \
-		--end-group -o vmlinux.o
-
-btfix.s: btfixupprep vmlinux.o
-	$(OBJDUMP) -x vmlinux.o | ./btfixupprep > btfix.s
-
-btfix.o: btfix.s
-	$(CC) -c -o btfix.o btfix.s
-
-include $(TOPDIR)/Rules.make
+$(obj)/btfix.S: $(obj)/btfixupprep vmlinux FORCE
+	$(call if_changed,btfix)

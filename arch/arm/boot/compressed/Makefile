@@ -3,38 +3,34 @@
 #
 # create a compressed vmlinuz image from the original vmlinux
 #
-# Note! SYSTEM, ZTEXTADDR, ZBSSADDR and ZRELADDR are now exported
-# from arch/arm/boot/Makefile
-#
 
-HEAD		 = head.o
-OBJS		 = misc.o
-CFLAGS		 = $(CPPFLAGS) -O2 -DSTDC_HEADERS $(CFLAGS_PROC)
-FONTC		 = $(TOPDIR)/drivers/video/font_acorn_8x8.c
-ZLDFLAGS	 = -p -X -T vmlinux.lds
+HEAD	= head.o
+OBJS	= misc.o
+FONTC	= drivers/video/console/font_acorn_8x8.c
+
+FONT = $(addprefix ../../../../drivers/video/console/, font_acorn_8x8.o)
 
 #
 # Architecture dependencies
 #
 ifeq ($(CONFIG_ARCH_ACORN),y)
-OBJS		+= ll_char_wr.o font.o
-ZLDFLAGS	+= -defsym params=$(PARAMS_PHYS)
+OBJS		+= ll_char_wr.o $(FONT)
 endif
 
-ifeq ($(CONFIG_ARCH_NETWINDER),y)
-OBJS		+= head-netwinder.o
+ifeq ($(CONFIG_ARCH_SHARK),y)
+OBJS		+= head-shark.o ofw-shark.o
 endif
 
-ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
-OBJS		+= head-netwinder.o
-endif
-
-ifeq ($(CONFIG_ARCH_NEXUSPCI),y)
-HEAD		 = head-nexuspci.o
+ifeq ($(CONFIG_ARCH_CAMELOT),y)
+OBJS		+= head-epxa10db.o
 endif
 
 ifeq ($(CONFIG_ARCH_L7200),y)
 OBJS		+= head-l7200.o
+endif
+
+ifeq ($(CONFIG_ARCH_CLPS7500),y)
+HEAD		= head-clps7500.o
 endif
 
 ifeq ($(CONFIG_ARCH_P720T),y)
@@ -43,45 +39,76 @@ OBJS		+= head-sa1100.o
 endif
 
 ifeq ($(CONFIG_ARCH_SA1100),y)
-OBJS		+= head-sa1100.o setup-sa1100.o
-ifeq ($(CONFIG_SA1100_NANOENGINE),y)
-  OBJS += hw-bse.o
-endif
+OBJS		+= head-sa1100.o
 endif
 
-SEDFLAGS	= s/TEXT_START/$(ZTEXTADDR)/;s/LOAD_ADDR/$(ZRELADDR)/;
+ifeq ($(CONFIG_CPU_XSCALE),y)
+OBJS		+= head-xscale.o
+endif
 
-ifneq ($(ZBSSADDR),)
-SEDFLAGS	+= s/BSS_START/$(ZBSSADDR)/
+ifeq ($(CONFIG_PXA_SHARPSL),y)
+OBJS		+= head-sharpsl.o
+endif
+
+ifeq ($(CONFIG_DEBUG_ICEDCC),y)
+OBJS            += ice-dcc.o
+endif
+
+ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
+OBJS		+= big-endian.o
+endif
+
+#
+# We now have a PIC decompressor implementation.  Decompressors running
+# from RAM should not define ZTEXTADDR.  Decompressors running directly
+# from ROM or Flash must define ZTEXTADDR (preferably via the config)
+# FIXME: Previous assignment to ztextaddr-y is lost here. See SHARK
+ifeq ($(CONFIG_ZBOOT_ROM),y)
+ZTEXTADDR	:= $(CONFIG_ZBOOT_ROM_TEXT)
+ZBSSADDR	:= $(CONFIG_ZBOOT_ROM_BSS)
 else
-SEDFLAGS	+= s/BSS_START/ALIGN(4)/
+ZTEXTADDR	:= 0
+ZBSSADDR	:= ALIGN(4)
 endif
 
-all:		vmlinux
+SEDFLAGS	= s/TEXT_START/$(ZTEXTADDR)/;s/BSS_START/$(ZBSSADDR)/
 
-vmlinux:	$(HEAD) $(OBJS) piggy.o vmlinux.lds
-		$(LD) $(ZLDFLAGS) $(HEAD) $(OBJS) piggy.o $(LIBGCC) -o vmlinux
+targets       := vmlinux vmlinux.lds piggy.gz piggy.o $(FONT) \
+		 head.o misc.o $(OBJS)
+EXTRA_CFLAGS  := -fpic
+EXTRA_AFLAGS  :=
 
-$(HEAD): 	$(HEAD:.o=.S)
-		$(CC) $(AFLAGS) -traditional -c $(HEAD:.o=.S)
+# Supply ZRELADDR, INITRD_PHYS and PARAMS_PHYS to the decompressor via
+# linker symbols.  We only define initrd_phys and params_phys if the
+# machine class defined the corresponding makefile variable.
+LDFLAGS_vmlinux := --defsym zreladdr=$(ZRELADDR)
+ifneq ($(INITRD_PHYS),)
+LDFLAGS_vmlinux += --defsym initrd_phys=$(INITRD_PHYS)
+endif
+ifneq ($(PARAMS_PHYS),)
+LDFLAGS_vmlinux += --defsym params_phys=$(PARAMS_PHYS)
+endif
+LDFLAGS_vmlinux += -p --no-undefined -X \
+	$(shell $(CC) $(CFLAGS) --print-libgcc-file-name) -T
 
-piggy.o:	$(SYSTEM)
-		$(OBJCOPY) $(SYSTEM) piggy
-		gzip $(GZFLAGS) < piggy > piggy.gz
-		$(LD) -r -o $@ -b binary piggy.gz
-		rm -f piggy piggy.gz
+# Don't allow any static data in misc.o, which
+# would otherwise mess up our GOT table
+CFLAGS_misc.o := -Dstatic=
 
-font.o:		$(FONTC)
-		$(CC) $(CFLAGS) -Dstatic= -c -o $@ $(FONTC)
+$(obj)/vmlinux: $(obj)/vmlinux.lds $(obj)/$(HEAD) $(obj)/piggy.o \
+	 	$(addprefix $(obj)/, $(OBJS)) FORCE
+	$(call if_changed,ld)
+	@:
 
-vmlinux.lds:	vmlinux.lds.in
-		@sed "$(SEDFLAGS)" < vmlinux.lds.in > $@
+$(obj)/piggy.gz: $(obj)/../Image FORCE
+	$(call if_changed,gzip)
 
-clean:;		rm -f vmlinux core piggy* vmlinux.lds
+$(obj)/piggy.o:  $(obj)/piggy.gz FORCE
 
-.PHONY:	vmlinux.lds clean
+CFLAGS_font_acorn_8x8.o := -Dstatic=
 
-misc.o: misc.c $(TOPDIR)/include/asm/arch/uncompress.h $(TOPDIR)/lib/inflate.c
+$(obj)/vmlinux.lds: $(obj)/vmlinux.lds.in arch/arm/boot/Makefile .config
+	@sed "$(SEDFLAGS)" < $< > $@
 
-%.o: %.S
-	$(CC) $(AFLAGS) $(EXTRA_AFLAGS) $(AFLAGS_$@) -c -o $@ $<
+$(obj)/misc.o: $(obj)/misc.c include/asm/arch/uncompress.h lib/inflate.c
+

@@ -1,23 +1,30 @@
 /*
  *	Generate devlist.h and classlist.h from the PCI ID file.
  *
- *	(c) 1999--2000 Martin Mares <mj@suse.cz>
+ *	(c) 1999--2002 Martin Mares <mj@ucw.cz>
  */
 
 #include <stdio.h>
 #include <string.h>
 
-#define MAX_NAME_SIZE 79
+#define MAX_NAME_SIZE 89
 
 static void
-pq(FILE *f, const char *c)
+pq(FILE *f, const char *c, int len)
 {
-	while (*c) {
+	int i = 1;
+	while (*c && i != len) {
 		if (*c == '"')
 			fprintf(f, "\\\"");
-		else
+		else {
 			fputc(*c, f);
+			if (*c == '?' && c[1] == '?') {
+				/* Avoid trigraphs */
+				fprintf(f, "\" \"");
+			}
+		}
 		c++;
+		i++;
 	}
 }
 
@@ -67,12 +74,13 @@ main(void)
 						if (bra && bra > c && bra[-1] == ' ')
 							bra[-1] = 0;
 						if (vendor_len + strlen(c) + 1 > MAX_NAME_SIZE) {
-							fprintf(stderr, "Line %d: Device name too long\n", lino);
-							return 1;
+							fprintf(stderr, "Line %d: Device name too long. Name truncated.\n", lino);
+							fprintf(stderr, "%s\n", c);
+							/*return 1;*/
 						}
 					}
 					fprintf(devf, "\tDEVICE(%s,%s,\"", vend, line+1);
-					pq(devf, c);
+					pq(devf, c, MAX_NAME_SIZE - vendor_len - 1);
 					fputs("\")\n", devf);
 				} else goto err;
 				break;
@@ -101,7 +109,7 @@ main(void)
 				return 1;
 			}
 			fprintf(devf, "VENDOR(%s,\"", vend);
-			pq(devf, c);
+			pq(devf, c, 0);
 			fputs("\")\n", devf);
 			mode = 1;
 		} else {

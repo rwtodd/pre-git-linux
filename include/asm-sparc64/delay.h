@@ -1,7 +1,11 @@
-/* $Id: delay.h,v 1.11 2001/01/02 08:15:32 davem Exp $
- * delay.h: Linux delay routines on the V9.
+/* delay.h: Linux delay routines on sparc64.
  *
- * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu).
+ * Copyright (C) 1996, 2004 David S. Miller (davem@davemloft.net).
+ *
+ * Based heavily upon x86 variant which is:
+ * Copyright (C) 1993 Linus Torvalds
+ *
+ * Delay routines calling functions in arch/sparc64/lib/delay.c
  */
 
 #ifndef __SPARC64_DELAY_H
@@ -9,44 +13,26 @@
 
 #include <linux/config.h>
 #include <linux/param.h>
-#ifdef CONFIG_SMP
-#include <linux/sched.h>
-#include <asm/smp.h>
-#endif 
+#include <asm/cpudata.h>
 
-extern __inline__ void __delay(unsigned long loops)
-{
-	__asm__ __volatile__("
-	b,pt	%%xcc, 1f
-	 cmp	%0, 0
-	.align	32
-1:
-	bne,pt	%%xcc, 1b
-	 subcc	%0, 1, %0
-"	: "=&r" (loops)
-	: "0" (loops)
-	: "cc");
-}
+#ifndef __ASSEMBLY__
 
-extern __inline__ void __udelay(unsigned long usecs, unsigned long lps)
-{
-	usecs *= 0x00000000000010c6UL;		/* 2**32 / 1000000 */
+extern void __bad_udelay(void);
+extern void __bad_ndelay(void);
 
-	__asm__ __volatile__("
-	mulx	%1, %2, %0
-	srlx	%0, 32, %0
-"	: "=r" (usecs)
-	: "r" (usecs), "r" (lps));
+extern void __udelay(unsigned long usecs);
+extern void __ndelay(unsigned long nsecs);
+extern void __const_udelay(unsigned long usecs);
+extern void __delay(unsigned long loops);
 
-	__delay(usecs * HZ);
-}
+#define udelay(n) (__builtin_constant_p(n) ? \
+	((n) > 20000 ? __bad_udelay() : __const_udelay((n) * 0x10c7ul)) : \
+	__udelay(n))
+	
+#define ndelay(n) (__builtin_constant_p(n) ? \
+	((n) > 20000 ? __bad_ndelay() : __const_udelay((n) * 5ul)) : \
+	__ndelay(n))
 
-#ifdef CONFIG_SMP
-#define __udelay_val cpu_data[smp_processor_id()].udelay_val
-#else
-#define __udelay_val loops_per_jiffy
-#endif
-
-#define udelay(usecs) __udelay((usecs),__udelay_val)
+#endif /* !__ASSEMBLY__ */
 
 #endif /* defined(__SPARC64_DELAY_H) */

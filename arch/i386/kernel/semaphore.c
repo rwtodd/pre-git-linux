@@ -14,7 +14,8 @@
  */
 #include <linux/config.h>
 #include <linux/sched.h>
-
+#include <linux/err.h>
+#include <linux/init.h>
 #include <asm/semaphore.h>
 
 /*
@@ -28,8 +29,8 @@
  * needs to do something only if count was negative before
  * the increment operation.
  *
- * "sleeping" and the contention routine ordering is
- * protected by the semaphore spinlock.
+ * "sleeping" and the contention routine ordering is protected
+ * by the spinlock in the semaphore's waitqueue head.
  *
  * Note that these functions are only called when there is
  * contention on the lock, and as such all this is the
@@ -48,56 +49,60 @@
  *    we cannot lose wakeup events.
  */
 
-void __up(struct semaphore *sem)
+fastcall void __up(struct semaphore *sem)
 {
 	wake_up(&sem->wait);
 }
 
-static spinlock_t semaphore_lock = SPIN_LOCK_UNLOCKED;
-
-void __down(struct semaphore * sem)
+fastcall void __sched __down(struct semaphore * sem)
 {
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
-	tsk->state = TASK_UNINTERRUPTIBLE;
-	add_wait_queue_exclusive(&sem->wait, &wait);
+	unsigned long flags;
 
-	spin_lock_irq(&semaphore_lock);
+	tsk->state = TASK_UNINTERRUPTIBLE;
+	spin_lock_irqsave(&sem->wait.lock, flags);
+	add_wait_queue_exclusive_locked(&sem->wait, &wait);
+
 	sem->sleepers++;
 	for (;;) {
 		int sleepers = sem->sleepers;
 
 		/*
 		 * Add "everybody else" into it. They aren't
-		 * playing, because we own the spinlock.
+		 * playing, because we own the spinlock in
+		 * the wait_queue_head.
 		 */
 		if (!atomic_add_negative(sleepers - 1, &sem->count)) {
 			sem->sleepers = 0;
 			break;
 		}
 		sem->sleepers = 1;	/* us - see -1 above */
-		spin_unlock_irq(&semaphore_lock);
+		spin_unlock_irqrestore(&sem->wait.lock, flags);
 
 		schedule();
+
+		spin_lock_irqsave(&sem->wait.lock, flags);
 		tsk->state = TASK_UNINTERRUPTIBLE;
-		spin_lock_irq(&semaphore_lock);
 	}
-	spin_unlock_irq(&semaphore_lock);
-	remove_wait_queue(&sem->wait, &wait);
+	remove_wait_queue_locked(&sem->wait, &wait);
+	wake_up_locked(&sem->wait);
+	spin_unlock_irqrestore(&sem->wait.lock, flags);
 	tsk->state = TASK_RUNNING;
-	wake_up(&sem->wait);
 }
 
-int __down_interruptible(struct semaphore * sem)
+fastcall int __sched __down_interruptible(struct semaphore * sem)
 {
 	int retval = 0;
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
-	tsk->state = TASK_INTERRUPTIBLE;
-	add_wait_queue_exclusive(&sem->wait, &wait);
+	unsigned long flags;
 
-	spin_lock_irq(&semaphore_lock);
-	sem->sleepers ++;
+	tsk->state = TASK_INTERRUPTIBLE;
+	spin_lock_irqsave(&sem->wait.lock, flags);
+	add_wait_queue_exclusive_locked(&sem->wait, &wait);
+
+	sem->sleepers++;
 	for (;;) {
 		int sleepers = sem->sleepers;
 
@@ -117,25 +122,27 @@ int __down_interruptible(struct semaphore * sem)
 
 		/*
 		 * Add "everybody else" into it. They aren't
-		 * playing, because we own the spinlock. The
-		 * "-1" is because we're still hoping to get
-		 * the lock.
+		 * playing, because we own the spinlock in
+		 * wait_queue_head. The "-1" is because we're
+		 * still hoping to get the semaphore.
 		 */
 		if (!atomic_add_negative(sleepers - 1, &sem->count)) {
 			sem->sleepers = 0;
 			break;
 		}
 		sem->sleepers = 1;	/* us - see -1 above */
-		spin_unlock_irq(&semaphore_lock);
+		spin_unlock_irqrestore(&sem->wait.lock, flags);
 
 		schedule();
+
+		spin_lock_irqsave(&sem->wait.lock, flags);
 		tsk->state = TASK_INTERRUPTIBLE;
-		spin_lock_irq(&semaphore_lock);
 	}
-	spin_unlock_irq(&semaphore_lock);
+	remove_wait_queue_locked(&sem->wait, &wait);
+	wake_up_locked(&sem->wait);
+	spin_unlock_irqrestore(&sem->wait.lock, flags);
+
 	tsk->state = TASK_RUNNING;
-	remove_wait_queue(&sem->wait, &wait);
-	wake_up(&sem->wait);
 	return retval;
 }
 
@@ -147,23 +154,25 @@ int __down_interruptible(struct semaphore * sem)
  * single "cmpxchg" without failure cases,
  * but then it wouldn't work on a 386.
  */
-int __down_trylock(struct semaphore * sem)
+fastcall int __down_trylock(struct semaphore * sem)
 {
 	int sleepers;
 	unsigned long flags;
 
-	spin_lock_irqsave(&semaphore_lock, flags);
+	spin_lock_irqsave(&sem->wait.lock, flags);
 	sleepers = sem->sleepers + 1;
 	sem->sleepers = 0;
 
 	/*
 	 * Add "everybody else" and us into it. They aren't
-	 * playing, because we own the spinlock.
+	 * playing, because we own the spinlock in the
+	 * wait_queue_head.
 	 */
-	if (!atomic_add_negative(sleepers, &sem->count))
-		wake_up(&sem->wait);
+	if (!atomic_add_negative(sleepers, &sem->count)) {
+		wake_up_locked(&sem->wait);
+	}
 
-	spin_unlock_irqrestore(&semaphore_lock, flags);
+	spin_unlock_irqrestore(&sem->wait.lock, flags);
 	return 1;
 }
 
@@ -174,281 +183,115 @@ int __down_trylock(struct semaphore * sem)
  * need to convert that sequence back into the C sequence when
  * there is contention on the semaphore.
  *
- * %ecx contains the semaphore pointer on entry. Save the C-clobbered
- * registers (%eax, %edx and %ecx) except %eax when used as a return
- * value..
+ * %eax contains the semaphore pointer on entry. Save the C-clobbered
+ * registers (%eax, %edx and %ecx) except %eax whish is either a return
+ * value or just clobbered..
  */
 asm(
+".section .sched.text\n"
 ".align 4\n"
 ".globl __down_failed\n"
 "__down_failed:\n\t"
-	"pushl %eax\n\t"
+#if defined(CONFIG_FRAME_POINTER)
+	"pushl %ebp\n\t"
+	"movl  %esp,%ebp\n\t"
+#endif
 	"pushl %edx\n\t"
 	"pushl %ecx\n\t"
 	"call __down\n\t"
 	"popl %ecx\n\t"
 	"popl %edx\n\t"
-	"popl %eax\n\t"
+#if defined(CONFIG_FRAME_POINTER)
+	"movl %ebp,%esp\n\t"
+	"popl %ebp\n\t"
+#endif
 	"ret"
 );
 
 asm(
+".section .sched.text\n"
 ".align 4\n"
 ".globl __down_failed_interruptible\n"
 "__down_failed_interruptible:\n\t"
+#if defined(CONFIG_FRAME_POINTER)
+	"pushl %ebp\n\t"
+	"movl  %esp,%ebp\n\t"
+#endif
 	"pushl %edx\n\t"
 	"pushl %ecx\n\t"
 	"call __down_interruptible\n\t"
 	"popl %ecx\n\t"
 	"popl %edx\n\t"
+#if defined(CONFIG_FRAME_POINTER)
+	"movl %ebp,%esp\n\t"
+	"popl %ebp\n\t"
+#endif
 	"ret"
 );
 
 asm(
+".section .sched.text\n"
 ".align 4\n"
 ".globl __down_failed_trylock\n"
 "__down_failed_trylock:\n\t"
+#if defined(CONFIG_FRAME_POINTER)
+	"pushl %ebp\n\t"
+	"movl  %esp,%ebp\n\t"
+#endif
 	"pushl %edx\n\t"
 	"pushl %ecx\n\t"
 	"call __down_trylock\n\t"
 	"popl %ecx\n\t"
 	"popl %edx\n\t"
+#if defined(CONFIG_FRAME_POINTER)
+	"movl %ebp,%esp\n\t"
+	"popl %ebp\n\t"
+#endif
 	"ret"
 );
 
 asm(
+".section .sched.text\n"
 ".align 4\n"
 ".globl __up_wakeup\n"
 "__up_wakeup:\n\t"
-	"pushl %eax\n\t"
 	"pushl %edx\n\t"
 	"pushl %ecx\n\t"
 	"call __up\n\t"
 	"popl %ecx\n\t"
 	"popl %edx\n\t"
-	"popl %eax\n\t"
+	"ret"
+);
+
+/*
+ * rw spinlock fallbacks
+ */
+#if defined(CONFIG_SMP)
+asm(
+".section .sched.text\n"
+".align	4\n"
+".globl	__write_lock_failed\n"
+"__write_lock_failed:\n\t"
+	LOCK "addl	$" RW_LOCK_BIAS_STR ",(%eax)\n"
+"1:	rep; nop\n\t"
+	"cmpl	$" RW_LOCK_BIAS_STR ",(%eax)\n\t"
+	"jne	1b\n\t"
+	LOCK "subl	$" RW_LOCK_BIAS_STR ",(%eax)\n\t"
+	"jnz	__write_lock_failed\n\t"
 	"ret"
 );
 
 asm(
-"
-.align 4
-.globl __down_read_failed
-__down_read_failed:
-	pushl	%edx
-	pushl	%ecx
-	jnc	2f
-
-3:	call	down_read_failed_biased
-
-1:	popl	%ecx
-	popl	%edx
-	ret
-
-2:	call	down_read_failed
-	" LOCK "subl	$1,(%eax)
-	jns	1b
-	jnc	2b
-	jmp	3b
-"
-);
-
-asm(
-"
-.align 4
-.globl __down_write_failed
-__down_write_failed:
-	pushl	%edx
-	pushl	%ecx
-	jnc	2f
-
-3:	call	down_write_failed_biased
-
-1:	popl	%ecx
-	popl	%edx
-	ret
-
-2:	call	down_write_failed
-	" LOCK "subl	$" RW_LOCK_BIAS_STR ",(%eax)
-	jz	1b
-	jnc	2b
-	jmp	3b
-"
-);
-
-struct rw_semaphore *FASTCALL(rwsem_wake_readers(struct rw_semaphore *sem));
-struct rw_semaphore *FASTCALL(rwsem_wake_writer(struct rw_semaphore *sem));
-
-struct rw_semaphore *FASTCALL(down_read_failed_biased(struct rw_semaphore *sem));
-struct rw_semaphore *FASTCALL(down_write_failed_biased(struct rw_semaphore *sem));
-struct rw_semaphore *FASTCALL(down_read_failed(struct rw_semaphore *sem));
-struct rw_semaphore *FASTCALL(down_write_failed(struct rw_semaphore *sem));
-
-struct rw_semaphore *down_read_failed_biased(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	add_wait_queue(&sem->wait, &wait);	/* put ourselves at the head of the list */
-
-	for (;;) {
-		if (sem->read_bias_granted && xchg(&sem->read_bias_granted, 0))
-			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (!sem->read_bias_granted)
-			schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	return sem;
-}
-
-struct rw_semaphore *down_write_failed_biased(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	add_wait_queue_exclusive(&sem->write_bias_wait, &wait);	/* put ourselves at the end of the list */
-
-	for (;;) {
-		if (sem->write_bias_granted && xchg(&sem->write_bias_granted, 0))
-			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (!sem->write_bias_granted)
-			schedule();
-	}
-
-	remove_wait_queue(&sem->write_bias_wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	/* if the lock is currently unbiased, awaken the sleepers
-	 * FIXME: this wakes up the readers early in a bit of a
-	 * stampede -> bad!
-	 */
-	if (atomic_read(&sem->count) >= 0)
-		wake_up(&sem->wait);
-
-	return sem;
-}
-
-/* Wait for the lock to become unbiased.  Readers
- * are non-exclusive. =)
- */
-struct rw_semaphore *down_read_failed(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	__up_read(sem);	/* this takes care of granting the lock */
-
-	add_wait_queue(&sem->wait, &wait);
-
-	while (atomic_read(&sem->count) < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (atomic_read(&sem->count) >= 0)
-			break;
-		schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	return sem;
-}
-
-/* Wait for the lock to become unbiased. Since we're
- * a writer, we'll make ourselves exclusive.
- */
-struct rw_semaphore *down_write_failed(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	__up_write(sem);	/* this takes care of granting the lock */
-
-	add_wait_queue_exclusive(&sem->wait, &wait);
-
-	while (atomic_read(&sem->count) < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (atomic_read(&sem->count) >= 0)
-			break;	/* we must attempt to acquire or bias the lock */
-		schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	return sem;
-}
-
-asm(
-"
-.align 4
-.globl __rwsem_wake
-__rwsem_wake:
-	pushl	%edx
-	pushl	%ecx
-
-	jz	1f
-	call	rwsem_wake_readers
-	jmp	2f
-
-1:	call	rwsem_wake_writer
-
-2:	popl	%ecx
-	popl	%edx
-	ret
-"
-);
-
-/* Called when someone has done an up that transitioned from
- * negative to non-negative, meaning that the lock has been
- * granted to whomever owned the bias.
- */
-struct rw_semaphore *rwsem_wake_readers(struct rw_semaphore *sem)
-{
-	if (xchg(&sem->read_bias_granted, 1))
-		BUG();
-	wake_up(&sem->wait);
-	return sem;
-}
-
-struct rw_semaphore *rwsem_wake_writer(struct rw_semaphore *sem)
-{
-	if (xchg(&sem->write_bias_granted, 1))
-		BUG();
-	wake_up(&sem->write_bias_wait);
-	return sem;
-}
-
-#if defined(CONFIG_SMP)
-asm(
-"
-.align	4
-.globl	__write_lock_failed
-__write_lock_failed:
-	" LOCK "addl	$" RW_LOCK_BIAS_STR ",(%eax)
-1:	cmpl	$" RW_LOCK_BIAS_STR ",(%eax)
-	jne	1b
-
-	" LOCK "subl	$" RW_LOCK_BIAS_STR ",(%eax)
-	jnz	__write_lock_failed
-	ret
-
-
-.align	4
-.globl	__read_lock_failed
-__read_lock_failed:
-	lock ; incl	(%eax)
-1:	cmpl	$1,(%eax)
-	js	1b
-
-	lock ; decl	(%eax)
-	js	__read_lock_failed
-	ret
-"
+".section .sched.text\n"
+".align	4\n"
+".globl	__read_lock_failed\n"
+"__read_lock_failed:\n\t"
+	LOCK "incl	(%eax)\n"
+"1:	rep; nop\n\t"
+	"cmpl	$1,(%eax)\n\t"
+	"js	1b\n\t"
+	LOCK "decl	(%eax)\n\t"
+	"js	__read_lock_failed\n\t"
+	"ret"
 );
 #endif
-

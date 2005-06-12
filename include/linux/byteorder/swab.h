@@ -15,6 +15,8 @@
  *
  */
 
+#include <linux/compiler.h>
+
 /* casts are necessary for constants, because we never know how for sure
  * how U/UL/ULL map to __u16, __u32, __u64. At least not in a portable way.
  */
@@ -128,34 +130,34 @@
 #endif /* OPTIMIZE */
 
 
-extern __inline__ __const__ __u16 __fswab16(__u16 x)
+static __inline__ __attribute_const__ __u16 __fswab16(__u16 x)
 {
 	return __arch__swab16(x);
 }
-extern __inline__ __u16 __swab16p(__u16 *x)
+static __inline__ __u16 __swab16p(const __u16 *x)
 {
 	return __arch__swab16p(x);
 }
-extern __inline__ void __swab16s(__u16 *addr)
+static __inline__ void __swab16s(__u16 *addr)
 {
 	__arch__swab16s(addr);
 }
 
-extern __inline__ __const__ __u32 __fswab32(__u32 x)
+static __inline__ __attribute_const__ __u32 __fswab32(__u32 x)
 {
 	return __arch__swab32(x);
 }
-extern __inline__ __u32 __swab32p(__u32 *x)
+static __inline__ __u32 __swab32p(const __u32 *x)
 {
 	return __arch__swab32p(x);
 }
-extern __inline__ void __swab32s(__u32 *addr)
+static __inline__ void __swab32s(__u32 *addr)
 {
 	__arch__swab32s(addr);
 }
 
 #ifdef __BYTEORDER_HAS_U64__
-extern __inline__ __const__ __u64 __fswab64(__u64 x)
+static __inline__ __attribute_const__ __u64 __fswab64(__u64 x)
 {
 #  ifdef __SWAB_64_THRU_32__
 	__u32 h = x >> 32;
@@ -165,11 +167,11 @@ extern __inline__ __const__ __u64 __fswab64(__u64 x)
 	return __arch__swab64(x);
 #  endif
 }
-extern __inline__ __u64 __swab64p(__u64 *x)
+static __inline__ __u64 __swab64p(const __u64 *x)
 {
 	return __arch__swab64p(x);
 }
-extern __inline__ void __swab64s(__u64 *addr)
+static __inline__ void __swab64s(__u64 *addr)
 {
 	__arch__swab64s(addr);
 }

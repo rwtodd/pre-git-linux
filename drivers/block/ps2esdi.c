@@ -27,35 +27,31 @@
    + reset after read/write error
  */
 
+#define DEVICE_NAME "PS/2 ESDI"
+
 #include <linux/config.h>
 #include <linux/major.h>
-
-#ifdef  CONFIG_BLK_DEV_PS2
-
-#define MAJOR_NR PS2ESDI_MAJOR
-
 #include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/mm.h>
+#include <linux/wait.h>
+#include <linux/interrupt.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/genhd.h>
 #include <linux/ps2esdi.h>
-#include <linux/devfs_fs_kernel.h>
-#include <linux/blk.h>
-#include <linux/blkpg.h>
-#include <linux/mca.h>
+#include <linux/blkdev.h>
+#include <linux/mca-legacy.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/segment.h>
 #include <asm/dma.h>
+#include <asm/mca_dma.h>
 #include <asm/uaccess.h>
 
 #define PS2ESDI_IRQ 14
-#define MAX_HD 1
+#define MAX_HD 2
 #define MAX_RETRIES 5
 #define MAX_16BIT 65536
 #define ESDI_TIMEOUT   0xf000
@@ -64,16 +60,13 @@
 #define TYPE_0_CMD_BLK_LENGTH 2
 #define TYPE_1_CMD_BLK_LENGTH 4
 
-
 static void reset_ctrl(void);
 
-int ps2esdi_init(void);
-
-static void ps2esdi_geninit(void);
+static int ps2esdi_geninit(void);
 
 static void do_ps2esdi_request(request_queue_t * q);
 
-static void ps2esdi_readwrite(int cmd, u_char drive, u_int block, u_int count);
+static void ps2esdi_readwrite(int cmd, struct request *req);
 
 static void ps2esdi_fill_cmd_block(u_short * cmd_blk, u_short cmd,
 u_short cyl, u_short head, u_short sector, u_short length, u_char drive);
@@ -82,23 +75,14 @@ static int ps2esdi_out_cmd_blk(u_short * cmd_blk);
 
 static void ps2esdi_prep_dma(char *buffer, u_short length, u_char dma_xmode);
 
-static void ps2esdi_interrupt_handler(int irq, void *dev_id,
+static irqreturn_t ps2esdi_interrupt_handler(int irq, void *dev_id,
 				      struct pt_regs *regs);
 static void (*current_int_handler) (u_int) = NULL;
 static void ps2esdi_normal_interrupt_handler(u_int);
 static void ps2esdi_initial_reset_int_handler(u_int);
 static void ps2esdi_geometry_int_handler(u_int);
-
-static void ps2esdi_continue_request(void);
-
-static int ps2esdi_open(struct inode *inode, struct file *file);
-
-static int ps2esdi_release(struct inode *inode, struct file *file);
-
 static int ps2esdi_ioctl(struct inode *inode, struct file *file,
 			 u_int cmd, u_long arg);
-
-static int ps2esdi_reread_partitions(kdev_t dev);
 
 static int ps2esdi_read_status_words(int num_words, int max_words, u_short * buffer);
 
@@ -106,106 +90,104 @@ static void dump_cmd_complete_status(u_int int_ret_code);
 
 static void ps2esdi_get_device_cfg(void);
 
-void ps2esdi_reset_timer(unsigned long unused);
+static void ps2esdi_reset_timer(unsigned long unused);
 
-u_int dma_arb_level;		/* DMA arbitration level */
+static u_int dma_arb_level;		/* DMA arbitration level */
 
 static DECLARE_WAIT_QUEUE_HEAD(ps2esdi_int);
-static DECLARE_WAIT_QUEUE_HEAD(ps2esdi_wait_open);
 
-int no_int_yet;
-static int access_count[MAX_HD];
-static char ps2esdi_valid[MAX_HD];
-static int ps2esdi_sizes[MAX_HD << 6];
-static int ps2esdi_blocksizes[MAX_HD << 6];
+static int no_int_yet;
 static int ps2esdi_drives;
-static struct hd_struct ps2esdi[MAX_HD << 6];
 static u_short io_base;
-static struct timer_list esdi_timer = { function: ps2esdi_reset_timer };
+static struct timer_list esdi_timer =
+		TIMER_INITIALIZER(ps2esdi_reset_timer, 0, 0);
 static int reset_status;
 static int ps2esdi_slot = -1;
-int tp720esdi = 0;		/* Is it Integrated ESDI of ThinkPad-720? */
-int intg_esdi = 0;              /* If integrated adapter */
+static int tp720esdi = 0;	/* Is it Integrated ESDI of ThinkPad-720? */
+static int intg_esdi = 0;       /* If integrated adapter */
 struct ps2esdi_i_struct {
 	unsigned int head, sect, cyl, wpcom, lzone, ctl;
 };
+static DEFINE_SPINLOCK(ps2esdi_lock);
+static struct request_queue *ps2esdi_queue;
+static struct request *current_req;
 
 #if 0
 #if 0				/* try both - I don't know which one is better... UB */
-struct ps2esdi_i_struct ps2esdi_info[] =
+static struct ps2esdi_i_struct ps2esdi_info[MAX_HD] =
 {
 	{4, 48, 1553, 0, 0, 0},
 	{0, 0, 0, 0, 0, 0}};
 #else
-struct ps2esdi_i_struct ps2esdi_info[] =
+static struct ps2esdi_i_struct ps2esdi_info[MAX_HD] =
 {
 	{64, 32, 161, 0, 0, 0},
 	{0, 0, 0, 0, 0, 0}};
 #endif
 #endif
-struct ps2esdi_i_struct ps2esdi_info[] =
+static struct ps2esdi_i_struct ps2esdi_info[MAX_HD] =
 {
 	{0, 0, 0, 0, 0, 0},
 	{0, 0, 0, 0, 0, 0}};
 
 static struct block_device_operations ps2esdi_fops =
 {
-	open:		ps2esdi_open,
-	release:	ps2esdi_release,
-	ioctl:		ps2esdi_ioctl,
+	.owner		= THIS_MODULE,
+	.ioctl		= ps2esdi_ioctl,
 };
 
-static struct gendisk ps2esdi_gendisk =
-{
-	MAJOR_NR,		/* Major number */
-	"ed",			/* Major name */
-	6,			/* Bits to shift to get real from partition */
-	1 << 6,			/* Number of partitions per real disk */
-	ps2esdi,		/* hd struct */
-	ps2esdi_sizes,		/* block sizes */
-	0,			/* number */
-	(void *) ps2esdi_info,	/* internal */
-	NULL,			/* next */
-	&ps2esdi_fops,          /* file operations */
-};
+static struct gendisk *ps2esdi_gendisk[2];
 
 /* initialization routine called by ll_rw_blk.c   */
-int __init ps2esdi_init(void)
+static int __init ps2esdi_init(void)
 {
 
-	/* register the device - pass the name, major number and operations
-	   vector .                                                 */
-	if (devfs_register_blkdev(MAJOR_NR, "ed", &ps2esdi_fops)) {
-		printk("%s: Unable to get major number %d\n", DEVICE_NAME, MAJOR_NR);
-		return -1;
-	}
+	int error = 0;
+
+	/* register the device - pass the name and major number */
+	if (register_blkdev(PS2ESDI_MAJOR, "ed"))
+		return -EBUSY;
+
 	/* set up some global information - indicating device specific info */
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	read_ahead[MAJOR_NR] = 8;	/* 8 sector (4kB) read ahead */
+	ps2esdi_queue = blk_init_queue(do_ps2esdi_request, &ps2esdi_lock);
+	if (!ps2esdi_queue) {
+		unregister_blkdev(PS2ESDI_MAJOR, "ed");
+		return -ENOMEM;
+	}
 
 	/* some minor housekeeping - setup the global gendisk structure */
-	ps2esdi_gendisk.next = gendisk_head;
-	gendisk_head = &ps2esdi_gendisk;
-	ps2esdi_geninit();
+	error = ps2esdi_geninit();
+	if (error) {
+		printk(KERN_WARNING "PS2ESDI: error initialising"
+			" device, releasing resources\n");
+		unregister_blkdev(PS2ESDI_MAJOR, "ed");
+		blk_cleanup_queue(ps2esdi_queue);
+		return error;
+	}
 	return 0;
 }				/* ps2esdi_init */
 
-#ifdef MODULE
+#ifndef MODULE
 
-int cyl[2] = {-1,-1};
-int head[2] = {-1, -1};
-int sect[2] = {-1, -1};
+module_init(ps2esdi_init);
 
-MODULE_PARM(tp720esdi, "i");
-MODULE_PARM(cyl, "i");
-MODULE_PARM(head, "i");
-MODULE_PARM(track, "i");
+#else
+
+static int cyl[MAX_HD] = {-1,-1};
+static int head[MAX_HD] = {-1, -1};
+static int sect[MAX_HD] = {-1, -1};
+
+module_param(tp720esdi, bool, 0);
+module_param_array(cyl, int, NULL, 0);
+module_param_array(head, int, NULL, 0);
+module_param_array(sect, int, NULL, 0);
+MODULE_LICENSE("GPL");
 
 int init_module(void) {
 	int drive;
 
-	for(drive = 0; drive <= 1; drive++) {
-	        struct ps2_esdi_i_struct *info = &ps2esdi_info[drive];
+	for(drive = 0; drive < MAX_HD; drive++) {
+	        struct ps2esdi_i_struct *info = &ps2esdi_info[drive];
 
         	if (cyl[drive] != -1) {
 		  	info->cyl = info->lzone = cyl[drive];
@@ -221,18 +203,21 @@ int init_module(void) {
 }
 
 void
-cleanup_module(void)
-{
-	if(ps2esdi_slot)
-	{
+cleanup_module(void) {
+	int i;
+	if(ps2esdi_slot) {
 		mca_mark_as_unused(ps2esdi_slot);
 		mca_set_adapter_procfn(ps2esdi_slot, NULL, NULL);
 	}
 	release_region(io_base, 4);
 	free_dma(dma_arb_level);
-  	free_irq(PS2ESDI_IRQ, NULL)
-	devfs_unregister_blkdev(MAJOR_NR, "ed");
-	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+	free_irq(PS2ESDI_IRQ, &ps2esdi_gendisk);
+	unregister_blkdev(PS2ESDI_MAJOR, "ed");
+	blk_cleanup_queue(ps2esdi_queue);
+	for (i = 0; i < ps2esdi_drives; i++) {
+		del_gendisk(ps2esdi_gendisk[i]);
+		put_disk(ps2esdi_gendisk[i]);
+	}
 }
 #endif /* MODULE */
 
@@ -292,7 +277,7 @@ static int ps2esdi_getinfo(char *buf, int slot, void *d)
 }
 
 /* ps2 esdi specific initialization - called thru the gendisk chain */
-static void __init ps2esdi_geninit(void)
+static int __init ps2esdi_geninit(void)
 {
 	/*
 	   The first part contains the initialization code
@@ -310,6 +295,7 @@ static void __init ps2esdi_geninit(void)
 	int slot = 0, i, reset_start, reset_end;
 	u_char status;
 	unsigned short adapterID;
+	int error = 0;
 
 	if ((slot = mca_find_adapter(INTG_ESDI_ID, 0)) != MCA_NOTFOUND) {
 		adapterID = INTG_ESDI_ID;
@@ -324,7 +310,7 @@ static void __init ps2esdi_geninit(void)
 		       DEVICE_NAME, slot+1);
 		mca_set_adapter_name(slot, "PS/2 ESDI");
 	} else {
-		return;
+		return -ENODEV;
 	}
 
 	ps2esdi_slot = slot;
@@ -350,7 +336,8 @@ static void __init ps2esdi_geninit(void)
 	/* is it enabled ? */
 	if (!(status & STATUS_ENABLED)) {
 		printk("%s: ESDI adapter disabled\n", DEVICE_NAME);
-		return;
+		error = -ENODEV;
+		goto err_out1;
 	}
 	/* try to grab IRQ, and try to grab a slow IRQ if it fails, so we can
 	   share with the SCSI driver */
@@ -360,13 +347,19 @@ static void __init ps2esdi_geninit(void)
 			   SA_SHIRQ, "PS/2 ESDI", &ps2esdi_gendisk)
 	    ) {
 		printk("%s: Unable to get IRQ %d\n", DEVICE_NAME, PS2ESDI_IRQ);
-		return;
+		error = -EBUSY;
+		goto err_out1;
 	}
 	if (status & STATUS_ALTERNATE)
 		io_base = ALT_IO_BASE;
 	else
 		io_base = PRIMARY_IO_BASE;
 
+	if (!request_region(io_base, 4, "ed")) {
+		printk(KERN_WARNING"Unable to request region 0x%x\n", io_base);
+		error = -EBUSY;
+		goto err_out2;
+	}
 	/* get the dma arbitration level */
 	dma_arb_level = (status >> 2) & 0xf;
 
@@ -413,22 +406,49 @@ static void __init ps2esdi_geninit(void)
 
 	current_int_handler = ps2esdi_normal_interrupt_handler;
 
-	ps2esdi_gendisk.nr_real = ps2esdi_drives;
+	if (request_dma(dma_arb_level, "ed") !=0) {
+		printk(KERN_WARNING "PS2ESDI: Can't request dma-channel %d\n"
+			,(int) dma_arb_level);
+		error = -EBUSY;
+		goto err_out3;
+	}
+	blk_queue_max_sectors(ps2esdi_queue, 128);
 
-	for (i = 0; i < (MAX_HD << 6); i++)
-		ps2esdi_blocksizes[i] = 1024;
-
-	request_dma(dma_arb_level, "ed");
-	request_region(io_base, 4, "ed");
-	blksize_size[MAJOR_NR] = ps2esdi_blocksizes;
+	error = -ENOMEM;
+	for (i = 0; i < ps2esdi_drives; i++) {
+		struct gendisk *disk = alloc_disk(64);
+		if (!disk)
+			goto err_out4;
+		disk->major = PS2ESDI_MAJOR;
+		disk->first_minor = i<<6;
+		sprintf(disk->disk_name, "ed%c", 'a'+i);
+		sprintf(disk->devfs_name, "ed/target%d", i);
+		disk->fops = &ps2esdi_fops;
+		ps2esdi_gendisk[i] = disk;
+	}
 
 	for (i = 0; i < ps2esdi_drives; i++) {
-		register_disk(&ps2esdi_gendisk,MKDEV(MAJOR_NR,i<<6),1<<6,
-				&ps2esdi_fops,
-				ps2esdi_info[i].head * ps2esdi_info[i].sect *
+		struct gendisk *disk = ps2esdi_gendisk[i];
+		set_capacity(disk, ps2esdi_info[i].head * ps2esdi_info[i].sect *
 				ps2esdi_info[i].cyl);
-		ps2esdi_valid[i] = 1;
+		disk->queue = ps2esdi_queue;
+		disk->private_data = &ps2esdi_info[i];
+		add_disk(disk);
 	}
+	return 0;
+err_out4:
+	while (i--)
+		put_disk(ps2esdi_gendisk[i]);
+err_out3:
+	release_region(io_base, 4);
+err_out2:
+	free_irq(PS2ESDI_IRQ, &ps2esdi_gendisk);
+err_out1:
+	if(ps2esdi_slot) {
+		mca_mark_as_unused(ps2esdi_slot);
+		mca_set_adapter_procfn(ps2esdi_slot, NULL, NULL);
+	}
+	return error;
 }
 
 static void __init ps2esdi_get_device_cfg(void)
@@ -459,74 +479,49 @@ static void __init ps2esdi_get_device_cfg(void)
 /* strategy routine that handles most of the IO requests */
 static void do_ps2esdi_request(request_queue_t * q)
 {
-	u_int block, count;
+	struct request *req;
 	/* since, this routine is called with interrupts cleared - they 
 	   must be before it finishes  */
-	sti();
 
-#if 0
-	printk("%s:got request. device : %d minor : %d command : %d  sector : %ld count : %ld, buffer: %p\n",
-	       DEVICE_NAME,
-	       CURRENT_DEV, MINOR(CURRENT->rq_dev),
-	       CURRENT->cmd, CURRENT->sector,
-	       CURRENT->nr_sectors, CURRENT->buffer);
-#endif
-
-	/* standard macro that ensures that requests are really on the
-	   list + sanity checks.                     */
-	INIT_REQUEST;
-
-	if (virt_to_bus(CURRENT->buffer + CURRENT->nr_sectors * 512) > 16 * MB) {
-		printk("%s: DMA above 16MB not supported\n", DEVICE_NAME);
-		end_request(FAIL);
-		if (!QUEUE_EMPTY)
-			do_ps2esdi_request(q);
+	req = elv_next_request(q);
+	if (!req)
 		return;
-	}			/* check for above 16Mb dmas */
-	if ((CURRENT_DEV < ps2esdi_drives) &&
-	    (CURRENT->sector + CURRENT->nr_sectors <=
-	     ps2esdi[MINOR(CURRENT->rq_dev)].nr_sects)) {
-#if 0
-		printk("%s:got request. device : %d minor : %d command : %d  sector : %ld count : %ld\n",
-		       DEVICE_NAME,
-		       CURRENT_DEV, MINOR(CURRENT->dev),
-		       CURRENT->cmd, CURRENT->sector,
-		       CURRENT->nr_sectors);
-#endif
-
-
-		block = CURRENT->sector + ps2esdi[MINOR(CURRENT->rq_dev)].start_sect;
 
 #if 0
-		printk("%s: blocknumber : %d\n", DEVICE_NAME, block);
+	printk("%s:got request. device : %s command : %d  sector : %ld count : %ld, buffer: %p\n",
+	       DEVICE_NAME,
+	       req->rq_disk->disk_name,
+	       req->cmd, req->sector,
+	       req->current_nr_sectors, req->buffer);
 #endif
-		count = CURRENT->nr_sectors;
-		switch (CURRENT->cmd) {
-		case READ:
-			ps2esdi_readwrite(READ, CURRENT_DEV, block, count);
-			return;
-			break;
-		case WRITE:
-			ps2esdi_readwrite(WRITE, CURRENT_DEV, block, count);
-			return;
-			break;
-		default:
-			printk("%s: Unknown command\n", DEVICE_NAME);
-			end_request(FAIL);
-			if (!QUEUE_EMPTY)
-				do_ps2esdi_request(q);
-			break;
-		}		/* handle different commands */
-	}
-	/* is request is valid */ 
-	else {
-		printk("Grrr. error. ps2esdi_drives: %d, %lu %lu\n", ps2esdi_drives,
-		       CURRENT->sector, ps2esdi[MINOR(CURRENT->rq_dev)].nr_sects);
-		end_request(FAIL);
-		if (!QUEUE_EMPTY)
-			do_ps2esdi_request(q);
+
+	/* check for above 16Mb dmas */
+	if (isa_virt_to_bus(req->buffer + req->current_nr_sectors * 512) > 16 * MB) {
+		printk("%s: DMA above 16MB not supported\n", DEVICE_NAME);
+		end_request(req, FAIL);
+		return;
 	}
 
+	if (req->sector+req->current_nr_sectors > get_capacity(req->rq_disk)) {
+		printk("Grrr. error. ps2esdi_drives: %d, %llu %llu\n",
+		    ps2esdi_drives, req->sector,
+		    (unsigned long long)get_capacity(req->rq_disk));
+		end_request(req, FAIL);
+		return;
+	}
+
+	switch (rq_data_dir(req)) {
+	case READ:
+		ps2esdi_readwrite(READ, req);
+		break;
+	case WRITE:
+		ps2esdi_readwrite(WRITE, req);
+		break;
+	default:
+		printk("%s: Unknown command\n", req->rq_disk->disk_name);
+		end_request(req, FAIL);
+		break;
+	}		/* handle different commands */
 }				/* main strategy routine */
 
 /* resets the ESDI adapter */
@@ -563,19 +558,20 @@ static void reset_ctrl(void)
 }				/* reset the controller */
 
 /* called by the strategy routine to handle read and write requests */
-static void ps2esdi_readwrite(int cmd, u_char drive, u_int block, u_int count)
+static void ps2esdi_readwrite(int cmd, struct request *req)
 {
-
+	struct ps2esdi_i_struct *p = req->rq_disk->private_data;
+	unsigned block = req->sector;
+	unsigned count = req->current_nr_sectors;
+	int drive = p - ps2esdi_info;
 	u_short track, head, cylinder, sector;
 	u_short cmd_blk[TYPE_1_CMD_BLK_LENGTH];
 
 	/* do some relevant arithmatic */
-	CURRENT->current_nr_sectors =
-	    (count < (2 * MAX_16BIT / SECT_SIZE)) ? count : (2 * MAX_16BIT / SECT_SIZE);
-	track = block / ps2esdi_info[drive].sect;
-	head = track % ps2esdi_info[drive].head;
-	cylinder = track / ps2esdi_info[drive].head;
-	sector = block % ps2esdi_info[drive].sect;
+	track = block / p->sect;
+	head = track % p->head;
+	cylinder = track / p->head;
+	sector = block % p->sect;
 
 #if 0
 	printk("%s: cyl=%d head=%d sect=%d\n", DEVICE_NAME, cylinder, head, sector);
@@ -584,22 +580,20 @@ static void ps2esdi_readwrite(int cmd, u_char drive, u_int block, u_int count)
 	ps2esdi_fill_cmd_block
 	    (cmd_blk,
 	     (cmd == READ) ? CMD_READ : CMD_WRITE,
-	     cylinder, head, sector,
-	     CURRENT->current_nr_sectors, drive);
+	     cylinder, head, sector, count, drive);
 
 	/* send the command block to the controller */
+	current_req = req;
+	spin_unlock_irq(&ps2esdi_lock);
 	if (ps2esdi_out_cmd_blk(cmd_blk)) {
+		spin_lock_irq(&ps2esdi_lock);
 		printk("%s: Controller failed\n", DEVICE_NAME);
-		if ((++CURRENT->errors) < MAX_RETRIES)
-			return do_ps2esdi_request(NULL);
-		else {
-			end_request(FAIL);
-			if (!QUEUE_EMPTY)
-				do_ps2esdi_request(NULL);
-		}
+		if ((++req->errors) >= MAX_RETRIES)
+			end_request(req, FAIL);
 	}
 	/* check for failure to put out the command block */ 
 	else {
+		spin_lock_irq(&ps2esdi_lock);
 #if 0
 		printk("%s: waiting for xfer\n", DEVICE_NAME);
 #endif
@@ -625,18 +619,21 @@ static void ps2esdi_fill_cmd_block(u_short * cmd_blk, u_short cmd,
 static int ps2esdi_out_cmd_blk(u_short * cmd_blk)
 {
 
-	int i, j;
+	int i;
+	unsigned long jif;
 	u_char status;
 
 	/* enable interrupts */
 	outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
 
 	/* do not write to the controller, if it is busy */
-	for (i = jiffies + ESDI_STAT_TIMEOUT; time_after(i, jiffies) && (inb(ESDI_STATUS) &
-							  STATUS_BUSY););
+	for (jif = jiffies + ESDI_STAT_TIMEOUT;
+		time_after(jif, jiffies) &&
+			(inb(ESDI_STATUS) & STATUS_BUSY); )
+		;
 
 #if 0
-	printk("%s: i(1)=%d\n", DEVICE_NAME, i);
+	printk("%s: i(1)=%ld\n", DEVICE_NAME, jif);
 #endif
 
 	/* if device is still busy - then just time out */
@@ -654,8 +651,8 @@ static int ps2esdi_out_cmd_blk(u_short * cmd_blk)
 	/* one by one send each word out */
 	for (i = (((*cmd_blk) >> 14) + 1) << 1; i; i--) {
 		status = inb(ESDI_STATUS);
-		for (j = jiffies + ESDI_STAT_TIMEOUT;
-		     time_after(j, jiffies) && (status & STATUS_BUSY) &&
+		for (jif = jiffies + ESDI_STAT_TIMEOUT;
+		     time_after(jif, jiffies) && (status & STATUS_BUSY) &&
 		   (status & STATUS_CMD_INF); status = inb(ESDI_STATUS));
 		if ((status & (STATUS_BUSY | STATUS_CMD_INF)) == STATUS_BUSY) {
 #if 0
@@ -675,39 +672,25 @@ static int ps2esdi_out_cmd_blk(u_short * cmd_blk)
 /* prepare for dma - do all the necessary setup */
 static void ps2esdi_prep_dma(char *buffer, u_short length, u_char dma_xmode)
 {
-	u_int tc;
-	
-	buffer=(char *)virt_to_bus(buffer);
+	unsigned long flags = claim_dma_lock();
 
-#if 0
-	printk("ps2esdi: b_wait: %p\n", CURRENT->bh->b_wait);
-#endif
-	cli();
+	mca_disable_dma(dma_arb_level);
 
-	outb(dma_arb_level | DMA_MASK_CHAN, PORT_DMA_FN);
+	mca_set_dma_addr(dma_arb_level, isa_virt_to_bus(buffer));
 
-	outb(dma_arb_level | DMA_WRITE_ADDR, PORT_DMA_FN);
-	outb((u_int) buffer & (u_int) 0xff, PORT_DMA_EX);
-	outb(((u_int) buffer >> 8) & (u_int) 0xff, PORT_DMA_EX);
-	outb(((u_int) buffer >> 16) & (u_int) 0xff, PORT_DMA_EX);
+	mca_set_dma_count(dma_arb_level, length * 512 / 2);
 
-	outb(dma_arb_level | DMA_WRITE_TC, PORT_DMA_FN);
-	tc = (length * SECT_SIZE / 2) - 1;
-	outb(tc & 0xff, PORT_DMA_EX);
-	outb((tc >> 8) & 0xff, PORT_DMA_EX);
+	mca_set_dma_mode(dma_arb_level, dma_xmode);
 
-	outb(dma_arb_level | DMA_WRITE_MODE, PORT_DMA_FN);
-	outb(dma_xmode, PORT_DMA_EX);
+	mca_enable_dma(dma_arb_level);
 
-	outb(dma_arb_level | DMA_UNMASK_CHAN, PORT_DMA_FN);
-
-	sti();
+	release_dma_lock(flags);
 
 }				/* prepare for dma */
 
 
 
-static void ps2esdi_interrupt_handler(int irq, void *dev_id,
+static irqreturn_t ps2esdi_interrupt_handler(int irq, void *dev_id,
 				      struct pt_regs *regs)
 {
 	u_int int_ret_code;
@@ -721,8 +704,9 @@ static void ps2esdi_interrupt_handler(int irq, void *dev_id,
 		} else
 			printk("%s: help ! No interrupt handler.\n", DEVICE_NAME);
 	} else {
-		return;
+		return IRQ_NONE;
 	}
+	return IRQ_HANDLED;
 }
 
 static void ps2esdi_initial_reset_int_handler(u_int int_ret_code)
@@ -759,7 +743,7 @@ static void ps2esdi_geometry_int_handler(u_int int_ret_code)
 	drive_num = int_ret_code >> 5;
 	switch (int_ret_code & 0xf) {
 	case INT_CMD_COMPLETE:
-		for (i = ESDI_TIMEOUT; i & !(inb(ESDI_STATUS) & STATUS_STAT_AVAIL); i--);
+		for (i = ESDI_TIMEOUT; i && !(inb(ESDI_STATUS) & STATUS_STAT_AVAIL); i--);
 		if (!(inb(ESDI_STATUS) & STATUS_STAT_AVAIL)) {
 			printk("%s: timeout reading status word\n", DEVICE_NAME);
 			outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
@@ -871,35 +855,39 @@ static void ps2esdi_geometry_int_handler(u_int int_ret_code)
 
 static void ps2esdi_normal_interrupt_handler(u_int int_ret_code)
 {
+	unsigned long flags;
 	u_int status;
+	u_int ending;
 	int i;
 
 	switch (int_ret_code & 0x0f) {
 	case INT_TRANSFER_REQ:
-		ps2esdi_prep_dma(CURRENT->buffer, CURRENT->current_nr_sectors,
-		    (CURRENT->cmd == READ) ? DMA_READ_16 : DMA_WRITE_16);
+		ps2esdi_prep_dma(current_req->buffer,
+				 current_req->current_nr_sectors,
+		    (rq_data_dir(current_req) == READ)
+		    ? MCA_DMA_MODE_16 | MCA_DMA_MODE_WRITE | MCA_DMA_MODE_XFER
+		    : MCA_DMA_MODE_16 | MCA_DMA_MODE_READ);
 		outb(CTRL_ENABLE_DMA | CTRL_ENABLE_INTR, ESDI_CONTROL);
+		ending = -1;
 		break;
 
 	case INT_ATTN_ERROR:
 		printk("%s: Attention error. interrupt status : %02X\n", DEVICE_NAME,
 		       int_ret_code);
 		outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
+		ending = FAIL;
 		break;
 
 	case INT_CMD_COMPLETE:
-		for (i = ESDI_TIMEOUT; i & !(inb(ESDI_STATUS) & STATUS_STAT_AVAIL); i--);
+		for (i = ESDI_TIMEOUT; i && !(inb(ESDI_STATUS) & STATUS_STAT_AVAIL); i--);
 		if (!(inb(ESDI_STATUS) & STATUS_STAT_AVAIL)) {
 			printk("%s: timeout reading status word\n", DEVICE_NAME);
 			outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 			outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
-			if ((++CURRENT->errors) < MAX_RETRIES)
-				do_ps2esdi_request(NULL);
-			else {
-				end_request(FAIL);
-				if (!QUEUE_EMPTY)
-					do_ps2esdi_request(NULL);
-			}
+			if ((++current_req->errors) >= MAX_RETRIES)
+				ending = FAIL;
+			else
+				ending = -1;
 			break;
 		}
 		status = inw(ESDI_STT_INT);
@@ -909,16 +897,14 @@ static void ps2esdi_normal_interrupt_handler(u_int int_ret_code)
 			LITE_OFF;
 			outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 			outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
-#if 0
-			printk("ps2esdi: cmd_complete b_wait: %p\n", CURRENT->bh->b_wait);
-#endif
-			ps2esdi_continue_request();
+			ending = SUCCES;
 			break;
 		default:
 			printk("%s: interrupt for unknown command %02X\n",
 			       DEVICE_NAME, status & 0x1f);
 			outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 			outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
+			ending = -1;
 			break;
 		}
 		break;
@@ -929,7 +915,7 @@ static void ps2esdi_normal_interrupt_handler(u_int int_ret_code)
 		dump_cmd_complete_status(int_ret_code);
 		outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 		outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
-		ps2esdi_continue_request();
+		ending = SUCCES;
 		break;
 	case INT_CMD_WARNING:
 	case INT_CMD_ABORT:
@@ -939,22 +925,17 @@ static void ps2esdi_normal_interrupt_handler(u_int int_ret_code)
 		dump_cmd_complete_status(int_ret_code);
 		outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 		outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
-		if ((++CURRENT->errors) < MAX_RETRIES)
-			do_ps2esdi_request(NULL);
-		else {
-			end_request(FAIL);
-			if (!QUEUE_EMPTY)
-				do_ps2esdi_request(NULL);
-		}
+		if ((++current_req->errors) >= MAX_RETRIES)
+			ending = FAIL;
+		else
+			ending = -1;
 		break;
 
 	case INT_CMD_BLK_ERR:
 		dump_cmd_complete_status(int_ret_code);
 		outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 		outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
-		end_request(FAIL);
-		if (!QUEUE_EMPTY)
-			do_ps2esdi_request(NULL);
+		ending = FAIL;
 		break;
 
 	case INT_CMD_FORMAT:
@@ -962,12 +943,14 @@ static void ps2esdi_normal_interrupt_handler(u_int int_ret_code)
 		       ,DEVICE_NAME);
 		outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 		outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
+		ending = -1;
 		break;
 
 	case INT_RESET:
 		/* BA printk("%s: reset completed.\n", DEVICE_NAME) */ ;
 		outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 		outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
+		ending = -1;
 		break;
 
 	default:
@@ -975,24 +958,17 @@ static void ps2esdi_normal_interrupt_handler(u_int int_ret_code)
 		       DEVICE_NAME, int_ret_code & 0xf);
 		outb((int_ret_code & 0xe0) | ATT_EOI, ESDI_ATTN);
 		outb(CTRL_ENABLE_INTR, ESDI_CONTROL);
+		ending = -1;
 		break;
 	}
-
-}				/* handle interrupts */
-
-
-static void ps2esdi_continue_request(void)
-{
-	if (CURRENT->nr_sectors -= CURRENT->current_nr_sectors) {
-		CURRENT->buffer += CURRENT->current_nr_sectors * SECT_SIZE;
-		CURRENT->sector += CURRENT->current_nr_sectors;
-		do_ps2esdi_request(NULL);
-	} else {
-		end_request(SUCCES);
-		if (!QUEUE_EMPTY)
-			do_ps2esdi_request(NULL);
+	if(ending != -1) {
+		spin_lock_irqsave(&ps2esdi_lock, flags);
+		end_request(current_req, ending);
+		current_req = NULL;
+		do_ps2esdi_request(ps2esdi_queue);
+		spin_unlock_irqrestore(&ps2esdi_lock, flags);
 	}
-}
+}				/* handle interrupts */
 
 
 
@@ -1083,123 +1059,25 @@ static void dump_cmd_complete_status(u_int int_ret_code)
 
 }
 
-
-static int ps2esdi_open(struct inode *inode, struct file *file)
-{
-	int dev = DEVICE_NR(inode->i_rdev);
-
-	if (dev < ps2esdi_drives) {
-		while (!ps2esdi_valid[dev])
-			sleep_on(&ps2esdi_wait_open);
-
-		access_count[dev]++;
-
-		return (0);
-	} else
-		return (-ENODEV);
-}
-
-
-
-static int ps2esdi_release(struct inode *inode, struct file *file)
-{
-	int dev = DEVICE_NR(inode->i_rdev);
-
-	if (dev < ps2esdi_drives) {
-		access_count[dev]--;
-	}
-	return 0;
-}
-
-
-
 static int ps2esdi_ioctl(struct inode *inode,
 			 struct file *file, u_int cmd, u_long arg)
 {
+	struct ps2esdi_i_struct *p = inode->i_bdev->bd_disk->private_data;
+	struct ps2esdi_geometry geom;
 
-	struct ps2esdi_geometry *geometry = (struct ps2esdi_geometry *) arg;
-	int dev = DEVICE_NR(inode->i_rdev), err;
-
-	if (inode && (dev < ps2esdi_drives))
-		switch (cmd) {
-		case HDIO_GETGEO:
-			if (arg) {
-				if ((err = verify_area(VERIFY_WRITE, geometry, sizeof(*geometry))))
-					return (err);
-				put_user(ps2esdi_info[dev].head, (char *) &geometry->heads);
-				put_user(ps2esdi_info[dev].sect, (char *) &geometry->sectors);
-				put_user(ps2esdi_info[dev].cyl, (short *) &geometry->cylinders);
-				put_user(ps2esdi[MINOR(inode->i_rdev)].start_sect,
-					    (long *) &geometry->start);
-
-				return (0);
-			}
-			break;
-
-		case BLKGETSIZE:
-			if (arg) {
-				if ((err = verify_area(VERIFY_WRITE, (long *) arg, sizeof(long))))
-					 return (err);
-				put_user(ps2esdi[MINOR(inode->i_rdev)].nr_sects, (long *) arg);
-
-				return (0);
-			}
-			break;
-
-		case BLKRRPART:
-                        if (!capable(CAP_SYS_ADMIN)) 
-				return -EACCES;
-			return (ps2esdi_reread_partitions(inode->i_rdev));
-
-		case BLKROSET:
-		case BLKROGET:
-		case BLKRASET:
-		case BLKRAGET:
-		case BLKFLSBUF:
-		case BLKPG:
-			return blk_ioctl(inode->i_rdev, cmd, arg);
-		}
-	return (-EINVAL);
+	if (cmd != HDIO_GETGEO)
+		return -EINVAL;
+	memset(&geom, 0, sizeof(geom));
+	geom.heads = p->head;
+	geom.sectors = p->sect;
+	geom.cylinders = p->cyl;
+	geom.start = get_start_sect(inode->i_bdev);
+	if (copy_to_user((void __user *)arg, &geom, sizeof(geom)))
+		return -EFAULT;
+	return 0;
 }
 
-
-
-static int ps2esdi_reread_partitions(kdev_t dev)
-{
-	int target = DEVICE_NR(dev);
-	int start = target << ps2esdi_gendisk.minor_shift;
-	int partition;
-
-	cli();
-	ps2esdi_valid[target] = (access_count[target] != 1);
-	sti();
-	if (ps2esdi_valid[target])
-		return (-EBUSY);
-
-	for (partition = ps2esdi_gendisk.max_p - 1;
-	     partition >= 0; partition--) {
-		int minor = (start | partition);
-		kdev_t devp = MKDEV(MAJOR_NR, minor);
-		struct super_block * sb = get_super(devp);
-		
-		sync_dev(devp);
-		if (sb)
-			invalidate_inodes(sb);
-		invalidate_buffers(devp);
-		ps2esdi_gendisk.part[start + partition].start_sect = 0;
-		ps2esdi_gendisk.part[start + partition].nr_sects = 0;
-	}
-
-	grok_partitions(&ps2esdi_gendisk, target, 1<<6, 
-		ps2esdi_info[target].head * ps2esdi_info[target].cyl * ps2esdi_info[target].sect);
-
-	ps2esdi_valid[target] = 1;
-	wake_up(&ps2esdi_wait_open);
-
-	return (0);
-}
-
-void ps2esdi_reset_timer(unsigned long unused)
+static void ps2esdi_reset_timer(unsigned long unused)
 {
 
 	int status;
@@ -1212,5 +1090,3 @@ void ps2esdi_reset_timer(unsigned long unused)
 	}
 	wake_up(&ps2esdi_int);
 }
-
-#endif

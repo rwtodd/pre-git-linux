@@ -20,9 +20,9 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 
-#include <asm/bootinfo.h> 
-#include <asm/machw.h> 
-#include <asm/macintosh.h> 
+#include <asm/bootinfo.h>
+#include <asm/machw.h>
+#include <asm/macintosh.h>
 #include <asm/macints.h>
 #include <asm/mac_via.h>
 #include <asm/mac_oss.h>
@@ -30,11 +30,11 @@
 int oss_present;
 volatile struct mac_oss *oss;
 
-void oss_irq(int, void *, struct pt_regs *);
-void oss_nubus_irq(int, void *, struct pt_regs *);
+irqreturn_t oss_irq(int, void *, struct pt_regs *);
+irqreturn_t oss_nubus_irq(int, void *, struct pt_regs *);
 
-extern void via1_irq(int, void *, struct pt_regs *);
-extern void mac_scc_dispatch(int, void *, struct pt_regs *);
+extern irqreturn_t via1_irq(int, void *, struct pt_regs *);
+extern irqreturn_t mac_scc_dispatch(int, void *, struct pt_regs *);
 
 /*
  * Initialize the OSS
@@ -67,15 +67,15 @@ void __init oss_init(void)
 
 void __init oss_register_interrupts(void)
 {
-	sys_request_irq(OSS_IRQLEV_SCSI, oss_irq, IRQ_FLG_LOCK,
+	cpu_request_irq(OSS_IRQLEV_SCSI, oss_irq, IRQ_FLG_LOCK,
 			"scsi", (void *) oss);
-	sys_request_irq(OSS_IRQLEV_IOPSCC, mac_scc_dispatch, IRQ_FLG_LOCK,
+	cpu_request_irq(OSS_IRQLEV_IOPSCC, mac_scc_dispatch, IRQ_FLG_LOCK,
 			"scc", mac_scc_dispatch);
-	sys_request_irq(OSS_IRQLEV_NUBUS, oss_nubus_irq, IRQ_FLG_LOCK,
+	cpu_request_irq(OSS_IRQLEV_NUBUS, oss_nubus_irq, IRQ_FLG_LOCK,
 			"nubus", (void *) oss);
-	sys_request_irq(OSS_IRQLEV_SOUND, oss_irq, IRQ_FLG_LOCK,
+	cpu_request_irq(OSS_IRQLEV_SOUND, oss_irq, IRQ_FLG_LOCK,
 			"sound", (void *) oss);
-	sys_request_irq(OSS_IRQLEV_VIA1, via1_irq, IRQ_FLG_LOCK,
+	cpu_request_irq(OSS_IRQLEV_VIA1, via1_irq, IRQ_FLG_LOCK,
 			"via1", (void *) via1);
 }
 
@@ -91,15 +91,16 @@ void __init oss_nubus_init(void)
  * Handle miscellaneous OSS interrupts. Right now that's just sound
  * and SCSI; everything else is routed to its own autovector IRQ.
  */
- 
-void oss_irq(int irq, void *dev_id, struct pt_regs *regs)
+
+irqreturn_t oss_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int events;
 
 	events = oss->irq_pending & (OSS_IP_SOUND|OSS_IP_SCSI);
-	if (!events) return;
+	if (!events)
+		return IRQ_NONE;
 
-#ifdef DEBUG_IRQS	
+#ifdef DEBUG_IRQS
 	if ((console_loglevel == 10) && !(events & OSS_IP_SCSI)) {
 		printk("oss_irq: irq %d events = 0x%04X\n", irq,
 			(int) oss->irq_pending);
@@ -118,20 +119,22 @@ void oss_irq(int irq, void *dev_id, struct pt_regs *regs)
 	} else {
 		/* FIXME: error check here? */
 	}
+	return IRQ_HANDLED;
 }
 
 /*
  * Nubus IRQ handler, OSS style
  *
- * Unlike the VIA/RBV this is on its own autovector interupt level.
+ * Unlike the VIA/RBV this is on its own autovector interrupt level.
  */
 
-void oss_nubus_irq(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t oss_nubus_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int events, irq_bit, i;
 
 	events = oss->irq_pending & OSS_IP_NUBUS;
-	if (!events) return;
+	if (!events)
+		return IRQ_NONE;
 
 #ifdef DEBUG_NUBUS_INT
 	if (console_loglevel > 7) {
@@ -148,6 +151,7 @@ void oss_nubus_irq(int irq, void *dev_id, struct pt_regs *regs)
 			oss->irq_level[i] = OSS_IRQLEV_NUBUS;
 		}
 	}
+	return IRQ_HANDLED;
 }
 
 /*

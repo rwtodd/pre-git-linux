@@ -1,6 +1,6 @@
 /*
  * lec.c: Lan Emulation driver 
- * Marko Kiiskila carnil@cs.tut.fi
+ * Marko Kiiskila mkiiskila@yahoo.com
  *
  */
 
@@ -20,6 +20,9 @@
 #include <net/arp.h>
 #include <net/dst.h>
 #include <linux/proc_fs.h>
+#include <linux/spinlock.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 
 /* TokenRing if needed */
 #ifdef CONFIG_TR
@@ -35,6 +38,10 @@
 #include <linux/if_bridge.h>
 #include "../bridge/br_private.h"
 static unsigned char bridge_ula_lec[] = {0x01, 0x80, 0xc2, 0x00, 0x00};
+
+extern struct net_bridge_fdb_entry *(*br_fdb_get_hook)(struct net_bridge *br,
+       unsigned char *addr);
+extern void (*br_fdb_put_hook)(struct net_bridge_fdb_entry *ent);
 #endif
 
 /* Modular too */
@@ -43,7 +50,7 @@ static unsigned char bridge_ula_lec[] = {0x01, 0x80, 0xc2, 0x00, 0x00};
 
 #include "lec.h"
 #include "lec_arpc.h"
-#include "resources.h"  /* for bind_vcc() */
+#include "resources.h"
 
 #if 0
 #define DPRINTK printk
@@ -60,13 +67,13 @@ static unsigned char bridge_ula_lec[] = {0x01, 0x80, 0xc2, 0x00, 0x00};
                                single destination while waiting for SVC */
 
 static int lec_open(struct net_device *dev);
-static int lec_send_packet(struct sk_buff *skb, struct net_device *dev);
+static int lec_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static int lec_close(struct net_device *dev);
 static struct net_device_stats *lec_get_stats(struct net_device *dev);
 static void lec_init(struct net_device *dev);
-static __inline__ struct lec_arp_table* lec_arp_find(struct lec_priv *priv,
+static struct lec_arp_table* lec_arp_find(struct lec_priv *priv,
                                                      unsigned char *mac_addr);
-static __inline__ int lec_arp_remove(struct lec_arp_table **lec_arp_tables,
+static int lec_arp_remove(struct lec_priv *priv,
 				     struct lec_arp_table *to_remove);
 /* LANE2 functions */
 static void lane2_associate_ind (struct net_device *dev, u8 *mac_address,
@@ -88,8 +95,18 @@ static unsigned char bus_mac[ETH_ALEN] = {0xff,0xff,0xff,0xff,0xff,0xff};
 static struct net_device *dev_lec[MAX_LEC_ITF];
 
 /* This will be called from proc.c via function pointer */
-struct net_device **get_dev_lec (void) {
-        return &dev_lec[0];
+struct net_device *get_dev_lec(int itf)
+{
+	struct net_device *dev;
+
+	if (itf >= MAX_LEC_ITF)
+		return NULL;
+	rtnl_lock();
+	dev = dev_lec[itf];
+	if (dev)
+		dev_hold(dev);
+	rtnl_unlock();
+	return dev;
 }
 
 #if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
@@ -118,8 +135,8 @@ static void lec_handle_bridge(struct sk_buff *skb, struct net_device *dev)
 
                 priv = (struct lec_priv *)dev->priv;
                 atm_force_charge(priv->lecd, skb2->truesize);
-                skb_queue_tail(&priv->lecd->recvq, skb2);
-                wake_up(&priv->lecd->sleep);
+                skb_queue_tail(&priv->lecd->sk->sk_receive_queue, skb2);
+                priv->lecd->sk->sk_data_ready(priv->lecd->sk, skb2->len);
         }
 
         return;
@@ -191,15 +208,40 @@ lec_open(struct net_device *dev)
         return 0;
 }
 
+static __inline__ void
+lec_send(struct atm_vcc *vcc, struct sk_buff *skb, struct lec_priv *priv)
+{
+	ATM_SKB(skb)->vcc = vcc;
+	ATM_SKB(skb)->atm_options = vcc->atm_options;
+
+	atomic_add(skb->truesize, &vcc->sk->sk_wmem_alloc);
+	if (vcc->send(vcc, skb) < 0) {
+		priv->stats.tx_dropped++;
+		return;
+	}
+
+	priv->stats.tx_packets++;
+	priv->stats.tx_bytes += skb->len;
+}
+
+static void
+lec_tx_timeout(struct net_device *dev)
+{
+	printk(KERN_INFO "%s: tx timeout\n", dev->name);
+	dev->trans_start = jiffies;
+	netif_wake_queue(dev);
+}
+
 static int 
-lec_send_packet(struct sk_buff *skb, struct net_device *dev)
+lec_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
         struct sk_buff *skb2;
         struct lec_priv *priv = (struct lec_priv *)dev->priv;
         struct lecdatahdr_8023 *lec_h;
-        struct atm_vcc *send_vcc;
+        struct atm_vcc *vcc;
 	struct lec_arp_table *entry;
-        unsigned char *nb, *dst;
+        unsigned char *dst;
+	int min_frame_size;
 #ifdef CONFIG_TR
         unsigned char rdesc[ETH_ALEN]; /* Token Ring route descriptor */
 #endif
@@ -209,7 +251,7 @@ lec_send_packet(struct sk_buff *skb, struct net_device *dev)
         int i=0;
 #endif /* DUMP_PACKETS >0 */
         
-        DPRINTK("Lec_send_packet called\n");  
+        DPRINTK("lec_start_xmit called\n");  
         if (!priv->lecd) {
                 printk("%s:No lecd attached\n",dev->name);
                 priv->stats.tx_errors++;
@@ -228,7 +270,7 @@ lec_send_packet(struct sk_buff *skb, struct net_device *dev)
         /* Make sure we have room for lec_id */
         if (skb_headroom(skb) < 2) {
 
-                DPRINTK("lec_send_packet: reallocating skb\n");
+                DPRINTK("lec_start_xmit: reallocating skb\n");
                 skb2 = skb_realloc_headroom(skb, LEC_HEADER_LEN);
                 kfree_skb(skb);
                 if (skb2 == NULL) return 0;
@@ -270,22 +312,24 @@ lec_send_packet(struct sk_buff *skb, struct net_device *dev)
 #endif /* DUMP_PACKETS > 0 */
 
         /* Minimum ethernet-frame size */
-        if (skb->len <62) {
-                if (skb->truesize < 62) {
-                        printk("%s:data packet %d / %d\n",
-                               dev->name,
-                               skb->len,skb->truesize);
-                        nb=(unsigned char*)kmalloc(64, GFP_ATOMIC);
-                        memcpy(nb,skb->data,skb->len);
-                        kfree(skb->head);
-                        skb->head = skb->data = nb;
-                        skb->tail = nb+62;
-                        skb->end = nb+64;
-                        skb->len=62;
-                        skb->truesize = 64;
-                } else {
-                        skb->len = 62;
+#ifdef CONFIG_TR
+        if (priv->is_trdev)
+                min_frame_size = LEC_MINIMUM_8025_SIZE;
+	else
+#endif
+        min_frame_size = LEC_MINIMUM_8023_SIZE;
+        if (skb->len < min_frame_size) {
+                if ((skb->len + skb_tailroom(skb)) < min_frame_size) {
+                        skb2 = skb_copy_expand(skb, 0,
+                            min_frame_size - skb->truesize, GFP_ATOMIC);
+                                dev_kfree_skb(skb);
+                        if (skb2 == NULL) {
+                                priv->stats.tx_dropped++;
+                                return 0;
+                        }
+                        skb = skb2;
                 }
+		skb_put(skb, min_frame_size - skb->len);
         }
         
         /* Send to right vcc */
@@ -301,18 +345,18 @@ lec_send_packet(struct sk_buff *skb, struct net_device *dev)
         }
 #endif
         entry = NULL;
-        send_vcc = lec_arp_resolve(priv, dst, is_rdesc, &entry);
-        DPRINTK("%s:send_vcc:%p vcc_flags:%x, entry:%p\n", dev->name,
-                send_vcc, send_vcc?send_vcc->flags:0, entry);
-        if (!send_vcc || !test_bit(ATM_VF_READY,&send_vcc->flags)) {    
+        vcc = lec_arp_resolve(priv, dst, is_rdesc, &entry);
+        DPRINTK("%s:vcc:%p vcc_flags:%x, entry:%p\n", dev->name,
+                vcc, vcc?vcc->flags:0, entry);
+        if (!vcc || !test_bit(ATM_VF_READY,&vcc->flags)) {    
                 if (entry && (entry->tx_wait.qlen < LEC_UNRES_QUE_LEN)) {
-                        DPRINTK("%s:lec_send_packet: queuing packet, ", dev->name);
+                        DPRINTK("%s:lec_start_xmit: queuing packet, ", dev->name);
                         DPRINTK("MAC address 0x%02x:%02x:%02x:%02x:%02x:%02x\n",
                                 lec_h->h_dest[0], lec_h->h_dest[1], lec_h->h_dest[2],
                                 lec_h->h_dest[3], lec_h->h_dest[4], lec_h->h_dest[5]);
                         skb_queue_tail(&entry->tx_wait, skb);
                 } else {
-                        DPRINTK("%s:lec_send_packet: tx queue full or no arp entry, dropping, ", dev->name);
+                        DPRINTK("%s:lec_start_xmit: tx queue full or no arp entry, dropping, ", dev->name);
                         DPRINTK("MAC address 0x%02x:%02x:%02x:%02x:%02x:%02x\n",
                                 lec_h->h_dest[0], lec_h->h_dest[1], lec_h->h_dest[2],
                                 lec_h->h_dest[3], lec_h->h_dest[4], lec_h->h_dest[5]);
@@ -324,7 +368,7 @@ lec_send_packet(struct sk_buff *skb, struct net_device *dev)
                 
 #if DUMP_PACKETS > 0                    
         printk("%s:sending to vpi:%d vci:%d\n", dev->name,
-               send_vcc->vpi, send_vcc->vci);       
+               vcc->vpi, vcc->vci);       
 #endif /* DUMP_PACKETS > 0 */
                 
         while (entry && (skb2 = skb_dequeue(&entry->tx_wait))) {
@@ -332,39 +376,28 @@ lec_send_packet(struct sk_buff *skb, struct net_device *dev)
                 DPRINTK("MAC address 0x%02x:%02x:%02x:%02x:%02x:%02x\n",
                         lec_h->h_dest[0], lec_h->h_dest[1], lec_h->h_dest[2],
                         lec_h->h_dest[3], lec_h->h_dest[4], lec_h->h_dest[5]);
-                ATM_SKB(skb2)->vcc = send_vcc;
-                ATM_SKB(skb2)->iovcnt = 0;
-                ATM_SKB(skb2)->atm_options = send_vcc->atm_options;
-                DPRINTK("%s:sending to vpi:%d vci:%d\n", dev->name,
-                        send_vcc->vpi, send_vcc->vci);       
-                if (atm_may_send(send_vcc, skb2->len)) {
-                        atomic_add(skb2->truesize, &send_vcc->tx_inuse);
-                        priv->stats.tx_packets++;
-                        priv->stats.tx_bytes += skb2->len;
-                        send_vcc->send(send_vcc, skb2);
-                } else {
-                        priv->stats.tx_dropped++;
-                        dev_kfree_skb(skb2);
-		}
+		lec_send(vcc, skb2, priv);
         }
 
-        ATM_SKB(skb)->vcc = send_vcc;
-        ATM_SKB(skb)->iovcnt = 0;
-        ATM_SKB(skb)->atm_options = send_vcc->atm_options;
-        if (atm_may_send(send_vcc, skb->len)) {
-                atomic_add(skb->truesize, &send_vcc->tx_inuse);
-                priv->stats.tx_packets++;
-                priv->stats.tx_bytes += skb->len;
-                send_vcc->send(send_vcc, skb);
-        } else {
-                priv->stats.tx_dropped++;
-                dev_kfree_skb(skb);
+	lec_send(vcc, skb, priv);
+
+	if (!atm_may_send(vcc, 0)) {
+		struct lec_vcc_priv *vpriv = LEC_VCC_PRIV(vcc);
+
+		vpriv->xoff = 1;
+		netif_stop_queue(dev);
+
+		/*
+		 * vcc->pop() might have occurred in between, making
+		 * the vcc usuable again.  Since xmit is serialized,
+		 * this is the only situation we have to re-test.
+		 */
+
+		if (atm_may_send(vcc, 0))
+			netif_wake_queue(dev);
 	}
 
-#if 0
-        /* Should we wait for card's device driver to notify us? */
-        dev->tbusy=0;
-#endif        
+	dev->trans_start = jiffies;
         return 0;
 }
 
@@ -389,6 +422,7 @@ lec_get_stats(struct net_device *dev)
 static int 
 lec_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
 {
+	unsigned long flags;
         struct net_device *dev = (struct net_device*)vcc->proto_data;
         struct lec_priv *priv = (struct lec_priv*)dev->priv;
         struct atmlec_msg *mesg;
@@ -396,7 +430,7 @@ lec_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
         int i;
         char *tmp; /* FIXME */
 
-	atomic_sub(skb->truesize+ATM_PDU_OVHD, &vcc->tx_inuse);
+	atomic_sub(skb->truesize, &vcc->sk->sk_wmem_alloc);
         mesg = (struct atmlec_msg *)skb->data;
         tmp = skb->data;
         tmp += sizeof(struct atmlec_msg);
@@ -423,8 +457,10 @@ lec_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
                 lec_flush_complete(priv, mesg->content.normal.flag);
                 break;
         case l_narp_req: /* LANE2: see 7.1.35 in the lane2 spec */
+		spin_lock_irqsave(&priv->lec_arp_lock, flags);
                 entry = lec_arp_find(priv, mesg->content.normal.mac_addr);
-                lec_arp_remove(priv->lec_arp_tables, entry);
+                lec_arp_remove(priv, entry);
+		spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 
                 if (mesg->content.normal.no_source_le_narp)
                         break;
@@ -502,8 +538,8 @@ lec_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
                         skb2->len = sizeof(struct atmlec_msg);
                         memcpy(skb2->data, mesg, sizeof(struct atmlec_msg));
                         atm_force_charge(priv->lecd, skb2->truesize);
-                        skb_queue_tail(&priv->lecd->recvq, skb2);
-                        wake_up(&priv->lecd->sleep);
+                        skb_queue_tail(&priv->lecd->sk->sk_receive_queue, skb2);
+                        priv->lecd->sk->sk_data_ready(priv->lecd->sk, skb2->len);
                 }
                 if (f != NULL) br_fdb_put_hook(f);
 #endif /* defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE) */
@@ -531,33 +567,28 @@ lec_atm_close(struct atm_vcc *vcc)
         netif_stop_queue(dev);
         lec_arp_destroy(priv);
 
-        if (skb_peek(&vcc->recvq))
+        if (skb_peek(&vcc->sk->sk_receive_queue))
 		printk("%s lec_atm_close: closing with messages pending\n",
                        dev->name);
-        while ((skb = skb_dequeue(&vcc->recvq))) {
+        while ((skb = skb_dequeue(&vcc->sk->sk_receive_queue)) != NULL) {
                 atm_return(vcc, skb->truesize);
 		dev_kfree_skb(skb);
         }
   
 	printk("%s: Shut down!\n", dev->name);
-        MOD_DEC_USE_COUNT;
+        module_put(THIS_MODULE);
 }
 
 static struct atmdev_ops lecdev_ops = {
-        close:	lec_atm_close,
-        send:	lec_atm_send
+        .close	= lec_atm_close,
+        .send	= lec_atm_send
 };
 
 static struct atm_dev lecatm_dev = {
-        &lecdev_ops,
-        NULL,	    /*PHY*/
-        "lec",	    /*type*/
-        999,	    /*dummy device number*/
-        NULL,NULL,  /*no VCCs*/
-        NULL,NULL,  /*no data*/
-        { 0 },	    /*no flags*/
-        NULL,	    /* no local address*/
-        { 0 }	    /*no ESI or rest of the atm_dev struct things*/
+	.ops	= &lecdev_ops,
+	.type	= "lec",
+	.number	= 999,	/* dummy device number */
+	.lock	= SPIN_LOCK_UNLOCKED
 };
 
 /*
@@ -592,14 +623,14 @@ send_to_lecd(struct lec_priv *priv, atmlec_msg_type type,
 		memcpy(&mesg->content.normal.atm_addr, atm_addr, ATM_ESA_LEN);
 
         atm_force_charge(priv->lecd, skb->truesize);
-	skb_queue_tail(&priv->lecd->recvq, skb);
-        wake_up(&priv->lecd->sleep);
+	skb_queue_tail(&priv->lecd->sk->sk_receive_queue, skb);
+        priv->lecd->sk->sk_data_ready(priv->lecd->sk, skb->len);
 
         if (data != NULL) {
                 DPRINTK("lec: about to send %d bytes of data\n", data->len);
                 atm_force_charge(priv->lecd, data->truesize);
-                skb_queue_tail(&priv->lecd->recvq, data);
-                wake_up(&priv->lecd->sleep);
+                skb_queue_tail(&priv->lecd->sk->sk_receive_queue, data);
+                priv->lecd->sk->sk_data_ready(priv->lecd->sk, skb->len);
         }
 
         return 0;
@@ -614,16 +645,25 @@ static int lec_change_mtu(struct net_device *dev, int new_mtu)
         return 0;
 }
 
+static void lec_set_multicast_list(struct net_device *dev)
+{
+	/* by default, all multicast frames arrive over the bus.
+         * eventually support selective multicast service
+         */
+        return;
+}
+
 static void 
 lec_init(struct net_device *dev)
 {
         dev->change_mtu = lec_change_mtu;
         dev->open = lec_open;
         dev->stop = lec_close;
-        dev->hard_start_xmit = lec_send_packet;
+        dev->hard_start_xmit = lec_start_xmit;
+	dev->tx_timeout = lec_tx_timeout;
 
         dev->get_stats = lec_get_stats;
-        dev->set_multicast_list = NULL;
+        dev->set_multicast_list = lec_set_multicast_list;
         dev->do_ioctl  = NULL;
         printk("%s: Initialized!\n",dev->name);
         return;
@@ -672,17 +712,18 @@ lec_push(struct atm_vcc *vcc, struct sk_buff *skb)
 #endif /* DUMP_PACKETS > 0 */
         if (memcmp(skb->data, lec_ctrl_magic, 4) ==0) { /* Control frame, to daemon*/
                 DPRINTK("%s: To daemon\n",dev->name);
-                skb_queue_tail(&vcc->recvq, skb);
-                wake_up(&vcc->sleep);
+                skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
+                vcc->sk->sk_data_ready(vcc->sk, skb->len);
         } else { /* Data frame, queue to protocol handlers */
                 unsigned char *dst;
 
                 atm_return(vcc,skb->truesize);
                 if (*(uint16_t *)skb->data == htons(priv->lecid) ||
-                    !priv->lecd) { 
+                    !priv->lecd ||
+                    !(dev->flags & IFF_UP)) { 
                         /* Probably looping back, or if lecd is missing,
                            lecd has gone down */
-                        DPRINTK("Ignoring loopback frame...\n");
+                        DPRINTK("Ignoring frame...\n");
                         dev_kfree_skb(skb);
                         return;
                 }
@@ -702,7 +743,7 @@ lec_push(struct atm_vcc *vcc, struct sk_buff *skb)
                         lec_arp_check_empties(priv, vcc, skb);
                 }
                 skb->dev = dev;
-                skb->data += 2; /* skip lec_id */
+                skb_pull(skb, 2); /* skip lec_id */
 #ifdef CONFIG_TR
                 if (priv->is_trdev) skb->protocol = tr_type_trans(skb, dev);
                 else
@@ -710,13 +751,35 @@ lec_push(struct atm_vcc *vcc, struct sk_buff *skb)
                 skb->protocol = eth_type_trans(skb, dev);
                 priv->stats.rx_packets++;
                 priv->stats.rx_bytes += skb->len;
+                memset(ATM_SKB(skb), 0, sizeof(struct atm_skb_data));
                 netif_rx(skb);
         }
 }
 
-int 
-lec_vcc_attach(struct atm_vcc *vcc, void *arg)
+void
+lec_pop(struct atm_vcc *vcc, struct sk_buff *skb)
 {
+	struct lec_vcc_priv *vpriv = LEC_VCC_PRIV(vcc);
+	struct net_device *dev = skb->dev;
+
+	if (vpriv == NULL) {
+		printk("lec_pop(): vpriv = NULL!?!?!?\n");
+		return;
+	}
+
+	vpriv->old_pop(vcc, skb);
+
+	if (vpriv->xoff && atm_may_send(vcc, 0)) {
+		vpriv->xoff = 0;
+		if (netif_running(dev) && netif_queue_stopped(dev))
+			netif_wake_queue(dev);
+	}
+}
+
+int 
+lec_vcc_attach(struct atm_vcc *vcc, void __user *arg)
+{
+	struct lec_vcc_priv *vpriv;
         int bytes_left;
         struct atmlec_ioc ioc_data;
 
@@ -729,10 +792,16 @@ lec_vcc_attach(struct atm_vcc *vcc, void *arg)
         if (ioc_data.dev_num < 0 || ioc_data.dev_num >= MAX_LEC_ITF || 
             !dev_lec[ioc_data.dev_num])
                 return -EINVAL;
+	if (!(vpriv = kmalloc(sizeof(struct lec_vcc_priv), GFP_KERNEL)))
+		return -ENOMEM;
+	vpriv->xoff = 0;
+	vpriv->old_pop = vcc->pop;
+	vcc->user_back = vpriv;
+	vcc->pop = lec_pop;
         lec_vcc_added(dev_lec[ioc_data.dev_num]->priv, 
                       &ioc_data, vcc, vcc->push);
-        vcc->push = lec_push;
         vcc->proto_data = dev_lec[ioc_data.dev_num];
+        vcc->push = lec_push;
         return 0;
 }
 
@@ -773,16 +842,20 @@ lecd_attach(struct atm_vcc *vcc, int arg)
                 size = sizeof(struct lec_priv);
 #ifdef CONFIG_TR
                 if (is_trdev)
-                        dev_lec[i] = init_trdev(NULL, size);
+                        dev_lec[i] = alloc_trdev(size);
                 else
 #endif
-                dev_lec[i] = init_etherdev(NULL, size);
+                dev_lec[i] = alloc_etherdev(size);
                 if (!dev_lec[i])
                         return -ENOMEM;
+                snprintf(dev_lec[i]->name, IFNAMSIZ, "lec%d", i);
+                if (register_netdev(dev_lec[i])) {
+                        free_netdev(dev_lec[i]);
+                        return -EINVAL;
+                }
 
                 priv = dev_lec[i]->priv;
                 priv->is_trdev = is_trdev;
-                sprintf(dev_lec[i]->name, "lec%d", i);
                 lec_init(dev_lec[i]);
         } else {
                 priv = dev_lec[i]->priv;
@@ -792,7 +865,8 @@ lecd_attach(struct atm_vcc *vcc, int arg)
         lec_arp_init(priv);
 	priv->itfnum = i;  /* LANE2 addition */
         priv->lecd = vcc;
-        bind_vcc(vcc, &lecatm_dev);
+        vcc->dev = &lecatm_dev;
+        vcc_insert_socket(vcc->sk);
         
         vcc->proto_data = dev_lec[i];
 	set_bit(ATM_VF_META,&vcc->flags);
@@ -813,49 +887,324 @@ lecd_attach(struct atm_vcc *vcc, int arg)
         if (dev_lec[i]->flags & IFF_UP) {
                 netif_start_queue(dev_lec[i]);
         }
-        MOD_INC_USE_COUNT;
+        __module_get(THIS_MODULE);
         return i;
 }
 
-void atm_lane_init_ops(struct atm_lane_ops *ops)
+#ifdef CONFIG_PROC_FS
+static char* lec_arp_get_status_string(unsigned char status)
 {
-        ops->lecd_attach = lecd_attach;
-        ops->mcast_attach = lec_mcast_attach;
-        ops->vcc_attach = lec_vcc_attach;
-        ops->get_lecs = get_dev_lec;
+	static char *lec_arp_status_string[] = {
+		"ESI_UNKNOWN       ",
+		"ESI_ARP_PENDING   ",
+		"ESI_VC_PENDING    ",
+		"<Undefined>       ",
+		"ESI_FLUSH_PENDING ",
+		"ESI_FORWARD_DIRECT"
+	};
 
-        printk("lec.c: " __DATE__ " " __TIME__ " initialized\n");
-
-	return;
+	if (status > ESI_FORWARD_DIRECT)
+		status = 3;	/* ESI_UNDEFINED */
+	return lec_arp_status_string[status];
 }
+
+static void lec_info(struct seq_file *seq, struct lec_arp_table *entry)
+{
+	int i;
+
+	for (i = 0; i < ETH_ALEN; i++)
+		seq_printf(seq, "%2.2x", entry->mac_addr[i] & 0xff);
+	seq_printf(seq, " ");
+	for (i = 0; i < ATM_ESA_LEN; i++)
+		seq_printf(seq, "%2.2x", entry->atm_addr[i] & 0xff);
+	seq_printf(seq, " %s %4.4x", lec_arp_get_status_string(entry->status),
+		   entry->flags & 0xffff);
+	if (entry->vcc)
+		seq_printf(seq, "%3d %3d ", entry->vcc->vpi, entry->vcc->vci);
+	else
+	        seq_printf(seq, "        ");
+	if (entry->recv_vcc) {
+		seq_printf(seq, "     %3d %3d", entry->recv_vcc->vpi,
+			   entry->recv_vcc->vci);
+        }
+        seq_putc(seq, '\n');
+}
+
+
+struct lec_state {
+	unsigned long flags;
+	struct lec_priv *locked;
+	struct lec_arp_table *entry;
+	struct net_device *dev;
+	int itf;
+	int arp_table;
+	int misc_table;
+};
+
+static void *lec_tbl_walk(struct lec_state *state, struct lec_arp_table *tbl,
+			  loff_t *l)
+{
+	struct lec_arp_table *e = state->entry;
+
+	if (!e)
+		e = tbl;
+	if (e == (void *)1) {
+		e = tbl;
+		--*l;
+	}
+	for (; e; e = e->next) {
+		if (--*l < 0)
+			break;
+	}
+	state->entry = e;
+	return (*l < 0) ? state : NULL;
+}
+
+static void *lec_arp_walk(struct lec_state *state, loff_t *l,
+			      struct lec_priv *priv)
+{
+	void *v = NULL;
+	int p;
+
+	for (p = state->arp_table; p < LEC_ARP_TABLE_SIZE; p++) {
+		v = lec_tbl_walk(state, priv->lec_arp_tables[p], l);
+		if (v)
+			break;
+	}
+	state->arp_table = p;
+	return v;
+}
+
+static void *lec_misc_walk(struct lec_state *state, loff_t *l,
+			   struct lec_priv *priv)
+{
+	struct lec_arp_table *lec_misc_tables[] = {
+		priv->lec_arp_empty_ones,
+		priv->lec_no_forward,
+		priv->mcast_fwds
+	};
+	void *v = NULL;
+	int q;
+
+	for (q = state->misc_table; q < ARRAY_SIZE(lec_misc_tables); q++) {
+		v = lec_tbl_walk(state, lec_misc_tables[q], l);
+		if (v)
+			break;
+	}
+	state->misc_table = q;
+	return v;
+}
+
+static void *lec_priv_walk(struct lec_state *state, loff_t *l,
+			   struct lec_priv *priv)
+{
+	if (!state->locked) {
+		state->locked = priv;
+		spin_lock_irqsave(&priv->lec_arp_lock, state->flags);
+	}
+	if (!lec_arp_walk(state, l, priv) &&
+	    !lec_misc_walk(state, l, priv)) {
+		spin_unlock_irqrestore(&priv->lec_arp_lock, state->flags);
+		state->locked = NULL;
+		/* Partial state reset for the next time we get called */
+		state->arp_table = state->misc_table = 0;
+	}
+	return state->locked;
+}
+
+static void *lec_itf_walk(struct lec_state *state, loff_t *l)
+{
+	struct net_device *dev;
+	void *v;
+
+	dev = state->dev ? state->dev : dev_lec[state->itf];
+	v = (dev && dev->priv) ? lec_priv_walk(state, l, dev->priv) : NULL;
+	if (!v && dev) {
+		dev_put(dev);
+		/* Partial state reset for the next time we get called */
+		dev = NULL;
+	}
+	state->dev = dev;
+	return v;
+}
+
+static void *lec_get_idx(struct lec_state *state, loff_t l)
+{
+	void *v = NULL;
+
+	for (; state->itf < MAX_LEC_ITF; state->itf++) {
+		v = lec_itf_walk(state, &l);
+		if (v)
+			break;
+	}
+	return v; 
+}
+
+static void *lec_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	struct lec_state *state = seq->private;
+
+	state->itf = 0;
+	state->dev = NULL;
+	state->locked = NULL;
+	state->arp_table = 0;
+	state->misc_table = 0;
+	state->entry = (void *)1;
+
+	return *pos ? lec_get_idx(state, *pos) : (void*)1;
+}
+
+static void lec_seq_stop(struct seq_file *seq, void *v)
+{
+	struct lec_state *state = seq->private;
+
+	if (state->dev) {
+		spin_unlock_irqrestore(&state->locked->lec_arp_lock,
+				       state->flags);
+		dev_put(state->dev);
+	}
+}
+
+static void *lec_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct lec_state *state = seq->private;
+
+	v = lec_get_idx(state, 1);
+	*pos += !!PTR_ERR(v);
+	return v;
+}
+
+static int lec_seq_show(struct seq_file *seq, void *v)
+{
+	static char lec_banner[] = "Itf  MAC          ATM destination" 
+		"                          Status            Flags "
+		"VPI/VCI Recv VPI/VCI\n";
+
+	if (v == (void *)1)
+		seq_puts(seq, lec_banner);
+	else {
+		struct lec_state *state = seq->private;
+		struct net_device *dev = state->dev; 
+
+		seq_printf(seq, "%s ", dev->name);
+		lec_info(seq, state->entry);
+	}
+	return 0;
+}
+
+static struct seq_operations lec_seq_ops = {
+	.start	= lec_seq_start,
+	.next	= lec_seq_next,
+	.stop	= lec_seq_stop,
+	.show	= lec_seq_show,
+};
+
+static int lec_seq_open(struct inode *inode, struct file *file)
+{
+	struct lec_state *state;
+	struct seq_file *seq;
+	int rc = -EAGAIN;
+
+	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	rc = seq_open(file, &lec_seq_ops);
+	if (rc)
+		goto out_kfree;
+	seq = file->private_data;
+	seq->private = state;
+out:
+	return rc;
+
+out_kfree:
+	kfree(state);
+	goto out;
+}
+
+static int lec_seq_release(struct inode *inode, struct file *file)
+{
+	return seq_release_private(inode, file);
+}
+
+static struct file_operations lec_seq_fops = {
+	.owner		= THIS_MODULE,
+	.open		= lec_seq_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= lec_seq_release,
+};
+#endif
+
+static int lane_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
+{
+	struct atm_vcc *vcc = ATM_SD(sock);
+	int err = 0;
+	
+	switch (cmd) {
+		case ATMLEC_CTRL: 
+		case ATMLEC_MCAST:
+		case ATMLEC_DATA:
+			if (!capable(CAP_NET_ADMIN))
+				return -EPERM;
+			break;
+		default:
+			return -ENOIOCTLCMD;
+	}
+
+	switch (cmd) {
+		case ATMLEC_CTRL:
+			err = lecd_attach(vcc, (int) arg);
+			if (err >= 0)
+				sock->state = SS_CONNECTED;
+			break;
+		case ATMLEC_MCAST:
+			err = lec_mcast_attach(vcc, (int) arg);
+			break;
+		case ATMLEC_DATA:
+			err = lec_vcc_attach(vcc, (void __user *) arg);
+			break;
+	}
+
+	return err;
+}
+
+static struct atm_ioctl lane_ioctl_ops = {
+	.owner  = THIS_MODULE,
+	.ioctl  = lane_ioctl,
+};
 
 static int __init lane_module_init(void)
 {
-        extern struct atm_lane_ops atm_lane_ops;
+#ifdef CONFIG_PROC_FS
+	struct proc_dir_entry *p;
 
-        atm_lane_init_ops(&atm_lane_ops);
+	p = create_proc_entry("lec", S_IRUGO, atm_proc_root);
+	if (p)
+		p->proc_fops = &lec_seq_fops;
+#endif
 
+	register_atm_ioctl(&lane_ioctl_ops);
+        printk("lec.c: " __DATE__ " " __TIME__ " initialized\n");
         return 0;
 }
 
 static void __exit lane_module_cleanup(void)
 {
         int i;
-        extern struct atm_lane_ops atm_lane_ops;
         struct lec_priv *priv;
 
-        atm_lane_ops.lecd_attach = NULL;
-        atm_lane_ops.mcast_attach = NULL;
-        atm_lane_ops.vcc_attach = NULL;
-        atm_lane_ops.get_lecs = NULL;
+	remove_proc_entry("lec", atm_proc_root);
+
+	deregister_atm_ioctl(&lane_ioctl_ops);
 
         for (i = 0; i < MAX_LEC_ITF; i++) {
                 if (dev_lec[i] != NULL) {
                         priv = (struct lec_priv *)dev_lec[i]->priv;
-#if defined(CONFIG_TR)
-                        unregister_trdev(dev_lec[i]);
-#endif
-                        kfree(dev_lec[i]);
+			unregister_netdev(dev_lec[i]);
+                        free_netdev(dev_lec[i]);
                         dev_lec[i] = NULL;
                 }
         }
@@ -876,17 +1225,20 @@ module_exit(lane_module_cleanup);
 static int lane2_resolve(struct net_device *dev, u8 *dst_mac, int force,
     u8 **tlvs, u32 *sizeoftlvs)
 {
+	unsigned long flags;
         struct lec_priv *priv = (struct lec_priv *)dev->priv;
         struct lec_arp_table *table;
         struct sk_buff *skb;
         int retval;
 
         if (force == 0) {
+		spin_lock_irqsave(&priv->lec_arp_lock, flags);
                 table = lec_arp_find(priv, dst_mac);
+		spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
                 if(table == NULL)
                         return -1;
                 
-                *tlvs = kmalloc(table->sizeoftlvs, GFP_KERNEL);
+                *tlvs = kmalloc(table->sizeoftlvs, GFP_ATOMIC);
                 if (*tlvs == NULL)
                         return -1;
                 
@@ -1022,7 +1374,7 @@ static void lane2_associate_ind (struct net_device *dev, u8 *mac_addr,
 #define LEC_ARP_REFRESH_INTERVAL (3*HZ)
 
 static void lec_arp_check_expire(unsigned long data);
-static __inline__ void lec_arp_expire_arp(unsigned long data);
+static void lec_arp_expire_arp(unsigned long data);
 void dump_arp_table(struct lec_priv *priv);
 
 /* 
@@ -1030,18 +1382,6 @@ void dump_arp_table(struct lec_priv *priv);
  */
 
 #define HASH(ch) (ch & (LEC_ARP_TABLE_SIZE -1))
-
-static __inline__ void 
-lec_arp_lock(struct lec_priv *priv)
-{
-        atomic_inc(&priv->lec_arp_lock_var);
-}
-
-static __inline__ void 
-lec_arp_unlock(struct lec_priv *priv)
-{
-        atomic_dec(&priv->lec_arp_lock_var);
-}
 
 /*
  * Initialization of arp-cache
@@ -1051,11 +1391,12 @@ lec_arp_init(struct lec_priv *priv)
 {
         unsigned short i;
 
-        for (i=0;i<LEC_ARP_TABLE_SIZE;i++) {
+        for (i = 0; i < LEC_ARP_TABLE_SIZE; i++) {
                 priv->lec_arp_tables[i] = NULL;
         }        
+	spin_lock_init(&priv->lec_arp_lock);
         init_timer(&priv->lec_arp_timer);
-        priv->lec_arp_timer.expires = jiffies+LEC_ARP_REFRESH_INTERVAL;
+        priv->lec_arp_timer.expires = jiffies + LEC_ARP_REFRESH_INTERVAL;
         priv->lec_arp_timer.data = (unsigned long)priv;
         priv->lec_arp_timer.function = lec_arp_check_expire;
         add_timer(&priv->lec_arp_timer);
@@ -1065,23 +1406,22 @@ void
 lec_arp_clear_vccs(struct lec_arp_table *entry)
 {
         if (entry->vcc) {
-                entry->vcc->push = entry->old_push;
-#if 0 /* August 6, 1998 */
-                set_bit(ATM_VF_RELEASED,&entry->vcc->flags);
-		clear_bit(ATM_VF_READY,&entry->vcc->flags);
-                entry->vcc->push(entry->vcc, NULL);
-#endif
-		atm_async_release_vcc(entry->vcc, -EPIPE);
-                entry->vcc = NULL;
+		struct atm_vcc *vcc = entry->vcc;
+		struct lec_vcc_priv *vpriv = LEC_VCC_PRIV(vcc);
+		struct net_device *dev = (struct net_device*) vcc->proto_data;
+
+                vcc->pop = vpriv->old_pop;
+		if (vpriv->xoff)
+			netif_wake_queue(dev);
+		kfree(vpriv);
+		vcc->user_back = NULL;
+                vcc->push = entry->old_push;
+		vcc_release_async(vcc, -EPIPE);
+                vcc = NULL;
         }
         if (entry->recv_vcc) {
                 entry->recv_vcc->push = entry->old_recv_push;
-#if 0
-                set_bit(ATM_VF_RELEASED,&entry->recv_vcc->flags);
-		clear_bit(ATM_VF_READY,&entry->recv_vcc->flags);
-                entry->recv_vcc->push(entry->recv_vcc, NULL);
-#endif
-		atm_async_release_vcc(entry->recv_vcc, -EPIPE);
+		vcc_release_async(entry->recv_vcc, -EPIPE);
                 entry->recv_vcc = NULL;
         }        
 }
@@ -1090,65 +1430,53 @@ lec_arp_clear_vccs(struct lec_arp_table *entry)
  * Insert entry to lec_arp_table
  * LANE2: Add to the end of the list to satisfy 8.1.13
  */
-static __inline__ void 
-lec_arp_put(struct lec_arp_table **lec_arp_tables, 
-            struct lec_arp_table *to_put)
+static inline void 
+lec_arp_add(struct lec_priv *priv, struct lec_arp_table *to_add)
 {
         unsigned short place;
-        unsigned long flags;
         struct lec_arp_table *tmp;
 
-        save_flags(flags);
-        cli();
-
-        place = HASH(to_put->mac_addr[ETH_ALEN-1]);
-        tmp = lec_arp_tables[place];
-        to_put->next = NULL;
+        place = HASH(to_add->mac_addr[ETH_ALEN-1]);
+        tmp = priv->lec_arp_tables[place];
+        to_add->next = NULL;
         if (tmp == NULL)
-                lec_arp_tables[place] = to_put;
+                priv->lec_arp_tables[place] = to_add;
   
         else {  /* add to the end */
                 while (tmp->next)
                         tmp = tmp->next;
-                tmp->next = to_put;
+                tmp->next = to_add;
         }
 
-        restore_flags(flags);
         DPRINTK("LEC_ARP: Added entry:%2.2x %2.2x %2.2x %2.2x %2.2x %2.2x\n",
-                0xff&to_put->mac_addr[0], 0xff&to_put->mac_addr[1],
-                0xff&to_put->mac_addr[2], 0xff&to_put->mac_addr[3],
-                0xff&to_put->mac_addr[4], 0xff&to_put->mac_addr[5]);
+                0xff&to_add->mac_addr[0], 0xff&to_add->mac_addr[1],
+                0xff&to_add->mac_addr[2], 0xff&to_add->mac_addr[3],
+                0xff&to_add->mac_addr[4], 0xff&to_add->mac_addr[5]);
 }
 
 /*
  * Remove entry from lec_arp_table
  */
-static __inline__ int 
-lec_arp_remove(struct lec_arp_table **lec_arp_tables,
+static int 
+lec_arp_remove(struct lec_priv *priv,
                struct lec_arp_table *to_remove)
 {
         unsigned short place;
         struct lec_arp_table *tmp;
-        unsigned long flags;
         int remove_vcc=1;
 
-        save_flags(flags);
-        cli();
-
         if (!to_remove) {
-                restore_flags(flags);
                 return -1;
         }
         place = HASH(to_remove->mac_addr[ETH_ALEN-1]);
-        tmp = lec_arp_tables[place];
+        tmp = priv->lec_arp_tables[place];
         if (tmp == to_remove) {
-                lec_arp_tables[place] = tmp->next;
+                priv->lec_arp_tables[place] = tmp->next;
         } else {
                 while(tmp && tmp->next != to_remove) {
                         tmp = tmp->next;
                 }
                 if (!tmp) {/* Entry was not found */
-                        restore_flags(flags);
                         return -1;
                 }
         }
@@ -1161,8 +1489,8 @@ lec_arp_remove(struct lec_arp_table **lec_arp_tables,
                 /*
                  * ESI_FLUSH_PENDING, ESI_FORWARD_DIRECT
                  */
-                for(place=0;place<LEC_ARP_TABLE_SIZE;place++) {
-                        for(tmp=lec_arp_tables[place];tmp!=NULL;tmp=tmp->next){
+                for(place = 0; place < LEC_ARP_TABLE_SIZE; place++) {
+                        for(tmp = priv->lec_arp_tables[place]; tmp != NULL; tmp = tmp->next) {
                                 if (memcmp(tmp->atm_addr, to_remove->atm_addr,
                                            ATM_ESA_LEN)==0) {
                                         remove_vcc=0;
@@ -1174,7 +1502,7 @@ lec_arp_remove(struct lec_arp_table **lec_arp_tables,
                         lec_arp_clear_vccs(to_remove);
         }
         skb_queue_purge(&to_remove->tx_wait); /* FIXME: good place for this? */
-        restore_flags(flags);
+
         DPRINTK("LEC_ARP: Removed entry:%2.2x %2.2x %2.2x %2.2x %2.2x %2.2x\n",
                 0xff&to_remove->mac_addr[0], 0xff&to_remove->mac_addr[1],
                 0xff&to_remove->mac_addr[2], 0xff&to_remove->mac_addr[3],
@@ -1358,29 +1686,28 @@ dump_arp_table(struct lec_priv *priv)
 void
 lec_arp_destroy(struct lec_priv *priv)
 {
+	unsigned long flags;
         struct lec_arp_table *entry, *next;
-        unsigned long flags;
         int i;
 
-        save_flags(flags);
-        cli();
-
-        del_timer(&priv->lec_arp_timer);
+        del_timer_sync(&priv->lec_arp_timer);
         
         /*
          * Remove all entries
          */
-        for (i=0;i<LEC_ARP_TABLE_SIZE;i++) {
-                for(entry =priv->lec_arp_tables[i];entry != NULL; entry=next) {
+
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
+        for (i = 0; i < LEC_ARP_TABLE_SIZE; i++) {
+                for(entry = priv->lec_arp_tables[i]; entry != NULL; entry=next) {
                         next = entry->next;
-                        lec_arp_remove(priv->lec_arp_tables, entry);
+                        lec_arp_remove(priv, entry);
                         kfree(entry);
                 }
         }
         entry = priv->lec_arp_empty_ones;
         while(entry) {
                 next = entry->next;
-                del_timer(&entry->timer);
+                del_timer_sync(&entry->timer);
                 lec_arp_clear_vccs(entry);
                 kfree(entry);
                 entry = next;
@@ -1389,7 +1716,7 @@ lec_arp_destroy(struct lec_priv *priv)
         entry = priv->lec_no_forward;
         while(entry) {
                 next = entry->next;
-                del_timer(&entry->timer);
+                del_timer_sync(&entry->timer);
                 lec_arp_clear_vccs(entry);
                 kfree(entry);
                 entry = next;
@@ -1398,7 +1725,7 @@ lec_arp_destroy(struct lec_priv *priv)
         entry = priv->mcast_fwds;
         while(entry) {
                 next = entry->next;
-                del_timer(&entry->timer);
+                /* No timer, LANEv2 7.1.20 and 2.3.5.3 */
                 lec_arp_clear_vccs(entry);
                 kfree(entry);
                 entry = next;
@@ -1406,15 +1733,15 @@ lec_arp_destroy(struct lec_priv *priv)
         priv->mcast_fwds = NULL;
         priv->mcast_vcc = NULL;
         memset(priv->lec_arp_tables, 0, 
-               sizeof(struct lec_arp_table*)*LEC_ARP_TABLE_SIZE);
-        restore_flags(flags);
+               sizeof(struct lec_arp_table *) * LEC_ARP_TABLE_SIZE);
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 }
 
 
 /* 
  * Find entry by mac_address
  */
-static __inline__ struct lec_arp_table*
+static struct lec_arp_table*
 lec_arp_find(struct lec_priv *priv,
              unsigned char *mac_addr)
 {
@@ -1424,18 +1751,15 @@ lec_arp_find(struct lec_priv *priv,
         DPRINTK("LEC_ARP: lec_arp_find :%2.2x %2.2x %2.2x %2.2x %2.2x %2.2x\n",
                 mac_addr[0]&0xff, mac_addr[1]&0xff, mac_addr[2]&0xff, 
                 mac_addr[3]&0xff, mac_addr[4]&0xff, mac_addr[5]&0xff);
-        lec_arp_lock(priv);
         place = HASH(mac_addr[ETH_ALEN-1]);
   
         to_return = priv->lec_arp_tables[place];
         while(to_return) {
                 if (memcmp(mac_addr, to_return->mac_addr, ETH_ALEN) == 0) {
-                        lec_arp_unlock(priv);
                         return to_return;
                 }
                 to_return = to_return->next;
         }
-        lec_arp_unlock(priv);
         return NULL;
 }
 
@@ -1444,17 +1768,17 @@ make_entry(struct lec_priv *priv, unsigned char *mac_addr)
 {
         struct lec_arp_table *to_return;
 
-        to_return=(struct lec_arp_table *)kmalloc(sizeof(struct lec_arp_table),
-                                                  GFP_ATOMIC);
+        to_return = (struct lec_arp_table *) kmalloc(sizeof(struct lec_arp_table),
+						     GFP_ATOMIC);
         if (!to_return) {
                 printk("LEC: Arp entry kmalloc failed\n");
                 return NULL;
         }
-        memset(to_return,0,sizeof(struct lec_arp_table));
+        memset(to_return, 0, sizeof(struct lec_arp_table));
         memcpy(to_return->mac_addr, mac_addr, ETH_ALEN);
         init_timer(&to_return->timer);
         to_return->timer.function = lec_arp_expire_arp;
-        to_return->timer.data = (unsigned long)to_return;
+        to_return->timer.data = (unsigned long) to_return;
         to_return->last_used = jiffies;
         to_return->priv = priv;
         skb_queue_head_init(&to_return->tx_wait);
@@ -1473,8 +1797,6 @@ lec_arp_expire_arp(unsigned long data)
 
         entry = (struct lec_arp_table *)data;
 
-        del_timer(&entry->timer);
-
         DPRINTK("lec_arp_expire_arp\n");
         if (entry->status == ESI_ARP_PENDING) {
                 if (entry->no_tries <= entry->priv->max_retry_count) {
@@ -1484,8 +1806,7 @@ lec_arp_expire_arp(unsigned long data)
                                 send_to_lecd(entry->priv, l_arp_xmt, entry->mac_addr, NULL, NULL);
                         entry->no_tries++;
                 }
-                entry->timer.expires = jiffies + (1*HZ);
-                add_timer(&entry->timer);
+                mod_timer(&entry->timer, jiffies + (1*HZ));
         }
 }
 
@@ -1497,6 +1818,7 @@ lec_arp_expire_arp(unsigned long data)
 static void
 lec_arp_expire_vcc(unsigned long data)
 {
+	unsigned long flags;
         struct lec_arp_table *to_remove = (struct lec_arp_table*)data;
         struct lec_priv *priv = (struct lec_priv *)to_remove->priv;
         struct lec_arp_table *entry = NULL;
@@ -1508,6 +1830,8 @@ lec_arp_expire_vcc(unsigned long data)
                 to_remove->vcc?to_remove->recv_vcc->vpi:0,
                 to_remove->vcc?to_remove->recv_vcc->vci:0);
         DPRINTK("eo:%p nf:%p\n",priv->lec_arp_empty_ones,priv->lec_no_forward);
+
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
         if (to_remove == priv->lec_arp_empty_ones)
                 priv->lec_arp_empty_ones = to_remove->next;
         else {
@@ -1528,6 +1852,8 @@ lec_arp_expire_vcc(unsigned long data)
                                 entry->next = to_remove->next;
                 }
 	}
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
+
         lec_arp_clear_vccs(to_remove);
         kfree(to_remove);
 }
@@ -1551,71 +1877,69 @@ lec_arp_expire_vcc(unsigned long data)
 static void
 lec_arp_check_expire(unsigned long data)
 {
+	unsigned long flags;
         struct lec_priv *priv = (struct lec_priv *)data;
-        struct lec_arp_table **lec_arp_tables =
-                (struct lec_arp_table **)priv->lec_arp_tables;
         struct lec_arp_table *entry, *next;
         unsigned long now;
         unsigned long time_to_check;
         int i;
 
-        del_timer(&priv->lec_arp_timer);
-
-        DPRINTK("lec_arp_check_expire %p,%d\n",priv,
-                priv->lec_arp_lock_var.counter);
+        DPRINTK("lec_arp_check_expire %p\n",priv);
         DPRINTK("expire: eo:%p nf:%p\n",priv->lec_arp_empty_ones,
                 priv->lec_no_forward);
-        if (!priv->lec_arp_lock_var.counter) {
-                lec_arp_lock(priv);
-                now = jiffies;
-                for(i=0;i<LEC_ARP_TABLE_SIZE;i++) {
-                        for(entry = lec_arp_tables[i];entry != NULL;) {
-                                if ((entry->flags) & LEC_REMOTE_FLAG && 
-                                    priv->topology_change)
-                                        time_to_check=priv->forward_delay_time;
-                                else
-                                        time_to_check = priv->aging_time;
+	now = jiffies;
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
+	for(i = 0; i < LEC_ARP_TABLE_SIZE; i++) {
+		for(entry = priv->lec_arp_tables[i]; entry != NULL; ) {
+			if ((entry->flags) & LEC_REMOTE_FLAG && 
+			    priv->topology_change)
+				time_to_check = priv->forward_delay_time;
+			else
+				time_to_check = priv->aging_time;
 
-                                DPRINTK("About to expire: %lx - %lx > %lx\n",
-                                        now,entry->last_used, time_to_check);
-                                if( time_after(now, entry->last_used+
-                                   time_to_check) && 
-                                    !(entry->flags & LEC_PERMANENT_FLAG) &&
-                                    !(entry->mac_addr[0] & 0x01) ) { /* LANE2: 7.1.20 */
-                                        /* Remove entry */
-                                        DPRINTK("LEC:Entry timed out\n");
-                                        next = entry->next;      
-                                        lec_arp_remove(lec_arp_tables, entry);
-                                        kfree(entry);
-                                        entry = next;
-                                } else {
-                                        /* Something else */
-                                        if ((entry->status == ESI_VC_PENDING ||
-                                             entry->status == ESI_ARP_PENDING) 
-                                            && time_after_eq(now,
-                                            entry->timestamp +
-                                            priv->max_unknown_frame_time)) {
-                                                entry->timestamp = jiffies;
-                                                entry->packets_flooded = 0;
-                                                if (entry->status == ESI_VC_PENDING)
-                                                        send_to_lecd(priv, l_svc_setup, entry->mac_addr, entry->atm_addr, NULL);
-                                        }
-                                        if (entry->status == ESI_FLUSH_PENDING 
-                                           &&
-                                           time_after_eq(now, entry->timestamp+
-                                           priv->path_switching_delay)) {
-                                                entry->last_used = jiffies;
-                                                entry->status = 
-                                                        ESI_FORWARD_DIRECT;
-                                        }
-                                        entry = entry->next;
-                                }
-                        }
-                }
-                lec_arp_unlock(priv);
-        }
-        priv->lec_arp_timer.expires = jiffies + LEC_ARP_REFRESH_INTERVAL;
-        add_timer(&priv->lec_arp_timer);
+			DPRINTK("About to expire: %lx - %lx > %lx\n",
+				now,entry->last_used, time_to_check);
+			if( time_after(now, entry->last_used+
+			   time_to_check) && 
+			    !(entry->flags & LEC_PERMANENT_FLAG) &&
+			    !(entry->mac_addr[0] & 0x01) ) { /* LANE2: 7.1.20 */
+				/* Remove entry */
+				DPRINTK("LEC:Entry timed out\n");
+				next = entry->next;      
+				lec_arp_remove(priv, entry);
+				kfree(entry);
+				entry = next;
+			} else {
+				/* Something else */
+				if ((entry->status == ESI_VC_PENDING ||
+				     entry->status == ESI_ARP_PENDING) 
+				    && time_after_eq(now,
+				    entry->timestamp +
+				    priv->max_unknown_frame_time)) {
+					entry->timestamp = jiffies;
+					entry->packets_flooded = 0;
+					if (entry->status == ESI_VC_PENDING)
+						send_to_lecd(priv, l_svc_setup, entry->mac_addr, entry->atm_addr, NULL);
+				}
+				if (entry->status == ESI_FLUSH_PENDING 
+				   &&
+				   time_after_eq(now, entry->timestamp+
+				   priv->path_switching_delay)) {
+					struct sk_buff *skb;
+
+					while ((skb = skb_dequeue(&entry->tx_wait)) != NULL)
+						lec_send(entry->vcc, skb, entry->priv);
+					entry->last_used = jiffies;
+					entry->status = 
+						ESI_FORWARD_DIRECT;
+				}
+				entry = entry->next;
+			}
+		}
+	}
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
+
+        mod_timer(&priv->lec_arp_timer, jiffies + LEC_ARP_REFRESH_INTERVAL);
 }
 /*
  * Try to find vcc where mac_address is attached.
@@ -1625,9 +1949,11 @@ struct atm_vcc*
 lec_arp_resolve(struct lec_priv *priv, unsigned char *mac_to_find, int is_rdesc,
                 struct lec_arp_table **ret_entry)
 {
+	unsigned long flags;
         struct lec_arp_table *entry;
+	struct atm_vcc *found;
 
-        if (mac_to_find[0]&0x01) {
+        if (mac_to_find[0] & 0x01) {
                 switch (priv->lane_version) {
                 case 1:
                         return priv->mcast_vcc;
@@ -1641,6 +1967,7 @@ lec_arp_resolve(struct lec_priv *priv, unsigned char *mac_to_find, int is_rdesc,
                 }
         }
 
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
         entry = lec_arp_find(priv, mac_to_find);
   
         if (entry) {
@@ -1648,7 +1975,8 @@ lec_arp_resolve(struct lec_priv *priv, unsigned char *mac_to_find, int is_rdesc,
                         /* Connection Ok */
                         entry->last_used = jiffies;
                         *ret_entry = entry;
-                        return entry->vcc;
+                        found = entry->vcc;
+			goto out;
                 }
                 /* Data direct VC not yet set up, check to see if the unknown
                    frame count is greater than the limit. If the limit has
@@ -1658,7 +1986,8 @@ lec_arp_resolve(struct lec_priv *priv, unsigned char *mac_to_find, int is_rdesc,
                     entry->packets_flooded<priv->maximum_unknown_frame_count) {
                         entry->packets_flooded++;
                         DPRINTK("LEC_ARP: Flooding..\n");
-                        return priv->mcast_vcc;
+                        found = priv->mcast_vcc;
+			goto out;
                 }
 		/* We got here because entry->status == ESI_FLUSH_PENDING
 		 * or BUS flood limit was reached for an entry which is
@@ -1666,15 +1995,16 @@ lec_arp_resolve(struct lec_priv *priv, unsigned char *mac_to_find, int is_rdesc,
 		 */
                 *ret_entry = entry;
                 DPRINTK("lec: entry->status %d entry->vcc %p\n", entry->status, entry->vcc);
-                return NULL;
+                found = NULL;
         } else {
                 /* No matching entry was found */
                 entry = make_entry(priv, mac_to_find);
                 DPRINTK("LEC_ARP: Making entry\n");
                 if (!entry) {
-                        return priv->mcast_vcc;
+                        found = priv->mcast_vcc;
+			goto out;
                 }
-                lec_arp_put(priv->lec_arp_tables, entry);
+                lec_arp_add(priv, entry);
                 /* We want arp-request(s) to be sent */
                 entry->packets_flooded =1;
                 entry->status = ESI_ARP_PENDING;
@@ -1688,33 +2018,38 @@ lec_arp_resolve(struct lec_priv *priv, unsigned char *mac_to_find, int is_rdesc,
                 entry->timer.expires = jiffies + (1*HZ);
                 entry->timer.function = lec_arp_expire_arp;
                 add_timer(&entry->timer);
-                return priv->mcast_vcc;
+                found = priv->mcast_vcc;
         }
+
+out:
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
+	return found;
 }
 
 int
 lec_addr_delete(struct lec_priv *priv, unsigned char *atm_addr, 
                 unsigned long permanent)
 {
+	unsigned long flags;
         struct lec_arp_table *entry, *next;
         int i;
 
-        lec_arp_lock(priv);
         DPRINTK("lec_addr_delete\n");
-        for(i=0;i<LEC_ARP_TABLE_SIZE;i++) {
-                for(entry=priv->lec_arp_tables[i];entry != NULL; entry=next) {
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
+        for(i = 0; i < LEC_ARP_TABLE_SIZE; i++) {
+                for(entry = priv->lec_arp_tables[i]; entry != NULL; entry = next) {
                         next = entry->next;
                         if (!memcmp(atm_addr, entry->atm_addr, ATM_ESA_LEN)
                             && (permanent || 
                                 !(entry->flags & LEC_PERMANENT_FLAG))) {
-                                lec_arp_remove(priv->lec_arp_tables, entry);
+				lec_arp_remove(priv, entry);
                                 kfree(entry);
                         }
-                        lec_arp_unlock(priv);
+			spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
                         return 0;
                 }
         }
-        lec_arp_unlock(priv);
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
         return -1;
 }
 
@@ -1726,6 +2061,7 @@ lec_arp_update(struct lec_priv *priv, unsigned char *mac_addr,
                unsigned char *atm_addr, unsigned long remoteflag,
                unsigned int targetless_le_arp)
 {
+	unsigned long flags;
         struct lec_arp_table *entry, *tmp;
         int i;
 
@@ -1734,12 +2070,12 @@ lec_arp_update(struct lec_priv *priv, unsigned char *mac_addr,
                 mac_addr[0],mac_addr[1],mac_addr[2],mac_addr[3],
                 mac_addr[4],mac_addr[5]);
 
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
         entry = lec_arp_find(priv, mac_addr);
         if (entry == NULL && targetless_le_arp)
-                return;   /* LANE2: ignore targetless LE_ARPs for which
-                           * we have no entry in the cache. 7.1.30
-                           */
-        lec_arp_lock(priv);
+                goto out;   /* LANE2: ignore targetless LE_ARPs for which
+                             * we have no entry in the cache. 7.1.30
+                             */
         if (priv->lec_arp_empty_ones) {
                 entry = priv->lec_arp_empty_ones;
                 if (!memcmp(entry->atm_addr, atm_addr, ATM_ESA_LEN)) {
@@ -1773,29 +2109,30 @@ lec_arp_update(struct lec_priv *priv, unsigned char *mac_addr,
                                 entry->status = ESI_FORWARD_DIRECT;
                                 memcpy(entry->mac_addr, mac_addr, ETH_ALEN);
                                 entry->last_used = jiffies;
-                                lec_arp_put(priv->lec_arp_tables, entry);
+                                lec_arp_add(priv, entry);
                         }
                         if (remoteflag)
                                 entry->flags|=LEC_REMOTE_FLAG;
                         else
                                 entry->flags&=~LEC_REMOTE_FLAG;
-                        lec_arp_unlock(priv);
                         DPRINTK("After update\n");
                         dump_arp_table(priv);
-                        return;
+                        goto out;
                 }
         }
         entry = lec_arp_find(priv, mac_addr);
         if (!entry) {
                 entry = make_entry(priv, mac_addr);
+                if (!entry)
+			goto out;
                 entry->status = ESI_UNKNOWN;
-                lec_arp_put(priv->lec_arp_tables, entry);
+                lec_arp_add(priv, entry);
                 /* Temporary, changes before end of function */
         }
         memcpy(entry->atm_addr, atm_addr, ATM_ESA_LEN);
         del_timer(&entry->timer);
-        for(i=0;i<LEC_ARP_TABLE_SIZE;i++) {
-                for(tmp=priv->lec_arp_tables[i];tmp;tmp=tmp->next) {
+        for(i = 0; i < LEC_ARP_TABLE_SIZE; i++) {
+                for(tmp = priv->lec_arp_tables[i]; tmp; tmp=tmp->next) {
                         if (entry != tmp &&
                             !memcmp(tmp->atm_addr, atm_addr,
                                     ATM_ESA_LEN)) { 
@@ -1824,7 +2161,8 @@ lec_arp_update(struct lec_priv *priv, unsigned char *mac_addr,
         }
         DPRINTK("After update2\n");
         dump_arp_table(priv);
-        lec_arp_unlock(priv);
+out:
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 }
 
 /*
@@ -1835,10 +2173,11 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
               struct atm_vcc *vcc,
               void (*old_push)(struct atm_vcc *vcc, struct sk_buff *skb))
 {
+	unsigned long flags;
         struct lec_arp_table *entry;
         int i, found_entry=0;
 
-        lec_arp_lock(priv);
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
         if (ioc_data->receive == 2) {
                 /* Vcc for Multicast Forward. No timer, LANEv2 7.1.20 and 2.3.5.3 */
 
@@ -1847,26 +2186,22 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
                 entry = lec_arp_find(priv, bus_mac);
                 if (!entry) {
                         printk("LEC_ARP: Multicast entry not found!\n");
-                        lec_arp_unlock(priv);
-                        return;
+			goto out;
                 }
                 memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
                 entry->recv_vcc = vcc;
                 entry->old_recv_push = old_push;
 #endif
                 entry = make_entry(priv, bus_mac);
-                if (entry == NULL) {
-                        lec_arp_unlock(priv);
-                        return;
-                }
+                if (entry == NULL)
+			goto out;
                 del_timer(&entry->timer);
                 memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
                 entry->recv_vcc = vcc;
                 entry->old_recv_push = old_push;
                 entry->next = priv->mcast_fwds;
                 priv->mcast_fwds = entry;
-                lec_arp_unlock(priv);
-                return;
+                goto out;
         } else if (ioc_data->receive == 1) {
                 /* Vcc which we don't want to make default vcc, attach it
                    anyway. */
@@ -1882,6 +2217,8 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
                         ioc_data->atm_addr[16],ioc_data->atm_addr[17],
                         ioc_data->atm_addr[18],ioc_data->atm_addr[19]);
                 entry = make_entry(priv, bus_mac);
+                if (entry == NULL)
+			goto out;
                 memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
                 memset(entry->mac_addr, 0, ETH_ALEN);
                 entry->recv_vcc = vcc;
@@ -1892,9 +2229,8 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
                 add_timer(&entry->timer);
                 entry->next = priv->lec_no_forward;
                 priv->lec_no_forward = entry;
-                lec_arp_unlock(priv);
 		dump_arp_table(priv);
-                return;
+		goto out;
         }
         DPRINTK("LEC_ARP:Attaching data direct, default:%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x\n",
                 ioc_data->atm_addr[0],ioc_data->atm_addr[1],
@@ -1907,8 +2243,8 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
                 ioc_data->atm_addr[14],ioc_data->atm_addr[15],
                 ioc_data->atm_addr[16],ioc_data->atm_addr[17],
                 ioc_data->atm_addr[18],ioc_data->atm_addr[19]);
-        for (i=0;i<LEC_ARP_TABLE_SIZE;i++) {
-                for (entry = priv->lec_arp_tables[i];entry;entry=entry->next) {
+        for (i = 0; i < LEC_ARP_TABLE_SIZE; i++) {
+                for (entry = priv->lec_arp_tables[i]; entry; entry=entry->next) {
                         if (memcmp(ioc_data->atm_addr, entry->atm_addr, 
                                    ATM_ESA_LEN)==0) {
                                 DPRINTK("LEC_ARP: Attaching data direct\n");
@@ -1951,14 +2287,15 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
                 }
         }
         if (found_entry) {
-                lec_arp_unlock(priv);
                 DPRINTK("After vcc was added\n");
                 dump_arp_table(priv);
-                return;
+		goto out;
         }
         /* Not found, snatch address from first data packet that arrives from
            this vcc */
         entry = make_entry(priv, bus_mac);
+        if (!entry)
+		goto out;
         entry->vcc = vcc;
         entry->old_push = old_push;
         memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
@@ -1969,27 +2306,35 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
         entry->timer.expires = jiffies + priv->vcc_timeout_period;
         entry->timer.function = lec_arp_expire_vcc;
         add_timer(&entry->timer);
-        lec_arp_unlock(priv);
         DPRINTK("After vcc was added\n");
 	dump_arp_table(priv);
+out:
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 }
 
 void
 lec_flush_complete(struct lec_priv *priv, unsigned long tran_id)
 {
+	unsigned long flags;
         struct lec_arp_table *entry;
         int i;
   
         DPRINTK("LEC:lec_flush_complete %lx\n",tran_id);
-        for (i=0;i<LEC_ARP_TABLE_SIZE;i++) {
-                for (entry=priv->lec_arp_tables[i];entry;entry=entry->next) {
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
+        for (i = 0; i < LEC_ARP_TABLE_SIZE; i++) {
+                for (entry = priv->lec_arp_tables[i]; entry; entry=entry->next) {
                         if (entry->flush_tran_id == tran_id &&
                             entry->status == ESI_FLUSH_PENDING) {
+			        struct sk_buff *skb;
+
+ 				while ((skb = skb_dequeue(&entry->tx_wait)) != NULL)
+					lec_send(entry->vcc, skb, entry->priv);
                                 entry->status = ESI_FORWARD_DIRECT;
                                 DPRINTK("LEC_ARP: Flushed\n");
                         }
                 }
         }
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
         dump_arp_table(priv);
 }
 
@@ -1997,29 +2342,43 @@ void
 lec_set_flush_tran_id(struct lec_priv *priv,
                       unsigned char *atm_addr, unsigned long tran_id)
 {
+	unsigned long flags;
         struct lec_arp_table *entry;
         int i;
 
-        for (i=0;i<LEC_ARP_TABLE_SIZE;i++)
-                for(entry=priv->lec_arp_tables[i];entry;entry=entry->next)
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
+        for (i = 0; i < LEC_ARP_TABLE_SIZE; i++)
+                for(entry = priv->lec_arp_tables[i]; entry; entry=entry->next)
                         if (!memcmp(atm_addr, entry->atm_addr, ATM_ESA_LEN)) {
                                 entry->flush_tran_id = tran_id;
                                 DPRINTK("Set flush transaction id to %lx for %p\n",tran_id,entry);
                         }
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 }
 
 int 
 lec_mcast_make(struct lec_priv *priv, struct atm_vcc *vcc)
 {
+	unsigned long flags;
         unsigned char mac_addr[] = {
                 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
         struct lec_arp_table *to_add;
+	struct lec_vcc_priv *vpriv;
+	int err = 0;
   
-        lec_arp_lock(priv);
+	if (!(vpriv = kmalloc(sizeof(struct lec_vcc_priv), GFP_KERNEL)))
+		return -ENOMEM;
+	vpriv->xoff = 0;
+	vpriv->old_pop = vcc->pop;
+	vcc->user_back = vpriv;
+        vcc->pop = lec_pop;
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
         to_add = make_entry(priv, mac_addr);
         if (!to_add) {
-                lec_arp_unlock(priv);
-                return -ENOMEM;
+		vcc->pop = vpriv->old_pop;
+		kfree(vpriv);
+                err = -ENOMEM;
+		goto out;
         }
         memcpy(to_add->atm_addr, vcc->remote.sas_addr.prv, ATM_ESA_LEN);
         to_add->status = ESI_FORWARD_DIRECT;
@@ -2028,25 +2387,27 @@ lec_mcast_make(struct lec_priv *priv, struct atm_vcc *vcc)
         to_add->old_push = vcc->push;
         vcc->push = lec_push;
         priv->mcast_vcc = vcc;
-        lec_arp_put(priv->lec_arp_tables, to_add);
-        lec_arp_unlock(priv);
-        return 0;
+        lec_arp_add(priv, to_add);
+out:
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
+        return err;
 }
 
 void
 lec_vcc_close(struct lec_priv *priv, struct atm_vcc *vcc)
 {
+	unsigned long flags;
         struct lec_arp_table *entry, *next;
         int i;
 
         DPRINTK("LEC_ARP: lec_vcc_close vpi:%d vci:%d\n",vcc->vpi,vcc->vci);
         dump_arp_table(priv);
-        lec_arp_lock(priv);
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
         for(i=0;i<LEC_ARP_TABLE_SIZE;i++) {
                 for(entry = priv->lec_arp_tables[i];entry; entry=next) {
                         next = entry->next;
                         if (vcc == entry->vcc) {
-                                lec_arp_remove(priv->lec_arp_tables,entry);
+                                lec_arp_remove(priv, entry);
                                 kfree(entry);
                                 if (priv->mcast_vcc == vcc) {
                                         priv->mcast_vcc = NULL;
@@ -2103,7 +2464,7 @@ lec_vcc_close(struct lec_priv *priv, struct atm_vcc *vcc)
                 entry = next;
         }
 
-        lec_arp_unlock(priv);
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 	dump_arp_table(priv);
 }
 
@@ -2111,9 +2472,9 @@ void
 lec_arp_check_empties(struct lec_priv *priv,
                       struct atm_vcc *vcc, struct sk_buff *skb)
 {
+        unsigned long flags;
         struct lec_arp_table *entry, *prev;
         struct lecdatahdr_8023 *hdr = (struct lecdatahdr_8023 *)skb->data;
-        unsigned long flags;
         unsigned char *src;
 #ifdef CONFIG_TR
         struct lecdatahdr_8025 *tr_hdr = (struct lecdatahdr_8025 *)skb->data;
@@ -2123,25 +2484,21 @@ lec_arp_check_empties(struct lec_priv *priv,
 #endif
         src = hdr->h_source;
 
-        lec_arp_lock(priv);
+	spin_lock_irqsave(&priv->lec_arp_lock, flags);
         entry = priv->lec_arp_empty_ones;
         if (vcc == entry->vcc) {
-                save_flags(flags);
-                cli();
                 del_timer(&entry->timer);
                 memcpy(entry->mac_addr, src, ETH_ALEN);
                 entry->status = ESI_FORWARD_DIRECT;
                 entry->last_used = jiffies;
                 priv->lec_arp_empty_ones = entry->next;
-                restore_flags(flags);
                 /* We might have got an entry */
-                if ((prev=lec_arp_find(priv,src))) {
-                        lec_arp_remove(priv->lec_arp_tables, prev);
+                if ((prev = lec_arp_find(priv,src))) {
+                        lec_arp_remove(priv, prev);
                         kfree(prev);
                 }
-                lec_arp_put(priv->lec_arp_tables, entry);
-                lec_arp_unlock(priv);
-                return;
+                lec_arp_add(priv, entry);
+		goto out;
         }
         prev = entry;
         entry = entry->next;
@@ -2151,21 +2508,19 @@ lec_arp_check_empties(struct lec_priv *priv,
         }
         if (!entry) {
                 DPRINTK("LEC_ARP: Arp_check_empties: entry not found!\n");
-                lec_arp_unlock(priv);
-                return;
+		goto out;
         }
-        save_flags(flags);
-        cli();
         del_timer(&entry->timer);
         memcpy(entry->mac_addr, src, ETH_ALEN);
         entry->status = ESI_FORWARD_DIRECT;
         entry->last_used = jiffies;
         prev->next = entry->next;
-        restore_flags(flags);
         if ((prev = lec_arp_find(priv, src))) {
-                lec_arp_remove(priv->lec_arp_tables,prev);
+                lec_arp_remove(priv, prev);
                 kfree(prev);
         }
-        lec_arp_put(priv->lec_arp_tables,entry);
-        lec_arp_unlock(priv);  
+        lec_arp_add(priv, entry);
+out:
+	spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 }
+MODULE_LICENSE("GPL");

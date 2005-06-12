@@ -10,26 +10,32 @@
  *	<tomsoft@informatik.tu-chemnitz.de>
  */
 
-#define TIMER_IRQ 0
+#include <linux/config.h>
+#include <linux/sched.h>
+/* include comes from machine specific directory */
+#include "irq_vectors.h"
+#include <asm/thread_info.h>
 
-/*
- * 16 8259A IRQ's, 208 potential APIC interrupt sources.
- * Right now the APIC is mostly only used for SMP.
- * 256 vectors is an architectural limit. (we can have
- * more than 256 devices theoretically, but they will
- * have to use shared interrupts)
- * Since vectors 0x00-0x1f are used/reserved for the CPU,
- * the usable vector space is 0x20-0xff (224 vectors)
- */
-#define NR_IRQS 224
-
-static __inline__ int irq_cannonicalize(int irq)
+static __inline__ int irq_canonicalize(int irq)
 {
 	return ((irq == 2) ? 9 : irq);
 }
 
-extern void disable_irq(unsigned int);
-extern void disable_irq_nosync(unsigned int);
-extern void enable_irq(unsigned int);
+extern void release_vm86_irqs(struct task_struct *);
+
+#ifdef CONFIG_X86_LOCAL_APIC
+# define ARCH_HAS_NMI_WATCHDOG		/* See include/linux/nmi.h */
+#endif
+
+#ifdef CONFIG_4KSTACKS
+  extern void irq_ctx_init(int cpu);
+# define __ARCH_HAS_DO_SOFTIRQ
+#else
+# define irq_ctx_init(cpu) do { } while (0)
+#endif
+
+#ifdef CONFIG_IRQBALANCE
+extern int irqbalance_disable(char *str);
+#endif
 
 #endif /* _ASM_IRQ_H */

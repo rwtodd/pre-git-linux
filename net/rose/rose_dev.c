@@ -1,21 +1,12 @@
 /*
- *	ROSE release 003
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- *	This code REQUIRES 2.1.15 or higher/ NET3.038
- *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
- *	History
- *	ROSE 001	Jonathan(G4KLX)	Cloned from nr_dev.c.
- *			Hans(PE1AYX)	Fixed interface to IP layer.
+ * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
-
 #include <linux/config.h>
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
@@ -29,10 +20,9 @@
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/in.h>
-#include <linux/if_ether.h>	/* For the statistics structure. */
+#include <linux/if_ether.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 
 #include <linux/inet.h>
@@ -46,38 +36,6 @@
 
 #include <net/ax25.h>
 #include <net/rose.h>
-
-/*
- *	Only allow IP over ROSE frames through if the netrom device is up.
- */
-
-int rose_rx_ip(struct sk_buff *skb, struct net_device *dev)
-{
-	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
-
-#ifdef CONFIG_INET
-	if (!netif_running(dev)) {
-		stats->rx_errors++;
-		return 0;
-	}
-
-	stats->rx_packets++;
-	stats->rx_bytes += skb->len;
-
-	skb->protocol = htons(ETH_P_IP);
-
-	/* Spoof incoming device */
-	skb->dev      = dev;
-	skb->h.raw    = skb->data;
-	skb->nh.raw   = skb->data;
-	skb->pkt_type = PACKET_HOST;
-
-	ip_rcv(skb, skb->dev, NULL);
-#else
-	kfree_skb(skb);
-#endif
-	return 1;
-}
 
 static int rose_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
 	void *daddr, void *saddr, unsigned len)
@@ -99,7 +57,7 @@ static int rose_header(struct sk_buff *skb, struct net_device *dev, unsigned sho
 static int rose_rebuild_header(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
-	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
+	struct net_device_stats *stats = netdev_priv(dev);
 	unsigned char *bp = (unsigned char *)skb->data;
 	struct sk_buff *skbn;
 
@@ -121,6 +79,7 @@ static int rose_rebuild_header(struct sk_buff *skb)
 	if (!rose_route_frame(skbn, NULL)) {
 		kfree_skb(skbn);
 		stats->tx_errors++;
+		return 1;
 	}
 
 	stats->tx_packets++;
@@ -144,7 +103,6 @@ static int rose_set_mac_address(struct net_device *dev, void *addr)
 
 static int rose_open(struct net_device *dev)
 {
-	MOD_INC_USE_COUNT;
 	netif_start_queue(dev);
 	rose_add_loopback_node((rose_address *)dev->dev_addr);
 	return 0;
@@ -154,13 +112,12 @@ static int rose_close(struct net_device *dev)
 {
 	netif_stop_queue(dev);
 	rose_del_loopback_node((rose_address *)dev->dev_addr);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static int rose_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
+	struct net_device_stats *stats = netdev_priv(dev);
 
 	if (!netif_running(dev)) {
 		printk(KERN_ERR "ROSE: rose_xmit - called when iface is down\n");
@@ -173,11 +130,12 @@ static int rose_xmit(struct sk_buff *skb, struct net_device *dev)
 
 static struct net_device_stats *rose_get_stats(struct net_device *dev)
 {
-	return (struct net_device_stats *)dev->priv;
+	return netdev_priv(dev);
 }
 
-int rose_init(struct net_device *dev)
+void rose_setup(struct net_device *dev)
 {
+	SET_MODULE_OWNER(dev);
 	dev->mtu		= ROSE_MAX_PACKET_SIZE - 2;
 	dev->hard_start_xmit	= rose_xmit;
 	dev->open		= rose_open;
@@ -192,15 +150,5 @@ int rose_init(struct net_device *dev)
 
 	/* New-style flags. */
 	dev->flags		= 0;
-
-	if ((dev->priv = kmalloc(sizeof(struct net_device_stats), GFP_KERNEL)) == NULL)
-		return -ENOMEM;
-
-	memset(dev->priv, 0, sizeof(struct net_device_stats));
-
 	dev->get_stats = rose_get_stats;
-
-	dev_init_buffers(dev);
-
-	return 0;
-};
+}

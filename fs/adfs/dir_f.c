@@ -9,13 +9,14 @@
  *
  *  E and F format directory handling
  */
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/adfs_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/spinlock.h>
+#include <linux/buffer_head.h>
+#include <linux/string.h>
 
 #include "adfs.h"
 #include "dir_f.h"
@@ -92,7 +93,7 @@ static inline void adfs_writename(char *to, char *from, int maxlen)
 #define dir_u32(idx)				\
 	({ int _buf = idx >> blocksize_bits;	\
 	   int _off = idx - (_buf << blocksize_bits);\
-	  *(u32 *)(bh[_buf]->b_data + _off);	\
+	  *(__le32 *)(bh[_buf]->b_data + _off);	\
 	})
 
 #define bufoff(_bh,_idx)			\
@@ -111,7 +112,7 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 {
 	struct buffer_head * const *bh = dir->bh;
 	const int blocksize_bits = dir->sb->s_blocksize_bits;
-	union { u32 *ptr32; u8 *ptr8; } ptr, end;
+	union { __le32 *ptr32; u8 *ptr8; } ptr, end;
 	u32 dircheck = 0;
 	int last = 5 - 26;
 	int i = 0;
@@ -124,7 +125,7 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 	do {
 		last += 26;
 		do {
-			dircheck = cpu_to_le32(dir_u32(i)) ^ ror13(dircheck);
+			dircheck = le32_to_cpu(dir_u32(i)) ^ ror13(dircheck);
 
 			i += sizeof(u32);
 		} while (i < (last & ~3));
@@ -154,8 +155,8 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 	end.ptr8 = ptr.ptr8 + 36;
 
 	do {
-		unsigned int v = *ptr.ptr32++;
-		dircheck = cpu_to_le32(v) ^ ror13(dircheck);
+		__le32 v = *ptr.ptr32++;
+		dircheck = le32_to_cpu(v) ^ ror13(dircheck);
 	} while (ptr.ptr32 < end.ptr32);
 
 	return (dircheck ^ (dircheck >> 8) ^ (dircheck >> 16) ^ (dircheck >> 24)) & 0xff;
@@ -164,7 +165,7 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 /*
  * Read and check that a directory is valid
  */
-int
+static int
 adfs_dir_read(struct super_block *sb, unsigned long object_id,
 	      unsigned int size, struct adfs_dir *dir)
 {
@@ -193,7 +194,7 @@ adfs_dir_read(struct super_block *sb, unsigned long object_id,
 			goto release_buffers;
 		}
 
-		dir->bh[blk] = bread(sb->s_dev, phys, sb->s_blocksize);
+		dir->bh[blk] = sb_bread(sb, phys);
 		if (!dir->bh[blk])
 			goto release_buffers;
 	}
@@ -257,9 +258,9 @@ adfs_obj2dir(struct adfs_direntry *de, struct object_info *obj)
 
 /*
  * get a directory entry.  Note that the caller is responsible
- * for holding the relevent locks.
+ * for holding the relevant locks.
  */
-int
+static int
 __adfs_dir_get(struct adfs_dir *dir, int pos, struct object_info *obj)
 {
 	struct super_block *sb = dir->sb;
@@ -289,7 +290,7 @@ __adfs_dir_get(struct adfs_dir *dir, int pos, struct object_info *obj)
 	return 0;
 }
 
-int
+static int
 __adfs_dir_put(struct adfs_dir *dir, int pos, struct object_info *obj)
 {
 	struct super_block *sb = dir->sb;
@@ -468,11 +469,9 @@ adfs_f_free(struct adfs_dir *dir)
 }
 
 struct adfs_dir_ops adfs_f_dir_ops = {
-	adfs_f_read,
-	adfs_f_setpos,
-	adfs_f_getnext,
-	adfs_f_update,
-	NULL,
-	NULL,
-	adfs_f_free
+	.read		= adfs_f_read,
+	.setpos		= adfs_f_setpos,
+	.getnext	= adfs_f_getnext,
+	.update		= adfs_f_update,
+	.free		= adfs_f_free
 };

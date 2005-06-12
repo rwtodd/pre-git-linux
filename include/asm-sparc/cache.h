@@ -10,18 +10,12 @@
 
 #include <asm/asi.h>
 
+#define L1_CACHE_SHIFT 5
 #define L1_CACHE_BYTES 32
 #define L1_CACHE_ALIGN(x) ((((x)+(L1_CACHE_BYTES-1))&~(L1_CACHE_BYTES-1)))
+#define L1_CACHE_SHIFT_MAX 5	/* largest L1 which this arch supports */
 
 #define SMP_CACHE_BYTES 32
-
-#ifdef MODULE
-#define __cacheline_aligned __attribute__((__aligned__(SMP_CACHE_BYTES)))
-#else
-#define __cacheline_aligned					\
-  __attribute__((__aligned__(SMP_CACHE_BYTES),			\
-		 __section__(".data.cacheline_aligned")))
-#endif
 
 /* Direct access to the instruction cache is provided through and
  * alternate address space.  The IDC bit must be off in the ICCR on

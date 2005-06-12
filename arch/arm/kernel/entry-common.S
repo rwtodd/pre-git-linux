@@ -9,70 +9,78 @@
  */
 #include <linux/config.h>
 
-#define PT_TRACESYS	0x00000002
+#include <asm/thread_info.h>
+#include <asm/ptrace.h>
+#include <asm/unistd.h>
 
-@ OS version number used in SWIs
-@  RISC OS is 0
-@  RISC iX is 8
-@
-#define OS_NUMBER	9
+#include "entry-header.S"
 
-/*============================================================================
- * All exits to user mode from the kernel go through this code.
+/* 
+ * We rely on the fact that R0 is at the bottom of the stack (due to
+ * slow/fast restore user regs).
  */
-
-#define S_OFF		8
-
-		.macro	get_softirq, rd
-#ifdef CONFIG_SMP
-#error SMP not supported
-#else
-		ldr	\rd, __irq_stat
+#if S_R0 != 0
+#error "Please fix"
 #endif
-		.endm
 
-		.globl	ret_from_sys_call
+	.align	5
+/*
+ * This is the fast syscall return path.  We do as little as
+ * possible here, and this includes saving r0 back into the SVC
+ * stack.
+ */
+ret_fast_syscall:
+	disable_irq r1				@ disable interrupts
+	ldr	r1, [tsk, #TI_FLAGS]
+	tst	r1, #_TIF_WORK_MASK
+	bne	fast_work_pending
+	fast_restore_user_regs
 
-		.align	5
-fast_syscall_return:
-		str	r0, [sp, #S_R0 + S_OFF]	@ returned r0
-slow_syscall_return:
-		add	sp, sp, #S_OFF
-ret_from_sys_call:				@ external entry
-		get_softirq r0
-		get_current_task r5
-		ldmia	r0, {r0, r1}		@ softirq_active, softirq_mask
-		mov	r4, #1			@ flag this as being syscall return
-		tst	r0, r1
-		blne	SYMBOL_NAME(do_softirq)
-ret_with_reschedule:				@ external entry (r5 must be set) (__irq_usr)
-		ldr	r0, [r5, #TSK_NEED_RESCHED]
-		ldr	r1, [r5, #TSK_SIGPENDING]
-		teq	r0, #0
-		bne	ret_reschedule
-		teq	r1, #0			@ check for signals
-		blne	ret_signal
-ret_from_all:	restore_user_regs		@ internal
+/*
+ * Ok, we need to do extra processing, enter the slow path.
+ */
+fast_work_pending:
+	str	r0, [sp, #S_R0+S_OFF]!		@ returned r0
+work_pending:
+	tst	r1, #_TIF_NEED_RESCHED
+	bne	work_resched
+	tst	r1, #_TIF_NOTIFY_RESUME | _TIF_SIGPENDING
+	beq	no_work_pending
+	mov	r0, sp				@ 'regs'
+	mov	r2, why				@ 'syscall'
+	bl	do_notify_resume
+	disable_irq r1				@ disable interrupts
+	b	no_work_pending
 
-ret_signal:	mov	r1, sp			@ internal
-		mov	r2, r4
-		b	SYMBOL_NAME(do_signal)	@ note the bl above sets lr
+work_resched:
+	bl	schedule
+/*
+ * "slow" syscall return path.  "why" tells us if this was a real syscall.
+ */
+ENTRY(ret_to_user)
+ret_slow_syscall:
+	disable_irq r1				@ disable interrupts
+	ldr	r1, [tsk, #TI_FLAGS]
+	tst	r1, #_TIF_WORK_MASK
+	bne	work_pending
+no_work_pending:
+	slow_restore_user_regs
 
-ret_reschedule:	adrsvc	al, lr, ret_with_reschedule	@ internal
-		b	SYMBOL_NAME(schedule)
-
-		.globl	ret_from_exception
-ret_from_exception:				@ external entry
-		get_softirq r0
-		get_current_task r5
-		ldmia	r0, {r0, r1}		@ softirq_active, softirq_mask
-		mov	r4, #0
-		tst	r0, r1
-		ldr	r6, [sp, #S_PSR]
-		blne	SYMBOL_NAME(do_softirq)
-		tst	r6, #3			@ returning to user mode?
-		beq	ret_with_reschedule
-		b	ret_from_all
+/*
+ * This is how we return from a fork.
+ */
+ENTRY(ret_from_fork)
+	bl	schedule_tail
+	get_thread_info tsk
+	ldr	r1, [tsk, #TI_FLAGS]		@ check for syscall tracing
+	mov	why, #1
+	tst	r1, #_TIF_SYSCALL_TRACE		@ are we tracing syscalls?
+	beq	ret_slow_syscall
+	mov	r1, sp
+	mov	r0, #1				@ trace exit [IP = 1]
+	bl	syscall_trace
+	b	ret_slow_syscall
+	
 
 #include "calls.S"
 
@@ -81,76 +89,97 @@ ret_from_exception:				@ external entry
  *-----------------------------------------------------------------------------
  */
 
-/*
- * Create some aliases for some registers.  These should allow
- * us to have in theory up to 7 arguments to a function.
- */
-scno		.req	r9			@ syscall number
-tbl		.req	r8			@ syscall table pointer
-tip		.req	r7			@ temporary IP
+	/* If we're optimising for StrongARM the resulting code won't 
+	   run on an ARM7 and we can save a couple of instructions.  
+								--pb */
+#ifdef CONFIG_CPU_ARM710
+	.macro	arm710_bug_check, instr, temp
+	and	\temp, \instr, #0x0f000000	@ check for SWI
+	teq	\temp, #0x0f000000
+	bne	.Larm700bug
+	.endm
 
-		.align	5
-vector_swi:	save_user_regs
-		mask_pc	lr, lr
-		zero_fp
-		ldr	scno, [lr, #-4]		@ get SWI instruction
-		arm700_bug_check scno, ip
-#ifdef CONFIG_ALIGNMENT_TRAP
-		ldr	ip, .LCswi
-		ldr	ip, [ip]
-		mcr	p15, 0, ip, c1, c0
+.Larm700bug:
+	ldr	r0, [sp, #S_PSR]		@ Get calling cpsr
+	sub	lr, lr, #4
+	str	lr, [r8]
+	msr	spsr_cxsf, r0
+	ldmia	sp, {r0 - lr}^			@ Get calling r0 - lr
+	mov	r0, r0
+	ldr	lr, [sp, #S_PC]			@ Get PC
+	add	sp, sp, #S_FRAME_SIZE
+	movs	pc, lr
+#else
+	.macro	arm710_bug_check, instr, temp
+	.endm
 #endif
-		enable_irqs ip
 
-		str	r4, [sp, #-S_OFF]!	@ push fifth arg
-		adrsvc	al, lr, fast_syscall_return
+	.align	5
+ENTRY(vector_swi)
+	save_user_regs
+	zero_fp
+	get_scno
+	arm710_bug_check scno, ip
 
-		bic	scno, scno, #0xff000000	@ mask off SWI op-code
-		eor	scno, scno, #OS_NUMBER<<20	@ check OS number
-		cmp	scno, #NR_syscalls	@ check upper syscall limit
-		bcs	2f
+#ifdef CONFIG_ALIGNMENT_TRAP
+	ldr	ip, __cr_alignment
+	ldr	ip, [ip]
+	mcr	p15, 0, ip, c1, c0		@ update control register
+#endif
+	enable_irq ip
 
-		get_current_task ip
-		ldr	ip, [ip, #TSK_PTRACE]	@ check for syscall tracing
-		adr	tbl, SYMBOL_NAME(sys_call_table)
-		tst	ip, #PT_TRACESYS
-		ldreq	pc, [tbl, scno, lsl #2]	@ call sys routine
+	str	r4, [sp, #-S_OFF]!		@ push fifth arg
 
-		ldr	tip, [sp, #S_IP + S_OFF]	@ save old IP
-		mov	ip, #0
-		str	ip, [sp, #S_IP + S_OFF]	@ trace entry [IP = 0]
-		bl	SYMBOL_NAME(syscall_trace)
-		str	tip, [sp, #S_IP + S_OFF]
+	get_thread_info tsk
+	ldr	ip, [tsk, #TI_FLAGS]		@ check for syscall tracing
+	bic	scno, scno, #0xff000000		@ mask off SWI op-code
+	eor	scno, scno, #OS_NUMBER << 20	@ check OS number
+	adr	tbl, sys_call_table		@ load syscall table pointer
+	tst	ip, #_TIF_SYSCALL_TRACE		@ are we tracing syscalls?
+	bne	__sys_trace
 
-		add	ip, sp, #S_OFF
-		ldmia	ip, {r0 - r3}		@ have to reload r0 - r3
-		mov	lr, pc
-		ldr	pc, [tbl, scno, lsl #2]	@ call sys routine
-		str	r0, [sp, #S_R0 + S_OFF]	@ returned r0
+	adr	lr, ret_fast_syscall		@ return address
+	cmp	scno, #NR_syscalls		@ check upper syscall limit
+	ldrcc	pc, [tbl, scno, lsl #2]		@ call sys_* routine
 
-		mov	ip, #1
-		str	ip, [sp, #S_IP + S_OFF]	@ trace exit [IP = 1]
-		bl	SYMBOL_NAME(syscall_trace)
-		str	tip, [sp, #S_IP + S_OFF]
-		b	slow_syscall_return
+	add	r1, sp, #S_OFF
+2:	mov	why, #0				@ no longer a real syscall
+	cmp	scno, #ARMSWI_OFFSET
+	eor	r0, scno, #OS_NUMBER << 20	@ put OS number back
+	bcs	arm_syscall	
+	b	sys_ni_syscall			@ not private func
 
-2:		add	r1, sp, #S_OFF
-		tst	scno, #0x00f00000	@ is it a Unix SWI?
-		bne	3f
-		subs	r0, scno, #(KSWI_SYS_BASE - KSWI_BASE)
-		bcs	SYMBOL_NAME(arm_syscall)
-		b	SYMBOL_NAME(sys_ni_syscall) @ not private func
+	/*
+	 * This is the really slow path.  We're going to be doing
+	 * context switches, and waiting for our parent to respond.
+	 */
+__sys_trace:
+	add	r1, sp, #S_OFF
+	mov	r0, #0				@ trace entry [IP = 0]
+	bl	syscall_trace
 
-3:		eor	r0, scno, #OS_NUMBER <<20	@ Put OS number back
-		adrsvc	al, lr, slow_syscall_return
-		b	SYMBOL_NAME(deferred)
+	adr	lr, __sys_trace_return		@ return address
+	add	r1, sp, #S_R0 + S_OFF		@ pointer to regs
+	cmp	scno, #NR_syscalls		@ check upper syscall limit
+	ldmccia	r1, {r0 - r3}			@ have to reload r0 - r3
+	ldrcc	pc, [tbl, scno, lsl #2]		@ call sys_* routine
+	b	2b
 
-		.align	5
-		.type	__irq_stat, #object
-__irq_stat:
-		.word	SYMBOL_NAME(irq_stat)
+__sys_trace_return:
+	str	r0, [sp, #S_R0 + S_OFF]!	@ save returned r0
+	mov	r1, sp
+	mov	r0, #1				@ trace exit [IP = 1]
+	bl	syscall_trace
+	b	ret_slow_syscall
 
-		.type	sys_call_table, #object
+	.align	5
+#ifdef CONFIG_ALIGNMENT_TRAP
+	.type	__cr_alignment, #object
+__cr_alignment:
+	.word	cr_alignment
+#endif
+
+	.type	sys_call_table, #object
 ENTRY(sys_call_table)
 #include "calls.S"
 
@@ -160,53 +189,58 @@ ENTRY(sys_call_table)
 @ r0 = syscall number
 @ r5 = syscall table
 		.type	sys_syscall, #function
-SYMBOL_NAME(sys_syscall):
+sys_syscall:
 		eor	scno, r0, #OS_NUMBER << 20
-		cmp	scno, #NR_syscalls	@ check range
-		add	ip, sp, #S_OFF
-		stmleia	sp, {r5, r6}		@ shuffle args
-		movle	r0, r1
-		movle	r1, r2
-		movle	r2, r3
-		movle	r3, r4
-		ldrle	pc, [tbl, scno, lsl #2]
+		cmp	scno, #__NR_syscall - __NR_SYSCALL_BASE
+		cmpne	scno, #NR_syscalls	@ check range
+		stmloia	sp, {r5, r6}		@ shuffle args
+		movlo	r0, r1
+		movlo	r1, r2
+		movlo	r2, r3
+		movlo	r3, r4
+		ldrlo	pc, [tbl, scno, lsl #2]
 		b	sys_ni_syscall
 
 sys_fork_wrapper:
 		add	r0, sp, #S_OFF
-		b	SYMBOL_NAME(sys_fork)
+		b	sys_fork
 
 sys_vfork_wrapper:
 		add	r0, sp, #S_OFF
-		b	SYMBOL_NAME(sys_vfork)
+		b	sys_vfork
 
 sys_execve_wrapper:
 		add	r3, sp, #S_OFF
-		b	SYMBOL_NAME(sys_execve)
+		b	sys_execve
 
-sys_clone_wapper:
-		add	r2, sp, #S_OFF
-		b	SYMBOL_NAME(sys_clone)
+sys_clone_wrapper:
+		add	ip, sp, #S_OFF
+		str	ip, [sp, #4]
+		b	sys_clone
 
 sys_sigsuspend_wrapper:
 		add	r3, sp, #S_OFF
-		b	SYMBOL_NAME(sys_sigsuspend)
+		b	sys_sigsuspend
 
 sys_rt_sigsuspend_wrapper:
 		add	r2, sp, #S_OFF
-		b	SYMBOL_NAME(sys_rt_sigsuspend)
+		b	sys_rt_sigsuspend
 
 sys_sigreturn_wrapper:
 		add	r0, sp, #S_OFF
-		b	SYMBOL_NAME(sys_sigreturn)
+		b	sys_sigreturn
 
 sys_rt_sigreturn_wrapper:
 		add	r0, sp, #S_OFF
-		b	SYMBOL_NAME(sys_rt_sigreturn)
+		b	sys_rt_sigreturn
 
 sys_sigaltstack_wrapper:
 		ldr	r2, [sp, #S_OFF + S_SP]
 		b	do_sigaltstack
+
+sys_futex_wrapper:
+		str	r5, [sp, #4]		@ push sixth arg
+		b	sys_futex
 
 /*
  * Note: off_4k (r5) is always units of 4K.  If we can't do the requested
@@ -215,7 +249,7 @@ sys_sigaltstack_wrapper:
 sys_mmap2:
 #if PAGE_SHIFT > 12
 		tst	r5, #PGOFF_MASK
-		moveq	r5, r5, lsr #PGOFF_SHIFT
+		moveq	r5, r5, lsr #PAGE_SHIFT - 12
 		streq	r5, [sp, #4]
 		beq	do_mmap2
 		mov	r0, #-EINVAL
@@ -224,8 +258,3 @@ sys_mmap2:
 		str	r5, [sp, #4]
 		b	do_mmap2
 #endif
-
-		.data
-
-ENTRY(fp_enter)
-		.word	fpe_not_present

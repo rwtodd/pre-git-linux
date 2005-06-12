@@ -26,7 +26,7 @@
  */
 
 #include <linux/pci.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 
 #include <asm/io.h>
@@ -45,8 +45,6 @@
  */
 
 #define ALIGN(val,align)	(((val) + ((align) - 1)) & ~((align) - 1))
-
-#define MAX(val1, val2) 	(((val1) > (val2)) ? val1 : val2)
 
 /*
  * Offsets relative to the I/O and memory base addresses from where resources
@@ -70,17 +68,12 @@ extern struct pci_bus_info *init_hades_pci(void);
 static struct pci_bus_info *bus_info;
 
 static int pci_modify = 1;		/* If set, layout the PCI bus ourself. */
-static int skip_vga = 0;		/* If set do not modify base addresses
+static int skip_vga;			/* If set do not modify base addresses
 					   of vga cards.*/
-static int disable_pci_burst = 0;	/* If set do not allow PCI bursts. */
+static int disable_pci_burst;		/* If set do not allow PCI bursts. */
 
 static unsigned int io_base;
 static unsigned int mem_base;
-
-struct pci_fixup pcibios_fixups[] =
-{
-	{ 0 }
-};
 
 /*
  * static void disable_dev(struct pci_dev *dev)
@@ -95,7 +88,6 @@ struct pci_fixup pcibios_fixups[] =
 
 static void __init disable_dev(struct pci_dev *dev)
 {
-	struct pci_bus *bus;
 	unsigned short cmd;
 
 	if (((dev->class >> 8 == PCI_CLASS_NOT_DEFINED_VGA) ||
@@ -103,11 +95,10 @@ static void __init disable_dev(struct pci_dev *dev)
 	     (dev->class >> 8 == PCI_CLASS_DISPLAY_XGA)) && skip_vga)
 		return;
 
-	bus = dev->bus;
-	pcibios_read_config_word(bus->number, dev->devfn, PCI_COMMAND, &cmd);
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 
 	cmd &= (~PCI_COMMAND_IO & ~PCI_COMMAND_MEMORY & ~PCI_COMMAND_MASTER);
-	pcibios_write_config_word(bus->number, dev->devfn, PCI_COMMAND, cmd);
+	pci_write_config_word(dev, PCI_COMMAND, cmd);
 }
 
 /*
@@ -122,7 +113,6 @@ static void __init disable_dev(struct pci_dev *dev)
 
 static void __init layout_dev(struct pci_dev *dev)
 {
-	struct pci_bus *bus;
 	unsigned short cmd;
 	unsigned int base, mask, size, reg;
 	unsigned int alignto;
@@ -137,8 +127,7 @@ static void __init layout_dev(struct pci_dev *dev)
 	     (dev->class >> 8 == PCI_CLASS_DISPLAY_XGA)) && skip_vga)
 		return;
 
-	bus = dev->bus;
-	pcibios_read_config_word(bus->number, dev->devfn, PCI_COMMAND, &cmd);
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 
 	for (reg = PCI_BASE_ADDRESS_0, i = 0; reg <= PCI_BASE_ADDRESS_5; reg += 4, i++)
 	{
@@ -147,9 +136,8 @@ static void __init layout_dev(struct pci_dev *dev)
 		 * device wants.
 		 */
 
-		pcibios_write_config_dword(bus->number, dev->devfn, reg,
-					   0xffffffff);
-		pcibios_read_config_dword(bus->number, dev->devfn, reg, &base);
+		pci_write_config_dword(dev, reg, 0xffffffff);
+		pci_read_config_dword(dev, reg, &base);
 
 		if (!base)
 		{
@@ -181,11 +169,10 @@ static void __init layout_dev(struct pci_dev *dev)
 			 * Align to multiple of size of minimum base.
 			 */
 
-			alignto = MAX(0x040, size) ;
+			alignto = max_t(unsigned int, 0x040, size);
 			base = ALIGN(io_base, alignto);
 			io_base = base + size;
-			pcibios_write_config_dword(bus->number, dev->devfn,
-						   reg, base | PCI_BASE_ADDRESS_SPACE_IO);
+			pci_write_config_dword(dev, reg, base | PCI_BASE_ADDRESS_SPACE_IO);
 
 			dev->resource[i].start = base;
 			dev->resource[i].end = dev->resource[i].start + size - 1;
@@ -225,11 +212,10 @@ static void __init layout_dev(struct pci_dev *dev)
 			 * Align to multiple of size of minimum base.
 			 */
 
-			alignto = MAX(0x1000, size) ;
+			alignto = max_t(unsigned int, 0x1000, size);
 			base = ALIGN(mem_base, alignto);
 			mem_base = base + size;
-			pcibios_write_config_dword(bus->number, dev->devfn,
-						   reg, base);
+			pci_write_config_dword(dev, reg, base);
 
 			dev->resource[i].start = base;
 			dev->resource[i].end = dev->resource[i].start + size - 1;
@@ -243,8 +229,7 @@ static void __init layout_dev(struct pci_dev *dev)
 				 */
 
 				reg += 4;
-				pcibios_write_config_dword(bus->number, dev->devfn,
-							   reg, 0);
+				pci_write_config_dword(dev, reg, 0);
 
 				i++;
 				dev->resource[i].start = 0;
@@ -272,17 +257,15 @@ static void __init layout_dev(struct pci_dev *dev)
 		cmd |= PCI_COMMAND_IO;
 	}
 
-	pcibios_write_config_word(bus->number, dev->devfn, PCI_COMMAND,
-				  cmd | PCI_COMMAND_MASTER);
+	pci_write_config_word(dev, PCI_COMMAND, cmd | PCI_COMMAND_MASTER);
 
-	pcibios_write_config_byte(bus->number, dev->devfn, PCI_LATENCY_TIMER,
-				  (disable_pci_burst) ? 0 : 32);
+	pci_write_config_byte(dev, PCI_LATENCY_TIMER, (disable_pci_burst) ? 0 : 32);
 
 	if (bus_info != NULL)
-		bus_info->conf_device(bus->number, dev->devfn);	/* Machine dependent configuration. */
+		bus_info->conf_device(dev);	/* Machine dependent configuration. */
 
 	DBG_DEVS(("layout_dev: bus %d  slot 0x%x  VID 0x%x  DID 0x%x  class 0x%x\n",
-		  bus->number, PCI_SLOT(dev->devfn), dev->vendor, dev->device, dev->class));
+		  dev->bus->number, PCI_SLOT(dev->devfn), dev->vendor, dev->device, dev->class));
 }
 
 /*
@@ -444,7 +427,7 @@ static void __init pcibios_claim_resources(struct pci_bus *bus)
  * dev	- device.
  * i	- resource.
  *
- * Result: 0 if successfull.
+ * Result: 0 if successful.
  */
 
 int __init pcibios_assign_resource(struct pci_dev *dev, int i)

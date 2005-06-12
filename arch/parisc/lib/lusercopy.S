@@ -1,8 +1,11 @@
-/*------------------------------------------------------------------------------
- * Native PARISC/Linux Project (http://www.puffingroup.com/parisc)
+/*
+ *    User Space Access Routines
  *
- * Assembly Language User Access Routines
- *  Copyright (C) 2000 Hewlett-Packard (John Marvin)
+ *    Copyright (C) 2000-2002 Hewlett-Packard (John Marvin)
+ *    Copyright (C) 2000 Richard Hirst <rhirst with parisc-linux.org>
+ *    Copyright (C) 2001 Matthieu Delahaye <delahaym at esiee.fr>
+ *    Copyright (C) 2003 Randolph Chung <tausq with parisc-linux.org>
+ *
  *
  *    This program is free software; you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -16,7 +19,7 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 /*
@@ -30,7 +33,6 @@
  */
 
 
-	.level		1.1
 	.text
 	
 #include <asm/assembly.h>
@@ -42,98 +44,27 @@
 	 * on the flag stored in the task structure.
 	 */
 
-	/* FIXME! depi below has hardcoded idea of kernel stack size */
-
 	.macro  get_sr
-	copy        %r30,%r1        ;! Get task structure
-	depi        0,31,14,%r1     ;! into r1
-	ldw         TASK_SEGMENT(%r1),%r22
+	mfctl       %cr30,%r1
+	ldw         TI_SEGMENT(%r1),%r22
 	mfsp        %sr3,%r1
 	or,<>       %r22,%r0,%r0
 	copy        %r0,%r1
 	mtsp        %r1,%sr1
 	.endm
 
-	/*
-	 * unsigned long
-	 * lcopy_to_user(void *to, const void *from, unsigned long n)
-	 *
-	 * Returns 0 for success.
-	 * otherwise, returns number of bytes not transferred.
-	 */
-
-	.export lcopy_to_user,code
-lcopy_to_user:
-	.proc
-	.callinfo NO_CALLS
-	.entry
-	comib,=,n   0,%r24,$lctu_done
-	get_sr
-$lctu_loop:
-	ldbs,ma     1(%r25),%r1
-	addib,<>    -1,%r24,$lctu_loop
-1:      stbs,ma     %r1,1(%sr1,%r26)
-$lctu_done:
-	bv          %r0(%r2)
-	copy        %r24,%r28
-	.exit
-
-2:      b $lctu_done
-	ldo         1(%r24),%r24
-
-	.section __ex_table,"a"
-	.word       1b,(2b-1b)
-	.previous
-
-	.procend
-
-	/*
-	 * unsigned long
-	 * lcopy_from_user(void *to, const void *from, unsigned long n)
-	 *
-	 * Returns 0 for success.
-	 * otherwise, returns number of bytes not transferred.
-	 *
-	 * NOTE: This routine will also zero any bytes in the
-	 *       destination that were not copied due to a fault.
-	 *
-	 */
-
-	.export lcopy_from_user,code
-lcopy_from_user:
-	.proc
-	.callinfo NO_CALLS
-	.entry
-	comib,=,n   0,%r24,$lcfu_done
-	get_sr
-$lcfu_loop:
-1:      ldbs,ma     1(%sr1,%r25),%r1
-	addib,<>    -1,%r24,$lcfu_loop
-	stbs,ma     %r1,1(%r26)
-$lcfu_done:
-	bv          %r0(%r2)
-	copy        %r24,%r28
-	.exit
-
-2:      copy        %r24,%r23
-$lcfu_zero_loop:
-	addib,<>    -1,%r23,$lcfu_zero_loop
-	stbs,ma     %r0,1(%r26)
-	b           $lcfu_done
-	nop
-
-	.section __ex_table,"a"
-	.word       1b,(2b-1b)
-	.previous
-
-	.procend
+	.macro fixup_branch lbl
+	ldil	    L%\lbl, %r1
+	ldo	    R%\lbl(%r1), %r1
+	bv          %r0(%r1)
+	.endm
 
 	/*
 	 * long lstrncpy_from_user(char *dst, const char *src, long n)
 	 *
 	 * Returns -EFAULT if exception before terminator,
 	 *         N if the entire buffer filled,
-	 *         otherwise strlen + 1 (i.e. includes zero byte)
+	 *         otherwise strlen (i.e. excludes zero byte)
 	 */
 
 	.export lstrncpy_from_user,code
@@ -142,7 +73,7 @@ lstrncpy_from_user:
 	.callinfo NO_CALLS
 	.entry
 	comib,=     0,%r24,$lsfu_done
-	copy        %r26,%r23
+	copy        %r24,%r23
 	get_sr
 1:      ldbs,ma     1(%sr1,%r25),%r1
 $lsfu_loop:
@@ -151,18 +82,25 @@ $lsfu_loop:
 	addib,<>,n  -1,%r24,$lsfu_loop
 2:      ldbs,ma     1(%sr1,%r25),%r1
 $lsfu_done:
-	sub         %r26,%r23,%r28
+	sub         %r23,%r24,%r28
 $lsfu_exit:
 	bv          %r0(%r2)
 	nop
 	.exit
 
-3:      b           $lsfu_exit
+	.section .fixup,"ax"
+3:      fixup_branch $lsfu_exit
 	ldi         -EFAULT,%r28
+	.previous
 
-	.section __ex_table,"a"
-	.word       1b,(3b-1b)
-	.word       2b,(2b-1b)
+	.section __ex_table,"aw"
+#ifdef __LP64__
+	.dword      1b,3b
+	.dword      2b,3b
+#else
+	.word       1b,3b
+	.word       2b,3b
+#endif
 	.previous
 
 	.procend
@@ -190,11 +128,17 @@ $lclu_done:
 	copy        %r25,%r28
 	.exit
 
-2:      b $lclu_done
+	.section .fixup,"ax"
+2:      fixup_branch $lclu_done
 	ldo        1(%r25),%r25
+	.previous
 
-	.section __ex_table,"a"
-	.word       1b,(2b-1b)
+	.section __ex_table,"aw"
+#ifdef __LP64__
+	.dword      1b,2b
+#else
+	.word       1b,2b
+#endif
 	.previous
 
 	.procend
@@ -229,12 +173,19 @@ $lslen_nzero:
 	b           $lslen_done
 	ldo         1(%r26),%r26 /* special case for N == 0 */
 
-3:      b           $lslen_done
+	.section .fixup,"ax"
+3:      fixup_branch $lslen_done
 	copy        %r24,%r26    /* reset r26 so 0 is returned on fault */
+	.previous
 
-	.section __ex_table,"a"
-	.word       1b,(3b-1b)
-	.word       2b,(2b-1b)
+	.section __ex_table,"aw"
+#ifdef __LP64__
+	.dword      1b,3b
+	.dword      2b,3b
+#else
+	.word       1b,3b
+	.word       2b,3b
+#endif
 	.previous
 
 	.procend

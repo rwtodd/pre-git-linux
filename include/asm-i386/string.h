@@ -8,25 +8,22 @@
  * byte string operations. But on a 386 or a PPro the
  * byte string ops are faster than doing it by hand
  * (MUCH faster on a Pentium).
- *
- * Also, the byte strings actually work correctly. Forget
- * the i486 routines for now as they may be broken..
  */
-#if FIXED_486_STRING && defined(CONFIG_X86_USE_STRING_486)
-#include <asm/string-486.h>
-#else
 
 /*
  * This string-include defines all string functions as inline
  * functions. Use gcc. It also assumes ds=es=data space, this should be
  * normal. Most of the string-functions are rather heavily hand-optimized,
- * see especially strtok,strstr,str[c]spn. They should work, but are not
+ * see especially strsep,strstr,str[c]spn. They should work, but are not
  * very easy to understand. Everything is done entirely within the register
  * set, making the functions fast and clean. String instructions have been
  * used through-out, making for "slightly" unclear code :-)
  *
  *		NO Copyright (C) 1991, 1992 Linus Torvalds,
  *		consider these trivial functions to be PD.
+ */
+
+/* AK: in fact I bet it would be better to move this stuff all out of line.
  */
 
 #define __HAVE_ARCH_STRCPY
@@ -75,7 +72,7 @@ __asm__ __volatile__(
 	"testb %%al,%%al\n\t"
 	"jne 1b"
 	: "=&S" (d0), "=&D" (d1), "=&a" (d2), "=&c" (d3)
-	: "0" (src), "1" (dest), "2" (0), "3" (0xffffffff):"memory");
+	: "0" (src), "1" (dest), "2" (0), "3" (0xffffffffu):"memory");
 return dest;
 }
 
@@ -97,7 +94,7 @@ __asm__ __volatile__(
 	"2:\txorl %2,%2\n\t"
 	"stosb"
 	: "=&S" (d0), "=&D" (d1), "=&a" (d2), "=&c" (d3)
-	: "0" (src),"1" (dest),"2" (0),"3" (0xffffffff), "g" (count)
+	: "0" (src),"1" (dest),"2" (0),"3" (0xffffffffu), "g" (count)
 	: "memory");
 return dest;
 }
@@ -192,7 +189,7 @@ __asm__ __volatile__(
 	"scasb\n\t"
 	"notl %0\n\t"
 	"decl %0"
-	:"=c" (__res), "=&D" (d0) :"1" (s),"a" (0), "0" (0xffffffff));
+	:"=c" (__res), "=&D" (d0) :"1" (s),"a" (0), "0" (0xffffffffu));
 return __res;
 }
 
@@ -220,49 +217,9 @@ return (to);
  */
 static inline void * __constant_memcpy(void * to, const void * from, size_t n)
 {
-	switch (n) {
-		case 0:
-			return to;
-		case 1:
-			*(unsigned char *)to = *(const unsigned char *)from;
-			return to;
-		case 2:
-			*(unsigned short *)to = *(const unsigned short *)from;
-			return to;
-		case 3:
-			*(unsigned short *)to = *(const unsigned short *)from;
-			*(2+(unsigned char *)to) = *(2+(const unsigned char *)from);
-			return to;
-		case 4:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			return to;
-		case 6:	/* for Ethernet addresses */
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(2+(unsigned short *)to) = *(2+(const unsigned short *)from);
-			return to;
-		case 8:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			return to;
-		case 12:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			*(2+(unsigned long *)to) = *(2+(const unsigned long *)from);
-			return to;
-		case 16:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			*(2+(unsigned long *)to) = *(2+(const unsigned long *)from);
-			*(3+(unsigned long *)to) = *(3+(const unsigned long *)from);
-			return to;
-		case 20:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			*(2+(unsigned long *)to) = *(2+(const unsigned long *)from);
-			*(3+(unsigned long *)to) = *(3+(const unsigned long *)from);
-			*(4+(unsigned long *)to) = *(4+(const unsigned long *)from);
-			return to;
-	}
+	if (n <= 128)
+		return __builtin_memcpy(to, from, n);
+
 #define COMMON(x) \
 __asm__ __volatile__( \
 	"rep ; movsl" \
@@ -287,13 +244,6 @@ __asm__ __volatile__( \
 
 #ifdef CONFIG_X86_USE_3DNOW
 
-/* All this just for in_interrupt() ... */
-
-#include <asm/system.h>
-#include <asm/ptrace.h>
-#include <linux/smp.h>
-#include <linux/spinlock.h>
-#include <linux/interrupt.h>
 #include <asm/mmx.h>
 
 /*
@@ -302,14 +252,14 @@ __asm__ __volatile__( \
 
 static inline void * __constant_memcpy3d(void * to, const void * from, size_t len)
 {
-	if(len<512 || in_interrupt())
+	if (len < 512)
 		return __constant_memcpy(to, from, len);
 	return _mmx_memcpy(to, from, len);
 }
 
-extern __inline__ void *__memcpy3d(void *to, const void *from, size_t len)
+static __inline__ void *__memcpy3d(void *to, const void *from, size_t len)
 {
-	if(len<512 || in_interrupt())
+	if (len < 512)
 		return __memcpy(to, from, len);
 	return _mmx_memcpy(to, from, len);
 }
@@ -332,46 +282,8 @@ extern __inline__ void *__memcpy3d(void *to, const void *from, size_t len)
 
 #endif
 
-/*
- * struct_cpy(x,y), copy structure *x into (matching structure) *y.
- *
- * We get link-time errors if the structure sizes do not match.
- * There is no runtime overhead, it's all optimized away at
- * compile time.
- */
-extern void __struct_cpy_bug (void);
-
-#define struct_cpy(x,y) 			\
-({						\
-	if (sizeof(*(x)) != sizeof(*(y))) 	\
-		__struct_cpy_bug;		\
-	memcpy(x, y, sizeof(*(x)));		\
-})
-
 #define __HAVE_ARCH_MEMMOVE
-static inline void * memmove(void * dest,const void * src, size_t n)
-{
-int d0, d1, d2;
-if (dest<src)
-__asm__ __volatile__(
-	"rep\n\t"
-	"movsb"
-	: "=&c" (d0), "=&S" (d1), "=&D" (d2)
-	:"0" (n),"1" (src),"2" (dest)
-	: "memory");
-else
-__asm__ __volatile__(
-	"std\n\t"
-	"rep\n\t"
-	"movsb\n\t"
-	"cld"
-	: "=&c" (d0), "=&S" (d1), "=&D" (d2)
-	:"0" (n),
-	 "1" (n-1+(const char *)src),
-	 "2" (n-1+(char *)dest)
-	:"memory");
-return dest;
-}
+void *memmove(void * dest,const void * src, size_t n);
 
 #define memcmp __builtin_memcmp
 
@@ -453,34 +365,8 @@ return __res;
 /* end of additional stuff */
 
 #define __HAVE_ARCH_STRSTR
-static inline char * strstr(const char * cs,const char * ct)
-{
-int	d0, d1;
-register char * __res;
-__asm__ __volatile__(
-	"movl %6,%%edi\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %%ecx\n\t"
-	"decl %%ecx\n\t"	/* NOTE! This also sets Z if searchstring='' */
-	"movl %%ecx,%%edx\n"
-	"1:\tmovl %6,%%edi\n\t"
-	"movl %%esi,%%eax\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repe\n\t"
-	"cmpsb\n\t"
-	"je 2f\n\t"		/* also works for empty string, see above */
-	"xchgl %%eax,%%esi\n\t"
-	"incl %%esi\n\t"
-	"cmpb $0,-1(%%eax)\n\t"
-	"jne 1b\n\t"
-	"xorl %%eax,%%eax\n\t"
-	"2:"
-	:"=a" (__res), "=&c" (d0), "=&S" (d1)
-	:"0" (0), "1" (0xffffffff), "2" (cs), "g" (ct)
-	:"dx", "di");
-return __res;
-}
+
+extern char *strstr(const char *cs, const char *ct);
 
 /*
  * This looks horribly ugly, but the compiler can optimize it totally,
@@ -549,16 +435,15 @@ static inline void * memscan(void * addr, int c, size_t size)
 {
 	if (!size)
 		return addr;
-	__asm__("repnz; scasb
-		jnz 1f
-		dec %%edi
-1:		"
+	__asm__("repnz; scasb\n\t"
+		"jnz 1f\n\t"
+		"dec %%edi\n"
+		"1:"
 		: "=D" (addr), "=c" (size)
 		: "0" (addr), "1" (size), "a" (c));
 	return addr;
 }
 
-#endif /* CONFIG_X86_USE_STRING_486 */
 #endif /* __KERNEL__ */
 
 #endif

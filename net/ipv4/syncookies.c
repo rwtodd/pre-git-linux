@@ -9,21 +9,18 @@
  *      as published by the Free Software Foundation; either version
  *      2 of the License, or (at your option) any later version.
  * 
- *  $Id: syncookies.c,v 1.12 2000/07/26 01:04:19 davem Exp $
+ *  $Id: syncookies.c,v 1.18 2002/02/01 22:01:04 davem Exp $
  *
  *  Missing: IPv6 support. 
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_SYN_COOKIES) 
 #include <linux/tcp.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/kernel.h>
 #include <net/tcp.h>
 
 extern int sysctl_tcp_syncookies;
-
-static unsigned long tcp_lastsynq_overflow;
 
 /* 
  * This table has to be sorted and terminated with (__u16)-1.
@@ -31,41 +28,43 @@ static unsigned long tcp_lastsynq_overflow;
  * Unresolved Issues: HIPPI with a 64k MSS is not well supported.
  */
 static __u16 const msstab[] = {
-	64-1,
-	256-1,	
-	512-1,
-	536-1,
-	1024-1,	
-	1440-1,
-	1460-1,
-	4312-1,
+	64 - 1,
+	256 - 1,	
+	512 - 1,
+	536 - 1,
+	1024 - 1,	
+	1440 - 1,
+	1460 - 1,
+	4312 - 1,
 	(__u16)-1
 };
 /* The number doesn't include the -1 terminator */
-#define NUM_MSS (sizeof(msstab)/sizeof(msstab[0]) - 1)
+#define NUM_MSS (ARRAY_SIZE(msstab) - 1)
 
 /*
  * Generate a syncookie.  mssp points to the mss, which is returned
  * rounded down to the value encoded in the cookie.
  */
-__u32 cookie_v4_init_sequence(struct sock *sk, struct sk_buff *skb, 
-			      __u16 *mssp)
+__u32 cookie_v4_init_sequence(struct sock *sk, struct sk_buff *skb, __u16 *mssp)
 {
+	struct tcp_sock *tp = tcp_sk(sk);
 	int mssind;
 	const __u16 mss = *mssp;
 
-	tcp_lastsynq_overflow = jiffies;
-	/* XXX sort msstab[] by probability?  Binary search? */
-	for (mssind = 0; mss > msstab[mssind+1]; mssind++)
-		;
-	*mssp = msstab[mssind]+1;
+	
+	tp->last_synq_overflow = jiffies;
 
-	NET_INC_STATS_BH(SyncookiesSent);
+	/* XXX sort msstab[] by probability?  Binary search? */
+	for (mssind = 0; mss > msstab[mssind + 1]; mssind++)
+		;
+	*mssp = msstab[mssind] + 1;
+
+	NET_INC_STATS_BH(LINUX_MIB_SYNCOOKIESSENT);
 
 	return secure_tcp_syn_cookie(skb->nh.iph->saddr, skb->nh.iph->daddr,
 				     skb->h.th->source, skb->h.th->dest,
 				     ntohl(skb->h.th->seq),
-				     jiffies / (HZ*60), mssind);
+				     jiffies / (HZ * 60), mssind);
 }
 
 /* 
@@ -79,76 +78,74 @@ __u32 cookie_v4_init_sequence(struct sock *sk, struct sk_buff *skb,
  * Check if a ack sequence number is a valid syncookie. 
  * Return the decoded mss if it is, or 0 if not.
  */
-static inline int cookie_check(struct sk_buff *skb, __u32 cookie) 
+static inline int cookie_check(struct sk_buff *skb, __u32 cookie)
 {
 	__u32 seq; 
 	__u32 mssind;
-
-  	if ((jiffies - tcp_lastsynq_overflow) > TCP_TIMEOUT_INIT)
-		return 0; 
 
 	seq = ntohl(skb->h.th->seq)-1; 
 	mssind = check_tcp_syn_cookie(cookie,
 				      skb->nh.iph->saddr, skb->nh.iph->daddr,
 				      skb->h.th->source, skb->h.th->dest,
-				      seq, jiffies/(HZ*60), COUNTER_TRIES);
+				      seq, jiffies / (HZ * 60), COUNTER_TRIES);
 
-	return mssind < NUM_MSS ? msstab[mssind]+1 : 0;
+	return mssind < NUM_MSS ? msstab[mssind] + 1 : 0;
 }
 
 extern struct or_calltable or_ipv4;
 
-static inline struct sock *
-get_cookie_sock(struct sock *sk, struct sk_buff *skb, struct open_request *req,
-		struct dst_entry *dst)
+static inline struct sock *get_cookie_sock(struct sock *sk, struct sk_buff *skb,
+					   struct open_request *req,
+					   struct dst_entry *dst)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
 	struct sock *child;
 
 	child = tp->af_specific->syn_recv_sock(sk, skb, req, dst);
-	if (child)
+	if (child) {
+		sk_set_owner(child, sk->sk_owner);
 		tcp_acceptq_queue(sk, req, child);
-	else
+	} else
 		tcp_openreq_free(req);
 
 	return child;
 }
 
-struct sock *
-cookie_v4_check(struct sock *sk, struct sk_buff *skb, struct ip_options *opt)
+struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb,
+			     struct ip_options *opt)
 {
-	__u32 cookie = ntohl(skb->h.th->ack_seq)-1; 
+	struct tcp_sock *tp = tcp_sk(sk);
+	__u32 cookie = ntohl(skb->h.th->ack_seq) - 1; 
+	struct sock *ret = sk;
 	struct open_request *req; 
 	int mss; 
 	struct rtable *rt; 
 	__u8 rcv_wscale;
 
-	if (!sysctl_tcp_syncookies)
-		return sk;
-	if (!skb->h.th->ack)
-		return sk; 
+	if (!sysctl_tcp_syncookies || !skb->h.th->ack)
+		goto out;
 
-	mss = cookie_check(skb, cookie);
-	if (mss == 0) {
-	 	NET_INC_STATS_BH(SyncookiesFailed);
-		return sk;
+  	if (time_after(jiffies, tp->last_synq_overflow + TCP_TIMEOUT_INIT) ||
+	    (mss = cookie_check(skb, cookie)) == 0) {
+	 	NET_INC_STATS_BH(LINUX_MIB_SYNCOOKIESFAILED);
+		goto out;
 	}
 
-	NET_INC_STATS_BH(SyncookiesRecv);
+	NET_INC_STATS_BH(LINUX_MIB_SYNCOOKIESRECV);
 
 	req = tcp_openreq_alloc();
-	if (req == NULL)
-		return NULL;	
+	ret = NULL;
+	if (!req)
+		goto out;
 
-	req->rcv_isn = htonl(skb->h.th->seq)-1;
-	req->snt_isn = cookie; 
-	req->mss = mss;
- 	req->rmt_port = skb->h.th->source;
+	req->rcv_isn		= htonl(skb->h.th->seq) - 1;
+	req->snt_isn		= cookie; 
+	req->mss		= mss;
+ 	req->rmt_port		= skb->h.th->source;
 	req->af.v4_req.loc_addr = skb->nh.iph->daddr;
 	req->af.v4_req.rmt_addr = skb->nh.iph->saddr;
-	req->class = &or_ipv4; /* for savety */
-
-	req->af.v4_req.opt = NULL;
+	req->class		= &or_ipv4; /* for savety */
+	req->af.v4_req.opt	= NULL;
 
 	/* We throwed the options of the initial SYN away, so we hope
 	 * the ACK carries the same options again (see RFC1122 4.2.3.8)
@@ -166,9 +163,9 @@ cookie_v4_check(struct sock *sk, struct sk_buff *skb, struct ip_options *opt)
 	}
 
 	req->snd_wscale = req->rcv_wscale = req->tstamp_ok = 0;
-	req->wscale_ok = req->sack_ok = 0; 
-	req->expires = 0UL; 
-	req->retrans = 0; 
+	req->wscale_ok	= req->sack_ok = 0; 
+	req->expires	= 0UL; 
+	req->retrans	= 0; 
 	
 	/*
 	 * We need to lookup the route here to get at the correct
@@ -176,25 +173,31 @@ cookie_v4_check(struct sock *sk, struct sk_buff *skb, struct ip_options *opt)
 	 * hasn't changed since we received the original syn, but I see
 	 * no easy way to do this. 
 	 */
-	if (ip_route_output(&rt,
-			    opt && 
-			    opt->srr ? opt->faddr : req->af.v4_req.rmt_addr,
-			    req->af.v4_req.loc_addr,
-			    sk->protinfo.af_inet.tos | RTO_CONN,
-			    0)) { 
-		tcp_openreq_free(req);
-		return NULL; 
+	{
+		struct flowi fl = { .nl_u = { .ip4_u =
+					      { .daddr = ((opt && opt->srr) ?
+							  opt->faddr :
+							  req->af.v4_req.rmt_addr),
+						.saddr = req->af.v4_req.loc_addr,
+						.tos = RT_CONN_FLAGS(sk) } },
+				    .proto = IPPROTO_TCP,
+				    .uli_u = { .ports =
+					       { .sport = skb->h.th->dest,
+						 .dport = skb->h.th->source } } };
+		if (ip_route_output_key(&rt, &fl)) {
+			tcp_openreq_free(req);
+			goto out; 
+		}
 	}
 
 	/* Try to redo what tcp_v4_send_synack did. */
-	req->window_clamp = rt->u.dst.window;  
-	tcp_select_initial_window(tcp_full_space(sk),req->mss,
+	req->window_clamp = dst_metric(&rt->u.dst, RTAX_WINDOW);
+	tcp_select_initial_window(tcp_full_space(sk), req->mss,
 				  &req->rcv_wnd, &req->window_clamp, 
 				  0, &rcv_wscale);
 	/* BTW win scale with syncookies is 0 by definition */
-	req->rcv_wscale = rcv_wscale; 
+	req->rcv_wscale	  = rcv_wscale; 
 
-	return get_cookie_sock(sk, skb, req, &rt->u.dst);
+	ret = get_cookie_sock(sk, skb, req, &rt->u.dst);
+out:	return ret;
 }
-
-#endif

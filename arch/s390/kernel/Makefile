@@ -1,54 +1,31 @@
 #
 # Makefile for the linux kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-.S.o:
-	$(CC) $(AFLAGS) -traditional -c $< -o $*.o
+EXTRA_AFLAGS	:= -traditional
 
-all: kernel.o head.o init_task.o
-
-O_TARGET := kernel.o
-O_OBJS   := lowcore.o entry.o bitmap.o traps.o time.o process.o irq.o \
+obj-y	:=  bitmap.o traps.o time.o process.o \
             setup.o sys_s390.o ptrace.o signal.o cpcmd.o ebcdic.o \
-            semaphore.o s390fpu.o s390io.o s390mach.o s390dyn.o reipl.o
-OX_OBJS := s390_ksyms.o
-MX_OBJS  :=
+            semaphore.o s390_ext.o debug.o profile.o irq.o
 
-ifdef CONFIG_SMP
-O_OBJS += smp.o
-endif
+extra-$(CONFIG_ARCH_S390_31)	+= head.o 
+extra-$(CONFIG_ARCH_S390X)	+= head64.o 
+extra-y				+= init_task.o vmlinux.lds
 
-ifdef CONFIG_PCI
-O_OBJS += bios32.o
-endif
+obj-$(CONFIG_MODULES)		+= s390_ksyms.o module.o
+obj-$(CONFIG_SMP)		+= smp.o
 
-ifdef CONFIG_MCA
-O_OBJS += mca.o
-endif
+obj-$(CONFIG_S390_SUPPORT)	+= compat_linux.o compat_signal.o \
+					compat_ioctl.o compat_wrapper.o \
+					compat_exec_domain.o
+obj-$(CONFIG_BINFMT_ELF32)	+= binfmt_elf32.o
 
-ifeq ($(CONFIG_MTRR),y)
-OX_OBJS += mtrr.o
-else
-  ifeq ($(CONFIG_MTRR),m)
-  MX_OBJS += mtrr.o
-  endif
-endif
+obj-$(CONFIG_ARCH_S390_31)	+= entry.o reipl.o
+obj-$(CONFIG_ARCH_S390X)	+= entry64.o reipl64.o
 
-ifeq ($(CONFIG_IEEEFPU_EMULATION),y)
-  O_OBJS += mathemu.o floatlib.o
-endif
+obj-$(CONFIG_VIRT_TIMER)	+= vtime.o
 
 #
-# Kernel debugging
+# This is just to get the dependencies...
 #
-ifdef CONFIG_REMOTE_DEBUG
-O_OBJS += gdb-stub.o #gdb-low.o 
-endif
-
-include $(TOPDIR)/Rules.make
-
+binfmt_elf32.o:	$(TOPDIR)/fs/binfmt_elf.c

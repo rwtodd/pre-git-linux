@@ -18,8 +18,6 @@
 #define _LINUX_IP_H
 #include <asm/byteorder.h>
 
-/* SOL_IP socket options */
-
 #define IPTOS_TOS_MASK		0x1E
 #define IPTOS_TOS(tos)		((tos)&IPTOS_TOS_MASK)
 #define	IPTOS_LOWDELAY		0x10
@@ -67,14 +65,6 @@
 #define MAXTTL		255
 #define IPDEFTTL	64
 
-/* struct timestamp, struct route and MAX_ROUTES are removed.
-
-   REASONS: it is clear that nobody used them because:
-   - MAX_ROUTES value was wrong.
-   - "struct route" was wrong.
-   - "struct timestamp" had fatally misaligned bitfields and was completely unusable.
- */
-
 #define IPOPT_OPTVAL 0
 #define IPOPT_OLEN   1
 #define IPOPT_OFFSET 2
@@ -89,6 +79,11 @@
 #define	IPOPT_TS_PRESPEC	3		/* specified modules only */
 
 #ifdef __KERNEL__
+#include <linux/config.h>
+#include <linux/types.h>
+#include <net/sock.h>
+#include <linux/igmp.h>
+#include <net/flow.h>
 
 struct ip_options {
   __u32		faddr;				/* Saved first hop address */
@@ -111,6 +106,72 @@ struct ip_options {
 };
 
 #define optlength(opt) (sizeof(struct ip_options) + opt->optlen)
+
+struct ipv6_pinfo;
+
+struct inet_sock {
+	/* sk and pinet6 has to be the first two members of inet_sock */
+	struct sock		sk;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	struct ipv6_pinfo	*pinet6;
+#endif
+	/* Socket demultiplex comparisons on incoming packets. */
+	__u32			daddr;		/* Foreign IPv4 addr */
+	__u32			rcv_saddr;	/* Bound local IPv4 addr */
+	__u16			dport;		/* Destination port */
+	__u16			num;		/* Local port */
+	__u32			saddr;		/* Sending source */
+	int			uc_ttl;		/* Unicast TTL */
+	int			tos;		/* TOS */
+	unsigned	   	cmsg_flags;
+	struct ip_options	*opt;
+	__u16			sport;		/* Source port */
+	unsigned char		hdrincl;	/* Include headers ? */
+	__u8			mc_ttl;		/* Multicasting TTL */
+	__u8			mc_loop;	/* Loopback */
+	__u8			pmtudisc;
+	__u16			id;		/* ID counter for DF pkts */
+	unsigned		recverr : 1,
+				freebind : 1;
+	int			mc_index;	/* Multicast device index */
+	__u32			mc_addr;
+	struct ip_mc_socklist	*mc_list;	/* Group array */
+	/*
+	 * Following members are used to retain the infomation to build
+	 * an ip header on each ip fragmentation while the socket is corked.
+	 */
+	struct {
+		unsigned int		flags;
+		unsigned int		fragsize;
+		struct ip_options	*opt;
+		struct rtable		*rt;
+		int			length; /* Total length of all frames */
+		u32			addr;
+		struct flowi		fl;
+	} cork;
+};
+
+#define IPCORK_OPT	1	/* ip-options has been held in ipcork.opt */
+
+static inline struct inet_sock *inet_sk(const struct sock *sk)
+{
+	return (struct inet_sock *)sk;
+}
+
+static inline void __inet_sk_copy_descendant(struct sock *sk_to,
+					     const struct sock *sk_from,
+					     const int ancestor_size)
+{
+	memcpy(inet_sk(sk_to) + 1, inet_sk(sk_from) + 1,
+	       sk_from->sk_prot->slab_obj_size - ancestor_size);
+}
+#if !(defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE))
+static inline void inet_sk_copy_descendant(struct sock *sk_to,
+					   const struct sock *sk_from)
+{
+	__inet_sk_copy_descendant(sk_to, sk_from, sizeof(struct inet_sock));
+}
+#endif
 #endif
 
 struct iphdr {
@@ -133,6 +194,27 @@ struct iphdr {
 	__u32	saddr;
 	__u32	daddr;
 	/*The options start here. */
+};
+
+struct ip_auth_hdr {
+	__u8  nexthdr;
+	__u8  hdrlen;		/* This one is measured in 32 bit units! */
+	__u16 reserved;
+	__u32 spi;
+	__u32 seq_no;		/* Sequence number */
+	__u8  auth_data[0];	/* Variable len but >=4. Mind the 64 bit alignment! */
+};
+
+struct ip_esp_hdr {
+	__u32 spi;
+	__u32 seq_no;		/* Sequence number */
+	__u8  enc_data[0];	/* Variable len but >=8. Mind the 64 bit alignment! */
+};
+
+struct ip_comp_hdr {
+	__u8 nexthdr;
+	__u8 flags;
+	__u16 cpi;
 };
 
 #endif	/* _LINUX_IP_H */

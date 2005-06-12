@@ -4,7 +4,7 @@
 #define _ASMm68k_APOLLOHW_H_
 
 /*
-   apollo models 
+   apollo models
 */
 
 extern u_long apollo_model;
@@ -16,8 +16,8 @@ extern u_long apollo_model;
 #define APOLLO_DN4000 (4)
 #define APOLLO_DN4500 (5)
 
-/* 
-   see scn2681 data sheet for more info. 
+/*
+   see scn2681 data sheet for more info.
    member names are read_write.
 */
 
@@ -96,14 +96,9 @@ extern u_long timer_physaddr;
 #define cpuctrl (*(volatile unsigned int *)(IO_BASE + cpuctrl_physaddr))
 #define pica (IO_BASE + pica_physaddr)
 #define picb (IO_BASE + picb_physaddr)
-#define timer (IO_BASE + timer_physaddr)	
+#define timer (IO_BASE + timer_physaddr)
 #define addr_xlat_map ((unsigned short *)(IO_BASE + 0x17000))
 
 #define isaIO2mem(x) (((((x) & 0x3f8)  << 7) | (((x) & 0xfc00) >> 6) | ((x) & 0x7)) + 0x40000 + IO_BASE)
-
-#define inb(addr) (*((volatile unsigned char *)(addr)))
-#define outb(val,addr) (*((volatile unsigned char *)(addr)) = (val))
-#define inw(addr) (*((volatile unsigned short *)(addr)))
-#define outw(val,addr) (*((volatile unsigned short *)(addr)) = (val))
 
 #endif

@@ -1,13 +1,21 @@
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/netfilter.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/if.h>
-
 #include <linux/netfilter_ipv4/ip_nat.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_nat_protocol.h>
+#include <linux/netfilter_ipv4/ip_nat_core.h>
 
 static int
 tcp_in_range(const struct ip_conntrack_tuple *tuple,
@@ -32,7 +40,7 @@ tcp_unique_tuple(struct ip_conntrack_tuple *tuple,
 		 enum ip_nat_manip_type maniptype,
 		 const struct ip_conntrack *conntrack)
 {
-	static u_int16_t port = 0, *portptr;
+	static u_int16_t port, *portptr;
 	unsigned int range_size, min, i;
 
 	if (maniptype == IP_NAT_MANIP_SRC)
@@ -74,29 +82,56 @@ tcp_unique_tuple(struct ip_conntrack_tuple *tuple,
 	return 0;
 }
 
-static void
-tcp_manip_pkt(struct iphdr *iph, size_t len,
-	      const struct ip_conntrack_manip *manip,
+static int
+tcp_manip_pkt(struct sk_buff **pskb,
+	      unsigned int iphdroff,
+	      const struct ip_conntrack_tuple *tuple,
 	      enum ip_nat_manip_type maniptype)
 {
-	struct tcphdr *hdr = (struct tcphdr *)((u_int32_t *)iph + iph->ihl);
-	u_int32_t oldip;
-	u_int16_t *portptr;
+	struct iphdr *iph = (struct iphdr *)((*pskb)->data + iphdroff);
+	struct tcphdr *hdr;
+	unsigned int hdroff = iphdroff + iph->ihl*4;
+	u32 oldip, newip;
+	u16 *portptr, newport, oldport;
+	int hdrsize = 8; /* TCP connection tracking guarantees this much */
+
+	/* this could be a inner header returned in icmp packet; in such
+	   cases we cannot update the checksum field since it is outside of
+	   the 8 bytes of transport layer headers we are guaranteed */
+	if ((*pskb)->len >= hdroff + sizeof(struct tcphdr))
+		hdrsize = sizeof(struct tcphdr);
+
+	if (!skb_ip_make_writable(pskb, hdroff + hdrsize))
+		return 0;
+
+	iph = (struct iphdr *)((*pskb)->data + iphdroff);
+	hdr = (struct tcphdr *)((*pskb)->data + hdroff);
 
 	if (maniptype == IP_NAT_MANIP_SRC) {
 		/* Get rid of src ip and src pt */
 		oldip = iph->saddr;
+		newip = tuple->src.ip;
+		newport = tuple->src.u.tcp.port;
 		portptr = &hdr->source;
 	} else {
 		/* Get rid of dst ip and dst pt */
 		oldip = iph->daddr;
+		newip = tuple->dst.ip;
+		newport = tuple->dst.u.tcp.port;
 		portptr = &hdr->dest;
 	}
-	hdr->check = ip_nat_cheat_check(~oldip, manip->ip,
-					ip_nat_cheat_check(*portptr ^ 0xFFFF,
-							   manip->u.tcp.port,
+
+	oldport = *portptr;
+	*portptr = newport;
+
+	if (hdrsize < sizeof(*hdr))
+		return 1;
+
+	hdr->check = ip_nat_cheat_check(~oldip, newip,
+					ip_nat_cheat_check(oldport ^ 0xFFFF,
+							   newport,
 							   hdr->check));
-	*portptr = manip->u.tcp.port;
+	return 1;
 }
 
 static unsigned int
@@ -134,7 +169,7 @@ tcp_print_range(char *buffer, const struct ip_nat_range *range)
 }
 
 struct ip_nat_protocol ip_nat_protocol_tcp
-= { { NULL, NULL }, "TCP", IPPROTO_TCP,
+= { "TCP", IPPROTO_TCP,
     tcp_manip_pkt,
     tcp_in_range,
     tcp_unique_tuple,

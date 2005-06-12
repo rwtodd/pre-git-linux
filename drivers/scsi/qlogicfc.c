@@ -21,6 +21,9 @@
  *
  * Big endian support and dynamic DMA mapping added
  * by Jakub Jelinek <jakub@redhat.com>.
+ *
+ * Conversion to final pci64 DMA interfaces
+ * by David S. Miller <davem@redhat.com>.
  */
 
 /*
@@ -47,7 +50,7 @@
  *
  */
 
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -57,37 +60,16 @@
 #include <linux/delay.h>
 #include <linux/unistd.h>
 #include <linux/spinlock.h>
+#include <linux/interrupt.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include "scsi.h"
+#include <scsi/scsi_host.h>
 
-#include "sd.h"
-#include "hosts.h"
-
-#if 1
-/* Once pci64_ DMA mapping interface is in, kill this. */
-typedef dma_addr_t dma64_addr_t;
-#define pci64_alloc_consistent(d,s,p) pci_alloc_consistent((d),(s),(p))
-#define pci64_free_consistent(d,s,c,a) pci_free_consistent((d),(s),(c),(a))
-#define pci64_map_single(d,c,s,dir) pci_map_single((d),(c),(s),(dir))
-#define pci64_map_sg(d,s,n,dir) pci_map_sg((d),(s),(n),(dir))
-#define pci64_unmap_single(d,a,s,dir) pci_unmap_single((d),(a),(s),(dir))
-#define pci64_unmap_sg(d,s,n,dir) pci_unmap_sg((d),(s),(n),(dir))
-#if BITS_PER_LONG > 32
 #define pci64_dma_hi32(a) ((u32) (0xffffffff & (((u64)(a))>>32)))
 #define pci64_dma_lo32(a) ((u32) (0xffffffff & (((u64)(a)))))
-#else
-#define pci64_dma_hi32(a) 0
-#define pci64_dma_lo32(a) (a)
-#endif	/* BITS_PER_LONG */
-#define pci64_dma_build(hi,lo) (lo)
-#define sg_dma64_address(s) sg_dma_address(s)
-#define sg_dma64_len(s) sg_dma_len(s)
-#if BITS_PER_LONG > 32
-#define PCI64_DMA_BITS 64
-#else
-#define PCI64_DMA_BITS	32
-#endif 	/* BITS_PER_LONG */
-#endif
+#define pci64_dma_build(hi,lo) \
+	((dma_addr_t)(((u64)(lo))|(((u64)(hi))<<32)))
 
 #include "qlogicfc.h"
 
@@ -97,8 +79,6 @@ typedef dma_addr_t dma64_addr_t;
    version 1.17.30 of the isp2100's firmware and version 2.00.40 of the 
    isp2200's firmware. 
 */
-
-#define RELOAD_FIRMWARE		1
 
 #define USE_NVRAM_DEFAULTS      1
 
@@ -120,6 +100,7 @@ typedef dma_addr_t dma64_addr_t;
 
 #define DEFAULT_LOOP_COUNT	1000000000
 
+#define ISP_TIMEOUT (2*HZ)
 /* End Configuration section ************************************************ */
 
 #include <linux/module.h>
@@ -195,8 +176,8 @@ struct {
 #define FLASH_BIOS_ADDR	0x00
 #define FLASH_BIOS_DATA	0x02
 #define ISP_CTRL_STATUS	0x06	/* configuration register #1 */
-#define PCI_INTER_CTL	0x08	/* pci interupt control */
-#define PCI_INTER_STS	0x0a	/* pci interupt status */
+#define PCI_INTER_CTL	0x08	/* pci interrupt control */
+#define PCI_INTER_STS	0x0a	/* pci interrupt status */
 #define PCI_SEMAPHORE	0x0c	/* pci semaphore */
 #define PCI_NVRAM	0x0e	/* pci nvram interface */
 
@@ -227,7 +208,7 @@ struct {
 #define REQUEST_TRANSFER_ERROR		0x8003
 #define RESPONSE_TRANSFER_ERROR		0x8004
 #define REQUEST_QUEUE_WAKEUP		0x8005
-#define LIP_OCCURED                     0x8010
+#define LIP_OCCURRED                     0x8010
 #define LOOP_UP                         0x8011
 #define LOOP_DOWN                       0x8012
 #define LIP_RECEIVED                    0x8013
@@ -245,13 +226,8 @@ struct Entry_header {
 };
 
 /* entry header type commands */
-#if PCI64_DMA_BITS > 32
 #define ENTRY_COMMAND		0x19
 #define ENTRY_CONTINUATION	0x0a
-#else
-#define ENTRY_COMMAND		0x11
-#define ENTRY_CONTINUATION	0x02
-#endif
 
 #define ENTRY_STATUS		0x03
 #define ENTRY_MARKER		0x04
@@ -262,22 +238,11 @@ struct Entry_header {
 #define EFLAG_BAD_HEADER	4
 #define EFLAG_BAD_PAYLOAD	8
 
-#if PCI64_DMA_BITS > 32
-
 struct dataseg {
 	u_int d_base;
 	u_int d_base_hi;
 	u_int d_count;
 };
-
-#else
-
-struct dataseg {
-	u_int d_base;
-	u_int d_count;
-};
-
-#endif
 
 struct Command_Entry {
 	struct Entry_header hdr;
@@ -303,18 +268,10 @@ struct Command_Entry {
 #define CFLAG_READ		0x20
 #define CFLAG_WRITE		0x40
 
-#if PCI64_DMA_BITS > 32
 struct Continuation_Entry {
 	struct Entry_header hdr;
 	struct dataseg dataseg[DATASEGS_PER_CONT];
 };
-#else
-struct Continuation_Entry {
-	struct Entry_header hdr;
-        u32 rsvd;
-	struct dataseg dataseg[DATASEGS_PER_CONT];
-};
-#endif
 
 struct Marker_Entry {
 	struct Entry_header hdr;
@@ -369,7 +326,7 @@ struct Status_Entry {
 #define STF_ABORTED			0x0020
 #define STF_TIMEOUT			0x0040
 
-/* interupt control commands */
+/* interrupt control commands */
 #define ISP_EN_INT			0x8000
 #define ISP_EN_RISC			0x0008
 
@@ -440,13 +397,22 @@ struct Status_Entry {
 #define MBOX_SEND_CHANGE_REQUEST        0x0070
 #define MBOX_PORT_LOGOUT                0x0071
 
+/*
+ *	Firmware if needed (note this is a hack, it belongs in a separate
+ *	module.
+ */
+ 
+#ifdef CONFIG_SCSI_QLOGIC_FC_FIRMWARE
 #include "qlogicfc_asm.c"
+#else
+static unsigned short risc_code_addr01 = 0x1000 ;
+#endif
 
 /* Each element in mbox_param is an 8 bit bitmap where each bit indicates
    if that mbox should be copied as input.  For example 0x2 would mean
    only copy mbox1. */
 
-const u_char mbox_param[] =
+static const u_char mbox_param[] =
 {
 	0x01,			/* MBOX_NO_OP */
 	0x1f,			/* MBOX_LOAD_RAM */
@@ -678,6 +644,7 @@ struct isp2x00_hostdata {
 	u_char queued;
 	u_char host_id;
         struct timer_list explore_timer;
+	struct id_name_map tempmap[QLOGICFC_MAX_ID + 1];
 };
 
 
@@ -694,7 +661,7 @@ static int isp2x00_reset_hardware(struct Scsi_Host *);
 static int isp2x00_mbox_command(struct Scsi_Host *, u_short[]);
 static int isp2x00_return_status(Scsi_Cmnd *, struct Status_Entry *);
 static void isp2x00_intr_handler(int, void *, struct pt_regs *);
-static void do_isp2x00_intr_handler(int, void *, struct pt_regs *);
+static irqreturn_t do_isp2x00_intr_handler(int, void *, struct pt_regs *);
 static int isp2x00_make_portdb(struct Scsi_Host *);
 
 #if ISP2x00_FABRIC
@@ -729,12 +696,12 @@ static inline void isp2x00_disable_irqs(struct Scsi_Host *host)
 int isp2x00_detect(Scsi_Host_Template * tmpt)
 {
 	int hosts = 0;
-	int wait_time;
+	unsigned long wait_time;
 	struct Scsi_Host *host = NULL;
 	struct isp2x00_hostdata *hostdata;
-	struct pci_dev *pdev = NULL;
+	struct pci_dev *pdev;
 	unsigned short device_ids[2];
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 	int i;
 
 
@@ -745,28 +712,33 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 
 	tmpt->proc_name = "isp2x00";
 
-	if (pci_present() == 0) {
-		printk("qlogicfc : PCI not present\n");
-		return 0;
-	}
-
 	for (i=0; i<2; i++){
+		pdev = NULL;
 	        while ((pdev = pci_find_device(PCI_VENDOR_ID_QLOGIC, device_ids[i], pdev))) {
 			if (pci_enable_device(pdev))
 				continue;
 
+			/* Try to configure DMA attributes. */
+			if (pci_set_dma_mask(pdev, 0xffffffffffffffffULL) &&
+			    pci_set_dma_mask(pdev, 0xffffffffULL))
+					continue;
+
 		        host = scsi_register(tmpt, sizeof(struct isp2x00_hostdata));
+			if (!host) {
+			        printk("qlogicfc%d : could not register host.\n", hosts);
+				continue;
+			}
+ 			scsi_set_device(host, &pdev->dev);
 			host->max_id = QLOGICFC_MAX_ID + 1;
 			host->max_lun = QLOGICFC_MAX_LUN;
-			host->hostt->use_new_eh_code = 1;
 			hostdata = (struct isp2x00_hostdata *) host->hostdata;
 
 			memset(hostdata, 0, sizeof(struct isp2x00_hostdata));
 			hostdata->pci_dev = pdev;
-			hostdata->res = pci64_alloc_consistent(pdev, RES_SIZE + REQ_SIZE, &busaddr);
+			hostdata->res = pci_alloc_consistent(pdev, RES_SIZE + REQ_SIZE, &busaddr);
 
 			if (!hostdata->res){
-			        printk("qlogicfc%d : could not allocate memory for request and response queue.\n", hostdata->host_id);
+			        printk("qlogicfc%d : could not allocate memory for request and response queue.\n", hosts);
 			        scsi_unregister(host);
 				continue;
 			}
@@ -799,7 +771,7 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 			hostdata->host_id = hosts;
 
 			if (isp2x00_init(host) || isp2x00_reset_hardware(host)) {
-				pci64_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+				pci_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 			        scsi_unregister(host);
 				continue;
 			}
@@ -808,28 +780,28 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 			if (request_irq(host->irq, do_isp2x00_intr_handler, SA_INTERRUPT | SA_SHIRQ, "qlogicfc", host)) {
 			        printk("qlogicfc%d : interrupt %d already in use\n",
 				       hostdata->host_id, host->irq);
-				pci64_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+				pci_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 				scsi_unregister(host);
 				continue;
 			}
-			if (check_region(host->io_port, 0xff)) {
+			if (!request_region(host->io_port, 0xff, "qlogicfc")) {
 			        printk("qlogicfc%d : i/o region 0x%lx-0x%lx already "
 				       "in use\n",
 				       hostdata->host_id, host->io_port, host->io_port + 0xff);
 				free_irq(host->irq, host);
-				pci64_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+				pci_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 				scsi_unregister(host);
 				continue;
 			}
-			request_region(host->io_port, 0xff, "qlogicfc");
 
 			outw(0x0, host->io_port + PCI_SEMAPHORE);
 			outw(HCCR_CLEAR_RISC_INTR, host->io_port + HOST_HCCR);
 			isp2x00_enable_irqs(host);
 			/* wait for the loop to come up */
-			for (wait_time = jiffies + 10 * HZ; wait_time > jiffies && hostdata->adapter_state == AS_LOOP_DOWN;)
+			for (wait_time = jiffies + 10 * HZ; time_before(jiffies, wait_time) && hostdata->adapter_state == AS_LOOP_DOWN;) {
 			        barrier();
-
+				cpu_relax();
+			}
 			if (hostdata->adapter_state == AS_LOOP_DOWN) {
 			        printk("qlogicfc%d : link is not up\n", hostdata->host_id);
 			}
@@ -843,8 +815,12 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 	   some time before recognizing it is attached to a fabric */
 
 #if ISP2x00_FABRIC
-	for (wait_time = jiffies + 5 * HZ; wait_time > jiffies;)
-		barrier();
+	if (hosts) {
+		for (wait_time = jiffies + 5 * HZ; time_before(jiffies, wait_time);) {
+			barrier();
+			cpu_relax();
+		}
+	}
 #endif
 
 	LEAVE("isp2x00_detect");
@@ -858,13 +834,12 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 
 	short param[8];
 	int i, j;
-	struct id_name_map temp[QLOGICFC_MAX_ID + 1];
 	struct isp2x00_hostdata *hostdata;
 
 	isp2x00_disable_irqs(host);
 
-	memset(temp, 0, sizeof(temp));
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
+	memset(hostdata->tempmap, 0, sizeof(hostdata->tempmap));
 
 #if ISP2x00_FABRIC
 	for (i = 0x81; i < QLOGICFC_MAX_ID; i++) {
@@ -890,15 +865,15 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 	if (param[0] == MBOX_COMMAND_COMPLETE) {
 		hostdata->port_id = ((u_int) param[3]) << 16;
 		hostdata->port_id |= param[2];
-		temp[0].loop_id = param[1];
-		temp[0].wwn = hostdata->wwn;
+		hostdata->tempmap[0].loop_id = param[1];
+		hostdata->tempmap[0].wwn = hostdata->wwn;
 	}
 	else {
 	        printk("qlogicfc%d : error getting scsi id.\n", hostdata->host_id);
 	}
 
         for (i = 0; i <=QLOGICFC_MAX_ID; i++)
-                temp[i].loop_id = temp[0].loop_id;
+                hostdata->tempmap[i].loop_id = hostdata->tempmap[0].loop_id;
    
         for (i = 0, j = 1; i <= QLOGICFC_MAX_LOOP_ID; i++) {
                 param[0] = MBOX_GET_PORT_NAME;
@@ -907,15 +882,15 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 		isp2x00_mbox_command(host, param);
 
 		if (param[0] == MBOX_COMMAND_COMPLETE) {
-			temp[j].loop_id = i;
-			temp[j].wwn = ((u64) (param[2] & 0xff)) << 56;
-			temp[j].wwn |= ((u64) ((param[2] >> 8) & 0xff)) << 48;
-			temp[j].wwn |= ((u64) (param[3] & 0xff)) << 40;
-			temp[j].wwn |= ((u64) ((param[3] >> 8) & 0xff)) << 32;
-			temp[j].wwn |= ((u64) (param[6] & 0xff)) << 24;
-			temp[j].wwn |= ((u64) ((param[6] >> 8) & 0xff)) << 16;
-			temp[j].wwn |= ((u64) (param[7] & 0xff)) << 8;
-			temp[j].wwn |= ((u64) ((param[7] >> 8) & 0xff));
+			hostdata->tempmap[j].loop_id = i;
+			hostdata->tempmap[j].wwn = ((u64) (param[2] & 0xff)) << 56;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[2] >> 8) & 0xff)) << 48;
+			hostdata->tempmap[j].wwn |= ((u64) (param[3] & 0xff)) << 40;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[3] >> 8) & 0xff)) << 32;
+			hostdata->tempmap[j].wwn |= ((u64) (param[6] & 0xff)) << 24;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[6] >> 8) & 0xff)) << 16;
+			hostdata->tempmap[j].wwn |= ((u64) (param[7] & 0xff)) << 8;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[7] >> 8) & 0xff));
 
 			j++;
 
@@ -924,33 +899,33 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 
 
 #if ISP2x00_FABRIC
-	isp2x00_init_fabric(host, temp, j);
+	isp2x00_init_fabric(host, hostdata->tempmap, j);
 #endif
 
 	for (i = 0; i <= QLOGICFC_MAX_ID; i++) {
-		if (temp[i].wwn != hostdata->port_db[i].wwn) {
+		if (hostdata->tempmap[i].wwn != hostdata->port_db[i].wwn) {
 			for (j = 0; j <= QLOGICFC_MAX_ID; j++) {
-				if (temp[j].wwn == hostdata->port_db[i].wwn) {
-					hostdata->port_db[i].loop_id = temp[j].loop_id;
+				if (hostdata->tempmap[j].wwn == hostdata->port_db[i].wwn) {
+					hostdata->port_db[i].loop_id = hostdata->tempmap[j].loop_id;
 					break;
 				}
 			}
 			if (j == QLOGICFC_MAX_ID + 1)
-				hostdata->port_db[i].loop_id = temp[0].loop_id;
+				hostdata->port_db[i].loop_id = hostdata->tempmap[0].loop_id;
 
 			for (j = 0; j <= QLOGICFC_MAX_ID; j++) {
-				if (hostdata->port_db[j].wwn == temp[i].wwn || !hostdata->port_db[j].wwn) {
+				if (hostdata->port_db[j].wwn == hostdata->tempmap[i].wwn || !hostdata->port_db[j].wwn) {
 					break;
 				}
 			}
 			if (j == QLOGICFC_MAX_ID + 1)
 				printk("qlogicfc%d : Too many scsi devices, no more room in port map.\n", hostdata->host_id);
 			if (!hostdata->port_db[j].wwn) {
-				hostdata->port_db[j].loop_id = temp[i].loop_id;
-				hostdata->port_db[j].wwn = temp[i].wwn;
+				hostdata->port_db[j].loop_id = hostdata->tempmap[i].loop_id;
+				hostdata->port_db[j].wwn = hostdata->tempmap[i].wwn;
 			}
 		} else
-			hostdata->port_db[i].loop_id = temp[i].loop_id;
+			hostdata->port_db[i].loop_id = hostdata->tempmap[i].loop_id;
 
 	}
 
@@ -977,7 +952,7 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 	u_int port_id;
 	struct sns_cb *req;
 	u_char *sns_response;
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 	struct isp2x00_hostdata *hostdata;
 
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
@@ -994,7 +969,7 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 	}
 	printk("qlogicfc%d : Fabric found.\n", hostdata->host_id);
 
-	req = (struct sns_cb *)pci64_alloc_consistent(hostdata->pci_dev, sizeof(*req) + 608, &busaddr);
+	req = (struct sns_cb *)pci_alloc_consistent(hostdata->pci_dev, sizeof(*req) + 608, &busaddr);
 	
 	if (!req){
 		printk("qlogicfc%d : Could not allocate DMA resources for fabric initialization\n", hostdata->host_id);
@@ -1096,12 +1071,12 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 				done = 1;
 		} else {
 			printk("qlogicfc%d : Get All Next failed %x.\n", hostdata->host_id, param[0]);
-			pci64_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
+			pci_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
 			return 0;
 		}
 	}
 
-	pci64_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
+	pci_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
 	return 1;
 }
 
@@ -1111,7 +1086,7 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 int isp2x00_release(struct Scsi_Host *host)
 {
 	struct isp2x00_hostdata *hostdata;
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 
 	ENTER("isp2x00_release");
 
@@ -1124,7 +1099,7 @@ int isp2x00_release(struct Scsi_Host *host)
 
 	busaddr = pci64_dma_build(le32_to_cpu(hostdata->control_block.res_queue_addr_high),
 				  le32_to_cpu(hostdata->control_block.res_queue_addr_lo));
-	pci64_free_consistent(hostdata->pci_dev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+	pci_free_consistent(hostdata->pci_dev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 
 	LEAVE("isp2x00_release");
 
@@ -1170,7 +1145,7 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	ENTER("isp2x00_queuecommand");
 
-	host = Cmnd->host;
+	host = Cmnd->device->host;
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 	Cmnd->scsi_done = done;
 
@@ -1255,10 +1230,10 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	cmd->hdr.entry_type = ENTRY_COMMAND;
 	cmd->hdr.entry_cnt = 1;
-	cmd->target_lun = Cmnd->lun;
-	cmd->expanded_lun = cpu_to_le16(Cmnd->lun);
+	cmd->target_lun = Cmnd->device->lun;
+	cmd->expanded_lun = cpu_to_le16(Cmnd->device->lun);
 #if ISP2x00_PORTDB
-	cmd->target_id = hostdata->port_db[Cmnd->target].loop_id;
+	cmd->target_id = hostdata->port_db[Cmnd->device->id].loop_id;
 #else
 	cmd->target_id = Cmnd->target;
 #endif
@@ -1268,7 +1243,7 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	if (Cmnd->use_sg) {
 		sg = (struct scatterlist *) Cmnd->request_buffer;
-		sg_count = pci64_map_sg(hostdata->pci_dev, sg, Cmnd->use_sg, scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+		sg_count = pci_map_sg(hostdata->pci_dev, sg, Cmnd->use_sg, scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 		cmd->segment_cnt = cpu_to_le16(sg_count);
 		ds = cmd->dataseg;
 		/* fill in first two sg entries: */
@@ -1277,11 +1252,9 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 			n = DATASEGS_PER_COMMAND;
 
 		for (i = 0; i < n; i++) {
-			ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma64_address(sg)));
-#if PCI64_DMA_BITS > 32
-			ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma64_address(sg)));
-#endif
-			ds[i].d_count = cpu_to_le32(sg_dma64_len(sg));
+			ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma_address(sg)));
+			ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma_address(sg)));
+			ds[i].d_count = cpu_to_le32(sg_dma_len(sg));
 			++sg;
 		}
 		sg_count -= DATASEGS_PER_COMMAND;
@@ -1303,54 +1276,41 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 			if (n > DATASEGS_PER_CONT)
 				n = DATASEGS_PER_CONT;
 			for (i = 0; i < n; ++i) {
-				ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma64_address(sg)));
-#if PCI64_DMA_BITS > 32
-				ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma64_address(sg)));
-#endif
-				ds[i].d_count = cpu_to_le32(sg_dma64_len(sg));
+				ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma_address(sg)));
+				ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma_address(sg)));
+				ds[i].d_count = cpu_to_le32(sg_dma_len(sg));
 				++sg;
 			}
 			sg_count -= n;
 		}
 	} else if (Cmnd->request_bufflen && Cmnd->sc_data_direction != PCI_DMA_NONE) {
-		dma64_addr_t busaddr = pci64_map_single(hostdata->pci_dev, Cmnd->request_buffer, Cmnd->request_bufflen,
-							scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+		struct page *page = virt_to_page(Cmnd->request_buffer);
+		unsigned long offset = offset_in_page(Cmnd->request_buffer);
+		dma_addr_t busaddr = pci_map_page(hostdata->pci_dev,
+						  page, offset,
+						  Cmnd->request_bufflen,
+						  scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+		Cmnd->SCp.dma_handle = busaddr;
 
-		*(dma64_addr_t *)&Cmnd->SCp = busaddr;
 		cmd->dataseg[0].d_base = cpu_to_le32(pci64_dma_lo32(busaddr));
-#if PCI64_DMA_BITS > 32
 		cmd->dataseg[0].d_base_hi = cpu_to_le32(pci64_dma_hi32(busaddr));
-#endif
 		cmd->dataseg[0].d_count = cpu_to_le32(Cmnd->request_bufflen);
 		cmd->segment_cnt = cpu_to_le16(1);
 	} else {
 		cmd->dataseg[0].d_base = 0;
-#if PCI64_DMA_BITS > 32
 		cmd->dataseg[0].d_base_hi = 0;
-#endif
 		cmd->segment_cnt = cpu_to_le16(1); /* Shouldn't this be 0? */
 	}
 
-	switch (Cmnd->cmnd[0]) {
-	case TEST_UNIT_READY:
-	case START_STOP:
-	        break;
-	case WRITE_10:
-	case WRITE_6:
-	case WRITE_BUFFER:
-	case MODE_SELECT:
+	if (Cmnd->sc_data_direction == SCSI_DATA_WRITE)
 		cmd->control_flags = cpu_to_le16(CFLAG_WRITE);
-		break;
-	default:
+	else 
 		cmd->control_flags = cpu_to_le16(CFLAG_READ);
-		break;
-	}
-
 
 	if (Cmnd->device->tagged_supported) {
-		if ((jiffies - hostdata->tag_ages[Cmnd->target]) > (2 * SCSI_TIMEOUT)) {
+		if ((jiffies - hostdata->tag_ages[Cmnd->device->id]) > (2 * ISP_TIMEOUT)) {
 			cmd->control_flags |= cpu_to_le16(CFLAG_ORDERED_TAG);
-			hostdata->tag_ages[Cmnd->target] = jiffies;
+			hostdata->tag_ages[Cmnd->device->id] = jiffies;
 		} else
 			switch (Cmnd->tag) {
 			case HEAD_OF_QUEUE_TAG:
@@ -1378,17 +1338,10 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	num_free = QLOGICFC_REQ_QUEUE_LEN - REQ_QUEUE_DEPTH(in_ptr, out_ptr);
 	num_free = (num_free > 2) ? num_free - 2 : 0;
-	host->can_queue = hostdata->queued + num_free;
+       host->can_queue = host->host_busy + num_free;
 	if (host->can_queue > QLOGICFC_REQ_QUEUE_LEN)
 		host->can_queue = QLOGICFC_REQ_QUEUE_LEN;
 	host->sg_tablesize = QLOGICFC_MAX_SG(num_free);
-
-	/* this is really gross */
-	if (host->can_queue <= host->host_busy){
-	        if (host->can_queue+2 < host->host_busy) 
-			DEBUG(printk("qlogicfc%d.c crosses its fingers.\n", hostdata->host_id));
-		host->can_queue = host->host_busy + 1;
-	}
 
 	LEAVE("isp2x00_queuecommand");
 
@@ -1411,7 +1364,7 @@ static void redo_port_db(unsigned long arg)
 	hostdata->explore_timer.data = 0;
 	del_timer(&hostdata->explore_timer);
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(host->host_lock, flags);
 
 	if (hostdata->adapter_state & AS_REDO_FABRIC_PORTDB || hostdata->adapter_state & AS_REDO_LOOP_PORTDB) {
 		isp2x00_make_portdb(host);
@@ -1426,9 +1379,25 @@ static void redo_port_db(unsigned long arg)
 		}
 		
 	        for (i = 0; i < QLOGICFC_REQ_QUEUE_LEN; i++){ 
-		        if (hostdata->handle_ptrs[i] && (hostdata->port_db[hostdata->handle_ptrs[i]->target].loop_id > QLOGICFC_MAX_LOOP_ID || hostdata->adapter_state & AS_REDO_LOOP_PORTDB)){
-                                if (hostdata->port_db[hostdata->handle_ptrs[i]->target].loop_id != hostdata->port_db[0].loop_id){
+		        if (hostdata->handle_ptrs[i] && (hostdata->port_db[hostdata->handle_ptrs[i]->device->id].loop_id > QLOGICFC_MAX_LOOP_ID || hostdata->adapter_state & AS_REDO_LOOP_PORTDB)){
+                                if (hostdata->port_db[hostdata->handle_ptrs[i]->device->id].loop_id != hostdata->port_db[0].loop_id){
+					Scsi_Cmnd *Cmnd = hostdata->handle_ptrs[i];
+
+					 if (Cmnd->use_sg)
+						 pci_unmap_sg(hostdata->pci_dev,
+							      (struct scatterlist *)Cmnd->buffer,
+							      Cmnd->use_sg,
+							      scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					 else if (Cmnd->request_bufflen &&
+						  Cmnd->sc_data_direction != PCI_DMA_NONE) {
+						 pci_unmap_page(hostdata->pci_dev,
+								Cmnd->SCp.dma_handle,
+								Cmnd->request_bufflen,
+								scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					 }
+
 					 hostdata->handle_ptrs[i]->result = DID_SOFT_ERROR << 16;
+
 					 if (hostdata->handle_ptrs[i]->scsi_done){
 					   (*hostdata->handle_ptrs[i]->scsi_done) (hostdata->handle_ptrs[i]);
 					 }
@@ -1442,19 +1411,22 @@ static void redo_port_db(unsigned long arg)
 		hostdata->adapter_state = AS_LOOP_GOOD;
 	}
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(host->host_lock, flags);
 
 }
 
 #define ASYNC_EVENT_INTERRUPT	0x01
 
-void do_isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t do_isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
+	struct Scsi_Host *host = dev_id;
 	unsigned long flags;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(host->host_lock, flags);
 	isp2x00_intr_handler(irq, dev_id, regs);
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(host->host_lock, flags);
+
+	return IRQ_HANDLED;
 }
 
 void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
@@ -1504,7 +1476,7 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 			if (hostdata->adapter_state == AS_LOOP_GOOD)
 				hostdata->adapter_state = AS_REDO_FABRIC_PORTDB;
 			break;		        
-		case LIP_OCCURED:
+		case LIP_OCCURRED:
 		case LIP_RECEIVED:
 		        printk("qlogicfc%d : Loop Reinitialized\n", hostdata->host_id);
 			if (hostdata->adapter_state == AS_LOOP_GOOD)
@@ -1521,6 +1493,17 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 			hostdata->handle_serials[handle] = 0;
 			hostdata->queued--;
 			if (Cmnd != NULL) {
+				if (Cmnd->use_sg)
+					pci_unmap_sg(hostdata->pci_dev,
+						     (struct scatterlist *)Cmnd->buffer,
+						     Cmnd->use_sg,
+						     scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+				else if (Cmnd->request_bufflen &&
+					 Cmnd->sc_data_direction != PCI_DMA_NONE)
+					pci_unmap_page(hostdata->pci_dev,
+						       Cmnd->SCp.dma_handle,
+						       Cmnd->request_bufflen,
+						       scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 				Cmnd->result = 0x0;
 				(*Cmnd->scsi_done) (Cmnd);
 			} else
@@ -1566,18 +1549,19 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 				hostdata->queued--;
 
 				if (Cmnd->use_sg)
-					pci64_unmap_sg(hostdata->pci_dev,
-						       (struct scatterlist *)Cmnd->buffer, Cmnd->use_sg,
-						       scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					pci_unmap_sg(hostdata->pci_dev,
+						     (struct scatterlist *)Cmnd->buffer, Cmnd->use_sg,
+						     scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 				else if (Cmnd->request_bufflen && Cmnd->sc_data_direction != PCI_DMA_NONE)
-					pci64_unmap_single(hostdata->pci_dev, *(dma64_addr_t *)&Cmnd->SCp,
-							   Cmnd->request_bufflen,
-							   scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					pci_unmap_page(hostdata->pci_dev,
+						       Cmnd->SCp.dma_handle,
+						       Cmnd->request_bufflen,
+						       scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 
 				/* 
 				 * if any of the following are true we do not
 				 * call scsi_done.  if the status is CS_ABORTED
-				 * we dont have to call done because the upper
+				 * we don't have to call done because the upper
 				 * level should already know its aborted.
 				 */
 				if (hostdata->handle_serials[le_hand] != Cmnd->serial_number 
@@ -1595,7 +1579,7 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 				 * the device may well be back in a couple of
 				 * seconds.
 				 */
-				if ((hostdata->adapter_state == AS_LOOP_DOWN || sts->completion_status == cpu_to_le16(CS_PORT_UNAVAILABLE) || sts->completion_status == cpu_to_le16(CS_PORT_LOGGED_OUT) || sts->completion_status == cpu_to_le16(CS_PORT_CONFIG_CHANGED)) && hostdata->port_db[Cmnd->target].wwn){
+				if ((hostdata->adapter_state == AS_LOOP_DOWN || sts->completion_status == cpu_to_le16(CS_PORT_UNAVAILABLE) || sts->completion_status == cpu_to_le16(CS_PORT_LOGGED_OUT) || sts->completion_status == cpu_to_le16(CS_PORT_CONFIG_CHANGED)) && hostdata->port_db[Cmnd->device->id].wwn){
 					outw(out_ptr, host->io_port + MBOX5);
 					continue;
 				}
@@ -1630,16 +1614,10 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 
 	num_free = QLOGICFC_REQ_QUEUE_LEN - REQ_QUEUE_DEPTH(in_ptr, out_ptr);
 	num_free = (num_free > 2) ? num_free - 2 : 0;
-	host->can_queue = hostdata->queued + num_free;
+       host->can_queue = host->host_busy + num_free;
 	if (host->can_queue > QLOGICFC_REQ_QUEUE_LEN)
 		host->can_queue = QLOGICFC_REQ_QUEUE_LEN;
 	host->sg_tablesize = QLOGICFC_MAX_SG(num_free);
-
-	if (host->can_queue <= host->host_busy){
-	        if (host->can_queue+2 < host->host_busy) 
-		        DEBUG(printk("qlogicfc%d : crosses its fingers.\n", hostdata->host_id));
-		host->can_queue = host->host_busy + 1;
-	}
 
 	outw(HCCR_CLEAR_RISC_INTR, host->io_port + HOST_HCCR);
 	LEAVE_INTR("isp2x00_intr_handler");
@@ -1729,7 +1707,7 @@ int isp2x00_abort(Scsi_Cmnd * Cmnd)
 
 	ENTER("isp2x00_abort");
 
-	host = Cmnd->host;
+	host = Cmnd->device->host;
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 
 	for (i = 0; i < QLOGICFC_REQ_QUEUE_LEN; i++)
@@ -1744,7 +1722,7 @@ int isp2x00_abort(Scsi_Cmnd * Cmnd)
 
 	param[0] = MBOX_ABORT_IOCB;
 #if ISP2x00_PORTDB
-	param[1] = (((u_short) hostdata->port_db[Cmnd->target].loop_id) << 8) | Cmnd->lun;
+	param[1] = (((u_short) hostdata->port_db[Cmnd->device->id].loop_id) << 8) | Cmnd->device->lun;
 #else
 	param[1] = (((u_short) Cmnd->target) << 8) | Cmnd->lun;
 #endif
@@ -1786,7 +1764,7 @@ int isp2x00_reset(Scsi_Cmnd * Cmnd, unsigned int reset_flags)
 
 	ENTER("isp2x00_reset");
 
-	host = Cmnd->host;
+	host = Cmnd->device->host;
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 	param[0] = MBOX_BUS_RESET;
 	param[1] = 3;
@@ -1803,13 +1781,14 @@ int isp2x00_reset(Scsi_Cmnd * Cmnd, unsigned int reset_flags)
 
 	LEAVE("isp2x00_reset");
 
-	return return_status;;
+	return return_status;
 }
 
 
-int isp2x00_biosparam(Disk * disk, kdev_t n, int ip[])
+int isp2x00_biosparam(struct scsi_device *sdev, struct block_device *n,
+		sector_t capacity, int ip[])
 {
-	int size = disk->capacity;
+	int size = capacity;
 
 	ENTER("isp2x00_biosparam");
 
@@ -1826,26 +1805,34 @@ int isp2x00_biosparam(Disk * disk, kdev_t n, int ip[])
 	return 0;
 }
 
-
 static int isp2x00_reset_hardware(struct Scsi_Host *host)
 {
 	u_short param[8];
 	struct isp2x00_hostdata *hostdata;
 	int loop_count;
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 
 	ENTER("isp2x00_reset_hardware");
 
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 
+	/*
+	 *	This cannot be right - PCI writes are posted
+	 *	(apparently this is hardware design flaw not software ?)
+	 */
+	 
 	outw(0x01, host->io_port + ISP_CTRL_STATUS);
+	udelay(100);
 	outw(HCCR_RESET, host->io_port + HOST_HCCR);
+	udelay(100);
 	outw(HCCR_RELEASE, host->io_port + HOST_HCCR);
 	outw(HCCR_BIOS_DISABLE, host->io_port + HOST_HCCR);
 
 	loop_count = DEFAULT_LOOP_COUNT;
-	while (--loop_count && inw(host->io_port + HOST_HCCR) == RISC_BUSY)
+	while (--loop_count && inw(host->io_port + HOST_HCCR) == RISC_BUSY) {
 		barrier();
+		cpu_relax();
+	}
 	if (!loop_count)
 		printk("qlogicfc%d : reset_hardware loop timeout\n", hostdata->host_id);
 
@@ -1864,7 +1851,7 @@ static int isp2x00_reset_hardware(struct Scsi_Host *host)
 
 	DEBUG(printk("qlogicfc%d : verifying checksum\n", hostdata->host_id));
 
-#if RELOAD_FIRMWARE
+#if defined(CONFIG_SCSI_QLOGIC_FC_FIRMWARE)
 	{
 		int i;
 		unsigned short * risc_code = NULL;
@@ -1936,9 +1923,14 @@ static int isp2x00_reset_hardware(struct Scsi_Host *host)
 	hostdata->wwn |= (u64) (cpu_to_le16(hostdata->control_block.node_name[3]) & 0x00ff) << 8;
 	hostdata->wwn |= (u64) (cpu_to_le16(hostdata->control_block.node_name[3]) & 0xff00) >> 8;
 
-	/* FIXME: If the DMA transfer goes one way only, this should use PCI_DMA_TODEVICE and below as well. */
-	busaddr = pci64_map_single(hostdata->pci_dev, &hostdata->control_block, sizeof(hostdata->control_block),
-				   PCI_DMA_BIDIRECTIONAL);
+	/* FIXME: If the DMA transfer goes one way only, this should use
+	 *        PCI_DMA_TODEVICE and below as well.
+	 */
+	busaddr = pci_map_page(hostdata->pci_dev,
+			       virt_to_page(&hostdata->control_block),
+			       offset_in_page(&hostdata->control_block),
+			       sizeof(hostdata->control_block),
+			       PCI_DMA_BIDIRECTIONAL);
 
 	param[0] = MBOX_INIT_FIRMWARE;
 	param[2] = (u_short) (pci64_dma_lo32(busaddr) >> 16);
@@ -1950,21 +1942,24 @@ static int isp2x00_reset_hardware(struct Scsi_Host *host)
 	isp2x00_mbox_command(host, param);
 	if (param[0] != MBOX_COMMAND_COMPLETE) {
 		printk("qlogicfc%d.c: Ouch 0x%04x\n", hostdata->host_id,  param[0]);
-		pci64_unmap_single(hostdata->pci_dev, busaddr, sizeof(hostdata->control_block),
-				   PCI_DMA_BIDIRECTIONAL);
+		pci_unmap_page(hostdata->pci_dev, busaddr,
+			       sizeof(hostdata->control_block),
+			       PCI_DMA_BIDIRECTIONAL);
 		return 1;
 	}
 	param[0] = MBOX_GET_FIRMWARE_STATE;
 	isp2x00_mbox_command(host, param);
 	if (param[0] != MBOX_COMMAND_COMPLETE) {
 		printk("qlogicfc%d.c: 0x%04x\n", hostdata->host_id,  param[0]);
-		pci64_unmap_single(hostdata->pci_dev, busaddr, sizeof(hostdata->control_block),
-				   PCI_DMA_BIDIRECTIONAL);
+		pci_unmap_page(hostdata->pci_dev, busaddr,
+			       sizeof(hostdata->control_block),
+			       PCI_DMA_BIDIRECTIONAL);
 		return 1;
 	}
 
-	pci64_unmap_single(hostdata->pci_dev, busaddr, sizeof(hostdata->control_block),
-			   PCI_DMA_BIDIRECTIONAL);
+	pci_unmap_page(hostdata->pci_dev, busaddr,
+		       sizeof(hostdata->control_block),
+		       PCI_DMA_BIDIRECTIONAL);
 	LEAVE("isp2x00_reset_hardware");
 
 	return 0;
@@ -2032,10 +2027,7 @@ static int isp2x00_init(struct Scsi_Host *sh)
 		return 1;
 	}
 
-	if (!(command & PCI_COMMAND_MASTER)) {
-		printk("qlogicfc%d : bus mastering is disabled\n", hostdata->host_id);
-		return 1;
-	}
+	pci_set_master(pdev);
 	if (revision != ISP2100_REV_ID1 && revision != ISP2100_REV_ID3 && revision != ISP2200_REV_ID5)
 		printk("qlogicfc%d : new isp2x00 revision ID (%d)\n", hostdata->host_id,  revision);
 
@@ -2113,8 +2105,10 @@ static int isp2x00_mbox_command(struct Scsi_Host *host, u_short param[])
 		return 1;
 
 	loop_count = DEFAULT_LOOP_COUNT;
-	while (--loop_count && inw(host->io_port + HOST_HCCR) & 0x0080)
+	while (--loop_count && inw(host->io_port + HOST_HCCR) & 0x0080) {
 		barrier();
+		cpu_relax();
+	}
 	if (!loop_count) {
 		printk("qlogicfc%d : mbox_command loop timeout #1\n", hostdata->host_id);
 		param[0] = 0x4006;
@@ -2148,8 +2142,9 @@ static int isp2x00_mbox_command(struct Scsi_Host *host, u_short param[])
 
 	while (1) {
 		loop_count = DEFAULT_LOOP_COUNT;
-		while (--loop_count && !(inw(host->io_port + PCI_INTER_STS) & 0x08)) {
+		while (--loop_count && !(inw(host->io_port + PCI_INTER_STS) & 0x08)) { 
 			barrier();
+			cpu_relax();
 		}
 
 		if (!loop_count) {
@@ -2167,6 +2162,7 @@ static int isp2x00_mbox_command(struct Scsi_Host *host, u_short param[])
 	loop_count = DEFAULT_LOOP_COUNT;
 	while (--loop_count && inw(host->io_port + MBOX0) == 0x04) {
 		barrier();
+		cpu_relax();
 	}
 	if (!loop_count)
 		printk("qlogicfc%d : mbox_command loop timeout #3\n", hostdata->host_id);
@@ -2225,7 +2221,19 @@ void isp2x00_print_scsi_cmd(Scsi_Cmnd * cmd)
 
 #endif				/* DEBUG_ISP2x00 */
 
+MODULE_LICENSE("GPL");
 
-static Scsi_Host_Template driver_template = QLOGICFC;
-
+static Scsi_Host_Template driver_template = {
+        .detect                 = isp2x00_detect,
+        .release                = isp2x00_release,
+        .info                   = isp2x00_info,
+        .queuecommand           = isp2x00_queuecommand,
+        .eh_abort_handler       = isp2x00_abort,
+        .bios_param             = isp2x00_biosparam,
+        .can_queue              = QLOGICFC_REQ_QUEUE_LEN,
+        .this_id                = -1,
+        .sg_tablesize           = QLOGICFC_MAX_SG(QLOGICFC_REQ_QUEUE_LEN),
+	.cmd_per_lun		= QLOGICFC_CMD_PER_LUN,
+        .use_clustering         = ENABLE_CLUSTERING,
+};
 #include "scsi_module.c"

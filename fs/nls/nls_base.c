@@ -1,5 +1,5 @@
 /*
- * linux/fs/nls.c
+ * linux/fs/nls_base.c
  *
  * Native language support--charsets and unicode translations.
  * By Gordon Chaffee 1996, 1997
@@ -8,20 +8,20 @@
  *
  */
 
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/config.h>
 #include <linux/nls.h>
-#include <linux/malloc.h>
+#include <linux/kernel.h>
 #include <linux/errno.h>
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
 #endif
 #include <linux/spinlock.h>
 
-static struct nls_table *tables;
-static spinlock_t nls_lock = SPIN_LOCK_UNLOCKED;
+static struct nls_table default_table;
+static struct nls_table *tables = &default_table;
+static DEFINE_SPINLOCK(nls_lock);
 
 /*
  * Sample implementation from Unicode home page.
@@ -93,12 +93,13 @@ utf8_mbstowcs(wchar_t *pwcs, const __u8 *s, int n)
 				ip++;
 				n--;
 			} else {
-				op += size;
+				op++;
 				ip += size;
 				n -= size;
 			}
 		} else {
 			*op++ = *ip++;
+			n--;
 		}
 	}
 	return (op - pwcs);
@@ -203,10 +204,13 @@ static struct nls_table *find_nls(char *charset)
 {
 	struct nls_table *nls;
 	spin_lock(&nls_lock);
-	for (nls = tables; nls; nls = nls->next)
-		if (! strcmp(nls->charset, charset))
+	for (nls = tables; nls; nls = nls->next) {
+		if (!strcmp(nls->charset, charset))
 			break;
-	if (nls && !try_inc_mod_count(nls->owner))
+		if (nls->alias && !strcmp(nls->alias, charset))
+			break;
+	}
+	if (nls && !try_module_get(nls->owner))
 		nls = NULL;
 	spin_unlock(&nls_lock);
 	return nls;
@@ -216,7 +220,6 @@ struct nls_table *load_nls(char *charset)
 {
 	struct nls_table *nls;
 #ifdef CONFIG_KMOD
-	char buf[40];
 	int ret;
 #endif
 
@@ -225,14 +228,7 @@ struct nls_table *load_nls(char *charset)
 		return nls;
 
 #ifdef CONFIG_KMOD
-	if (strlen(charset) > sizeof(buf) - sizeof("nls_")) {
-		printk("Unable to load NLS charset %s: name too long\n",
-			charset);
-		return NULL;
-	}
-		
-	sprintf(buf, "nls_%s", charset);
-	ret = request_module(buf);
+	ret = request_module("nls_%s", charset);
 	if (ret != 0) {
 		printk("Unable to load NLS charset %s\n", charset);
 		return NULL;
@@ -244,8 +240,7 @@ struct nls_table *load_nls(char *charset)
 
 void unload_nls(struct nls_table *nls)
 {
-	if (nls->owner)
-		__MOD_DEC_USE_COUNT(nls->owner);
+	module_put(nls->owner);
 }
 
 wchar_t charset2uni[256] = {
@@ -470,12 +465,11 @@ static int char2uni(const unsigned char *rawstring, int boundlen, wchar_t *uni)
 }
 
 static struct nls_table default_table = {
-	"default",
-	uni2char,
-	char2uni,
-	charset2lower,
-	charset2upper,
-	NULL,
+	.charset	= "default",
+	.uni2char	= uni2char,
+	.char2uni	= char2uni,
+	.charset2lower	= charset2lower,
+	.charset2upper	= charset2upper,
 };
 
 /* Returns a simple default translation table */
@@ -487,7 +481,7 @@ struct nls_table *load_nls_default(void)
 	if (default_nls != NULL)
 		return default_nls;
 	else
-               return &default_table;
+		return &default_table;
 }
 
 EXPORT_SYMBOL(register_nls);
@@ -499,3 +493,5 @@ EXPORT_SYMBOL(utf8_mbtowc);
 EXPORT_SYMBOL(utf8_mbstowcs);
 EXPORT_SYMBOL(utf8_wctomb);
 EXPORT_SYMBOL(utf8_wcstombs);
+
+MODULE_LICENSE("Dual BSD/GPL");

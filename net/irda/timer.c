@@ -11,6 +11,7 @@
  * 
  *     Copyright (c) 1997, 1999 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
+ *     Copyright (c) 2000-2002 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -29,40 +30,18 @@
 
 #include <net/irda/timer.h>
 #include <net/irda/irda.h>
-#include <net/irda/irtty.h>
+#include <net/irda/irda_device.h>
 #include <net/irda/irlap.h>
-#include <net/irda/irlmp_event.h>
+#include <net/irda/irlmp.h>
+
+extern int  sysctl_slot_timeout;
 
 static void irlap_slot_timer_expired(void* data);
 static void irlap_query_timer_expired(void* data);
 static void irlap_final_timer_expired(void* data);
 static void irlap_wd_timer_expired(void* data);
 static void irlap_backoff_timer_expired(void* data);
-
 static void irlap_media_busy_expired(void* data); 
-/*
- * Function irda_start_timer (timer, timeout)
- *
- *    Start an IrDA timer
- *
- */
-void irda_start_timer(struct timer_list *ptimer, int timeout, void *data,
-		      TIMER_CALLBACK callback) 
-{
-	del_timer(ptimer);
- 
-	ptimer->data = (unsigned long) data;
-
-	/* 
-	 * For most architectures void * is the same as unsigned long, but
-	 * at least we try to use void * as long as possible. Since the 
-	 * timer functions use unsigned long, we cast the function here
-	 */
-	ptimer->function = (void (*)(unsigned long)) callback;
-	ptimer->expires = jiffies + timeout;
-	
-	add_timer(ptimer);
-}
 
 void irlap_start_slot_timer(struct irlap_cb *self, int timeout)
 {
@@ -70,8 +49,25 @@ void irlap_start_slot_timer(struct irlap_cb *self, int timeout)
 			 irlap_slot_timer_expired);
 }
 
-void irlap_start_query_timer(struct irlap_cb *self, int timeout)
+void irlap_start_query_timer(struct irlap_cb *self, int S, int s)
 {
+	int timeout;
+
+	/* Calculate when the peer discovery should end. Normally, we
+	 * get the end-of-discovery frame, so this is just in case
+	 * we miss it.
+	 * Basically, we multiply the number of remaining slots by our
+	 * slot time, plus add some extra time to properly receive the last
+	 * discovery packet (which is longer due to extra discovery info),
+	 * to avoid messing with for incomming connections requests and
+	 * to accomodate devices that perform discovery slower than us.
+	 * Jean II */
+	timeout = ((sysctl_slot_timeout * HZ / 1000) * (S - s)
+		   + XIDEXTRA_TIMEOUT + SMALLBUSY_TIMEOUT);
+
+	/* Set or re-set the timer. We reset the timer for each received
+	 * discovery query, which allow us to automatically adjust to
+	 * the speed of the peer discovery (faster or slower). Jean II */
 	irda_start_timer( &self->query_timer, timeout, (void *) self, 
 			  irlap_query_timer_expired);
 }
@@ -94,29 +90,24 @@ void irlap_start_backoff_timer(struct irlap_cb *self, int timeout)
 			 irlap_backoff_timer_expired);
 }
 
-void irlap_start_mbusy_timer(struct irlap_cb *self)
+void irlap_start_mbusy_timer(struct irlap_cb *self, int timeout)
 {
-	irda_start_timer(&self->media_busy_timer, MEDIABUSY_TIMEOUT, 
+	irda_start_timer(&self->media_busy_timer, timeout, 
 			 (void *) self, irlap_media_busy_expired);
 }
 
 void irlap_stop_mbusy_timer(struct irlap_cb *self)
 {
 	/* If timer is activated, kill it! */
-	if(timer_pending(&self->media_busy_timer))
-		del_timer(&self->media_busy_timer);
+	del_timer(&self->media_busy_timer);
 
-#ifdef CONFIG_IRDA_ULTRA
-	/* Send any pending Ultra frames if any */
-	if (!skb_queue_empty(&self->txq_ultra))
-		/* Note : we don't send the frame, just post an event.
-		 * Frames will be sent only if we are in NDM mode (see
-		 * irlap_event.c).
-		 * Also, moved this code from irlap_media_busy_expired()
-		 * to here to catch properly all cases...
-		 * Jean II */
-		irlap_do_event(self, SEND_UI_FRAME, NULL, NULL);
-#endif /* CONFIG_IRDA_ULTRA */
+	/* If we are in NDM, there is a bunch of events in LAP that
+	 * that be pending due to the media_busy condition, such as
+	 * CONNECT_REQUEST and SEND_UI_FRAME. If we don't generate
+	 * an event, they will wait forever...
+	 * Jean II */
+	if (self->state == LAP_NDM)
+		irlap_do_event(self, MEDIA_BUSY_TIMER_EXPIRED, NULL, NULL);
 }
 
 void irlmp_start_watchdog_timer(struct lsap_cb *self, int timeout) 
@@ -140,8 +131,7 @@ void irlmp_start_idle_timer(struct lap_cb *self, int timeout)
 void irlmp_stop_idle_timer(struct lap_cb *self) 
 {
 	/* If timer is activated, kill it! */
-	if(timer_pending(&self->idle_timer))
-		del_timer(&self->idle_timer);
+	del_timer(&self->idle_timer);
 }
 
 /*
@@ -237,5 +227,7 @@ void irlap_media_busy_expired(void* data)
 	ASSERT(self != NULL, return;);
 
 	irda_device_set_media_busy(self->netdev, FALSE);
-	/* Note : will deal with Ultra frames */
+	/* Note : the LAP event will be send in irlap_stop_mbusy_timer(),
+	* to catch other cases where the flag is cleared (for example
+	* after a discovery) - Jean II */
 }

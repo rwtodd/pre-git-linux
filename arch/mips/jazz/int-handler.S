@@ -1,5 +1,4 @@
-/* $Id: int-handler.S,v 1.14 1999/05/01 22:40:34 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -89,9 +88,9 @@ ll_local_dev:	lbu	t0,JAZZ_IO_IRQ_SOURCE
  * cards.  Oh well - for all the Jazz boxes slots are more or less just
  * whistles and bells and we're aware of the problem.
  */
-ll_isa_irq:	lw	a0,JAZZ_EISA_IRQ_ACK
+ll_isa_irq:	lw	a0, JAZZ_EISA_IRQ_ACK
 
-		jal	i8259_do_irq
+		jal	do_IRQ
 		 move	a1,sp
 
 		j	ret_from_irq
@@ -134,7 +133,7 @@ ll_timer:	lw	zero,JAZZ_TIMER_REGISTER # timer irq cleared on read
 /*
  * CPU count/compare IRQ (unused)
  */
-ll_count:	j	return
+ll_count:	j	ret_from_irq
 		 mtc0	zero,CP0_COMPARE
 
 #if 0
@@ -251,14 +250,14 @@ loc_call:	/*
 
  		nor	s1,zero,s1
 		jal	do_IRQ
- 
+
  		/*
  		 * Reenable interrupt
  		 */
 		lhu	t2,JAZZ_IO_IRQ_ENABLE
  		or	t2,s1
 		sh	t2,JAZZ_IO_IRQ_ENABLE
- 
+
  		j	ret_from_irq
 
 /*

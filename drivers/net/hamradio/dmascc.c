@@ -36,32 +36,15 @@
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/sockios.h>
-#include <linux/tqueue.h>
-#include <linux/version.h>
+#include <linux/workqueue.h>
 #include <asm/atomic.h>
 #include <asm/bitops.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <net/ax25.h>
 #include "z8530.h"
-
-
-/* Linux 2.2 and 2.3 compatibility */
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,14)
-#define net_device device
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,43)
-#define netif_start_queue(dev) { dev->tbusy = 0; }
-#define netif_stop_queue(dev) { dev->tbusy = 1; }
-#define netif_wake_queue(dev) { dev->tbusy = 0; mark_bh(NET_BH); }
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,47)
-#define netif_running(dev) (dev->flags & IFF_UP)
-#endif
 
 
 /* Number of buffers per channel */
@@ -211,9 +194,6 @@ struct scc_hardware {
 };
 
 struct scc_priv {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
-  char name[IFNAMSIZ];
-#endif
   int type;
   int chip;
   struct net_device *dev;
@@ -226,7 +206,7 @@ struct scc_priv {
   char rx_buf[NUM_RX_BUF][BUF_SIZE];
   int rx_len[NUM_RX_BUF];
   int rx_ptr;
-  struct tq_struct rx_task;
+  struct work_struct rx_work;
   int rx_head, rx_tail, rx_count;
   int rx_over;
   char tx_buf[NUM_TX_BUF][BUF_SIZE];
@@ -236,20 +216,21 @@ struct scc_priv {
   int state;
   unsigned long tx_start;
   int rr0;
+  spinlock_t *register_lock;	/* Per scc_info */
+  spinlock_t ring_lock;
 };
 
 struct scc_info {
   int irq_used;
   int twin_serial_cfg;
-  struct net_device dev[2];
+  struct net_device *dev[2];
   struct scc_priv priv[2];
   struct scc_info *next;
+  spinlock_t register_lock;	/* Per device register lock */
 };
 
 
 /* Function declarations */
-
-int dmascc_init(void) __init;
 static int setup_adapter(int card_base, int type, int n) __init;
 
 static void write_scc(struct scc_priv *priv, int reg, int val);
@@ -264,8 +245,14 @@ static int scc_send_packet(struct sk_buff *skb, struct net_device *dev);
 static struct net_device_stats *scc_get_stats(struct net_device *dev);
 static int scc_set_mac_address(struct net_device *dev, void *sa);
 
-static void scc_isr(int irq, void *dev_id, struct pt_regs * regs);
+static inline void tx_on(struct scc_priv *priv);
+static inline void rx_on(struct scc_priv *priv);
+static inline void rx_off(struct scc_priv *priv);
+static void start_timer(struct scc_priv *priv, int t, int r15);
+static inline unsigned char random(void);
+
 static inline void z8530_isr(struct scc_info *info);
+static irqreturn_t scc_isr(int irq, void *dev_id, struct pt_regs * regs);
 static void rx_isr(struct scc_priv *priv);
 static void special_condition(struct scc_priv *priv, int rc);
 static void rx_bh(void *arg);
@@ -273,19 +260,12 @@ static void tx_isr(struct scc_priv *priv);
 static void es_isr(struct scc_priv *priv);
 static void tm_isr(struct scc_priv *priv);
 
-static inline void tx_on(struct scc_priv *priv);
-static inline void rx_on(struct scc_priv *priv);
-static inline void rx_off(struct scc_priv *priv);
-static void start_timer(struct scc_priv *priv, int t, int r15);
-static inline unsigned char random(void);
-
 
 /* Initialization variables */
 
 static int io[MAX_NUM_DEVS] __initdata = { 0, };
-/* Beware! hw[] is also used in cleanup_module(). If __initdata also applies
-   to modules, we may not declare hw[] as __initdata */
-static struct scc_hardware hw[NUM_TYPES] __initdata = HARDWARE;
+/* Beware! hw[] is also used in cleanup_module(). */
+static struct scc_hardware hw[NUM_TYPES] __initdata_or_module = HARDWARE;
 static char ax25_broadcast[7] __initdata =
   { 'Q'<<1, 'S'<<1, 'T'<<1, ' '<<1, ' '<<1, ' '<<1, '0'<<1 };
 static char ax25_test[7] __initdata =
@@ -294,26 +274,16 @@ static char ax25_test[7] __initdata =
 
 /* Global variables */
 
-static struct scc_info *first = NULL;
+static struct scc_info *first;
 static unsigned long rand;
-
-
-/* Module functions */
-
-#ifdef MODULE
 
 
 MODULE_AUTHOR("Klaus Kudielka");
 MODULE_DESCRIPTION("Driver for high-speed SCC boards");
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NUM_DEVS) "i");
+MODULE_LICENSE("GPL");
 
-
-int init_module(void) {
-  return dmascc_init();
-}
-
-
-void cleanup_module(void) {
+static void __exit dmascc_exit(void) {
   int i;
   struct scc_info *info;
 
@@ -321,19 +291,18 @@ void cleanup_module(void) {
     info = first;
 
     /* Unregister devices */
-    for (i = 0; i < 2; i++) {
-      if (info->dev[i].name)
-	rtnl_lock();
-	unregister_netdevice(&info->dev[i]);
-	rtnl_unlock();
-    }
+    for (i = 0; i < 2; i++)
+	unregister_netdev(info->dev[i]);
 
     /* Reset board */
     if (info->priv[0].type == TYPE_TWIN)
-      outb(0, info->dev[0].base_addr + TWIN_SERIAL_CFG);
+      outb(0, info->dev[0]->base_addr + TWIN_SERIAL_CFG);
     write_scc(&info->priv[0], R9, FHWRES);
-    release_region(info->dev[0].base_addr,
+    release_region(info->dev[0]->base_addr,
 		   hw[info->priv[0].type].io_size);
+
+    for (i = 0; i < 2; i++)
+	free_netdev(info->dev[i]);
 
     /* Free memory */
     first = info->next;
@@ -341,24 +310,16 @@ void cleanup_module(void) {
   }
 }
 
-
-#else
-
-
+#ifndef MODULE
 void __init dmascc_setup(char *str, int *ints) {
    int i;
 
    for (i = 0; i < MAX_NUM_DEVS && i < ints[0]; i++)
       io[i] = ints[i+1];
 }
-
-
 #endif
 
-
-/* Initialization functions */
-
-int __init dmascc_init(void) {
+static int __init dmascc_init(void) {
   int h, i, j, n;
   int base[MAX_NUM_DEVS], tcmd[MAX_NUM_DEVS], t0[MAX_NUM_DEVS],
     t1[MAX_NUM_DEVS];
@@ -371,7 +332,7 @@ int __init dmascc_init(void) {
   /* Cards found = 0 */
   n = 0;
   /* Warning message */
-  if (!io[0]) printk("dmascc: autoprobing (dangerous)\n");
+  if (!io[0]) printk(KERN_INFO "dmascc: autoprobing (dangerous)\n");
 
   /* Run autodetection for each card type */
   for (h = 0; h < NUM_TYPES; h++) {
@@ -397,7 +358,7 @@ int __init dmascc_init(void) {
     /* Check valid I/O address regions */
     for (i = 0; i < hw[h].num_devs; i++)
       if (base[i]) {
-	if (check_region(base[i], hw[h].io_size))
+	if (!request_region(base[i], hw[h].io_size, "dmascc"))
 	  base[i] = 0;
 	else {
 	  tcmd[i] = base[i] + hw[h].tmr_offset + TMR_CTRL;
@@ -443,11 +404,12 @@ int __init dmascc_init(void) {
     /* Evaluate measurements */
     for (i = 0; i < hw[h].num_devs; i++)
       if (base[i]) {
-	if (delay[i] >= 9 && delay[i] <= 11) {
-	  /* Ok, we have found an adapter */
-	  if (setup_adapter(base[i], h, n) == 0)
-	    n++;
-	}
+	if ((delay[i] >= 9 && delay[i] <= 11)&& 
+	    /* Ok, we have found an adapter */
+	    (setup_adapter(base[i], h, n) == 0))
+	  n++;
+	else
+	  release_region(base[i], hw[h].io_size);
       }
 
   } /* NUM_TYPES */
@@ -456,158 +418,200 @@ int __init dmascc_init(void) {
   if (n) return 0;
 
   /* If no adapter found, return error */
-  printk("dmascc: no adapters found\n");
+  printk(KERN_INFO "dmascc: no adapters found\n");
   return -EIO;
 }
 
+module_init(dmascc_init);
+module_exit(dmascc_exit);
 
-int __init setup_adapter(int card_base, int type, int n) {
-  int i, irq, chip;
-  struct scc_info *info;
-  struct net_device *dev;
-  struct scc_priv *priv;
-  unsigned long time;
-  unsigned int irqs;
-  int tmr_base = card_base + hw[type].tmr_offset;
-  int scc_base = card_base + hw[type].scc_offset;
-  char *chipnames[] = CHIPNAMES;
+static void dev_setup(struct net_device *dev)
+{
+	dev->type = ARPHRD_AX25;
+	dev->hard_header_len = 73;
+	dev->mtu = 1500;
+	dev->addr_len = 7;
+	dev->tx_queue_len = 64;
+	memcpy(dev->broadcast, ax25_broadcast, 7);
+	memcpy(dev->dev_addr, ax25_test, 7);
+}
 
-  /* Allocate memory */
-  info = kmalloc(sizeof(struct scc_info), GFP_KERNEL | GFP_DMA);
-  if (!info) {
-    printk("dmascc: could not allocate memory for %s at %#3x\n",
-	   hw[type].name, card_base);
-    return -1;
-  }
+static int __init setup_adapter(int card_base, int type, int n)
+{
+	int i, irq, chip;
+	struct scc_info *info;
+	struct net_device *dev;
+	struct scc_priv *priv;
+	unsigned long time;
+	unsigned int irqs;
+	int tmr_base = card_base + hw[type].tmr_offset;
+	int scc_base = card_base + hw[type].scc_offset;
+	char *chipnames[] = CHIPNAMES;
 
-  /* Initialize what is necessary for write_scc and write_scc_data */
-  memset(info, 0, sizeof(struct scc_info));
-  priv = &info->priv[0];
-  priv->type = type;
-  priv->card_base = card_base;
-  priv->scc_cmd = scc_base + SCCA_CMD;
-  priv->scc_data = scc_base + SCCA_DATA;
+	/* Allocate memory */
+	info = kmalloc(sizeof(struct scc_info), GFP_KERNEL | GFP_DMA);
+	if (!info) {
+		printk(KERN_ERR "dmascc: "
+			"could not allocate memory for %s at %#3x\n",
+			hw[type].name, card_base);
+		goto out;
+	}
 
-  /* Reset SCC */
-  write_scc(priv, R9, FHWRES | MIE | NV);
+	/* Initialize what is necessary for write_scc and write_scc_data */
+	memset(info, 0, sizeof(struct scc_info));
 
-  /* Determine type of chip by enabling SDLC/HDLC enhancements */
-  write_scc(priv, R15, SHDLCE);
-  if (!read_scc(priv, R15)) {
-    /* WR7' not present. This is an ordinary Z8530 SCC. */
-    chip = Z8530;
-  } else {
-    /* Put one character in TX FIFO */
-    write_scc_data(priv, 0, 0);
-    if (read_scc(priv, R0) & Tx_BUF_EMP) {
-      /* TX FIFO not full. This is a Z85230 ESCC with a 4-byte FIFO. */
-      chip = Z85230;
-    } else {
-      /* TX FIFO full. This is a Z85C30 SCC with a 1-byte FIFO. */
-      chip = Z85C30;
-    }
-  }
-  write_scc(priv, R15, 0);
+	info->dev[0] = alloc_netdev(0, "", dev_setup);
+	if (!info->dev[0]) {
+		printk(KERN_ERR "dmascc: "
+			"could not allocate memory for %s at %#3x\n",
+			hw[type].name, card_base);
+		goto out1;
+	}
 
-  /* Start IRQ auto-detection */
-  sti();
-  irqs = probe_irq_on();
+	info->dev[1] = alloc_netdev(0, "", dev_setup);
+	if (!info->dev[1]) {
+		printk(KERN_ERR "dmascc: "
+			"could not allocate memory for %s at %#3x\n",
+			hw[type].name, card_base);
+		goto out2;
+	}
+	spin_lock_init(&info->register_lock);
 
-  /* Enable interrupts */
-  if (type == TYPE_TWIN) {
-    outb(0, card_base + TWIN_DMA_CFG);
-    inb(card_base + TWIN_CLR_TMR1);
-    inb(card_base + TWIN_CLR_TMR2);
-    outb((info->twin_serial_cfg = TWIN_EI), card_base + TWIN_SERIAL_CFG);
-  } else {
-    write_scc(priv, R15, CTSIE);
-    write_scc(priv, R0, RES_EXT_INT);
-    write_scc(priv, R1, EXT_INT_ENAB);
-  }
+	priv = &info->priv[0];
+	priv->type = type;
+	priv->card_base = card_base;
+	priv->scc_cmd = scc_base + SCCA_CMD;
+	priv->scc_data = scc_base + SCCA_DATA;
+	priv->register_lock = &info->register_lock;
 
-  /* Start timer */
-  outb(1, tmr_base + TMR_CNT1);
-  outb(0, tmr_base + TMR_CNT1);
+	/* Reset SCC */
+	write_scc(priv, R9, FHWRES | MIE | NV);
 
-  /* Wait and detect IRQ */
-  time = jiffies; while (jiffies - time < 2 + HZ / TMR_0_HZ);
-  irq = probe_irq_off(irqs);
+	/* Determine type of chip by enabling SDLC/HDLC enhancements */
+	write_scc(priv, R15, SHDLCE);
+	if (!read_scc(priv, R15)) {
+		/* WR7' not present. This is an ordinary Z8530 SCC. */
+		chip = Z8530;
+	} else {
+		/* Put one character in TX FIFO */
+		write_scc_data(priv, 0, 0);
+		if (read_scc(priv, R0) & Tx_BUF_EMP) {
+			/* TX FIFO not full. This is a Z85230 ESCC with a 4-byte FIFO. */
+			chip = Z85230;
+		} else {
+			/* TX FIFO full. This is a Z85C30 SCC with a 1-byte FIFO. */
+			chip = Z85C30;
+		}
+	}
+	write_scc(priv, R15, 0);
 
-  /* Clear pending interrupt, disable interrupts */
-  if (type == TYPE_TWIN) {
-    inb(card_base + TWIN_CLR_TMR1);
-  } else {
-    write_scc(priv, R1, 0);
-    write_scc(priv, R15, 0);
-    write_scc(priv, R0, RES_EXT_INT);
-  }
+	/* Start IRQ auto-detection */
+	irqs = probe_irq_on();
 
-  if (irq <= 0) {
-    printk("dmascc: could not find irq of %s at %#3x (irq=%d)\n",
-	   hw[type].name, card_base, irq);
-    kfree(info);
-    return -1;
-  }
+	/* Enable interrupts */
+	if (type == TYPE_TWIN) {
+		outb(0, card_base + TWIN_DMA_CFG);
+		inb(card_base + TWIN_CLR_TMR1);
+		inb(card_base + TWIN_CLR_TMR2);
+		info->twin_serial_cfg = TWIN_EI;
+		outb(info->twin_serial_cfg, card_base + TWIN_SERIAL_CFG);
+	} else {
+		write_scc(priv, R15, CTSIE);
+		write_scc(priv, R0, RES_EXT_INT);
+		write_scc(priv, R1, EXT_INT_ENAB);
+	}
 
-  /* Set up data structures */
-  for (i = 0; i < 2; i++) {
-    dev = &info->dev[i];
-    priv = &info->priv[i];
-    priv->type = type;
-    priv->chip = chip;
-    priv->dev = dev;
-    priv->info = info;
-    priv->channel = i;
-    priv->card_base = card_base;
-    priv->scc_cmd = scc_base + (i ? SCCB_CMD : SCCA_CMD);
-    priv->scc_data = scc_base + (i ? SCCB_DATA : SCCA_DATA);
-    priv->tmr_cnt = tmr_base + (i ? TMR_CNT2 : TMR_CNT1);
-    priv->tmr_ctrl = tmr_base + TMR_CTRL;
-    priv->tmr_mode = i ? 0xb0 : 0x70;
-    priv->param.pclk_hz = hw[type].pclk_hz;
-    priv->param.brg_tc = -1;
-    priv->param.clocks = TCTRxCP | RCRTxCP;
-    priv->param.persist = 256;
-    priv->param.dma = -1;
-    priv->rx_task.routine = rx_bh;
-    priv->rx_task.data = priv;
-    dev->priv = priv;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
-    if (sizeof(dev->name) == sizeof(char *)) dev->name = priv->name;
-#endif
-    sprintf(dev->name, "dmascc%i", 2*n+i);
-    dev->base_addr = card_base;
-    dev->irq = irq;
-    dev->open = scc_open;
-    dev->stop = scc_close;
-    dev->do_ioctl = scc_ioctl;
-    dev->hard_start_xmit = scc_send_packet;
-    dev->get_stats = scc_get_stats;
-    dev->hard_header = ax25_encapsulate;
-    dev->rebuild_header = ax25_rebuild_header;
-    dev->set_mac_address = scc_set_mac_address;
-    dev->type = ARPHRD_AX25;
-    dev->hard_header_len = 73;
-    dev->mtu = 1500;
-    dev->addr_len = 7;
-    dev->tx_queue_len = 64;
-    memcpy(dev->broadcast, ax25_broadcast, 7);
-    memcpy(dev->dev_addr, ax25_test, 7);
-    dev_init_buffers(dev);
-    rtnl_lock();
-    if (register_netdevice(dev)) {
-      printk("dmascc: could not register %s\n", dev->name);
-    }
-    rtnl_unlock();
-  }
+	/* Start timer */
+	outb(1, tmr_base + TMR_CNT1);
+	outb(0, tmr_base + TMR_CNT1);
 
-  request_region(card_base, hw[type].io_size, "dmascc");
+	/* Wait and detect IRQ */
+	time = jiffies; while (jiffies - time < 2 + HZ / TMR_0_HZ);
+	irq = probe_irq_off(irqs);
 
-  info->next = first;
-  first = info;
-  printk("dmascc: found %s (%s) at %#3x, irq %d\n", hw[type].name,
-	 chipnames[chip], card_base, irq);
-  return 0;
+	/* Clear pending interrupt, disable interrupts */
+	if (type == TYPE_TWIN) {
+		inb(card_base + TWIN_CLR_TMR1);
+	} else {
+		write_scc(priv, R1, 0);
+		write_scc(priv, R15, 0);
+		write_scc(priv, R0, RES_EXT_INT);
+	}
+
+	if (irq <= 0) {
+		printk(KERN_ERR "dmascc: could not find irq of %s at %#3x (irq=%d)\n",
+			hw[type].name, card_base, irq);
+		goto out3;
+	}
+
+	/* Set up data structures */
+	for (i = 0; i < 2; i++) {
+		dev = info->dev[i];
+		priv = &info->priv[i];
+		priv->type = type;
+		priv->chip = chip;
+		priv->dev = dev;
+		priv->info = info;
+		priv->channel = i;
+		spin_lock_init(&priv->ring_lock);
+		priv->register_lock = &info->register_lock;
+		priv->card_base = card_base;
+		priv->scc_cmd = scc_base + (i ? SCCB_CMD : SCCA_CMD);
+		priv->scc_data = scc_base + (i ? SCCB_DATA : SCCA_DATA);
+		priv->tmr_cnt = tmr_base + (i ? TMR_CNT2 : TMR_CNT1);
+		priv->tmr_ctrl = tmr_base + TMR_CTRL;
+		priv->tmr_mode = i ? 0xb0 : 0x70;
+		priv->param.pclk_hz = hw[type].pclk_hz;
+		priv->param.brg_tc = -1;
+		priv->param.clocks = TCTRxCP | RCRTxCP;
+		priv->param.persist = 256;
+		priv->param.dma = -1;
+		INIT_WORK(&priv->rx_work, rx_bh, priv);
+		dev->priv = priv;
+		sprintf(dev->name, "dmascc%i", 2*n+i);
+		SET_MODULE_OWNER(dev);
+		dev->base_addr = card_base;
+		dev->irq = irq;
+		dev->open = scc_open;
+		dev->stop = scc_close;
+		dev->do_ioctl = scc_ioctl;
+		dev->hard_start_xmit = scc_send_packet;
+		dev->get_stats = scc_get_stats;
+		dev->hard_header = ax25_encapsulate;
+		dev->rebuild_header = ax25_rebuild_header;
+		dev->set_mac_address = scc_set_mac_address;
+	}
+	if (register_netdev(info->dev[0])) {
+		printk(KERN_ERR "dmascc: could not register %s\n",
+				info->dev[0]->name);
+		goto out3;
+	}
+	if (register_netdev(info->dev[1])) {
+		printk(KERN_ERR "dmascc: could not register %s\n",
+				info->dev[1]->name);
+		goto out4;
+	}
+
+
+	info->next = first;
+	first = info;
+	printk(KERN_INFO "dmascc: found %s (%s) at %#3x, irq %d\n", hw[type].name,
+	chipnames[chip], card_base, irq);
+	return 0;
+
+out4:
+	unregister_netdev(info->dev[0]);
+out3:
+	if (info->priv[0].type == TYPE_TWIN)
+		outb(0, info->dev[0]->base_addr + TWIN_SERIAL_CFG);
+	write_scc(&info->priv[0], R9, FHWRES);
+	free_netdev(info->dev[1]);
+out2:
+	free_netdev(info->dev[0]);
+out1:
+	kfree(info);
+out:
+	return -1;
 }
 
 
@@ -625,13 +629,12 @@ static void write_scc(struct scc_priv *priv, int reg, int val) {
     outb_p(val, priv->scc_cmd);
     return;
   default:
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(priv->register_lock, flags);
     outb_p(0, priv->card_base + PI_DREQ_MASK);
     if (reg) outb_p(reg, priv->scc_cmd);
     outb_p(val, priv->scc_cmd);
     outb(1, priv->card_base + PI_DREQ_MASK);
-    restore_flags(flags);
+    spin_unlock_irqrestore(priv->register_lock, flags);
     return;
   }
 }
@@ -649,12 +652,11 @@ static void write_scc_data(struct scc_priv *priv, int val, int fast) {
   default:
     if (fast) outb_p(val, priv->scc_data);
     else {
-      save_flags(flags);
-      cli();
+      spin_lock_irqsave(priv->register_lock, flags);
       outb_p(0, priv->card_base + PI_DREQ_MASK);
       outb_p(val, priv->scc_data);
       outb(1, priv->card_base + PI_DREQ_MASK);
-      restore_flags(flags);
+      spin_unlock_irqrestore(priv->register_lock, flags);
     }
     return;
   }
@@ -672,13 +674,12 @@ static int read_scc(struct scc_priv *priv, int reg) {
     if (reg) outb_p(reg, priv->scc_cmd);
     return inb_p(priv->scc_cmd);
   default:
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(priv->register_lock, flags);
     outb_p(0, priv->card_base + PI_DREQ_MASK);
     if (reg) outb_p(reg, priv->scc_cmd);
     rc = inb_p(priv->scc_cmd);
     outb(1, priv->card_base + PI_DREQ_MASK);
-    restore_flags(flags);
+    spin_unlock_irqrestore(priv->register_lock, flags);
     return rc;
   }
 }
@@ -693,12 +694,11 @@ static int read_scc_data(struct scc_priv *priv) {
   case TYPE_TWIN:
     return inb_p(priv->scc_data);
   default:
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(priv->register_lock, flags);
     outb_p(0, priv->card_base + PI_DREQ_MASK);
     rc = inb_p(priv->scc_data);
     outb(1, priv->card_base + PI_DREQ_MASK);
-    restore_flags(flags);
+    spin_unlock_irqrestore(priv->register_lock, flags);
     return rc;
   }
 }
@@ -709,12 +709,9 @@ static int scc_open(struct net_device *dev) {
   struct scc_info *info = priv->info;
   int card_base = priv->card_base;
 
-  MOD_INC_USE_COUNT;
-
   /* Request IRQ if not already used by other channel */
   if (!info->irq_used) {
     if (request_irq(dev->irq, scc_isr, 0, "dmascc", info)) {
-      MOD_DEC_USE_COUNT;
       return -EAGAIN;
     }
   }
@@ -724,7 +721,6 @@ static int scc_open(struct net_device *dev) {
   if (priv->param.dma >= 0) {
     if (request_dma(priv->param.dma, "dmascc")) {
       if (--info->irq_used == 0) free_irq(dev->irq, info);
-      MOD_DEC_USE_COUNT;
       return -EAGAIN;
     } else {
       unsigned long flags = claim_dma_lock();
@@ -868,7 +864,6 @@ static int scc_close(struct net_device *dev) {
   }
   if (--info->irq_used == 0) free_irq(dev->irq, info);
 
-  MOD_DEC_USE_COUNT;
   return 0;
 }
 
@@ -907,9 +902,8 @@ static int scc_send_packet(struct sk_buff *skb, struct net_device *dev) {
   priv->tx_len[i] = skb->len-1;
 
   /* Clear interrupts while we touch our circular buffers */
-  save_flags(flags);
-  cli();
 
+  spin_lock_irqsave(&priv->ring_lock, flags);
   /* Move the ring buffer's head */
   priv->tx_head = (i + 1) % NUM_TX_BUF;
   priv->tx_count++;
@@ -930,7 +924,7 @@ static int scc_send_packet(struct sk_buff *skb, struct net_device *dev) {
   }
 
   /* Turn interrupts back on and free buffer */
-  restore_flags(flags);
+  spin_unlock_irqrestore(&priv->ring_lock, flags);
   dev_kfree_skb(skb);
 
   return 0;
@@ -950,9 +944,147 @@ static int scc_set_mac_address(struct net_device *dev, void *sa) {
 }
 
 
-static void scc_isr(int irq, void *dev_id, struct pt_regs * regs) {
+static inline void tx_on(struct scc_priv *priv) {
+  int i, n;
+  unsigned long flags;
+
+  if (priv->param.dma >= 0) {
+    n = (priv->chip == Z85230) ? 3 : 1;
+    /* Program DMA controller */
+    flags = claim_dma_lock();
+    set_dma_mode(priv->param.dma, DMA_MODE_WRITE);
+    set_dma_addr(priv->param.dma, (int) priv->tx_buf[priv->tx_tail]+n);
+    set_dma_count(priv->param.dma, priv->tx_len[priv->tx_tail]-n);
+    release_dma_lock(flags);
+    /* Enable TX underrun interrupt */
+    write_scc(priv, R15, TxUIE);
+    /* Configure DREQ */
+    if (priv->type == TYPE_TWIN)
+      outb((priv->param.dma == 1) ? TWIN_DMA_HDX_T1 : TWIN_DMA_HDX_T3,
+	   priv->card_base + TWIN_DMA_CFG);
+    else
+      write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN | WT_RDY_ENAB);
+    /* Write first byte(s) */
+    spin_lock_irqsave(priv->register_lock, flags);
+    for (i = 0; i < n; i++)
+      write_scc_data(priv, priv->tx_buf[priv->tx_tail][i], 1);
+    enable_dma(priv->param.dma);
+    spin_unlock_irqrestore(priv->register_lock, flags);
+  } else {
+    write_scc(priv, R15, TxUIE);
+    write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN | TxINT_ENAB);
+    tx_isr(priv);
+  }
+  /* Reset EOM latch if we do not have the AUTOEOM feature */
+  if (priv->chip == Z8530) write_scc(priv, R0, RES_EOM_L);
+}
+
+
+static inline void rx_on(struct scc_priv *priv) {
+  unsigned long flags;
+
+  /* Clear RX FIFO */
+  while (read_scc(priv, R0) & Rx_CH_AV) read_scc_data(priv);
+  priv->rx_over = 0;
+  if (priv->param.dma >= 0) {
+    /* Program DMA controller */
+    flags = claim_dma_lock();
+    set_dma_mode(priv->param.dma, DMA_MODE_READ);
+    set_dma_addr(priv->param.dma, (int) priv->rx_buf[priv->rx_head]);
+    set_dma_count(priv->param.dma, BUF_SIZE);
+    release_dma_lock(flags);
+    enable_dma(priv->param.dma);
+    /* Configure PackeTwin DMA */
+    if (priv->type == TYPE_TWIN) {
+      outb((priv->param.dma == 1) ? TWIN_DMA_HDX_R1 : TWIN_DMA_HDX_R3,
+	   priv->card_base + TWIN_DMA_CFG);
+    }
+    /* Sp. cond. intr. only, ext int enable, RX DMA enable */
+    write_scc(priv, R1, EXT_INT_ENAB | INT_ERR_Rx |
+	      WT_RDY_RT | WT_FN_RDYFN | WT_RDY_ENAB);
+  } else {
+    /* Reset current frame */
+    priv->rx_ptr = 0;
+    /* Intr. on all Rx characters and Sp. cond., ext int enable */
+    write_scc(priv, R1, EXT_INT_ENAB | INT_ALL_Rx | WT_RDY_RT |
+	      WT_FN_RDYFN);
+  }
+  write_scc(priv, R0, ERR_RES);
+  write_scc(priv, R3, RxENABLE | Rx8 | RxCRC_ENAB);
+}
+
+
+static inline void rx_off(struct scc_priv *priv) {
+  /* Disable receiver */
+  write_scc(priv, R3, Rx8);
+  /* Disable DREQ / RX interrupt */
+  if (priv->param.dma >= 0 && priv->type == TYPE_TWIN)
+    outb(0, priv->card_base + TWIN_DMA_CFG);
+  else
+    write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN);
+  /* Disable DMA */
+  if (priv->param.dma >= 0) disable_dma(priv->param.dma);
+}
+
+
+static void start_timer(struct scc_priv *priv, int t, int r15) {
+  unsigned long flags;
+
+  outb(priv->tmr_mode, priv->tmr_ctrl);
+  if (t == 0) {
+    tm_isr(priv);
+  } else if (t > 0) {
+    save_flags(flags);
+    cli();
+    outb(t & 0xFF, priv->tmr_cnt);
+    outb((t >> 8) & 0xFF, priv->tmr_cnt);
+    if (priv->type != TYPE_TWIN) {
+      write_scc(priv, R15, r15 | CTSIE);
+      priv->rr0 |= CTS;
+    }
+    restore_flags(flags);
+  }
+}
+
+
+static inline unsigned char random(void) {
+  /* See "Numerical Recipes in C", second edition, p. 284 */
+  rand = rand * 1664525L + 1013904223L;
+  return (unsigned char) (rand >> 24);
+}
+
+static inline void z8530_isr(struct scc_info *info) {
+  int is, i = 100;
+
+  while ((is = read_scc(&info->priv[0], R3)) && i--) {
+    if (is & CHARxIP) {
+      rx_isr(&info->priv[0]);
+    } else if (is & CHATxIP) {
+      tx_isr(&info->priv[0]);
+    } else if (is & CHAEXT) {
+      es_isr(&info->priv[0]);
+    } else if (is & CHBRxIP) {
+      rx_isr(&info->priv[1]);
+    } else if (is & CHBTxIP) {
+      tx_isr(&info->priv[1]);
+    } else {
+      es_isr(&info->priv[1]);
+    }
+    write_scc(&info->priv[0], R0, RES_H_IUS);
+    i++;
+  }
+  if (i < 0) {
+    printk(KERN_ERR "dmascc: stuck in ISR with RR3=0x%02x.\n", is);
+  }
+  /* Ok, no interrupts pending from this 8530. The INT line should
+     be inactive now. */
+}
+
+
+static irqreturn_t scc_isr(int irq, void *dev_id, struct pt_regs * regs) {
   struct scc_info *info = dev_id;
 
+  spin_lock(info->priv[0].register_lock);
   /* At this point interrupts are enabled, and the interrupt under service
      is already acknowledged, but masked off.
 
@@ -980,34 +1112,8 @@ static void scc_isr(int irq, void *dev_id, struct pt_regs * regs) {
       }
     }
   } else z8530_isr(info);
-}
-
-
-static inline void z8530_isr(struct scc_info *info) {
-  int is, i = 100;
-
-  while ((is = read_scc(&info->priv[0], R3)) && i--) {
-    if (is & CHARxIP) {
-      rx_isr(&info->priv[0]);
-    } else if (is & CHATxIP) {
-      tx_isr(&info->priv[0]);
-    } else if (is & CHAEXT) {
-      es_isr(&info->priv[0]);
-    } else if (is & CHBRxIP) {
-      rx_isr(&info->priv[1]);
-    } else if (is & CHBTxIP) {
-      tx_isr(&info->priv[1]);
-    } else {
-      es_isr(&info->priv[1]);
-    }
-    write_scc(&info->priv[0], R0, RES_H_IUS);
-    i++;
-  }
-  if (i < 0) {
-    printk("dmascc: stuck in ISR with RR3=0x%02x.\n", is);
-  }
-  /* Ok, no interrupts pending from this 8530. The INT line should
-     be inactive now. */
+  spin_unlock(info->priv[0].register_lock);
+  return IRQ_HANDLED;
 }
 
 
@@ -1073,9 +1179,7 @@ static void special_condition(struct scc_priv *priv, int rc) {
 	  priv->rx_len[priv->rx_head] = cb;
 	  priv->rx_head = (priv->rx_head + 1) % NUM_RX_BUF;
 	  priv->rx_count++;
-	  /* Mark bottom half handler */
-	  queue_task(&priv->rx_task, &tq_immediate);
-	  mark_bh(IMMEDIATE_BH);
+	  schedule_work(&priv->rx_work);
 	} else {
 	  priv->stats.rx_errors++;
 	  priv->stats.rx_over_errors++;
@@ -1103,11 +1207,9 @@ static void rx_bh(void *arg) {
   struct sk_buff *skb;
   unsigned char *data;
 
-  save_flags(flags);
-  cli();
-
+  spin_lock_irqsave(&priv->ring_lock, flags);
   while (priv->rx_count) {
-    restore_flags(flags);
+    spin_unlock_irqrestore(&priv->ring_lock, flags);
     cb = priv->rx_len[i];
     /* Allocate buffer */
     skb = dev_alloc_skb(cb+1);
@@ -1123,17 +1225,16 @@ static void rx_bh(void *arg) {
       skb->protocol = ntohs(ETH_P_AX25);
       skb->mac.raw = skb->data;
       netif_rx(skb);
+      priv->dev->last_rx = jiffies;
       priv->stats.rx_packets++;
       priv->stats.rx_bytes += cb;
     }
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(&priv->ring_lock, flags);
     /* Move tail */
     priv->rx_tail = i = (i + 1) % NUM_RX_BUF;
     priv->rx_count--;
   }
-
-  restore_flags(flags);
+  spin_unlock_irqrestore(&priv->ring_lock, flags);
 }
 
 
@@ -1299,115 +1400,3 @@ static void tm_isr(struct scc_priv *priv) {
     break;
   }
 }
-
-
-static inline void tx_on(struct scc_priv *priv) {
-  int i, n;
-  unsigned long flags;
-
-  if (priv->param.dma >= 0) {
-    n = (priv->chip == Z85230) ? 3 : 1;
-    /* Program DMA controller */
-    flags = claim_dma_lock();
-    set_dma_mode(priv->param.dma, DMA_MODE_WRITE);
-    set_dma_addr(priv->param.dma, (int) priv->tx_buf[priv->tx_tail]+n);
-    set_dma_count(priv->param.dma, priv->tx_len[priv->tx_tail]-n);
-    release_dma_lock(flags);
-    /* Enable TX underrun interrupt */
-    write_scc(priv, R15, TxUIE);
-    /* Configure DREQ */
-    if (priv->type == TYPE_TWIN)
-      outb((priv->param.dma == 1) ? TWIN_DMA_HDX_T1 : TWIN_DMA_HDX_T3,
-	   priv->card_base + TWIN_DMA_CFG);
-    else
-      write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN | WT_RDY_ENAB);
-    /* Write first byte(s) */
-    save_flags(flags);
-    cli();
-    for (i = 0; i < n; i++)
-      write_scc_data(priv, priv->tx_buf[priv->tx_tail][i], 1);
-    enable_dma(priv->param.dma);
-    restore_flags(flags);
-  } else {
-    write_scc(priv, R15, TxUIE);
-    write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN | TxINT_ENAB);
-    tx_isr(priv);
-  }
-  /* Reset EOM latch if we do not have the AUTOEOM feature */
-  if (priv->chip == Z8530) write_scc(priv, R0, RES_EOM_L);
-}
-
-
-static inline void rx_on(struct scc_priv *priv) {
-  unsigned long flags;
-
-  /* Clear RX FIFO */
-  while (read_scc(priv, R0) & Rx_CH_AV) read_scc_data(priv);
-  priv->rx_over = 0;
-  if (priv->param.dma >= 0) {
-    /* Program DMA controller */
-    flags = claim_dma_lock();
-    set_dma_mode(priv->param.dma, DMA_MODE_READ);
-    set_dma_addr(priv->param.dma, (int) priv->rx_buf[priv->rx_head]);
-    set_dma_count(priv->param.dma, BUF_SIZE);
-    release_dma_lock(flags);
-    enable_dma(priv->param.dma);
-    /* Configure PackeTwin DMA */
-    if (priv->type == TYPE_TWIN) {
-      outb((priv->param.dma == 1) ? TWIN_DMA_HDX_R1 : TWIN_DMA_HDX_R3,
-	   priv->card_base + TWIN_DMA_CFG);
-    }
-    /* Sp. cond. intr. only, ext int enable, RX DMA enable */
-    write_scc(priv, R1, EXT_INT_ENAB | INT_ERR_Rx |
-	      WT_RDY_RT | WT_FN_RDYFN | WT_RDY_ENAB);
-  } else {
-    /* Reset current frame */
-    priv->rx_ptr = 0;
-    /* Intr. on all Rx characters and Sp. cond., ext int enable */
-    write_scc(priv, R1, EXT_INT_ENAB | INT_ALL_Rx | WT_RDY_RT |
-	      WT_FN_RDYFN);
-  }
-  write_scc(priv, R0, ERR_RES);
-  write_scc(priv, R3, RxENABLE | Rx8 | RxCRC_ENAB);
-}
-
-
-static inline void rx_off(struct scc_priv *priv) {
-  /* Disable receiver */
-  write_scc(priv, R3, Rx8);
-  /* Disable DREQ / RX interrupt */
-  if (priv->param.dma >= 0 && priv->type == TYPE_TWIN)
-    outb(0, priv->card_base + TWIN_DMA_CFG);
-  else
-    write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN);
-  /* Disable DMA */
-  if (priv->param.dma >= 0) disable_dma(priv->param.dma);
-}
-
-
-static void start_timer(struct scc_priv *priv, int t, int r15) {
-  unsigned long flags;
-
-  outb(priv->tmr_mode, priv->tmr_ctrl);
-  if (t == 0) {
-    tm_isr(priv);
-  } else if (t > 0) {
-    save_flags(flags);
-    cli();
-    outb(t & 0xFF, priv->tmr_cnt);
-    outb((t >> 8) & 0xFF, priv->tmr_cnt);
-    if (priv->type != TYPE_TWIN) {
-      write_scc(priv, R15, r15 | CTSIE);
-      priv->rr0 |= CTS;
-    }
-    restore_flags(flags);
-  }
-}
-
-
-static inline unsigned char random(void) {
-  /* See "Numerical Recipes in C", second edition, p. 284 */
-  rand = rand * 1664525L + 1013904223L;
-  return (unsigned char) (rand >> 24);
-}
-

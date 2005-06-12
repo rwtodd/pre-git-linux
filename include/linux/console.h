@@ -15,11 +15,12 @@
 #define _LINUX_CONSOLE_H_ 1
 
 #include <linux/types.h>
-#include <linux/kdev_t.h>
 #include <linux/spinlock.h>
 
 struct vc_data;
 struct console_font_op;
+struct console_font;
+struct module;
 
 /*
  * this is what the terminal answers to a ESC-Z or csi0c query.
@@ -28,6 +29,7 @@ struct console_font_op;
 #define VT102ID "\033[?6c"
 
 struct consw {
+	struct module *owner;
 	const char *(*con_startup)(void);
 	void	(*con_init)(struct vc_data *, int);
 	void	(*con_deinit)(struct vc_data *);
@@ -38,8 +40,12 @@ struct consw {
 	int	(*con_scroll)(struct vc_data *, int, int, int, int);
 	void	(*con_bmove)(struct vc_data *, int, int, int, int, int, int);
 	int	(*con_switch)(struct vc_data *);
-	int	(*con_blank)(struct vc_data *, int);
-	int	(*con_font_op)(struct vc_data *, struct console_font_op *);
+	int	(*con_blank)(struct vc_data *, int, int);
+	int	(*con_font_set)(struct vc_data *, struct console_font *, unsigned);
+	int	(*con_font_get)(struct vc_data *, struct console_font *);
+	int	(*con_font_default)(struct vc_data *, struct console_font *, char *);
+	int	(*con_font_copy)(struct vc_data *, int);
+	int	(*con_resize)(struct vc_data *, unsigned int, unsigned int);
 	int	(*con_set_palette)(struct vc_data *, unsigned char *);
 	int	(*con_scrolldelta)(struct vc_data *, int);
 	int	(*con_set_origin)(struct vc_data *);
@@ -58,7 +64,7 @@ extern const struct consw vga_con;	/* VGA text console */
 extern const struct consw newport_con;	/* SGI Newport console  */
 extern const struct consw prom_con;	/* SPARC PROM console */
 
-void take_over_console(const struct consw *sw, int first, int last, int deflt);
+int take_over_console(const struct consw *sw, int first, int last, int deflt);
 void give_up_console(const struct consw *sw);
 
 /* scroll */
@@ -71,18 +77,6 @@ void give_up_console(const struct consw *sw);
 #define CM_MOVE     (3)
 
 /*
- *	Array of consoles built from command line options (console=)
- */
-struct console_cmdline
-{
-	char	name[8];			/* Name of the driver	    */
-	int	index;				/* Minor dev. to use	    */
-	char	*options;			/* Options for the driver   */
-};
-#define MAX_CMDLINECONSOLES 8
-extern struct console_cmdline console_list[MAX_CMDLINECONSOLES];
-
-/*
  *	The interface for a console, or any other device that
  *	wants to capture console messages (printer driver?)
  */
@@ -91,26 +85,41 @@ extern struct console_cmdline console_list[MAX_CMDLINECONSOLES];
 #define CON_CONSDEV	(2) /* Last on the command line */
 #define CON_ENABLED	(4)
 
-extern spinlock_t console_lock;
-
 struct console
 {
 	char	name[8];
 	void	(*write)(struct console *, const char *, unsigned);
-	int	(*read)(struct console *, const char *, unsigned);
-	kdev_t	(*device)(struct console *);
-	int	(*wait_key)(struct console *);
+	int	(*read)(struct console *, char *, unsigned);
+	struct tty_driver *(*device)(struct console *, int *);
 	void	(*unblank)(void);
 	int	(*setup)(struct console *, char *);
 	short	flags;
 	short	index;
 	int	cflag;
+	void	*data;
 	struct	 console *next;
 };
 
+extern int add_preferred_console(char *name, int idx, char *options);
 extern void register_console(struct console *);
 extern int unregister_console(struct console *);
 extern struct console *console_drivers;
+extern void acquire_console_sem(void);
+extern int try_acquire_console_sem(void);
+extern void release_console_sem(void);
+extern void console_conditional_schedule(void);
+extern void console_unblank(void);
+extern struct tty_driver *console_device(int *);
+extern void console_stop(struct console *);
+extern void console_start(struct console *);
+extern int is_console_locked(void);
+
+/* Some debug stub to catch some of the obvious races in the VT code */
+#if 1
+#define WARN_CONSOLE_UNLOCKED()	WARN_ON(!is_console_locked() && !oops_in_progress)
+#else
+#define WARN_CONSOLE_UNLOCKED()
+#endif
 
 /* VESA Blanking Levels */
 #define VESA_NO_BLANKING        0

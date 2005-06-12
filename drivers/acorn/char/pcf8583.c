@@ -10,33 +10,34 @@
  *  Driver for PCF8583 RTC & RAM chip
  */
 #include <linux/i2c.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/mc146818rtc.h>
 #include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/bcd.h>
 
 #include "pcf8583.h"
 
 static struct i2c_driver pcf8583_driver;
 
 static unsigned short ignore[] = { I2C_CLIENT_END };
-static unsigned short normal_addr[] = { 0x50, 0x51, I2C_CLIENT_END };
+static unsigned short normal_addr[] = { 0x50, I2C_CLIENT_END };
 
 static struct i2c_client_address_data addr_data = {
-	force:			ignore,
-	ignore:			ignore,
-	ignore_range:		ignore,
-	normal_i2c:		ignore,
-	normal_i2c_range:	normal_addr,
-	probe:			ignore,
-	probe_range:		ignore
+	.normal_i2c		= normal_addr,
+	.normal_i2c_range	= ignore,
+	.probe			= ignore,
+	.probe_range		= ignore,
+	.ignore			= ignore,
+	.ignore_range		= ignore,
+	.force			= ignore,
 };
 
-#define DAT(x) ((unsigned int)(x->data))
+#define DAT(x) ((unsigned int)(x->dev.driver_data))
 
 static int
-pcf8583_attach(struct i2c_adapter *adap, int addr, unsigned short flags,
-	       int kind)
+pcf8583_attach(struct i2c_adapter *adap, int addr, int kind)
 {
 	struct i2c_client *c;
 	unsigned char buf[1], ad[1] = { 0 };
@@ -49,13 +50,11 @@ pcf8583_attach(struct i2c_adapter *adap, int addr, unsigned short flags,
 	if (!c)
 		return -ENOMEM;
 
-	strcpy(c->name, "PCF8583");
+	memset(c, 0, sizeof(*c));
 	c->id		= pcf8583_driver.id;
-	c->flags	= 0;
 	c->addr		= addr;
 	c->adapter	= adap;
 	c->driver	= &pcf8583_driver;
-	c->data		= NULL;
 
 	if (i2c_transfer(c->adapter, msgs, 2) == 2)
 		DAT(c) = buf[0];
@@ -73,6 +72,7 @@ static int
 pcf8583_detach(struct i2c_client *client)
 {
 	i2c_detach_client(client);
+	kfree(client);
 	return 0;
 }
 
@@ -86,7 +86,10 @@ pcf8583_get_datetime(struct i2c_client *client, struct rtc_tm *dt)
 	};
 	int ret = -EIO;
 
-	if (i2c_transfer(client->adapter, msgs, 2) == 2) {
+	memset(buf, 0, sizeof(buf));
+
+	ret = i2c_transfer(client->adapter, msgs, 2);
+	if (ret == 2) {
 		dt->year_off = buf[4] >> 6;
 		dt->wday     = buf[5] >> 5;
 
@@ -126,6 +129,8 @@ pcf8583_set_datetime(struct i2c_client *client, struct rtc_tm *dt, int datetoo)
 	}
 
 	ret = i2c_master_send(client, (char *)buf, len);
+	if (ret == len)
+		ret = 0;
 
 	buf[1] = DAT(client);
 	i2c_master_send(client, (char *)buf, 2);
@@ -219,12 +224,12 @@ pcf8583_command(struct i2c_client *client, unsigned int cmd, void *arg)
 }
 
 static struct i2c_driver pcf8583_driver = {
-	"PCF8583",
-	I2C_DRIVERID_PCF8583,
-	I2C_DF_NOTIFY,
-	pcf8583_probe,
-	pcf8583_detach,
-	pcf8583_command
+	.name		= "PCF8583",
+	.id		= I2C_DRIVERID_PCF8583,
+	.flags		= I2C_DF_NOTIFY,
+	.attach_adapter	= pcf8583_probe,
+	.detach_client	= pcf8583_detach,
+	.command	= pcf8583_command
 };
 
 static __init int pcf8583_init(void)

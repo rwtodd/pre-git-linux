@@ -1,8 +1,10 @@
-/* $Id: semaphore.c,v 1.5 2000/12/29 10:35:05 anton Exp $ */
+/* $Id: semaphore.c,v 1.7 2001/04/18 21:06:05 davem Exp $ */
 
 /* sparc32 semaphore implementation, based on i386 version */
 
 #include <linux/sched.h>
+#include <linux/errno.h>
+#include <linux/init.h>
 
 #include <asm/semaphore.h>
 
@@ -42,9 +44,9 @@ void __up(struct semaphore *sem)
 	wake_up(&sem->wait);
 }
 
-static spinlock_t semaphore_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(semaphore_lock);
 
-void __down(struct semaphore * sem)
+void __sched __down(struct semaphore * sem)
 {
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
@@ -60,7 +62,7 @@ void __down(struct semaphore * sem)
 		 * Add "everybody else" into it. They aren't
 		 * playing, because we own the spinlock.
 		 */
-		if (!atomic_add_negative(sleepers - 1, &sem->count)) {
+		if (!atomic24_add_negative(sleepers - 1, &sem->count)) {
 			sem->sleepers = 0;
 			break;
 		}
@@ -77,7 +79,7 @@ void __down(struct semaphore * sem)
 	wake_up(&sem->wait);
 }
 
-int __down_interruptible(struct semaphore * sem)
+int __sched __down_interruptible(struct semaphore * sem)
 {
 	int retval = 0;
 	struct task_struct *tsk = current;
@@ -100,7 +102,7 @@ int __down_interruptible(struct semaphore * sem)
 		if (signal_pending(current)) {
 			retval = -EINTR;
 			sem->sleepers = 0;
-			atomic_add(sleepers, &sem->count);
+			atomic24_add(sleepers, &sem->count);
 			break;
 		}
 
@@ -110,7 +112,7 @@ int __down_interruptible(struct semaphore * sem)
 		 * "-1" is because we're still hoping to get
 		 * the lock.
 		 */
-		if (!atomic_add_negative(sleepers - 1, &sem->count)) {
+		if (!atomic24_add_negative(sleepers - 1, &sem->count)) {
 			sem->sleepers = 0;
 			break;
 		}
@@ -145,125 +147,9 @@ int __down_trylock(struct semaphore * sem)
 	 * Add "everybody else" and us into it. They aren't
 	 * playing, because we own the spinlock.
 	 */
-	if (!atomic_add_negative(sleepers, &sem->count))
+	if (!atomic24_add_negative(sleepers, &sem->count))
 		wake_up(&sem->wait);
 
 	spin_unlock_irqrestore(&semaphore_lock, flags);
 	return 1;
-}
-
-/* rw mutexes
- * Implemented by Jakub Jelinek (jakub@redhat.com) based on
- * i386 implementation by Ben LaHaise (bcrl@redhat.com).
- */
-
-extern inline int ldstub(unsigned char *p)
-{
-	int ret;
-	asm volatile("ldstub %1, %0" : "=r" (ret) : "m" (*p) : "memory");
-	return ret;
-}
-
-#define DOWN_VAR				\
-	struct task_struct *tsk = current;	\
-	DECLARE_WAITQUEUE(wait, tsk);
-
-void down_read_failed_biased(struct rw_semaphore *sem)
-{
-	DOWN_VAR
-
-	add_wait_queue(&sem->wait, &wait);	/* put ourselves at the head of the list */
-
-	for (;;) {
-		if (!ldstub(&sem->read_not_granted))
-			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (sem->read_not_granted)
-			schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-}
-
-void down_write_failed_biased(struct rw_semaphore *sem)
-{
-	DOWN_VAR
-
-	add_wait_queue_exclusive(&sem->write_bias_wait, &wait); /* put ourselves at the end of the list */
-
-	for (;;) {
-		if (!ldstub(&sem->write_not_granted))
-			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (sem->write_not_granted)
-			schedule();
-	}
-
-	remove_wait_queue(&sem->write_bias_wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	/* if the lock is currently unbiased, awaken the sleepers
-	 * FIXME: this wakes up the readers early in a bit of a
-	 * stampede -> bad!
-	 */
-	if (sem->count >= 0)
-		wake_up(&sem->wait);
-}
-
-/* Wait for the lock to become unbiased.  Readers
- * are non-exclusive. =)
- */
-void down_read_failed(struct rw_semaphore *sem)
-{
-	DOWN_VAR
-
-	__up_read(sem); /* this takes care of granting the lock */
-
-	add_wait_queue(&sem->wait, &wait);
-
-	while (sem->count < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (sem->count >= 0)
-			break;
-		schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-}
-
-/* Wait for the lock to become unbiased. Since we're
- * a writer, we'll make ourselves exclusive.
- */
-void down_write_failed(struct rw_semaphore *sem)
-{
-	DOWN_VAR
-
-	__up_write(sem);	/* this takes care of granting the lock */
-
-	add_wait_queue_exclusive(&sem->wait, &wait);
-
-	while (sem->count < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (sem->count >= 0)
-			break;  /* we must attempt to acquire or bias the lock */
-		schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-}
-
-void __rwsem_wake(struct rw_semaphore *sem, unsigned long readers)
-{
-	if (readers) {
-		/* Due to lame ldstub we don't do here
-		   a BUG() consistency check */
-		sem->read_not_granted = 0;
-		wake_up(&sem->wait);
-	} else {
-		sem->write_not_granted = 0;
-		wake_up(&sem->write_bias_wait);
-	}
 }

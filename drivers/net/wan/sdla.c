@@ -34,37 +34,31 @@
 
 #include <linux/config.h> /* for CONFIG_DLCI_MAX */
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <asm/uaccess.h>
-
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/if_frad.h>
-
 #include <linux/sdla.h>
+#include <linux/bitops.h>
+
+#include <asm/system.h>
+#include <asm/io.h>
+#include <asm/dma.h>
+#include <asm/uaccess.h>
 
 static const char* version = "SDLA driver v0.30, 12 Sep 1996, mike.mclagan@linux.org";
-
-static const char* devname = "sdla";
 
 static unsigned int valid_port[] __initdata = { 0x250, 0x270, 0x280, 0x300, 0x350, 0x360, 0x380, 0x390};
 
@@ -75,6 +69,8 @@ static unsigned int valid_mem[]  __initdata = {
                                     0xD0000, 0xD2000, 0xD4000, 0xD6000, 0xD8000, 0xDA000, 0xDC000, 0xDE000,
                                     0xE0000, 0xE2000, 0xE4000, 0xE6000, 0xE8000, 0xEA000, 0xEC000, 0xEE000}; 
 
+static DEFINE_SPINLOCK(sdla_lock);
+
 /*********************************************************
  *
  * these are the core routines that access the card itself 
@@ -83,10 +79,10 @@ static unsigned int valid_mem[]  __initdata = {
 
 #define SDLA_WINDOW(dev,addr) outb((((addr) >> 13) & 0x1F), (dev)->base_addr + SDLA_REG_Z80_WINDOW)
 
-static void sdla_read(struct net_device *dev, int addr, void *buf, short len)
+static void __sdla_read(struct net_device *dev, int addr, void *buf, short len)
 {
-	unsigned long flags;
-	char          *temp, *base;
+	char          *temp;
+	const void    *base;
 	int           offset, bytes;
 
 	temp = buf;
@@ -94,13 +90,10 @@ static void sdla_read(struct net_device *dev, int addr, void *buf, short len)
 	{	
 		offset = addr & SDLA_ADDR_MASK;
 		bytes = offset + len > SDLA_WINDOW_SIZE ? SDLA_WINDOW_SIZE - offset : len;
-		base = (void *) (dev->mem_start + offset);
+		base = (const void *) (dev->mem_start + offset);
 
-		save_flags(flags);
-		cli();
 		SDLA_WINDOW(dev, addr);
 		memcpy(temp, base, bytes);
-		restore_flags(flags);
 
 		addr += bytes;
 		temp += bytes;
@@ -108,10 +101,19 @@ static void sdla_read(struct net_device *dev, int addr, void *buf, short len)
 	}  
 }
 
-static void sdla_write(struct net_device *dev, int addr, void *buf, short len)
+static void sdla_read(struct net_device *dev, int addr, void *buf, short len)
 {
 	unsigned long flags;
-	char          *temp, *base;
+	spin_lock_irqsave(&sdla_lock, flags);
+	__sdla_read(dev, addr, buf, len);
+	spin_unlock_irqrestore(&sdla_lock, flags);
+}
+
+static void __sdla_write(struct net_device *dev, int addr, 
+			 const void *buf, short len)
+{
+	const char    *temp;
+	void 	      *base;
 	int           offset, bytes;
 
 	temp = buf;
@@ -120,16 +122,26 @@ static void sdla_write(struct net_device *dev, int addr, void *buf, short len)
 		offset = addr & SDLA_ADDR_MASK;
 		bytes = offset + len > SDLA_WINDOW_SIZE ? SDLA_WINDOW_SIZE - offset : len;
 		base = (void *) (dev->mem_start + offset);
-		save_flags(flags);
-		cli();
+
 		SDLA_WINDOW(dev, addr);
 		memcpy(base, temp, bytes);
-		restore_flags(flags);
+
 		addr += bytes;
 		temp += bytes;
 		len  -= bytes;
 	}
 }
+
+static void sdla_write(struct net_device *dev, int addr, 
+		       const void *buf, short len)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sdla_lock, flags);
+	__sdla_write(dev, addr, buf, len);
+	spin_unlock_irqrestore(&sdla_lock, flags);
+}
+
 
 static void sdla_clear(struct net_device *dev)
 {
@@ -142,8 +154,7 @@ static void sdla_clear(struct net_device *dev)
 	bytes = SDLA_WINDOW_SIZE;
 	base = (void *) dev->mem_start;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&sdla_lock, flags);
 	while(len)
 	{
 		SDLA_WINDOW(dev, addr);
@@ -152,7 +163,8 @@ static void sdla_clear(struct net_device *dev)
 		addr += bytes;
 		len  -= bytes;
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&sdla_lock, flags);
+
 }
 
 static char sdla_byte(struct net_device *dev, int addr)
@@ -162,11 +174,10 @@ static char sdla_byte(struct net_device *dev, int addr)
 
 	temp = (void *) (dev->mem_start + (addr & SDLA_ADDR_MASK));
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&sdla_lock, flags);
 	SDLA_WINDOW(dev, addr);
 	byte = *temp;
-	restore_flags(flags);
+	spin_unlock_irqrestore(&sdla_lock, flags);
 
 	return(byte);
 }
@@ -418,7 +429,8 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 	struct frad_local        *flp;
 	struct sdla_cmd          *cmd_buf;
 	unsigned long            pflags;
-	int                      jiffs, ret, waiting, len;
+	unsigned long		 jiffs;
+	int                      ret, waiting, len;
 	long                     window;
 
 	flp = dev->priv;
@@ -427,8 +439,8 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 	ret = 0;
 	len = 0;
 	jiffs = jiffies + HZ;  /* 1 second is plenty */
-	save_flags(pflags);
-	cli();
+
+	spin_lock_irqsave(&sdla_lock, pflags);
 	SDLA_WINDOW(dev, window);
 	cmd_buf->cmd = cmd;
 	cmd_buf->dlci = dlci;
@@ -440,7 +452,7 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 	cmd_buf->length = inlen;
 
 	cmd_buf->opp_flag = 1;
-	restore_flags(pflags);
+	spin_unlock_irqrestore(&sdla_lock, pflags);
 
 	waiting = 1;
 	len = 0;
@@ -448,18 +460,17 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 	{
 		if (waiting++ % 3) 
 		{
-			save_flags(pflags);
-			cli();
+			spin_lock_irqsave(&sdla_lock, pflags);
 			SDLA_WINDOW(dev, window);
 			waiting = ((volatile int)(cmd_buf->opp_flag));
-			restore_flags(pflags);
+			spin_unlock_irqrestore(&sdla_lock, pflags);
 		}
 	}
 	
 	if (!waiting)
 	{
-		save_flags(pflags);
-		cli();
+
+		spin_lock_irqsave(&sdla_lock, pflags);
 		SDLA_WINDOW(dev, window);
 		ret = cmd_buf->retval;
 		len = cmd_buf->length;
@@ -475,7 +486,7 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 		if (ret)
 			memcpy(&status, cmd_buf->data, len > sizeof(status) ? sizeof(status) : len);
 
-		restore_flags(pflags);
+		spin_unlock_irqrestore(&sdla_lock, pflags);
 	}
 	else
 		ret = SDLA_RET_TIMEOUT;
@@ -559,7 +570,6 @@ int sdla_assoc(struct net_device *slave, struct net_device *master)
 	if (i == CONFIG_DLCI_MAX)
 		return(-EMLINK);  /* #### Alan: Comments on this ?? */
 
-	MOD_INC_USE_COUNT;
 
 	flp->master[i] = master;
 	flp->dlci[i] = -*(short *)(master->dev_addr);
@@ -592,7 +602,6 @@ int sdla_deassoc(struct net_device *slave, struct net_device *master)
 	flp->master[i] = NULL;
 	flp->dlci[i] = 0;
 
-	MOD_DEC_USE_COUNT;
 
 	if (netif_running(slave)) {
 		if (flp->config.station == FRAD_STATION_CPE)
@@ -692,14 +701,14 @@ static int sdla_transmit(struct sk_buff *skb, struct net_device *dev)
 				ret = sdla_cmd(dev, SDLA_INFORMATION_WRITE, *(short *)(skb->dev->dev_addr), 0, NULL, skb->len, &addr, &size);
 				if (ret == SDLA_RET_OK)
 				{
-					save_flags(flags); 
-					cli();
+
+					spin_lock_irqsave(&sdla_lock, flags);
 					SDLA_WINDOW(dev, addr);
 					pbuf = (void *)(((int) dev->mem_start) + (addr & SDLA_ADDR_MASK));
-						sdla_write(dev, pbuf->buf_addr, skb->data, skb->len);
-						SDLA_WINDOW(dev, addr);
+					__sdla_write(dev, pbuf->buf_addr, skb->data, skb->len);
+					SDLA_WINDOW(dev, addr);
 					pbuf->opp_flag = 1;
-					restore_flags(flags);
+					spin_unlock_irqrestore(&sdla_lock, flags);
 				}
 				break;
 		}
@@ -744,7 +753,7 @@ static void sdla_receive(struct net_device *dev)
 	struct buf_entry  *pbuf;
 
 	unsigned long	  flags;
-	int               i, received, success, addr, buf_base, buf_top;
+	int               i=0, received, success, addr, buf_base, buf_top;
 	short             dlci, len, len2, split;
 
 	flp = dev->priv;
@@ -757,8 +766,7 @@ static void sdla_receive(struct net_device *dev)
 	pbufi = NULL;
 	pbuf = NULL;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&sdla_lock, flags);
 
 	switch (flp->type)
 	{
@@ -825,7 +833,7 @@ static void sdla_receive(struct net_device *dev)
 		case SDLA_S502A:
 		case SDLA_S502E:
 			if (success)
-				sdla_read(dev, SDLA_502_RCV_BUF + SDLA_502_DATA_OFS, skb_put(skb,len), len);
+				__sdla_read(dev, SDLA_502_RCV_BUF + SDLA_502_DATA_OFS, skb_put(skb,len), len);
 
 			SDLA_WINDOW(dev, SDLA_502_RCV_BUF);
 			cmd->opp_flag = 0;
@@ -838,9 +846,9 @@ static void sdla_receive(struct net_device *dev)
 				split = addr + len > buf_top + 1 ? len - (buf_top - addr + 1) : 0;
 				len2 = len - split;
 
-				sdla_read(dev, addr, skb_put(skb, len2), len2);
+				__sdla_read(dev, addr, skb_put(skb, len2), len2);
 				if (split)
-					sdla_read(dev, buf_base, skb_put(skb, split), split);
+					__sdla_read(dev, buf_base, skb_put(skb, split), split);
 			}
 
 			/* increment the buffer we're looking at */
@@ -857,10 +865,10 @@ static void sdla_receive(struct net_device *dev)
 		(*dlp->receive)(skb, master);
 	}
 
-	restore_flags(flags);
+	spin_unlock_irqrestore(&sdla_lock, flags);
 }
 
-static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device     *dev;
 	struct frad_local *flp;
@@ -871,7 +879,7 @@ static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 	if (dev == NULL)
 	{
 		printk(KERN_WARNING "sdla_isr(): irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	flp = dev->priv;
@@ -879,7 +887,7 @@ static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 	if (!flp->initialized)
 	{
 		printk(KERN_WARNING "%s: irq %d for uninitialized device.\n", dev->name, irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	byte = sdla_byte(dev, flp->type == SDLA_S508 ? SDLA_508_IRQ_INTERFACE : SDLA_502_IRQ_INTERFACE);
@@ -914,6 +922,7 @@ static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 	/* this clears the byte, informing the Z80 we're done */
 	byte = 0;
 	sdla_write(dev, flp->type == SDLA_S508 ? SDLA_508_IRQ_INTERFACE : SDLA_502_IRQ_INTERFACE, &byte, sizeof(byte));
+	return IRQ_HANDLED;
 }
 
 static void sdla_poll(unsigned long device)
@@ -982,8 +991,6 @@ static int sdla_close(struct net_device *dev)
 
 	netif_stop_queue(dev);
 	
-	MOD_DEC_USE_COUNT;
-
 	return(0);
 }
 
@@ -1085,12 +1092,10 @@ static int sdla_open(struct net_device *dev)
 
 	netif_start_queue(dev);
 	
-	MOD_INC_USE_COUNT;
-
 	return(0);
 }
 
-static int sdla_config(struct net_device *dev, struct frad_conf *conf, int get)
+static int sdla_config(struct net_device *dev, struct frad_conf __user *conf, int get)
 {
 	struct frad_local *flp;
 	struct conf_data  data;
@@ -1188,7 +1193,7 @@ static int sdla_config(struct net_device *dev, struct frad_conf *conf, int get)
 	return(0);
 }
 
-static int sdla_xfer(struct net_device *dev, struct sdla_mem *info, int read)
+static int sdla_xfer(struct net_device *dev, struct sdla_mem __user *info, int read)
 {
 	struct sdla_mem mem;
 	char	*temp;
@@ -1201,6 +1206,7 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem *info, int read)
 		temp = kmalloc(mem.len, GFP_KERNEL);
 		if (!temp)
 			return(-ENOMEM);
+		memset(temp, 0, mem.len);
 		sdla_read(dev, mem.addr, temp, mem.len);
 		if(copy_to_user(mem.data, temp, mem.len))
 		{
@@ -1265,7 +1271,7 @@ static int sdla_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	{
 		case FRAD_GET_CONF:
 		case FRAD_SET_CONF:
-			return(sdla_config(dev, (struct frad_conf *)ifr->ifr_data, cmd == FRAD_GET_CONF));
+			return(sdla_config(dev, ifr->ifr_data, cmd == FRAD_GET_CONF));
 
 		case SDLA_IDENTIFY:
 			ifr->ifr_flags = flp->type;
@@ -1300,7 +1306,9 @@ NOTE:  This is rather a useless action right now, as the
 
 		case SDLA_WRITEMEM:
 		case SDLA_READMEM:
-			return(sdla_xfer(dev, (struct sdla_mem *)ifr->ifr_data, cmd == SDLA_READMEM));
+			if(!capable(CAP_SYS_RAWIO))
+				return -EPERM;
+			return(sdla_xfer(dev, ifr->ifr_data, cmd == SDLA_READMEM));
 
 		case SDLA_START:
 			sdla_start(dev);
@@ -1334,6 +1342,8 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 	struct frad_local *flp;
 	int               i;
 	char              byte;
+	unsigned base;
+	int err = -EINVAL;
 
 	flp = dev->priv;
 
@@ -1347,8 +1357,11 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 	if (i == sizeof(valid_port) / sizeof(int))
 		return(-EINVAL);
 
-	dev->base_addr = map->base_addr;
-	request_region(dev->base_addr, SDLA_IO_EXTENTS, dev->name);
+	if (!request_region(map->base_addr, SDLA_IO_EXTENTS, dev->name)){
+		printk(KERN_WARNING "SDLA: io-port 0x%04lx in use \n", dev->base_addr);
+		return(-EINVAL);
+	}
+	base = map->base_addr;
 
 	/* test for card types, S502A, S502E, S507, S508                 */
 	/* these tests shut down the card completely, so clear the state */
@@ -1356,97 +1369,78 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 	flp->state = 0;
    
 	for(i=1;i<SDLA_IO_EXTENTS;i++)
-		if (inb(dev->base_addr + i) != 0xFF)
+		if (inb(base + i) != 0xFF)
 			break;
 
-	if (i == SDLA_IO_EXTENTS)
-	{   
-		outb(SDLA_HALT, dev->base_addr + SDLA_REG_Z80_CONTROL);
-		if ((inb(dev->base_addr + SDLA_S502_STS) & 0x0F) == 0x08)
-		{
-			outb(SDLA_S502E_INTACK, dev->base_addr + SDLA_REG_CONTROL);
-			if ((inb(dev->base_addr + SDLA_S502_STS) & 0x0F) == 0x0C)
-			{
-				outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
+	if (i == SDLA_IO_EXTENTS) {   
+		outb(SDLA_HALT, base + SDLA_REG_Z80_CONTROL);
+		if ((inb(base + SDLA_S502_STS) & 0x0F) == 0x08) {
+			outb(SDLA_S502E_INTACK, base + SDLA_REG_CONTROL);
+			if ((inb(base + SDLA_S502_STS) & 0x0F) == 0x0C) {
+				outb(SDLA_HALT, base + SDLA_REG_CONTROL);
 				flp->type = SDLA_S502E;
+				goto got_type;
 			}
 		}
 	}
 
-	if (flp->type == SDLA_UNKNOWN)
-	{
-		for(byte=inb(dev->base_addr),i=0;i<SDLA_IO_EXTENTS;i++)
-			if (inb(dev->base_addr + i) != byte)
-				break;
+	for(byte=inb(base),i=0;i<SDLA_IO_EXTENTS;i++)
+		if (inb(base + i) != byte)
+			break;
 
-		if (i == SDLA_IO_EXTENTS)
-		{
-			outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
-			if ((inb(dev->base_addr + SDLA_S502_STS) & 0x7E) == 0x30)
-			{
-				outb(SDLA_S507_ENABLE, dev->base_addr + SDLA_REG_CONTROL);
-				if ((inb(dev->base_addr + SDLA_S502_STS) & 0x7E) == 0x32)
-				{
-					outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
-					flp->type = SDLA_S507;
-				}
+	if (i == SDLA_IO_EXTENTS) {
+		outb(SDLA_HALT, base + SDLA_REG_CONTROL);
+		if ((inb(base + SDLA_S502_STS) & 0x7E) == 0x30) {
+			outb(SDLA_S507_ENABLE, base + SDLA_REG_CONTROL);
+			if ((inb(base + SDLA_S502_STS) & 0x7E) == 0x32) {
+				outb(SDLA_HALT, base + SDLA_REG_CONTROL);
+				flp->type = SDLA_S507;
+				goto got_type;
 			}
 		}
 	}
 
-	if (flp->type == SDLA_UNKNOWN)
-	{
-		outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
-		if ((inb(dev->base_addr + SDLA_S508_STS) & 0x3F) == 0x00)
-		{
-			outb(SDLA_S508_INTEN, dev->base_addr + SDLA_REG_CONTROL);
-			if ((inb(dev->base_addr + SDLA_S508_STS) & 0x3F) == 0x10)
-			{
-				outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
-				flp->type = SDLA_S508;
+	outb(SDLA_HALT, base + SDLA_REG_CONTROL);
+	if ((inb(base + SDLA_S508_STS) & 0x3F) == 0x00) {
+		outb(SDLA_S508_INTEN, base + SDLA_REG_CONTROL);
+		if ((inb(base + SDLA_S508_STS) & 0x3F) == 0x10) {
+			outb(SDLA_HALT, base + SDLA_REG_CONTROL);
+			flp->type = SDLA_S508;
+			goto got_type;
+		}
+	}
+
+	outb(SDLA_S502A_HALT, base + SDLA_REG_CONTROL);
+	if (inb(base + SDLA_S502_STS) == 0x40) {
+		outb(SDLA_S502A_START, base + SDLA_REG_CONTROL);
+		if (inb(base + SDLA_S502_STS) == 0x40) {
+			outb(SDLA_S502A_INTEN, base + SDLA_REG_CONTROL);
+			if (inb(base + SDLA_S502_STS) == 0x44) {
+				outb(SDLA_S502A_START, base + SDLA_REG_CONTROL);
+				flp->type = SDLA_S502A;
+				goto got_type;
 			}
 		}
 	}
 
-	if (flp->type == SDLA_UNKNOWN)
-	{
-		outb(SDLA_S502A_HALT, dev->base_addr + SDLA_REG_CONTROL);
-		if (inb(dev->base_addr + SDLA_S502_STS) == 0x40)
-		{
-			outb(SDLA_S502A_START, dev->base_addr + SDLA_REG_CONTROL);
-			if (inb(dev->base_addr + SDLA_S502_STS) == 0x40)
-			{
-				outb(SDLA_S502A_INTEN, dev->base_addr + SDLA_REG_CONTROL);
-				if (inb(dev->base_addr + SDLA_S502_STS) == 0x44)
-				{
-					outb(SDLA_S502A_START, dev->base_addr + SDLA_REG_CONTROL);
-					flp->type = SDLA_S502A;
-				}
-			}
-		}
-	}
+	printk(KERN_NOTICE "%s: Unknown card type\n", dev->name);
+	err = -ENODEV;
+	goto fail;
 
-	if (flp->type == SDLA_UNKNOWN)
-	{
-		printk(KERN_NOTICE "%s: Unknown card type\n", dev->name);
-		return(-ENODEV);
-	}
-
-	switch(dev->base_addr)
-	{
+got_type:
+	switch(base) {
 		case 0x270:
 		case 0x280:
 		case 0x380: 
 		case 0x390:
-			if ((flp->type != SDLA_S508) && (flp->type != SDLA_S507))
-				return(-EINVAL);
+			if (flp->type != SDLA_S508 && flp->type != SDLA_S507)
+				goto fail;
 	}
 
-	switch (map->irq)
-	{
+	switch (map->irq) {
 		case 2:
 			if (flp->type != SDLA_S502E)
-				return(-EINVAL);
+				goto fail;
 			break;
 
 		case 10:
@@ -1454,28 +1448,26 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 		case 12:
 		case 15:
 		case 4:
-			if ((flp->type != SDLA_S508) && (flp->type != SDLA_S507))
-				return(-EINVAL);
-
+			if (flp->type != SDLA_S508 && flp->type != SDLA_S507)
+				goto fail;
+			break;
 		case 3:
 		case 5:
 		case 7:
 			if (flp->type == SDLA_S502A)
-				return(-EINVAL);
+				goto fail;
 			break;
 
 		default:
-			return(-EINVAL);
+			goto fail;
 	}
-	dev->irq = map->irq;
 
+	err = -EAGAIN;
 	if (request_irq(dev->irq, &sdla_isr, 0, dev->name, dev)) 
-		return(-EAGAIN);
+		goto fail;
 
-	if (flp->type == SDLA_S507)
-	{
-		switch(dev->irq)
-		{
+	if (flp->type == SDLA_S507) {
+		switch(dev->irq) {
 			case 3:
 				flp->state = SDLA_S507_IRQ3;
 				break;
@@ -1507,35 +1499,25 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 		if (valid_mem[i] == map->mem_start)
 			break;   
 
+	err = -EINVAL;
 	if (i == sizeof(valid_mem) / sizeof(int))
-	/*
-	 *	FIXME:
-	 *	BUG BUG BUG: MUST RELEASE THE IRQ WE ALLOCATED IN
-	 *	ALL THESE CASES
-	 *
-	 */
-		return(-EINVAL);
+		goto fail2;
 
-	if ((flp->type == SDLA_S502A) && (((map->mem_start & 0xF000) >> 12) == 0x0E))
-		return(-EINVAL);
+	if (flp->type == SDLA_S502A && (map->mem_start & 0xF000) >> 12 == 0x0E)
+		goto fail2;
 
-	if ((flp->type != SDLA_S507) && ((map->mem_start >> 16) == 0x0B))
-		return(-EINVAL);
+	if (flp->type != SDLA_S507 && map->mem_start >> 16 == 0x0B)
+		goto fail2;
 
-	if ((flp->type == SDLA_S507) && ((map->mem_start >> 16) == 0x0D))
-		return(-EINVAL);
-
-	dev->mem_start = map->mem_start;
-	dev->mem_end = dev->mem_start + 0x2000;
+	if (flp->type == SDLA_S507 && map->mem_start >> 16 == 0x0D)
+		goto fail2;
 
 	byte = flp->type != SDLA_S508 ? SDLA_8K_WINDOW : 0;
 	byte |= (map->mem_start & 0xF000) >> (12 + (flp->type == SDLA_S508 ? 1 : 0));
-	switch(flp->type)
-	{
+	switch(flp->type) {
 		case SDLA_S502A:
 		case SDLA_S502E:
-			switch (map->mem_start >> 16)
-			{
+			switch (map->mem_start >> 16) {
 				case 0x0A:
 					byte |= SDLA_S502_SEG_A;
 					break;
@@ -1551,8 +1533,7 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 			}
 			break;
 		case SDLA_S507:
-			switch (map->mem_start >> 16)
-			{
+			switch (map->mem_start >> 16) {
 				case 0x0A:
 					byte |= SDLA_S507_SEG_A;
 					break;
@@ -1568,8 +1549,7 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 			}
 			break;
 		case SDLA_S508:
-			switch (map->mem_start >> 16)
-			{
+			switch (map->mem_start >> 16) {
 				case 0x0A:
 					byte |= SDLA_S508_SEG_A;
 					break;
@@ -1587,7 +1567,7 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 	}
 
 	/* set the memory bits, and enable access */
-	outb(byte, dev->base_addr + SDLA_REG_PC_WINDOW);
+	outb(byte, base + SDLA_REG_PC_WINDOW);
 
 	switch(flp->type)
 	{
@@ -1601,10 +1581,20 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 			flp->state = SDLA_MEMEN;
 			break;
 	}
-	outb(flp->state, dev->base_addr + SDLA_REG_CONTROL);
+	outb(flp->state, base + SDLA_REG_CONTROL);
 
+	dev->irq = map->irq;
+	dev->base_addr = base;
+	dev->mem_start = map->mem_start;
+	dev->mem_end = dev->mem_start + 0x2000;
 	flp->initialized = 1;
-	return(0);
+	return 0;
+
+fail2:
+	free_irq(map->irq, dev);
+fail:
+	release_region(base, SDLA_IO_EXTENTS);
+	return err;
 }
  
 static struct net_device_stats *sdla_stats(struct net_device *dev)
@@ -1615,19 +1605,19 @@ static struct net_device_stats *sdla_stats(struct net_device *dev)
 	return(&flp->stats);
 }
 
-int __init sdla_init(struct net_device *dev)
+static void setup_sdla(struct net_device *dev)
 {
-	struct frad_local *flp;
+	struct frad_local *flp = dev->priv;
 
-	/* allocate the private data structure */
-	flp = kmalloc(sizeof(struct frad_local), GFP_KERNEL);
-	if (!flp)
-		return(-ENOMEM);
+	netdev_boot_setup_check(dev);
 
-	memset(flp, 0, sizeof(struct frad_local));
-	dev->priv = flp;
-
+	SET_MODULE_OWNER(dev);
 	dev->flags		= 0;
+	dev->type		= 0xFFFF;
+	dev->hard_header_len	= 0;
+	dev->addr_len		= 0;
+	dev->mtu		= SDLA_MAX_MTU;
+
 	dev->open		= sdla_open;
 	dev->stop		= sdla_close;
 	dev->do_ioctl		= sdla_ioctl;
@@ -1636,13 +1626,6 @@ int __init sdla_init(struct net_device *dev)
 	dev->hard_start_xmit	= sdla_transmit;
 	dev->change_mtu		= sdla_change_mtu;
 
-	dev->type		= 0xFFFF;
-	dev->hard_header_len = 0;
-	dev->addr_len		= 0;
-	dev->mtu		= SDLA_MAX_MTU;
-
-	dev_init_buffers(dev);
-   
 	flp->activate		= sdla_activate;
 	flp->deactivate		= sdla_deactivate;
 	flp->assoc		= sdla_assoc;
@@ -1653,36 +1636,41 @@ int __init sdla_init(struct net_device *dev)
 	flp->timer.expires	= 1;
 	flp->timer.data		= (unsigned long) dev;
 	flp->timer.function	= sdla_poll;
-
-	return(0);
 }
 
-int __init sdla_c_setup(void)
+static struct net_device *sdla;
+
+static int __init init_sdla(void)
 {
+	int err;
+
 	printk("%s.\n", version);
-	register_frad(devname);
-	return 0;
+
+	sdla = alloc_netdev(sizeof(struct frad_local), "sdla0", setup_sdla);
+	if (!sdla) 
+		return -ENOMEM;
+
+	err = register_netdev(sdla);
+	if (err) 
+		free_netdev(sdla);
+
+	return err;
 }
 
-#ifdef MODULE
-static struct net_device sdla0 = {"sdla0", 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, sdla_init};
-
-int init_module(void)
+static void __exit exit_sdla(void)
 {
-	int result;
+	struct frad_local *flp = sdla->priv;
 
-	sdla_c_setup();
-	if ((result = register_netdev(&sdla0)) != 0)
-		return result;
-	return 0;
+	unregister_netdev(sdla);
+	if (flp->initialized) {
+		free_irq(sdla->irq, sdla);
+		release_region(sdla->base_addr, SDLA_IO_EXTENTS);
+	}
+	del_timer_sync(&flp->timer);
+	free_netdev(sdla);
 }
 
-void cleanup_module(void)
-{
-	unregister_netdev(&sdla0);
-	if (sdla0.priv)
-		kfree(sdla0.priv);
-	if (sdla0.irq)
-		free_irq(sdla0.irq, &sdla0);
-}
-#endif /* MODULE */
+MODULE_LICENSE("GPL");
+
+module_init(init_sdla);
+module_exit(exit_sdla);

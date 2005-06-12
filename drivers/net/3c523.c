@@ -3,7 +3,7 @@
 
 
    This is an extension to the Linux operating system, and is covered by the
-   same Gnu Public License that covers that work.
+   same GNU General Public License that covers that work.
 
    Copyright 1995, 1996 by Chris Beauregard (cpbeaure@undergrad.math.uwaterloo.ca)
 
@@ -81,28 +81,34 @@
    added option to disable multicast as is causes problems
        Ganesh Sittampalam <ganesh.sittampalam@magdalen.oxford.ac.uk>
        Stuart Adamson <stuart.adamson@compsoc.net>
+   Nov 2001
+   added support for ethtool (jgarzik)
 	
    $Header: /fsys2/home/chrisb/linux-1.3.59-MCA/drivers/net/RCS/3c523.c,v 1.1 1996/02/05 01:53:46 chrisb Exp chrisb $
  */
 
+#define DRV_NAME		"3c523"
+#define DRV_VERSION		"17-Nov-2001"
+
+#include <linux/init.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
-#include <linux/mca.h>
-#include <asm/processor.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
+#include <linux/mca-legacy.h>
+#include <linux/ethtool.h>
+#include <linux/bitops.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
-#include <linux/init.h>
+#include <asm/uaccess.h>
+#include <asm/processor.h>
+#include <asm/io.h>
 
 #include "3c523.h"
 
@@ -148,9 +154,9 @@ sizeof(nop_cmd) = 8;
 
 #define RECV_BUFF_SIZE 1524	/* slightly oversized */
 #define XMIT_BUFF_SIZE 1524	/* slightly oversized */
-#define NUM_XMIT_BUFFS 4	/* config for both, 8K and 16K shmem */
-#define NUM_RECV_BUFFS_8  1	/* config for 8K shared mem */
-#define NUM_RECV_BUFFS_16 6	/* config for 16K shared mem */
+#define NUM_XMIT_BUFFS 1	/* config for both, 8K and 16K shmem */
+#define NUM_RECV_BUFFS_8  4	/* config for 8K shared mem */
+#define NUM_RECV_BUFFS_16 9	/* config for 16K shared mem */
 
 #if (NUM_XMIT_BUFFS == 1)
 #define NO_NOPCOMMANDS		/* only possible with NUM_XMIT_BUFFS=1 */
@@ -173,7 +179,7 @@ sizeof(nop_cmd) = 8;
       	dev->name,__LINE__); \
       elmc_id_reset586(); } } }
 
-static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr);
+static irqreturn_t elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr);
 static int elmc_open(struct net_device *dev);
 static int elmc_close(struct net_device *dev);
 static int elmc_send_packet(struct sk_buff *, struct net_device *);
@@ -182,6 +188,7 @@ static void elmc_timeout(struct net_device *dev);
 #ifdef ELMC_MULTICAST
 static void set_multicast_list(struct net_device *dev);
 #endif
+static struct ethtool_ops netdev_ethtool_ops;
 
 /* helper-functions */
 static int init586(struct net_device *dev);
@@ -197,15 +204,17 @@ struct priv {
 	struct net_device_stats stats;
 	unsigned long base;
 	char *memtop;
+	unsigned long mapped_start;		/* Start of ioremap */
 	volatile struct rfd_struct *rfd_last, *rfd_top, *rfd_first;
 	volatile struct scp_struct *scp;	/* volatile is important */
 	volatile struct iscp_struct *iscp;	/* volatile is important */
 	volatile struct scb_struct *scb;	/* volatile is important */
 	volatile struct tbd_struct *xmit_buffs[NUM_XMIT_BUFFS];
-	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 #if (NUM_XMIT_BUFFS == 1)
+	volatile struct transmit_cmd_struct *xmit_cmds[2];
 	volatile struct nop_cmd_struct *nop_cmds[2];
 #else
+	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 	volatile struct nop_cmd_struct *nop_cmds[NUM_XMIT_BUFFS];
 #endif
 	volatile int nop_point, num_recv_buffs;
@@ -303,13 +312,13 @@ static int __init check586(struct net_device *dev, unsigned long where, unsigned
 	char *iscp_addrs[2];
 	int i = 0;
 
-	p->base = where + size - 0x01000000;
-	p->memtop = phys_to_virt(where) + size;
-	p->scp = (struct scp_struct *)phys_to_virt(p->base + SCP_DEFAULT_ADDRESS);
+	p->base = (unsigned long) isa_bus_to_virt((unsigned long)where) + size - 0x01000000;
+	p->memtop = isa_bus_to_virt((unsigned long)where) + size;
+	p->scp = (struct scp_struct *)(p->base + SCP_DEFAULT_ADDRESS);
 	memset((char *) p->scp, 0, sizeof(struct scp_struct));
 	p->scp->sysbus = SYSBUSVAL;	/* 1 = 8Bit-Bus, 0 = 16 Bit */
 
-	iscp_addrs[0] = phys_to_virt(where);
+	iscp_addrs[0] = isa_bus_to_virt((unsigned long)where);
 	iscp_addrs[1] = (char *) p->scp - sizeof(struct iscp_struct);
 
 	for (i = 0; i < 2; i++) {
@@ -325,6 +334,7 @@ static int __init check586(struct net_device *dev, unsigned long where, unsigned
 
 		/* apparently, you sometimes have to kick the 82586 twice... */
 		elmc_id_attn586();
+		DELAY(1);
 
 		if (p->iscp->busy) {	/* i82586 clears 'busy' after successful init */
 			return 0;
@@ -344,8 +354,8 @@ void alloc586(struct net_device *dev)
 	elmc_id_reset586();
 	DELAY(2);
 
-	p->scp = (struct scp_struct *) phys_to_virt(p->base + SCP_DEFAULT_ADDRESS);
-	p->scb = (struct scb_struct *) phys_to_virt(dev->mem_start);
+	p->scp = (struct scp_struct *) (p->base + SCP_DEFAULT_ADDRESS);
+	p->scb = (struct scb_struct *) isa_bus_to_virt(dev->mem_start);
 	p->iscp = (struct iscp_struct *) ((char *) p->scp - sizeof(struct iscp_struct));
 
 	memset((char *) p->iscp, 0, sizeof(struct iscp_struct));
@@ -400,15 +410,17 @@ static int elmc_getinfo(char *buf, int slot, void *d)
 
 /*****************************************************************/
 
-int __init elmc_probe(struct net_device *dev)
+static int __init do_elmc_probe(struct net_device *dev)
 {
-	static int slot = 0;
+	static int slot;
 	int base_addr = dev->base_addr;
 	int irq = dev->irq;
 	u_char status = 0;
 	u_char revision = 0;
 	int i = 0;
 	unsigned int size = 0;
+	int retval;
+	struct priv *pr = dev->priv;
 
 	SET_MODULE_OWNER(dev);
 	if (MCA_bus == 0) {
@@ -428,19 +440,24 @@ int __init elmc_probe(struct net_device *dev)
 		   Also reject it if the card is already in use.
 		 */
 
-		if((irq && irq != dev->irq) || (base_addr && base_addr != dev->base_addr)
-		   || check_region(dev->base_addr,ELMC_IO_EXTENT)) {
+		if ((irq && irq != dev->irq) || 
+		    (base_addr && base_addr != dev->base_addr)) {
 			slot = mca_find_adapter(ELMC_MCA_ID, slot + 1);
 			continue;
 		}
+		if (!request_region(dev->base_addr, ELMC_IO_EXTENT, DRV_NAME)) {
+			slot = mca_find_adapter(ELMC_MCA_ID, slot + 1);
+			continue;
+		}
+
 		/* found what we're looking for... */
 		break;
 	}
 
 	/* we didn't find any 3c523 in the slots we checked for */
-	if (slot == MCA_NOTFOUND) {
-		return ((base_addr || irq) ? ENXIO : ENODEV);
-	}
+	if (slot == MCA_NOTFOUND)
+		return ((base_addr || irq) ? -ENXIO : -ENODEV);
+
 	mca_set_adapter_name(slot, "3Com 3c523 Etherlink/MC");
 	mca_set_adapter_procfn(slot, (MCA_ProcFn) elmc_getinfo, dev);
 
@@ -479,15 +496,8 @@ int __init elmc_probe(struct net_device *dev)
 		break;
 	}
 
-	request_region(dev->base_addr, ELMC_IO_EXTENT, "3c523");
-
-	dev->priv = (void *) kmalloc(sizeof(struct priv), GFP_KERNEL);
-	if (dev->priv == NULL) {
-		return -ENOMEM;
-	}
-	memset((char *) dev->priv, 0, sizeof(struct priv));
-
-	((struct priv *) (dev->priv))->slot = slot;
+	memset(pr, 0, sizeof(struct priv));
+	pr->slot = slot;
 
 	printk(KERN_INFO "%s: 3Com 3c523 Rev 0x%x at %#lx\n", dev->name, (int) revision,
 	       dev->base_addr);
@@ -513,18 +523,19 @@ int __init elmc_probe(struct net_device *dev)
 	if (!check586(dev, dev->mem_start, size)) {
 		printk(KERN_ERR "%s: memprobe, Can't find memory at 0x%lx!\n", dev->name,
 		       dev->mem_start);
-		release_region(dev->base_addr, ELMC_IO_EXTENT);
-		return -ENODEV;
+		retval = -ENODEV;
+		goto err_out;
 	}
 	dev->mem_end = dev->mem_start + size;	/* set mem_end showed by 'ifconfig' */
 
-	((struct priv *) (dev->priv))->base = dev->mem_start + size - 0x01000000;
+	pr->memtop = isa_bus_to_virt(dev->mem_start) + size;
+	pr->base = (unsigned long) isa_bus_to_virt(dev->mem_start) + size - 0x01000000;
 	alloc586(dev);
 
 	elmc_id_reset586();	/* make sure it doesn't generate spurious ints */
 
 	/* set number of receive-buffs according to memsize */
-	((struct priv *) dev->priv)->num_recv_buffs = NUM_RECV_BUFFS_16;
+	pr->num_recv_buffs = NUM_RECV_BUFFS_16;
 
 	/* dump all the assorted information */
 	printk(KERN_INFO "%s: IRQ %d, %sternal xcvr, memory %#lx-%#lx.\n", dev->name,
@@ -551,9 +562,8 @@ int __init elmc_probe(struct net_device *dev)
 #else
 	dev->set_multicast_list = NULL;
 #endif
-
-	ether_setup(dev);
-
+	dev->ethtool_ops = &netdev_ethtool_ops;
+	
 	/* note that we haven't actually requested the IRQ from the kernel.
 	   That gets done in elmc_open().  I'm not sure that's such a good idea,
 	   but it works, so I'll go with it. */
@@ -563,7 +573,44 @@ int __init elmc_probe(struct net_device *dev)
 #endif
 
 	return 0;
+err_out:
+	mca_set_adapter_procfn(slot, NULL, NULL);
+	release_region(dev->base_addr, ELMC_IO_EXTENT);
+	return retval;
 }
+ 
+static void cleanup_card(struct net_device *dev)
+{
+	mca_set_adapter_procfn(((struct priv *) (dev->priv))->slot, NULL, NULL);
+	release_region(dev->base_addr, ELMC_IO_EXTENT);
+}
+
+#ifndef MODULE
+struct net_device * __init elmc_probe(int unit)
+{
+	struct net_device *dev = alloc_etherdev(sizeof(struct priv));
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_elmc_probe(dev);
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	cleanup_card(dev);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
 
 /**********************************************
  * init the chip (elmc-interrupt should be disabled?!)
@@ -852,7 +899,8 @@ static void *alloc_rfa(struct net_device *dev, void *ptr)
  * Interrupt Handler ...
  */
 
-static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
+static irqreturn_t
+elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	unsigned short stat;
@@ -860,7 +908,7 @@ static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 
 	if (dev == NULL) {
 		printk(KERN_ERR "elmc-interrupt: irq %d for unknown device.\n", (int) -(((struct pt_regs *) reg_ptr)->orig_eax + 2));
-		return;
+		return IRQ_NONE;
 	} else if (!netif_running(dev)) {
 		/* The 3c523 has this habit of generating interrupts during the
 		   reset.  I'm not sure if the ni52 has this same problem, but it's
@@ -869,10 +917,10 @@ static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 		   might have missed a few. */
 
 		elmc_id_attn586();	/* ack inter. and disable any more */
-		return;
+		return IRQ_HANDLED;
 	} else if (!(ELMC_CTRL_INT & inb(dev->base_addr + ELMC_CTRL))) {
 		/* wasn't this device */
-		return;
+		return IRQ_NONE;
 	}
 	/* reading ELMC_CTRL also clears the INT bit. */
 
@@ -919,6 +967,7 @@ static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 			break;
 		}
 	}
+	return IRQ_HANDLED;
 }
 
 /*******************************************************
@@ -944,9 +993,11 @@ static void elmc_rcv_int(struct net_device *dev)
 				if (skb != NULL) {
 					skb->dev = dev;
 					skb_reserve(skb, 2);	/* 16 byte alignment */
-					memcpy(skb_put(skb, totlen), (u8 *)phys_to_virt(p->base) + (unsigned long) rbd->buffer, totlen);
+					skb_put(skb,totlen);
+					eth_copy_and_sum(skb, (char *) p->base+(unsigned long) rbd->buffer,totlen,0);
 					skb->protocol = eth_type_trans(skb, dev);
 					netif_rx(skb);
+					dev->last_rx = jiffies;
 					p->stats.rx_packets++;
 					p->stats.rx_bytes += totlen;
 				} else {
@@ -1086,6 +1137,7 @@ static void elmc_timeout(struct net_device *dev)
 static int elmc_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	int len;
+	int i;
 #ifndef NO_NOPCOMMANDS
 	int next_nop;
 #endif
@@ -1093,8 +1145,11 @@ static int elmc_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 	netif_stop_queue(dev);
 
-	memcpy((char *) p->xmit_cbuffs[p->xmit_count], (char *) (skb->data), skb->len);
 	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
+	
+	if (len != skb->len)
+		memset((char *) p->xmit_cbuffs[p->xmit_count], 0, ETH_ZLEN);
+	memcpy((char *) p->xmit_cbuffs[p->xmit_count], (char *) (skb->data), skb->len);
 
 #if (NUM_XMIT_BUFFS == 1)
 #ifdef NO_NOPCOMMANDS
@@ -1196,34 +1251,54 @@ static void set_multicast_list(struct net_device *dev)
 }
 #endif
 
-/*************************************************************************/
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "MCA 0x%lx", dev->base_addr);
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 #ifdef MODULE
 
 /* Increase if needed ;) */
 #define MAX_3C523_CARDS 4
 
-static struct net_device dev_elmc[MAX_3C523_CARDS];
+static struct net_device *dev_elmc[MAX_3C523_CARDS];
 static int irq[MAX_3C523_CARDS];
 static int io[MAX_3C523_CARDS];
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_3C523_CARDS) "i");
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_3C523_CARDS) "i");
+module_param_array(irq, int, NULL, 0);
+module_param_array(io, int, NULL, 0);
+MODULE_PARM_DESC(io, "EtherLink/MC I/O base address(es)");
+MODULE_PARM_DESC(irq, "EtherLink/MC IRQ number(s)");
 
 int init_module(void)
 {
 	int this_dev,found = 0;
 
 	/* Loop until we either can't find any more cards, or we have MAX_3C523_CARDS */	
-	for(this_dev=0; this_dev<MAX_3C523_CARDS; this_dev++) 
-		{
-		struct net_device *dev = &dev_elmc[this_dev];
+	for(this_dev=0; this_dev<MAX_3C523_CARDS; this_dev++) {
+		struct net_device *dev = alloc_etherdev(sizeof(struct priv));
+		if (!dev)
+			break;
 		dev->irq=irq[this_dev];
 		dev->base_addr=io[this_dev];
-		dev->init=elmc_probe;
-		if(register_netdev(dev)!=0) {
-			if(io[this_dev]==0) break;
-			printk(KERN_WARNING "3c523.c: No 3c523 card found at io=%#x\n",io[this_dev]);
-		} else found++;
+		if (do_elmc_probe(dev) == 0) {
+			if (register_netdev(dev) == 0) {
+				dev_elmc[this_dev] = dev;
+				found++;
+				continue;
+			}
+			cleanup_card(dev);
+		}
+		free_netdev(dev);
+		if (io[this_dev]==0)
+			break;
+		printk(KERN_WARNING "3c523.c: No 3c523 card found at io=%#x\n",io[this_dev]);
 	}
 
 	if(found==0) {
@@ -1235,31 +1310,12 @@ int init_module(void)
 void cleanup_module(void)
 {
 	int this_dev;
-	for(this_dev=0; this_dev<MAX_3C523_CARDS; this_dev++) {
-
-		struct net_device *dev = &dev_elmc[this_dev];
-		if(dev->priv) {
-			/* shutdown interrupts on the card */
-			elmc_id_reset586();
-			if (dev->irq != 0) {
-				/* this should be done by close, but if we failed to
-				   initialize properly something may have gotten hosed. */
-				free_irq(dev->irq, dev);
-				dev->irq = 0;
-			}
-			if (dev->base_addr != 0) {
-				release_region(dev->base_addr, ELMC_IO_EXTENT);
-				dev->base_addr = 0;
-			}
-			irq[this_dev] = 0;
-			io[this_dev] = 0;
+	for (this_dev=0; this_dev<MAX_3C523_CARDS; this_dev++) {
+		struct net_device *dev = dev_elmc[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-
-			mca_set_adapter_procfn(((struct priv *) (dev->priv))->slot,
-			       NULL, NULL);
-
-			kfree(dev->priv);
-			dev->priv = NULL;
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }

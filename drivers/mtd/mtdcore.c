@@ -1,5 +1,5 @@
 /*
- * $Id: mtdcore.c,v 1.27 2000/12/10 01:10:09 dwmw2 Exp $
+ * $Id: mtdcore.c,v 1.44 2004/11/16 18:28:59 dwmw2 Exp $
  *
  * Core registration and callback routines for MTD
  * drivers and users.
@@ -11,13 +11,13 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/ioctl.h>
-#include <stdarg.h>
+#include <linux/init.h>
 #include <linux/mtd/compatmac.h>
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
@@ -25,9 +25,15 @@
 
 #include <linux/mtd/mtd.h>
 
-static DECLARE_MUTEX(mtd_table_mutex);
-static struct mtd_info *mtd_table[MAX_MTD_DEVICES];
-static struct mtd_notifier *mtd_notifiers = NULL;
+/* These are exported solely for the purpose of mtd_blkdevs.c. You 
+   should not use them for _anything_ else */
+DECLARE_MUTEX(mtd_table_mutex);
+struct mtd_info *mtd_table[MAX_MTD_DEVICES];
+
+EXPORT_SYMBOL_GPL(mtd_table_mutex);
+EXPORT_SYMBOL_GPL(mtd_table);
+
+static LIST_HEAD(mtd_notifiers);
 
 /**
  *	add_mtd_device - register an MTD device
@@ -45,21 +51,28 @@ int add_mtd_device(struct mtd_info *mtd)
 
 	down(&mtd_table_mutex);
 
-	for (i=0; i< MAX_MTD_DEVICES; i++)
-		if (!mtd_table[i])
-		{
-			struct mtd_notifier *not=mtd_notifiers;
+	for (i=0; i < MAX_MTD_DEVICES; i++)
+		if (!mtd_table[i]) {
+			struct list_head *this;
 
 			mtd_table[i] = mtd;
 			mtd->index = i;
+			mtd->usecount = 0;
+
 			DEBUG(0, "mtd: Giving out device %d to %s\n",i, mtd->name);
-			while (not)
-			{
-				(*(not->add))(mtd);
-				not = not->next;
+			/* No need to get a refcount on the module containing
+			   the notifier, since we hold the mtd_table_mutex */
+			list_for_each(this, &mtd_notifiers) {
+				struct mtd_notifier *not = list_entry(this, struct mtd_notifier, list);
+				not->add(mtd);
 			}
+			
 			up(&mtd_table_mutex);
-			MOD_INC_USE_COUNT;
+			/* We _know_ we aren't being removed, because
+			   our caller is still holding us here. So none
+			   of this try_ nonsense, and no bitching about it
+			   either. :) */
+			__module_get(THIS_MODULE);
 			return 0;
 		}
 	
@@ -79,29 +92,34 @@ int add_mtd_device(struct mtd_info *mtd)
 
 int del_mtd_device (struct mtd_info *mtd)
 {
-	struct mtd_notifier *not=mtd_notifiers;
-	int i;
+	int ret;
 	
 	down(&mtd_table_mutex);
 
-	for (i=0; i < MAX_MTD_DEVICES; i++)
-	{
-		if (mtd_table[i] == mtd)
-		{
-			while (not)
-			{
-				(*(not->remove))(mtd);
-				not = not->next;
-			}
-			mtd_table[i] = NULL;
-			up (&mtd_table_mutex);
-			MOD_DEC_USE_COUNT;
-			return 0;
+	if (mtd_table[mtd->index] != mtd) {
+		ret = -ENODEV;
+	} else if (mtd->usecount) {
+		printk(KERN_NOTICE "Removing MTD device #%d (%s) with use count %d\n", 
+		       mtd->index, mtd->name, mtd->usecount);
+		ret = -EBUSY;
+	} else {
+		struct list_head *this;
+
+		/* No need to get a refcount on the module containing
+		   the notifier, since we hold the mtd_table_mutex */
+		list_for_each(this, &mtd_notifiers) {
+			struct mtd_notifier *not = list_entry(this, struct mtd_notifier, list);
+			not->remove(mtd);
 		}
+
+		mtd_table[mtd->index] = NULL;
+
+		module_put(THIS_MODULE);
+		ret = 0;
 	}
 
 	up(&mtd_table_mutex);
-	return 1;
+	return ret;
 }
 
 /**
@@ -119,10 +137,9 @@ void register_mtd_user (struct mtd_notifier *new)
 
 	down(&mtd_table_mutex);
 
-	new->next = mtd_notifiers;
-	mtd_notifiers = new;
+	list_add(&new->list, &mtd_notifiers);
 
- 	MOD_INC_USE_COUNT;
+ 	__module_get(THIS_MODULE);
 	
 	for (i=0; i< MAX_MTD_DEVICES; i++)
 		if (mtd_table[i])
@@ -143,34 +160,24 @@ void register_mtd_user (struct mtd_notifier *new)
 
 int unregister_mtd_user (struct mtd_notifier *old)
 {
-	struct mtd_notifier **prev = &mtd_notifiers;
-	struct mtd_notifier *cur;
 	int i;
 
 	down(&mtd_table_mutex);
 
-	while ((cur = *prev)) {
-		if (cur == old) {
-			*prev = cur->next;
+	module_put(THIS_MODULE);
 
-			MOD_DEC_USE_COUNT;
-
-			for (i=0; i< MAX_MTD_DEVICES; i++)
-				if (mtd_table[i])
-					old->remove(mtd_table[i]);
+	for (i=0; i< MAX_MTD_DEVICES; i++)
+		if (mtd_table[i])
+			old->remove(mtd_table[i]);
 			
-			up(&mtd_table_mutex);
-			return 0;
-		}
-		prev = &cur->next;
-	}
+	list_del(&old->list);
 	up(&mtd_table_mutex);
-	return 1;
+	return 0;
 }
 
 
 /**
- *	__get_mtd_device - obtain a validated handle for an MTD device
+ *	get_mtd_device - obtain a validated handle for an MTD device
  *	@mtd: last known address of the required MTD device
  *	@num: internal device number of the required MTD device
  *
@@ -178,11 +185,10 @@ int unregister_mtd_user (struct mtd_notifier *old)
  *	table, if any.	Given an address and num == -1, search the device table
  *	for a device with that address and return if it's still present. Given
  *	both, return the num'th driver only if its address matches. Return NULL
- *	if not. get_mtd_device() increases the use count, but
- *	__get_mtd_device() doesn't - you should generally use get_mtd_device().
+ *	if not.
  */
 	
-struct mtd_info *__get_mtd_device(struct mtd_info *mtd, int num)
+struct mtd_info *get_mtd_device(struct mtd_info *mtd, int num)
 {
 	struct mtd_info *ret = NULL;
 	int i;
@@ -198,16 +204,97 @@ struct mtd_info *__get_mtd_device(struct mtd_info *mtd, int num)
 		if (mtd && mtd != ret)
 			ret = NULL;
 	}
-	
+
+	if (ret && !try_module_get(ret->owner))
+		ret = NULL;
+
+	if (ret)
+		ret->usecount++;
+
 	up(&mtd_table_mutex);
 	return ret;
 }
 
+void put_mtd_device(struct mtd_info *mtd)
+{
+	int c;
+
+	down(&mtd_table_mutex);
+	c = --mtd->usecount;
+	up(&mtd_table_mutex);
+	BUG_ON(c < 0);
+
+	module_put(mtd->owner);
+}
+
+/* default_mtd_writev - default mtd writev method for MTD devices that
+ *			dont implement their own
+ */
+
+int default_mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+		       unsigned long count, loff_t to, size_t *retlen)
+{
+	unsigned long i;
+	size_t totlen = 0, thislen;
+	int ret = 0;
+
+	if(!mtd->write) {
+		ret = -EROFS;
+	} else {
+		for (i=0; i<count; i++) {
+			if (!vecs[i].iov_len)
+				continue;
+			ret = mtd->write(mtd, to, vecs[i].iov_len, &thislen, vecs[i].iov_base);
+			totlen += thislen;
+			if (ret || thislen != vecs[i].iov_len)
+				break;
+			to += vecs[i].iov_len;
+		}
+	}
+	if (retlen)
+		*retlen = totlen;
+	return ret;
+}
+
+
+/* default_mtd_readv - default mtd readv method for MTD devices that dont
+ *		       implement their own
+ */
+
+int default_mtd_readv(struct mtd_info *mtd, struct kvec *vecs,
+		      unsigned long count, loff_t from, size_t *retlen)
+{
+	unsigned long i;
+	size_t totlen = 0, thislen;
+	int ret = 0;
+
+	if(!mtd->read) {
+		ret = -EIO;
+	} else {
+		for (i=0; i<count; i++) {
+			if (!vecs[i].iov_len)
+				continue;
+			ret = mtd->read(mtd, from, vecs[i].iov_len, &thislen, vecs[i].iov_base);
+			totlen += thislen;
+			if (ret || thislen != vecs[i].iov_len)
+				break;
+			from += vecs[i].iov_len;
+		}
+	}
+	if (retlen)
+		*retlen = totlen;
+	return ret;
+}
+
+
 EXPORT_SYMBOL(add_mtd_device);
 EXPORT_SYMBOL(del_mtd_device);
-EXPORT_SYMBOL(__get_mtd_device);
+EXPORT_SYMBOL(get_mtd_device);
+EXPORT_SYMBOL(put_mtd_device);
 EXPORT_SYMBOL(register_mtd_user);
 EXPORT_SYMBOL(unregister_mtd_user);
+EXPORT_SYMBOL(default_mtd_writev);
+EXPORT_SYMBOL(default_mtd_readv);
 
 /*====================================================================*/
 /* Power management code */
@@ -246,10 +333,7 @@ static int mtd_pm_callback(struct pm_dev *dev, pm_request_t rqst, void *data)
 /* Support for /proc/mtd */
 
 #ifdef CONFIG_PROC_FS
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
 static struct proc_dir_entry *proc_mtd;
-#endif
 
 static inline int mtd_proc_info (char *buf, int i)
 {
@@ -258,23 +342,19 @@ static inline int mtd_proc_info (char *buf, int i)
 	if (!this)
 		return 0;
 
-	return sprintf(buf, "mtd%d: %8.8lx \"%s\"\n", i, this->size,
-		       this->name);
+	return sprintf(buf, "mtd%d: %8.8x %8.8x \"%s\"\n", i, this->size,
+		       this->erasesize, this->name);
 }
 
-static int mtd_read_proc ( char *page, char **start, off_t off,int count
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
-                       ,int *eof, void *data_unused
-#else
-                        ,int unused
-#endif
-			)
+static int mtd_read_proc (char *page, char **start, off_t off, int count,
+			  int *eof, void *data_unused)
 {
-	int len = 0, l, i;
+	int len, l, i;
         off_t   begin = 0;
 
 	down(&mtd_table_mutex);
 
+	len = sprintf(page, "dev:    size   erasesize  name\n");
         for (i=0; i< MAX_MTD_DEVICES; i++) {
 
                 l = mtd_proc_info(page + len, i);
@@ -287,53 +367,26 @@ static int mtd_read_proc ( char *page, char **start, off_t off,int count
                 }
         }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
         *eof = 1;
-#endif
 
 done:
 	up(&mtd_table_mutex);
         if (off >= len+begin)
                 return 0;
-        *start = page + (begin-off);
+        *start = page + (off-begin);
         return ((count < begin+len-off) ? count : begin+len-off);
 }
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,2,0)
-struct proc_dir_entry mtd_proc_entry = {
-        0,                 /* low_ino: the inode -- dynamic */
-        3, "mtd",     /* len of name and name */
-        S_IFREG | S_IRUGO, /* mode */
-        1, 0, 0,           /* nlinks, owner, group */
-        0, NULL,           /* size - unused; operations -- use default */
-        &mtd_read_proc,   /* function used to read data */
-        /* nothing more */
-    };
-#endif
 
 #endif /* CONFIG_PROC_FS */
 
 /*====================================================================*/
 /* Init code */
 
-#if  LINUX_VERSION_CODE < 0x20212 && defined(MODULE)
-#define init_mtd init_module
-#define cleanup_mtd cleanup_module
-#endif
-
-mod_init_t init_mtd(void)
+static int __init init_mtd(void)
 {
 #ifdef CONFIG_PROC_FS
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
-	if ((proc_mtd = create_proc_entry( "mtd", 0, 0 )))
-	  proc_mtd->read_proc = mtd_read_proc;
-#else
-        proc_register_dynamic(&proc_root,&mtd_proc_entry);
-#endif
-#endif
-
-#if LINUX_VERSION_CODE < 0x20212
-	init_mtd_devices();
+	if ((proc_mtd = create_proc_entry( "mtd", 0, NULL )))
+		proc_mtd->read_proc = mtd_read_proc;
 #endif
 
 #ifdef CONFIG_PM
@@ -342,7 +395,7 @@ mod_init_t init_mtd(void)
 	return 0;
 }
 
-mod_exit_t cleanup_mtd(void)
+static void __exit cleanup_mtd(void)
 {
 #ifdef CONFIG_PM
 	if (mtd_pm_dev) {
@@ -352,12 +405,8 @@ mod_exit_t cleanup_mtd(void)
 #endif
 
 #ifdef CONFIG_PROC_FS
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
         if (proc_mtd)
-          remove_proc_entry( "mtd", 0);
-#else
-        proc_unregister(&proc_root,mtd_proc_entry.low_ino);
-#endif
+		remove_proc_entry( "mtd", NULL);
 #endif
 }
 
@@ -365,3 +414,6 @@ module_init(init_mtd);
 module_exit(cleanup_mtd);
 
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>");
+MODULE_DESCRIPTION("Core MTD registration and access routines");

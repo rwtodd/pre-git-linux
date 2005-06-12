@@ -17,18 +17,20 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/smp_lock.h>
+#include <linux/delay.h>
+#include <linux/spinlock.h>
+#include <linux/mm.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/sbus.h>
-#include <asm/delay.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -43,7 +45,6 @@
 #include <asm/vfc_ioctls.h>
 
 static struct file_operations vfc_fops;
-static devfs_handle_t devfs_handle;  /*  For the directory  */
 struct vfc_dev **vfc_dev_lst;
 static char vfcstr[]="vfc";
 static unsigned char saa9051_init_array[VFC_SAA9051_NR] = {
@@ -143,8 +144,6 @@ int init_vfc_devstruct(struct vfc_dev *dev, int instance)
 
 int init_vfc_device(struct sbus_dev *sdev,struct vfc_dev *dev, int instance)
 {
-	char devname[8];
-
 	if(dev == NULL) {
 		printk(KERN_ERR "VFC: Bogus pointer passed\n");
 		return -ENOMEM;
@@ -167,11 +166,9 @@ int init_vfc_device(struct sbus_dev *sdev,struct vfc_dev *dev, int instance)
 	if (init_vfc_hw(dev))
 		return -EIO;
 
-	sprintf (devname, "%d", instance);
-	dev->de = devfs_register (devfs_handle, devname, DEVFS_FL_DEFAULT,
-				  VFC_MAJOR, instance,
-				  S_IFCHR | S_IRUSR | S_IWUSR,
-				  &vfc_fops, NULL);
+	devfs_mk_cdev(MKDEV(VFC_MAJOR, instance),
+			S_IFCHR | S_IRUSR | S_IWUSR,
+			"vfc/%d", instance);
 	return 0;
 }
 
@@ -181,17 +178,26 @@ struct vfc_dev *vfc_get_dev_ptr(int instance)
 	return vfc_dev_lst[instance];
 }
 
+static DEFINE_SPINLOCK(vfc_dev_lock);
+
 static int vfc_open(struct inode *inode, struct file *file) 
 {
 	struct vfc_dev *dev;
 
-	dev = vfc_get_dev_ptr(MINOR(inode->i_rdev));
-	if (dev == NULL)
+	spin_lock(&vfc_dev_lock);
+	dev = vfc_get_dev_ptr(iminor(inode));
+	if (dev == NULL) {
+		spin_unlock(&vfc_dev_lock);
 		return -ENODEV;
-	if (dev->busy)
+	}
+	if (dev->busy) {
+		spin_unlock(&vfc_dev_lock);
 		return -EBUSY;
+	}
 
 	dev->busy = 1;
+	spin_unlock(&vfc_dev_lock);
+
 	vfc_lock_device(dev);
 	
 	vfc_csr_init(dev);
@@ -209,18 +215,18 @@ static int vfc_release(struct inode *inode,struct file *file)
 {
 	struct vfc_dev *dev;
 
-	lock_kernel();
-	dev = vfc_get_dev_ptr(MINOR(inode->i_rdev));
+	spin_lock(&vfc_dev_lock);
+	dev = vfc_get_dev_ptr(iminor(inode));
 	if (!dev || !dev->busy) {
-		unlock_kernel();
+		spin_unlock(&vfc_dev_lock);
 		return -EINVAL;
 	}
 	dev->busy = 0;
-	unlock_kernel();
+	spin_unlock(&vfc_dev_lock);
 	return 0;
 }
 
-static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg) 
+static int vfc_debug(struct vfc_dev *dev, int cmd, void __user *argp)
 {
 	struct vfc_debug_inout inout;
 	unsigned char *buffer;
@@ -230,15 +236,14 @@ static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg)
 
 	switch(cmd) {
 	case VFC_I2C_SEND:
-		if(copy_from_user(&inout, (void *)arg, sizeof(inout)))
+		if(copy_from_user(&inout, argp, sizeof(inout)))
 			return -EFAULT;
 
-		buffer = kmalloc(inout.len*sizeof(char), GFP_KERNEL);
+		buffer = kmalloc(inout.len, GFP_KERNEL);
 		if (buffer == NULL)
 			return -ENOMEM;
 
-		if(copy_from_user(buffer, inout.buffer, 
-				  inout.len*sizeof(char))) {
+		if(copy_from_user(buffer, inout.buffer, inout.len)) {
 			kfree(buffer);
 			return -EFAULT;
 		}
@@ -247,9 +252,9 @@ static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg)
 		vfc_lock_device(dev);
 		inout.ret=
 			vfc_i2c_sendbuf(dev,inout.addr & 0xff,
-					inout.buffer,inout.len);
+					buffer,inout.len);
 
-		if (copy_to_user((void *)arg,&inout,sizeof(inout))) {
+		if (copy_to_user(argp,&inout,sizeof(inout))) {
 			kfree(buffer);
 			return -EFAULT;
 		}
@@ -257,14 +262,14 @@ static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg)
 
 		break;
 	case VFC_I2C_RECV:
-		if (copy_from_user(&inout, (void *)arg, sizeof(inout)))
+		if (copy_from_user(&inout, argp, sizeof(inout)))
 			return -EFAULT;
 
 		buffer = kmalloc(inout.len, GFP_KERNEL);
 		if (buffer == NULL)
 			return -ENOMEM;
 
-		memset(buffer,0,inout.len*sizeof(char));
+		memset(buffer,0,inout.len);
 		vfc_lock_device(dev);
 		inout.ret=
 			vfc_i2c_recvbuf(dev,inout.addr & 0xff
@@ -275,7 +280,7 @@ static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg)
 			kfree(buffer);
 			return -EFAULT;
 		}
-		if (copy_to_user((void *)arg,&inout,sizeof(inout))) {
+		if (copy_to_user(argp,&inout,sizeof(inout))) {
 			kfree(buffer);
 			return -EFAULT;
 		}
@@ -334,7 +339,7 @@ static int vfc_set_control_ioctl(struct inode *inode, struct file *file,
 {
 	int setcmd, ret = 0;
 
-	if (copy_from_user(&setcmd,(void *)arg,sizeof(unsigned int)))
+	if (copy_from_user(&setcmd,(void __user *)arg,sizeof(unsigned int)))
 		return -EFAULT;
 
 	VFC_IOCTL_DEBUG_PRINTK(("vfc%d: IOCTL(VFCSCTRL) arg=0x%x\n",
@@ -352,7 +357,7 @@ static int vfc_set_control_ioctl(struct inode *inode, struct file *file,
 		vfc_capture_poll(dev);
 		break;
 	case DIAGMODE:
-		if(suser()) {
+		if(capable(CAP_SYS_ADMIN)) {
 			vfc_lock_device(dev);
 			dev->control_reg |= VFC_CONTROL_DIAGMODE;
 			sbus_writel(dev->control_reg, &dev->regs->control);
@@ -392,7 +397,7 @@ int vfc_port_change_ioctl(struct inode *inode, struct file *file,
 	int ret = 0;
 	int cmd;
 
-	if(copy_from_user(&cmd, (void *)arg, sizeof(unsigned int))) {
+	if(copy_from_user(&cmd, (void __user *)arg, sizeof(unsigned int))) {
 		VFC_IOCTL_DEBUG_PRINTK(("vfc%d: User passed bogus pointer to "
 					"vfc_port_change_ioctl\n",
 					dev->instance));
@@ -462,7 +467,7 @@ int vfc_set_video_ioctl(struct inode *inode, struct file *file,
 	int ret = 0;
 	int cmd;
 
-	if(copy_from_user(&cmd, (void *)arg, sizeof(unsigned int))) {
+	if(copy_from_user(&cmd, (void __user *)arg, sizeof(unsigned int))) {
 		VFC_IOCTL_DEBUG_PRINTK(("vfc%d: User passed bogus pointer to "
 					"vfc_set_video_ioctl\n",
 					dev->instance));
@@ -536,7 +541,7 @@ int vfc_get_video_ioctl(struct inode *inode, struct file *file,
 	VFC_IOCTL_DEBUG_PRINTK(("vfc%d: IOCTL(VFCGVID) returning status 0x%x; "
 				"buf[0]=%x\n", dev->instance, status, buf[0]));
 
-	if (copy_to_user((void *)arg,&status,sizeof(unsigned int))) {
+	if (copy_to_user((void __user *)arg,&status,sizeof(unsigned int))) {
 		VFC_IOCTL_DEBUG_PRINTK(("vfc%d: User passed bogus pointer to "
 					"vfc_get_video_ioctl\n",
 					dev->instance));
@@ -551,8 +556,9 @@ static int vfc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	int ret = 0;
 	unsigned int tmp;
 	struct vfc_dev *dev;
+	void __user *argp = (void __user *)arg;
 
-	dev = vfc_get_dev_ptr(MINOR(inode->i_rdev));
+	dev = vfc_get_dev_ptr(iminor(inode));
 	if(dev == NULL)
 		return -ENODEV;
 	
@@ -562,7 +568,7 @@ static int vfc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		VFC_IOCTL_DEBUG_PRINTK(("vfc%d: IOCTL(VFCGCTRL)\n", dev->instance));
 #endif
 		tmp = sbus_readl(&dev->regs->control);
-		if(copy_to_user((void *)arg, &tmp, sizeof(unsigned int))) {
+		if(copy_to_user(argp, &tmp, sizeof(unsigned int))) {
 			ret = -EFAULT;
 			break;
 		}
@@ -579,7 +585,7 @@ static int vfc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		break;
 	case VFCHUE:
 		VFC_IOCTL_DEBUG_PRINTK(("vfc%d: IOCTL(VFCHUE)\n", dev->instance));
-		if(copy_from_user(&tmp,(void *)arg,sizeof(unsigned int))) {
+		if(copy_from_user(&tmp,argp,sizeof(unsigned int))) {
 			VFC_IOCTL_DEBUG_PRINTK(("vfc%d: User passed bogus pointer "
 						"to IOCTL(VFCHUE)", dev->instance));
 			ret = -EFAULT;
@@ -597,26 +603,22 @@ static int vfc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		VFC_IOCTL_DEBUG_PRINTK(("vfc%d: IOCTL(VFCRDINFO)\n", dev->instance));
 		break;
 	default:
-		ret = vfc_debug(vfc_get_dev_ptr(MINOR(inode->i_rdev)),
-				cmd, arg);
+		ret = vfc_debug(vfc_get_dev_ptr(iminor(inode)), cmd, argp);
 		break;
 	};
 
 	return ret;
 }
 
-static int vfc_mmap(struct inode *inode, struct file *file, 
-		    struct vm_area_struct *vma) 
+static int vfc_mmap(struct file *file, struct vm_area_struct *vma) 
 {
 	unsigned int map_size, ret, map_offset;
 	struct vfc_dev *dev;
 	
-	lock_kernel();
-	dev = vfc_get_dev_ptr(MINOR(inode->i_rdev));
-	if(dev == NULL) {
-		unlock_kernel();
+	dev = vfc_get_dev_ptr(iminor(file->f_dentry->d_inode));
+	if(dev == NULL)
 		return -ENODEV;
-	}
+
 	map_size = vma->vm_end - vma->vm_start;
 	if(map_size > sizeof(struct vfc_regs)) 
 		map_size = sizeof(struct vfc_regs);
@@ -624,9 +626,9 @@ static int vfc_mmap(struct inode *inode, struct file *file,
 	vma->vm_flags |=
 		(VM_SHM | VM_LOCKED | VM_IO | VM_MAYREAD | VM_MAYWRITE | VM_MAYSHARE);
 	map_offset = (unsigned int) (long)dev->phys_regs;
-	ret = io_remap_page_range(vma->vm_start, map_offset, map_size, 
+	ret = io_remap_page_range(vma, vma->vm_start, map_offset, map_size, 
 				  vma->vm_page_prot, dev->which_io);
-	unlock_kernel();
+
 	if(ret)
 		return -EAGAIN;
 
@@ -634,19 +636,13 @@ static int vfc_mmap(struct inode *inode, struct file *file,
 }
 
 
-static int vfc_lseek(struct inode *inode, struct file *file, 
-		     off_t offset, int origin) 
-{
-	return -ESPIPE;
-}
-
 static struct file_operations vfc_fops = {
-	owner:		THIS_MODULE,
-	llseek:		vfc_lseek,
-	ioctl:		vfc_ioctl,
-	mmap:		vfc_mmap,
-	open:		vfc_open,
-	release:	vfc_release,
+	.owner =	THIS_MODULE,
+	.llseek =	no_llseek,
+	.ioctl =	vfc_ioctl,
+	.mmap =		vfc_mmap,
+	.open =		vfc_open,
+	.release =	vfc_release,
 };
 
 static int vfc_probe(void)
@@ -674,14 +670,13 @@ static int vfc_probe(void)
 	memset(vfc_dev_lst, 0, sizeof(struct vfc_dev *) * (cards + 1));
 	vfc_dev_lst[cards] = NULL;
 
-	ret = devfs_register_chrdev(VFC_MAJOR, vfcstr, &vfc_fops);
+	ret = register_chrdev(VFC_MAJOR, vfcstr, &vfc_fops);
 	if(ret) {
 		printk(KERN_ERR "Unable to get major number %d\n", VFC_MAJOR);
 		kfree(vfc_dev_lst);
 		return -EIO;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "vfc", NULL);
-
+	devfs_mk_dir("vfc");
 	instance = 0;
 	for_all_sbusdev(sdev, sbus) {
 		if (strcmp(sdev->prom_name, "vfc") == 0) {
@@ -721,7 +716,7 @@ static void deinit_vfc_device(struct vfc_dev *dev)
 {
 	if(dev == NULL)
 		return;
-	devfs_unregister (dev->de);
+	devfs_remove("vfc/%d", dev->instance);
 	sbus_iounmap((unsigned long)dev->regs, sizeof(struct vfc_regs));
 	kfree(dev);
 }
@@ -730,15 +725,16 @@ void cleanup_module(void)
 {
 	struct vfc_dev **devp;
 
-	devfs_unregister_chrdev(VFC_MAJOR,vfcstr);
+	unregister_chrdev(VFC_MAJOR,vfcstr);
 
 	for (devp = vfc_dev_lst; *devp; devp++)
 		deinit_vfc_device(*devp);
 
-	devfs_unregister (devfs_handle);
+	devfs_remove("vfc");
 	kfree(vfc_dev_lst);
 	return;
 }
 #endif
 
+MODULE_LICENSE("GPL");
 

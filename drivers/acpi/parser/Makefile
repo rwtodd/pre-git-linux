@@ -2,15 +2,7 @@
 # Makefile for all Linux ACPI interpreter subdirectories
 #
 
-O_TARGET := ../$(shell basename `pwd`).o
-
-obj-$(CONFIG_ACPI) := $(patsubst %.c,%.o,$(wildcard *.c))
-
-EXTRA_CFLAGS += -I../include
+obj-y := psargs.o    psparse.o  pstree.o   pswalk.o  \
+	 psopcode.o  psscope.o  psutils.o  psxface.o
 
 EXTRA_CFLAGS += $(ACPI_CFLAGS)
-
-include $(TOPDIR)/Rules.make
-
-clean:
-	$(RM) *.o 

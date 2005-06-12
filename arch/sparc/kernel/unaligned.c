@@ -1,4 +1,4 @@
-/* $Id: unaligned.c,v 1.22 2000/04/29 08:05:21 anton Exp $
+/* $Id: unaligned.c,v 1.23 2001/12/21 00:54:31 davem Exp $
  * unaligned.c: Unaligned load/store trap handling with special
  *              cases for the kernel to do them more quickly.
  *
@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/system.h>
@@ -108,14 +109,14 @@ static inline unsigned long fetch_reg(unsigned int reg, struct pt_regs *regs)
 
 static inline unsigned long safe_fetch_reg(unsigned int reg, struct pt_regs *regs)
 {
-	struct reg_window *win;
+	struct reg_window __user *win;
 	unsigned long ret;
 
-	if(reg < 16)
+	if (reg < 16)
 		return (!reg ? 0 : regs->u_regs[reg]);
 
 	/* Ho hum, the slightly complicated case. */
-	win = (struct reg_window *) regs->u_regs[UREG_FP];
+	win = (struct reg_window __user *) regs->u_regs[UREG_FP];
 
 	if ((unsigned long)win & 3)
 		return -1;
@@ -136,8 +137,8 @@ static inline unsigned long *fetch_reg_addr(unsigned int reg, struct pt_regs *re
 	return &win->locals[reg - 16];
 }
 
-static inline unsigned long compute_effective_address(struct pt_regs *regs,
-						      unsigned int insn)
+static unsigned long compute_effective_address(struct pt_regs *regs,
+					       unsigned int insn)
 {
 	unsigned int rs1 = (insn >> 14) & 0x1f;
 	unsigned int rs2 = insn & 0x1f;
@@ -152,8 +153,8 @@ static inline unsigned long compute_effective_address(struct pt_regs *regs,
 	}
 }
 
-static inline unsigned long safe_compute_effective_address(struct pt_regs *regs,
-							   unsigned int insn)
+unsigned long safe_compute_effective_address(struct pt_regs *regs,
+					     unsigned int insn)
 {
 	unsigned int rs1 = (insn >> 14) & 0x1f;
 	unsigned int rs2 = insn & 0x1f;
@@ -224,7 +225,7 @@ __asm__ __volatile__ (								\
 	"or	%%l1, %%g7, %%g7\n\t"						\
 	"st	%%g7, [%0 + 4]\n"						\
 "0:\n\n\t"									\
-	".section __ex_table\n\t"						\
+	".section __ex_table,#alloc\n\t"					\
 	".word	4b, " #errh "\n\t"						\
 	".word	5b, " #errh "\n\t"						\
 	".word	6b, " #errh "\n\t"						\
@@ -277,7 +278,7 @@ __asm__ __volatile__ (								\
 "16:\t"	"stb	%%l2, [%0]\n"							\
 "17:\t"	"stb	%%l1, [%0 + 1]\n"						\
 "0:\n\n\t"									\
-	".section __ex_table\n\t"						\
+	".section __ex_table,#alloc\n\t"					\
 	".word	4b, " #errh "\n\t"						\
 	".word	5b, " #errh "\n\t"						\
 	".word	6b, " #errh "\n\t"						\
@@ -310,15 +311,19 @@ __asm__ __volatile__ (								\
 	store_common(dst_addr, size, src_val, errh);				\
 })
 
-/* XXX Need to capture/release other cpu's for SMP around this. */
+extern void smp_capture(void);
+extern void smp_release(void);
+
 #define do_atomic(srcdest_reg, mem, errh) ({					\
 	unsigned long flags, tmp;						\
 										\
-	save_and_cli(flags);							\
+	smp_capture();								\
+	local_irq_save(flags);							\
 	tmp = *srcdest_reg;							\
 	do_integer_load(srcdest_reg, 4, mem, 0, errh);				\
 	store_common(mem, 4, &tmp, errh);					\
-	restore_flags(flags);							\
+	local_irq_restore(flags);						\
+	smp_release();								\
 })
 
 static inline void advance(struct pt_regs *regs)
@@ -342,7 +347,7 @@ void kernel_mna_trap_fault(struct pt_regs *regs, unsigned int insn) __asm__ ("ke
 void kernel_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
 {
 	unsigned long g2 = regs->u_regs [UREG_G2];
-	unsigned long fixup = search_exception_table (regs->pc, &g2);
+	unsigned long fixup = search_extables_range(regs->pc, &g2);
 
 	if (!fixup) {
 		unsigned long address = compute_effective_address(regs, insn);
@@ -426,29 +431,32 @@ static inline int ok_for_user(struct pt_regs *regs, unsigned int insn,
 	int retval, check = (dir == load) ? VERIFY_READ : VERIFY_WRITE;
 	int size = ((insn >> 19) & 3) == 3 ? 8 : 4;
 
-	if((regs->pc | regs->npc) & 3)
+	if ((regs->pc | regs->npc) & 3)
 		return 0;
 
 	/* Must verify_area() in all the necessary places. */
-#define WINREG_ADDR(regnum) ((void *)(((unsigned long *)regs->u_regs[UREG_FP])+(regnum)))
+#define WINREG_ADDR(regnum) \
+	((void __user *)(((unsigned long *)regs->u_regs[UREG_FP])+(regnum)))
+
 	retval = 0;
 	reg = (insn >> 25) & 0x1f;
-	if(reg >= 16) {
+	if (reg >= 16) {
 		retval = verify_area(check, WINREG_ADDR(reg - 16), size);
-		if(retval)
+		if (retval)
 			return retval;
 	}
 	reg = (insn >> 14) & 0x1f;
-	if(reg >= 16) {
+	if (reg >= 16) {
 		retval = verify_area(check, WINREG_ADDR(reg - 16), size);
-		if(retval)
+		if (retval)
 			return retval;
 	}
-	if(!(insn & 0x2000)) {
+	if (!(insn & 0x2000)) {
 		reg = (insn & 0x1f);
-		if(reg >= 16) {
-			retval = verify_area(check, WINREG_ADDR(reg - 16), size);
-			if(retval)
+		if (reg >= 16) {
+			retval = verify_area(check, WINREG_ADDR(reg - 16),
+					     size);
+			if (retval)
 				return retval;
 		}
 	}
@@ -465,7 +473,7 @@ void user_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRALN;
-	info.si_addr = (void *)safe_compute_effective_address(regs, insn);
+	info.si_addr = (void __user *)safe_compute_effective_address(regs, insn);
 	info.si_trapno = 0;
 	send_sig_info(SIGBUS, &info, current);
 }
@@ -506,9 +514,18 @@ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
 			break;
 
 		case both:
+#if 0 /* unsupported */
 			do_atomic(fetch_reg_addr(((insn>>25)&0x1f), regs),
 				  (unsigned long *) addr,
 				  user_unaligned_trap_fault);
+#else
+			/*
+			 * This was supported in 2.4. However, we question
+			 * the value of SWAP instruction across word boundaries.
+			 */
+			printk("Unaligned SWAP unsupported.\n");
+			goto kill_user;
+#endif
 			break;
 
 		default:

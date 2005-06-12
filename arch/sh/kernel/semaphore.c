@@ -7,8 +7,10 @@
  * specific changes in <asm/semaphore-helper.h>
  */
 
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
+#include <linux/init.h>
 #include <asm/semaphore.h>
 #include <asm/semaphore-helper.h>
 
@@ -102,7 +104,7 @@ void __up(struct semaphore *sem)
 	tsk->state = TASK_RUNNING;		\
 	remove_wait_queue(&sem->wait, &wait);
 
-void __down(struct semaphore * sem)
+void __sched __down(struct semaphore * sem)
 {
 	DOWN_VAR
 	DOWN_HEAD(TASK_UNINTERRUPTIBLE)
@@ -112,7 +114,7 @@ void __down(struct semaphore * sem)
 	DOWN_TAIL(TASK_UNINTERRUPTIBLE)
 }
 
-int __down_interruptible(struct semaphore * sem)
+int __sched __down_interruptible(struct semaphore * sem)
 {
 	int ret = 0;
 	DOWN_VAR
@@ -134,163 +136,4 @@ int __down_interruptible(struct semaphore * sem)
 int __down_trylock(struct semaphore * sem)
 {
 	return waking_non_zero_trylock(sem);
-}
-
-/* Called when someone has done an up that transitioned from
- * negative to non-negative, meaning that the lock has been
- * granted to whomever owned the bias.
- */
-struct rw_semaphore *rwsem_wake_readers(struct rw_semaphore *sem)
-{
-	if (xchg(&sem->read_bias_granted, 1))
-		BUG();
-	wake_up(&sem->wait);
-	return sem;
-}
-
-struct rw_semaphore *rwsem_wake_writer(struct rw_semaphore *sem)
-{
-	if (xchg(&sem->write_bias_granted, 1))
-		BUG();
-	wake_up(&sem->write_bias_wait);
-	return sem;
-}
-
-struct rw_semaphore * __rwsem_wake(struct rw_semaphore *sem)
-{
-	if (atomic_read(&sem->count) == 0)
-		return rwsem_wake_writer(sem);
-	else
-		return rwsem_wake_readers(sem);
-}
-
-struct rw_semaphore *down_read_failed_biased(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	add_wait_queue(&sem->wait, &wait);	/* put ourselves at the head of the list */
-
-	for (;;) {
-		if (sem->read_bias_granted && xchg(&sem->read_bias_granted, 0))
-			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (!sem->read_bias_granted)
-			schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	return sem;
-}
-
-struct rw_semaphore *down_write_failed_biased(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	add_wait_queue_exclusive(&sem->write_bias_wait, &wait);	/* put ourselves at the end of the list */
-
-	for (;;) {
-		if (sem->write_bias_granted && xchg(&sem->write_bias_granted, 0))
-			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (!sem->write_bias_granted)
-			schedule();
-	}
-
-	remove_wait_queue(&sem->write_bias_wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	/* if the lock is currently unbiased, awaken the sleepers
-	 * FIXME: this wakes up the readers early in a bit of a
-	 * stampede -> bad!
-	 */
-	if (atomic_read(&sem->count) >= 0)
-		wake_up(&sem->wait);
-
-	return sem;
-}
-
-/* Wait for the lock to become unbiased.  Readers
- * are non-exclusive. =)
- */
-struct rw_semaphore *down_read_failed(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	__up_read(sem);	/* this takes care of granting the lock */
-
-	add_wait_queue(&sem->wait, &wait);
-
-	while (atomic_read(&sem->count) < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (atomic_read(&sem->count) >= 0)
-			break;
-		schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	return sem;
-}
-
-/* Wait for the lock to become unbiased. Since we're
- * a writer, we'll make ourselves exclusive.
- */
-struct rw_semaphore *down_write_failed(struct rw_semaphore *sem)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	__up_write(sem);	/* this takes care of granting the lock */
-
-	add_wait_queue_exclusive(&sem->wait, &wait);
-
-	while (atomic_read(&sem->count) < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		if (atomic_read(&sem->count) >= 0)
-			break;	/* we must attempt to acquire or bias the lock */
-		schedule();
-	}
-
-	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
-
-	return sem;
-}
-
-struct rw_semaphore *__down_read(struct rw_semaphore *sem, int carry)
-{
-	if (carry) {
-		int saved, new;
-
-		do {
-			down_read_failed(sem);
-			saved = atomic_read(&sem->count);
-			if ((new = atomic_dec_return(&sem->count)) >= 0)
-				return sem;
-		} while (!(new < 0 && saved >=0));
-	}
-
-	return down_read_failed_biased(sem);
-}
-
-struct rw_semaphore *__down_write(struct rw_semaphore *sem, int carry)
-{
-	if (carry) {
-		int saved, new;
-
-		do {
-			down_write_failed(sem);
-			saved = atomic_read(&sem->count);
-			if ((new = atomic_sub_return(RW_LOCK_BIAS, &sem->count) ) == 0)
-				return sem;
-		} while (!(new < 0 && saved >=0));
-	}
-
-	return down_write_failed_biased(sem);
 }

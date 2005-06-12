@@ -9,7 +9,7 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/in.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/clnt.h>
@@ -67,7 +67,7 @@ nlm_lookup_file(struct svc_rqst *rqstp, struct nlm_file **result,
 	down(&nlm_file_sema);
 
 	for (file = nlm_files[hash]; file; file = file->f_next)
-		if (!memcmp(&file->f_handle, f, sizeof(*f)))
+		if (!nfs_compare_fh(&file->f_handle, f))
 			goto found;
 
 	dprintk("lockd: creating file for (%08x %08x %08x %08x %08x %08x)\n",
@@ -124,16 +124,16 @@ out_free:
 static inline void
 nlm_delete_file(struct nlm_file *file)
 {
-	struct inode *inode = file->f_file.f_dentry->d_inode;
+	struct inode *inode = file->f_file->f_dentry->d_inode;
 	struct nlm_file	**fp, *f;
 
 	dprintk("lockd: closing file %s/%ld\n",
-		kdevname(inode->i_dev), inode->i_ino);
+		inode->i_sb->s_id, inode->i_ino);
 	fp = nlm_files + file->f_hash;
 	while ((f = *fp) != NULL) {
 		if (f == file) {
 			*fp = file->f_next;
-			nlmsvc_ops->fclose(&file->f_file);
+			nlmsvc_ops->fclose(file->f_file);
 			kfree(file);
 			return;
 		}
@@ -176,7 +176,7 @@ again:
 			lock.fl_type  = F_UNLCK;
 			lock.fl_start = 0;
 			lock.fl_end   = OFFSET_MAX;
-			if (posix_lock_file(&file->f_file, &lock, 0) < 0) {
+			if (posix_lock_file(file->f_file, &lock) < 0) {
 				printk("lockd: unlock failure in %s:%d\n",
 						__FILE__, __LINE__);
 				return 1;
@@ -230,7 +230,7 @@ nlm_traverse_files(struct nlm_host *host, int action)
 			if (!file->f_blocks && !file->f_locks
 			 && !file->f_shares && !file->f_count) {
 				*fp = file->f_next;
-				nlmsvc_ops->fclose(&file->f_file);
+				nlmsvc_ops->fclose(file->f_file);
 				kfree(file);
 			} else {
 				fp = &file->f_next;
@@ -294,17 +294,16 @@ nlmsvc_free_host_resources(struct nlm_host *host)
 }
 
 /*
- * Delete a client when the nfsd entry is removed.
+ * delete all hosts structs for clients
  */
 void
-nlmsvc_invalidate_client(struct svc_client *clnt)
+nlmsvc_invalidate_all(void)
 {
-	struct nlm_host	*host;
-
-	if ((host = nlm_lookup_host(clnt, NULL, 0, 0)) != NULL) {
-		dprintk("lockd: invalidating client for %s\n", host->h_name);
+	struct nlm_host *host;
+	while ((host = nlm_find_client()) != NULL) {
 		nlmsvc_free_host_resources(host);
 		host->h_expires = 0;
+		host->h_killed = 1;
 		nlm_release_host(host);
 	}
 }

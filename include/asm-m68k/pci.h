@@ -7,6 +7,8 @@
  * Written by Wout Klaren.
  */
 
+#include <asm/scatterlist.h>
+
 struct pci_ops;
 
 /*
@@ -30,19 +32,30 @@ struct pci_bus_info
 	struct pci_ops *m68k_pci_ops;
 
 	void (*fixup)(int pci_modify);
-	void (*conf_device)(unsigned char bus, unsigned char device_fn);
+	void (*conf_device)(struct pci_dev *dev);
 };
 
 #define pcibios_assign_all_busses()	0
+#define pcibios_scan_all_fns(a, b)	0
 
-extern inline void pcibios_set_master(struct pci_dev *dev)
+static inline void pcibios_set_master(struct pci_dev *dev)
 {
 	/* No special bus mastering setup handling */
 }
 
-extern inline void pcibios_penalize_isa_irq(int irq)
+static inline void pcibios_penalize_isa_irq(int irq)
 {
 	/* We don't do dynamic PCI IRQ allocation */
+}
+
+/* The PCI address space does equal the physical memory
+ * address space.  The networking and block device layers use
+ * this boolean for bounce buffer decisions.
+ */
+#define PCI_DMA_BUS_IS_PHYS	(1)
+
+static inline void pcibios_add_platform_entries(struct pci_dev *dev)
+{
 }
 
 #endif /* _ASM_M68K_PCI_H */

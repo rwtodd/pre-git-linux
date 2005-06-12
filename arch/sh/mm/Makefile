@@ -1,13 +1,25 @@
 #
 # Makefile for the Linux SuperH-specific parts of the memory manager.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET := mm.o
-obj-y	 := init.o fault.o extable.o cache.o # ioremap.o 
+obj-y			:= init.o extable.o consistent.o
 
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_CPU_SH2)	+= cache-sh2.o
+obj-$(CONFIG_CPU_SH3)	+= cache-sh3.o
+obj-$(CONFIG_CPU_SH4)	+= cache-sh4.o pg-sh4.o
+
+obj-$(CONFIG_DMA_PAGE_OPS)	+= pg-dma.o
+obj-$(CONFIG_HUGETLB_PAGE)	+= hugetlbpage.o
+
+mmu-y			:= fault-nommu.o tlb-nommu.o pg-nommu.o
+mmu-$(CONFIG_MMU)	:= fault.o clear_page.o copy_page.o
+
+obj-y			+= $(mmu-y)
+
+ifdef CONFIG_MMU
+obj-$(CONFIG_CPU_SH3)	+= tlb-sh3.o
+obj-$(CONFIG_CPU_SH4)	+= tlb-sh4.o ioremap.o
+obj-$(CONFIG_SH7705_CACHE_32KB) += pg-sh7705.o
+endif
+
+obj-$(CONFIG_SH7705_CACHE_32KB) += cache-sh7705.o

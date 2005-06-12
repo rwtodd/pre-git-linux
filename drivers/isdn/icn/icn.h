@@ -1,22 +1,11 @@
-/* $Id: icn.h,v 1.30 2000/11/13 22:51:48 kai Exp $
-
+/* $Id: icn.h,v 1.30.6.5 2001/09/23 22:24:55 kai Exp $
+ *
  * ISDN lowlevel-module for the ICN active ISDN-Card.
  *
  * Copyright 1994 by Fritz Elfert (fritz@isdn4linux.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -46,16 +35,14 @@ typedef struct icn_cdef {
 #ifdef __KERNEL__
 /* Kernel includes */
 
-#include <linux/module.h>
 #include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -83,8 +70,7 @@ typedef struct icn_cdef {
 #define ICN_FLAGS_RUNNING  4    /* Cards driver activated                  */
 #define ICN_FLAGS_RBTIMER  8    /* cyclic scheduling of B-Channel-poll     */
 
-#define ICN_BOOT_TIMEOUT1  (HZ) /* Delay for Boot-download (jiffies)       */
-#define ICN_CHANLOCK_DELAY (HZ/10)	/* Delay for Channel-mapping (jiffies)     */
+#define ICN_BOOT_TIMEOUT1  1000 /* Delay for Boot-download (msecs)         */
 
 #define ICN_TIMER_BCREAD (HZ/100)	/* B-Channel poll-cycle                    */
 #define ICN_TIMER_DCREAD (HZ/2) /* D-Channel poll-cycle                    */
@@ -155,15 +141,15 @@ typedef struct icn_card {
 	int myid;               /* Driver-Nr. assigned by linklevel */
 	int rvalid;             /* IO-portregion has been requested */
 	int leased;             /* Flag: This Adapter is connected  */
-	/*       to a leased line           */
+	                        /*       to a leased line           */
 	unsigned short flags;   /* Statusflags                      */
 	int doubleS0;           /* Flag: ICN4B                      */
 	int secondhalf;         /* Flag: Second half of a doubleS0  */
 	int fw_rev;             /* Firmware revision loaded         */
 	int ptype;              /* Protocol type (1TR6 or Euro)     */
-	struct timer_list st_timer;	/* Timer for Status-Polls           */
-	struct timer_list rb_timer;	/* Timer for B-Channel-Polls        */
-	u_char rcvbuf[ICN_BCH][4096];	/* B-Channel-Receive-Buffers        */
+	struct timer_list st_timer;   /* Timer for Status-Polls     */
+	struct timer_list rb_timer;   /* Timer for B-Channel-Polls  */
+	u_char rcvbuf[ICN_BCH][4096]; /* B-Channel-Receive-Buffers  */
 	int rcvidx[ICN_BCH];    /* Index for above buffers          */
 	int l2_proto[ICN_BCH];  /* Current layer-2-protocol         */
 	isdn_if interface;      /* Interface to upper layer         */
@@ -175,19 +161,20 @@ typedef struct icn_card {
 	char *msg_buf_end;      /* Pointer to end of statusbuffer   */
 	int sndcount[ICN_BCH];  /* Byte-counters for B-Ch.-send     */
 	int xlen[ICN_BCH];      /* Byte-counters/Flags for sent-ACK */
-	struct sk_buff *xskb[ICN_BCH];
-	                        /* Current transmitted skb          */
-	struct sk_buff_head
-	 spqueue[ICN_BCH];      /* Sendqueue                        */
+	struct sk_buff *xskb[ICN_BCH]; /* Current transmitted skb   */
+	struct sk_buff_head spqueue[ICN_BCH];  /* Sendqueue         */
 	char regname[35];       /* Name used for request_region     */
-	u_char xmit_lock[ICN_BCH];	/* Semaphore for pollbchan_send()   */
+	u_char xmit_lock[ICN_BCH]; /* Semaphore for pollbchan_send()*/
+	spinlock_t lock;        /* protect critical operations      */
 } icn_card;
 
 /*
  * Main driver data
  */
 typedef struct icn_dev {
-	icn_shmem *shmem;       /* Pointer to memory-mapped-buffers */
+	spinlock_t devlock;     /* spinlock to protect this struct  */
+	unsigned long memaddr;	/* Address of memory mapped buffers */
+	icn_shmem __iomem *shmem;       /* Pointer to memory-mapped-buffers */
 	int mvalid;             /* IO-shmem has been requested      */
 	int channel;            /* Currently mapped channel         */
 	struct icn_card *mcard; /* Currently mapped card            */
@@ -204,27 +191,6 @@ static u_char chan2bank[] =
 {0, 4, 8, 12};                  /* for icn_map_channel() */
 
 static icn_dev dev;
-
-/* With modutils >= 1.1.67 Integers can be changed while loading a
- * module. For this reason define the Port-Base an Shmem-Base as
- * integers.
- */
-static int portbase = ICN_BASEADDR;
-static int membase = ICN_MEMADDR;
-static char *icn_id = "\0";
-static char *icn_id2 = "\0";
-
-#ifdef MODULE
-MODULE_AUTHOR("Fritz Elfert");
-MODULE_PARM(portbase, "i");
-MODULE_PARM_DESC(portbase, "Port adress of first card");
-MODULE_PARM(membase, "i");
-MODULE_PARM_DESC(membase, "Shared memory adress of all cards");
-MODULE_PARM(icn_id, "s");
-MODULE_PARM_DESC(icn_id, "ID-String of first card");
-MODULE_PARM(icn_id2, "s");
-MODULE_PARM_DESC(icn_id2, "ID-String of first card, second S0 (4B only)");
-#endif
 
 #endif                          /* __KERNEL__ */
 
@@ -283,17 +249,6 @@ MODULE_PARM_DESC(icn_id2, "ID-String of first card, second S0 (4B only)");
 		   readb(&msg_i)-readb(&msg_o))
 
 #define CID (card->interface.id)
-
-#define MIN(a,b) ((a<b)?a:b)
-#define MAX(a,b) ((a>b)?a:b)
-
-/* Hopefully, a separate resource-registration-scheme for shared-memory
- * will be introduced into the kernel. Until then, we use the normal
- * routines, designed for port-registration.
- */
-#define check_shmem   check_region
-#define release_shmem release_region
-#define request_shmem request_region
 
 #endif                          /* defined(__KERNEL__) || defined(__DEBUGVAR__) */
 #endif                          /* icn_h */

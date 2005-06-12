@@ -1,10 +1,19 @@
-# Rules for making the NTFS driver
+# Rules for making the NTFS driver.
 
-O_TARGET := ntfs.o
+obj-$(CONFIG_NTFS_FS) += ntfs.o
 
-obj-y   := fs.o sysctl.o support.o util.o inode.o dir.o super.o attr.o
-obj-m   := $(O_TARGET)
-EXTRA_CFLAGS = -DNTFS_IN_LINUX_KERNEL -DNTFS_VERSION=\"000607\"
+ntfs-objs := aops.o attrib.o collate.o compress.o debug.o dir.o file.o \
+	     index.o inode.o mft.o mst.o namei.o runlist.o super.o sysctl.o \
+	     unistr.o upcase.o
 
-include $(TOPDIR)/Rules.make
+EXTRA_CFLAGS = -DNTFS_VERSION=\"2.1.22\"
 
+ifeq ($(CONFIG_NTFS_DEBUG),y)
+EXTRA_CFLAGS += -DDEBUG
+endif
+
+ifeq ($(CONFIG_NTFS_RW),y)
+EXTRA_CFLAGS += -DNTFS_RW
+
+ntfs-objs += bitmap.o lcnalloc.o logfile.o quota.o
+endif

@@ -6,13 +6,19 @@
 *
 * Author:	Gideon Hack	
 *
-* Copyright:	(c) 1995-1999 Sangoma Technologies Inc.
+* Copyright:	(c) 1995-2000 Sangoma Technologies Inc.
 *
 *		This program is free software; you can redistribute it and/or
 *		modify it under the terms of the GNU General Public License
 *		as published by the Free Software Foundation; either version
 *		2 of the License, or (at your option) any later version.
 * ============================================================================
+* Mar 20, 2001  Nenad Corbic	Added the auto_pci_cfg filed, to support
+*                               the PCISLOT #0. 
+* Apr 04, 2000  Nenad Corbic	Fixed the auto memory detection code.
+*                               The memory test at address 0xC8000.
+* Mar 09, 2000  Nenad Corbic 	Added Gideon's Bug Fix: clear pci
+*                               interrupt flags on initial load.
 * Jun 02, 1999  Gideon Hack     Added support for the S514 adapter.
 *				Updates for Linux 2.2.X kernels.	
 * Sep 17, 1998	Jaspreet Singh	Updates for linux 2.2.X kernels
@@ -85,13 +91,12 @@
 #if	defined(_LINUX_)	/****** Linux *******************************/
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/kernel.h>	/* printk(), and other useful stuff */
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
 #include <linux/string.h>	/* inline memset(), etc. */
 #include <linux/module.h>	/* support for loadable modules */
-#include <linux/sched.h>	/* for jiffies, HZ, etc. */
+#include <linux/jiffies.h>	/* for jiffies, HZ, etc. */
 #include <linux/sdladrv.h>	/* API definitions */
 #include <linux/sdlasfm.h>	/* SDLA firmware module definitions */
 #include <linux/sdlapci.h>	/* SDLA PCI hardware definitions */
@@ -103,6 +108,7 @@
 #define	SYSTEM_TICK		jiffies
 
 #include <linux/init.h>
+
 
 #elif	defined(_SCO_UNIX_)	/****** SCO Unix ****************************/
 
@@ -153,10 +159,6 @@
 
 /****** Function Prototypes *************************************************/
 
-/* Module entry points. These are called by the OS and must be public. */
-int init_module (void);
-void cleanup_module (void);
-
 /* Hardware-specific functions */
 static int sdla_detect	(sdlahw_t* hw);
 static int sdla_autodpm	(sdlahw_t* hw);
@@ -190,10 +192,21 @@ static int get_option_index (unsigned* optlist, unsigned optval);
 static unsigned check_memregion (void* ptr, unsigned len);
 static unsigned	test_memregion (void* ptr, unsigned len);
 static unsigned short checksum (unsigned char* buf, unsigned len);
+static int init_pci_slot(sdlahw_t *);
+
+static int pci_probe(sdlahw_t *hw);
 
 /****** Global Data **********************************************************
  * Note: All data must be explicitly initialized!!!
  */
+
+static struct pci_device_id sdladrv_pci_tbl[] = {
+	{ V3_VENDOR_ID, V3_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID, },
+	{ }			/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, sdladrv_pci_tbl);
+
+MODULE_LICENSE("GPL");
 
 /* private data */
 static char modname[]	= "sdladrv";
@@ -292,6 +305,8 @@ static unsigned char s507_irqmask[] =
 	0x00, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0
 };
 
+static int pci_slot_ar[MAX_S514_CARDS];
+
 /******* Kernel Loadable Module Entry Points ********************************/
 
 /*============================================================================
@@ -305,30 +320,36 @@ static unsigned char s507_irqmask[] =
  * Context:	process
  */
 
-#ifdef MODULE
-int init_module (void)
-#else
-int __init wanpipe_init(void)
-#endif
+static int __init sdladrv_init(void)
 {
+	int i=0;
+
 	printk(KERN_INFO "%s v%u.%u %s\n",
 		fullname, MOD_VERSION, MOD_RELEASE, copyright);
 	exec_idle = calibrate_delay(EXEC_DELAY);
 #ifdef WANDEBUG	
 	printk(KERN_DEBUG "%s: exec_idle = %d\n", modname, exec_idle);
 #endif	
+
+	/* Initialize the PCI Card array, which
+         * will store flags, used to mark 
+         * card initialization state */
+	for (i=0; i<MAX_S514_CARDS; i++)
+		pci_slot_ar[i] = 0xFF;
+
 	return 0;
 }
 
-#ifdef MODULE
 /*============================================================================
  * Module 'remove' entry point.
  * o release all remaining system resources
  */
-void cleanup_module (void)
+static void __exit sdladrv_cleanup(void)
 {
 }
-#endif
+
+module_init(sdladrv_init);
+module_exit(sdladrv_cleanup);
 
 /******* Kernel APIs ********************************************************/
 
@@ -355,7 +376,7 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
 
 	if (sdla_detect(hw)) {
                 if(hw->type != SDLA_S514)
-                        printk(KERN_ERR "%s: no SDLA card found at port 0x%X\n",
+                        printk(KERN_INFO "%s: no SDLA card found at port 0x%X\n",
                         modname, hw->port);
 		return -EINVAL;
 	}
@@ -404,7 +425,7 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
 
                 /* Verify IRQ configuration options */
                 if (!get_option_index(irq_opt, hw->irq)) {
-                        printk(KERN_ERR "%s: IRQ %d is illegal!\n",
+                        printk(KERN_INFO "%s: IRQ %d is invalid!\n",
                         	modname, hw->irq);
                       return -EINVAL;
                 } 
@@ -414,7 +435,7 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
                         hw->pclk = pclk_opt[1];  /* use default */
         
                 else if (!get_option_index(pclk_opt, hw->pclk)) {
-                        printk(KERN_ERR "%s: CPU clock %u is illegal!\n",
+                        printk(KERN_INFO "%s: CPU clock %u is invalid!\n",
 				modname, hw->pclk);
                         return -EINVAL;
                 } 
@@ -425,7 +446,7 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
                 if (hw->dpmbase == 0) {
                         err = sdla_autodpm(hw);
                         if (err) {
-                                printk(KERN_ERR
+                                printk(KERN_INFO
 				"%s: can't find available memory region!\n",
 					modname);
                                 return err;
@@ -433,13 +454,13 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
                 }
                 else if (!get_option_index(dpmbase_opt,
 			virt_to_phys(hw->dpmbase))) {
-                        printk(KERN_ERR
-				"%s: memory address 0x%lX is illegal!\n",
+                        printk(KERN_INFO
+				"%s: memory address 0x%lX is invalid!\n",
 				modname, virt_to_phys(hw->dpmbase));
                         return -EINVAL;
                 }               
                 else if (sdla_setdpm(hw)) {
-                        printk(KERN_ERR
+                        printk(KERN_INFO
 			"%s: 8K memory region at 0x%lX is not available!\n",
 				modname, virt_to_phys(hw->dpmbase));
                         return -EINVAL;
@@ -447,13 +468,27 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
                 printk(KERN_INFO
 			"%s: dual-port memory window is set at 0x%lX.\n",
 				modname, virt_to_phys(hw->dpmbase));
+
+
+		/* If we find memory in 0xE**** Memory region, 
+                 * warn the user to disable the SHADOW RAM.  
+                 * Since memory corruption can occur if SHADOW is
+                 * enabled. This can causes random crashes ! */
+		if (virt_to_phys(hw->dpmbase) >= 0xE0000){
+			printk(KERN_WARNING "\n%s: !!!!!!!!  WARNING !!!!!!!!\n",modname);
+			printk(KERN_WARNING "%s: WANPIPE is using 0x%lX memory region !!!\n",
+						modname, virt_to_phys(hw->dpmbase));
+			printk(KERN_WARNING "         Please disable the SHADOW RAM, otherwise\n");
+			printk(KERN_WARNING "         your system might crash randomly from time to time !\n");
+			printk(KERN_WARNING "%s: !!!!!!!!  WARNING !!!!!!!!\n\n",modname);
+		}
         }
 
 	else {
 		hw->memory = test_memregion((void*)hw->dpmbase, 
 			MAX_SIZEOF_S514_MEMORY);
 		if(hw->memory < (256 * 1024)) {
-			printk(KERN_ERR
+			printk(KERN_INFO
 				"%s: error in testing S514 memory (0x%lX)\n",
 				modname, hw->memory);
 			sdla_down(hw);
@@ -519,7 +554,7 @@ int sdla_down (sdlahw_t* hw)
 
 		/* disable the PCI IRQ and disable memory access */
                 pci_read_config_dword(hw->pci_dev, PCI_INT_CONFIG, &int_config);
-	        int_config &= (CPU_no == S514_CPU_A) ? ~PCI_DISABLE_IRQ_CPU_A : 			~PCI_DISABLE_IRQ_CPU_B;
+	        int_config &= (CPU_no == S514_CPU_A) ? ~PCI_DISABLE_IRQ_CPU_A :	~PCI_DISABLE_IRQ_CPU_B;
                 pci_write_config_dword(hw->pci_dev, PCI_INT_CONFIG, int_config);
 		read_S514_int_stat(hw, &int_status);
 		S514_intack(hw, int_status);
@@ -902,7 +937,7 @@ int sdla_peek (sdlahw_t* hw, unsigned long addr, void* buf, unsigned len)
                         peek_by_4 ((unsigned long)hw->dpmbase + curpos, buf,
 				curlen);
                         addr       += curlen;
-                        (char*)buf += curlen;
+                        buf         = (char*)buf + curlen;
                         len        -= curlen;
                 }
 
@@ -984,7 +1019,7 @@ int sdla_poke (sdlahw_t* hw, unsigned long addr, void* buf, unsigned len)
                         poke_by_4 ((unsigned long)hw->dpmbase + curpos, buf,
 				curlen);
 	                addr       += curlen;
-                        (char*)buf += curlen;
+                        buf         = (char*)buf + curlen;
                         len        -= curlen;
                 }
 
@@ -1118,7 +1153,11 @@ static int sdla_autodpm (sdlahw_t* hw)
 		return -EINVAL;
 	}
 
-	for (i = opt[0]; i && err; --i) {
+	/* Start testing from 8th position, address
+         * 0xC8000 from the 508 address table. 
+         * We don't want to test A**** addresses, since
+         * they are usually used for Video */
+	for (i = 8; i <= opt[0] && err; i++) {
 		hw->dpmbase = phys_to_virt(opt[i]);
 		err = sdla_setdpm(hw);
 	}
@@ -1170,14 +1209,14 @@ static int sdla_load (sdlahw_t* hw, sfm_t* sfm, unsigned len)
 
 	/* Verify firmware signature */
 	if (strcmp(sfm->signature, SFM_SIGNATURE)) {
-		printk(KERN_ERR "%s: not SDLA firmware!\n",
+		printk(KERN_INFO "%s: not SDLA firmware!\n",
 			modname);
 		return -EINVAL;
 	}
 
 	/* Verify firmware module format version */
 	if (sfm->version != SFM_VERSION) {
-		printk(KERN_ERR
+		printk(KERN_INFO
 			"%s: firmware format %u rejected! Expecting %u.\n",
 			modname, sfm->version, SFM_VERSION);
 		return -EINVAL;
@@ -1187,7 +1226,7 @@ static int sdla_load (sdlahw_t* hw, sfm_t* sfm, unsigned len)
 	if ((len - offsetof(sfm_t, image) != sfm->info.codesize) ||
 		(checksum((void*)&sfm->info,
 		sizeof(sfm_info_t) + sfm->info.codesize) != sfm->checksum)) {
-		printk(KERN_ERR "%s: firmware corrupted!\n", modname);
+		printk(KERN_INFO "%s: firmware corrupted!\n", modname);
 		return -EINVAL;
 	}
 
@@ -1205,19 +1244,18 @@ static int sdla_load (sdlahw_t* hw, sfm_t* sfm, unsigned len)
 	 */
 	for (i = 0;
 	     (i < SFM_MAX_SDLA) && (sfm->info.adapter[i] != hw->type);
-	     ++i)
-	;
+	     ++i);
+	
 	if (i == SFM_MAX_SDLA) {
-		printk(KERN_ERR "%s: firmware is not compatible with S%u!\n",
+		printk(KERN_INFO "%s: firmware is not compatible with S%u!\n",
 			modname, hw->type);
-		;
 		return -EINVAL;
 	}
 
 
 	/* Make sure there is enough on-board memory */
 	if (hw->memory < sfm->info.memsize) {
-		printk(KERN_ERR
+		printk(KERN_INFO
 			"%s: firmware needs %lu bytes of on-board memory!\n",
 			modname, sfm->info.memsize);
 		return -EINVAL;
@@ -1225,7 +1263,7 @@ static int sdla_load (sdlahw_t* hw, sfm_t* sfm, unsigned len)
 
 	/* Move code onto adapter */
 	if (sdla_poke(hw, sfm->info.codeoffs, sfm->image, sfm->info.codesize)) {
-		printk(KERN_ERR "%s: failed to load code segment!\n",
+		printk(KERN_INFO "%s: failed to load code segment!\n",
 			modname);
 		return -EIO;
 	}
@@ -1233,14 +1271,14 @@ static int sdla_load (sdlahw_t* hw, sfm_t* sfm, unsigned len)
 	/* Prepare boot-time configuration data and kick-off CPU */
 	sdla_bootcfg(hw, &sfm->info);
 	if (sdla_start(hw, sfm->info.startoffs)) {
-		printk(KERN_ERR "%s: Damn... Adapter won't start!\n",
+		printk(KERN_INFO "%s: Damn... Adapter won't start!\n",
 			modname);
 		return -EIO;
 	}
 
 	/* position DPM window over the mailbox and enable interrupts */
         if (sdla_mapmem(hw, sfm->info.winoffs) || sdla_inten(hw)) {
-		printk(KERN_ERR "%s: adapter hardware failure!\n",
+		printk(KERN_INFO "%s: adapter hardware failure!\n",
 			modname);
 		return -EIO;
 	}
@@ -1852,22 +1890,15 @@ static int detect_s508 (int port)
  */
 static int detect_s514 (sdlahw_t* hw)
 {
-	unsigned char CPU_no, slot_no;
+	unsigned char CPU_no, slot_no, auto_slot_cfg;
 	int number_S514_cards = 0;
 	u32 S514_mem_base_addr = 0;
 	u32 ut_u32;
-
 	struct pci_dev *pci_dev;
 
 
-#ifdef CONFIG_PCI
-        if(!pci_present())
-        {
-                printk(KERN_ERR "%s: PCI BIOS not present!\n", modname);
-                return 0;
-        }
-#else
-        printk(KERN_ERR "%s: Linux not compiled for PCI usage!\n", modname);
+#ifndef CONFIG_PCI
+        printk(KERN_INFO "%s: Linux not compiled for PCI usage!\n", modname);
         return 0;
 #endif
 
@@ -1877,10 +1908,17 @@ static int detect_s514 (sdlahw_t* hw)
 	*/
 	CPU_no = hw->S514_cpu_no[0];
 	slot_no = hw->S514_slot_no;
-	
-	printk(KERN_INFO "%s: detecting S514 card, CPU %c, slot #%d\n",
-		modname, CPU_no, slot_no);
+	auto_slot_cfg = hw->auto_pci_cfg;
 
+	if (auto_slot_cfg){
+		printk(KERN_INFO "%s: srch... S514 card, CPU %c, Slot=Auto\n",
+		modname, CPU_no);
+
+	}else{
+		printk(KERN_INFO "%s: srch... S514 card, CPU %c, Slot #%d\n",
+		modname, CPU_no, slot_no);
+	}
+	
 	/* check to see that CPU A or B has been selected in 'router.conf' */
 	switch(CPU_no) {
 		case S514_CPU_A:
@@ -1888,9 +1926,9 @@ static int detect_s514 (sdlahw_t* hw)
 			break;
 	
 		default:
-			printk(KERN_ERR "%s: S514 CPU definition invalid.\n", 
+			printk(KERN_INFO "%s: S514 CPU definition invalid.\n", 
 				modname);
-			printk(KERN_ERR "Must be 'A' or 'B'\n");
+			printk(KERN_INFO "Must be 'A' or 'B'\n");
 			return 0;
 	}
 
@@ -1898,11 +1936,12 @@ static int detect_s514 (sdlahw_t* hw)
 	if(!number_S514_cards)
 		return 0;
 
-	/* we are using a single S514 adapter with a slot of 0 so re-read the */	/* location of this adapter */
-	if((number_S514_cards == 1) && !slot_no) {	
+	/* we are using a single S514 adapter with a slot of 0 so re-read the */	
+	/* location of this adapter */
+	if((number_S514_cards == 1) && auto_slot_cfg) {	
         	number_S514_cards = find_s514_adapter(hw, 1);
 		if(!number_S514_cards) {
-			printk(KERN_ERR "%s: Error finding PCI card\n",
+			printk(KERN_INFO "%s: Error finding PCI card\n",
 				modname);
 			return 0;
 		}
@@ -1913,14 +1952,14 @@ static int detect_s514 (sdlahw_t* hw)
 	S514_mem_base_addr = (CPU_no == S514_CPU_A) ? 
 		(pci_dev->resource[1].start) :
 		(pci_dev->resource[2].start);
-
+	
 	printk(KERN_INFO "%s: S514 PCI memory at 0x%X\n",
 		modname, S514_mem_base_addr);
 	if(!S514_mem_base_addr) {
 		if(CPU_no == S514_CPU_B)
-			printk(KERN_ERR "%s: CPU #B not present on the card\n", 				modname);
+			printk(KERN_INFO "%s: CPU #B not present on the card\n", 				modname);
 		else
-			printk(KERN_ERR "%s: No PCI memory allocated to card\n",				modname);
+			printk(KERN_INFO "%s: No PCI memory allocated to card\n",				modname);
 		return 0;
 	}
 
@@ -1934,10 +1973,22 @@ static int detect_s514 (sdlahw_t* hw)
 
 	/* check the IRQ allocated and enable IRQ usage */
 	if(!(hw->irq = pci_dev->irq)) {
-		printk(KERN_ERR "%s: IRQ not allocated to S514 adapter\n",
+		printk(KERN_INFO "%s: IRQ not allocated to S514 adapter\n",
 			modname);
                 return 0;
 	}
+
+	/* BUG FIX : Mar 6 2000
+ 	 * On a initial loading of the card, we must check
+         * and clear PCI interrupt bits, due to a reset
+         * problem on some other boards.  i.e. An interrupt
+         * might be pending, even after system bootup, 
+         * in which case, when starting wanrouter the machine
+         * would crash. 
+	 */
+	if (init_pci_slot(hw))
+		return 0;
+
         pci_read_config_dword(pci_dev, PCI_INT_CONFIG, &ut_u32);
         ut_u32 |= (CPU_no == S514_CPU_A) ?
                 PCI_ENABLE_IRQ_CPU_A : PCI_ENABLE_IRQ_CPU_B;
@@ -1950,12 +2001,12 @@ static int detect_s514 (sdlahw_t* hw)
 	(void *)hw->dpmbase = ioremap((unsigned long)S514_mem_base_addr,
 		(unsigned long)MAX_SIZEOF_S514_MEMORY);
     	/* map the physical control register memory to virtual memory */
-	(void *)hw->vector = ioremap(
+	hw->vector = (unsigned long)ioremap(
 		(unsigned long)(S514_mem_base_addr + S514_CTRL_REG_BYTE),
 		(unsigned long)16);
      
         if(!hw->dpmbase || !hw->vector) {
-		printk(KERN_ERR "%s: PCI virtual memory allocation failed\n",
+		printk(KERN_INFO "%s: PCI virtual memory allocation failed\n",
 			modname);
                 return 0;
 	}
@@ -1983,43 +2034,54 @@ static int find_s514_adapter(sdlahw_t* hw, char find_first_S514_card)
   
 	while ((pci_dev = pci_find_device(V3_VENDOR_ID, V3_DEVICE_ID, pci_dev))
         	!= NULL) {
-		if (pci_enable_device(pci_dev))
-			continue;
-		PCI_subsys_vendor = pci_dev->subsystem_vendor;
-                if(PCI_subsys_vendor != SANGOMA_SUBSYS_VENDOR)
+                
+		pci_read_config_word(pci_dev, PCI_SUBSYS_VENDOR_WORD,
+                        &PCI_subsys_vendor);
+                
+		if(PCI_subsys_vendor != SANGOMA_SUBSYS_VENDOR)
                 	continue;
-        	hw->pci_dev = pci_dev;
+        	
+		hw->pci_dev = pci_dev;
+		
 		if(find_first_S514_card)
 			return(1);
+		
                 number_S514_cards ++;
-                printk(KERN_INFO
+                
+		printk(KERN_INFO
 			"%s: S514 card found, slot #%d (devfn 0x%X)\n",
                         modname, ((pci_dev->devfn >> 3) & PCI_DEV_SLOT_MASK),
 			pci_dev->devfn);
-                if(slot_no && (((pci_dev->devfn >> 3) & PCI_DEV_SLOT_MASK) ==
-                        slot_no)) {
+		
+		if (hw->auto_pci_cfg){
+			hw->S514_slot_no = ((pci_dev->devfn >> 3) & PCI_DEV_SLOT_MASK);
+			slot_no = hw->S514_slot_no;
+			
+		}else if (((pci_dev->devfn >> 3) & PCI_DEV_SLOT_MASK) == slot_no){
                         S514_found_in_slot = 1;
                         break;
                 }
         }
 
 	/* if no S514 adapter has been found, then exit */
-        if(!number_S514_cards) {
-                printk(KERN_ERR "%s: no S514 adapters found\n", modname);
+        if (!number_S514_cards) {
+                printk(KERN_INFO "%s: Error, no S514 adapters found\n", modname);
                 return 0;
         }
         /* if more than one S514 card has been found, then the user must have */        /* defined a slot number so that the correct adapter is used */
-        else if((number_S514_cards > 1) && !slot_no) {
-                printk(KERN_ERR "%s: More than one S514 adapter found\n",
-                        modname);
-                printk(KERN_ERR "Define a PCI slot number for this adapter\n");
+        else if ((number_S514_cards > 1) && hw->auto_pci_cfg) {
+                printk(KERN_INFO "%s: Error, PCI Slot autodetect Failed! \n"
+				 "%s:        More than one S514 adapter found.\n"
+				 "%s:        Disable the Autodetect feature and supply\n"
+				 "%s:        the PCISLOT numbers for each card.\n",
+                        modname,modname,modname,modname);
                 return 0;
         }
         /* if the user has specified a slot number and the S514 adapter has */
         /* not been found in that slot, then exit */
-        else if (slot_no && !S514_found_in_slot) {
-                printk(KERN_ERR
-			"%s: S514 card not found in specified slot #%d\n",
+        else if (!hw->auto_pci_cfg && !S514_found_in_slot) {
+                printk(KERN_INFO
+			"%s: Error, S514 card not found in specified slot #%d\n",
                         modname, slot_no);
                 return 0;
         }
@@ -2132,5 +2194,125 @@ static unsigned short checksum (unsigned char* buf, unsigned len)
 	return crc;
 }
 
+static int init_pci_slot(sdlahw_t *hw)
+{
+
+	u32 int_status;
+	int volatile found=0;
+	int i=0;
+
+	/* Check if this is a very first load for a specific
+         * pci card. If it is, clear the interrput bits, and
+         * set the flag indicating that this card was initialized.
+	 */
+	
+	for (i=0; (i<MAX_S514_CARDS) && !found; i++){
+		if (pci_slot_ar[i] == hw->S514_slot_no){
+			found=1;
+			break;
+		}
+		if (pci_slot_ar[i] == 0xFF){
+			break;
+		}
+	}
+
+	if (!found){
+		read_S514_int_stat(hw,&int_status);
+		S514_intack(hw,int_status);
+		if (i == MAX_S514_CARDS){
+			printk(KERN_INFO "%s: Critical Error !!!\n",modname);
+			printk(KERN_INFO 
+				"%s: Number of Sangoma PCI cards exceeded maximum limit.\n",
+					modname);
+			printk(KERN_INFO "Please contact Sangoma Technologies\n");
+			return 1;
+		}
+		pci_slot_ar[i] = hw->S514_slot_no;
+	}
+	return 0;
+}
+
+static int pci_probe(sdlahw_t *hw)
+{
+
+        unsigned char slot_no;
+        int number_S514_cards = 0;
+        u16 PCI_subsys_vendor;
+	u16 PCI_card_type;
+
+        struct pci_dev *pci_dev = NULL;
+	struct pci_bus *bus = NULL;
+ 
+       slot_no = 0;
+  
+	while ((pci_dev = pci_find_device(V3_VENDOR_ID, V3_DEVICE_ID, pci_dev))
+        	!= NULL) {
+		
+                pci_read_config_word(pci_dev, PCI_SUBSYS_VENDOR_WORD,
+                        &PCI_subsys_vendor);
+		
+                if(PCI_subsys_vendor != SANGOMA_SUBSYS_VENDOR)
+                	continue;
+
+		pci_read_config_word(pci_dev, PCI_CARD_TYPE,
+                        &PCI_card_type);
+	
+		bus = pci_dev->bus;
+		
+		/* A dual cpu card can support up to 4 physical connections,
+		 * where a single cpu card can support up to 2 physical
+		 * connections.  The FT1 card can only support a single 
+		 * connection, however we cannot distinguish between a Single
+		 * CPU card and an FT1 card. */
+		if (PCI_card_type == S514_DUAL_CPU){
+                	number_S514_cards += 4;
+			 printk(KERN_INFO
+				"wanpipe: S514-PCI card found, cpu(s) 2, bus #%d, slot #%d, irq #%d\n",
+                        	bus->number,((pci_dev->devfn >> 3) & PCI_DEV_SLOT_MASK),
+				pci_dev->irq);
+		}else{
+			number_S514_cards += 2;
+			printk(KERN_INFO
+				"wanpipe: S514-PCI card found, cpu(s) 1, bus #%d, slot #%d, irq #%d\n",
+                        	bus->number,((pci_dev->devfn >> 3) & PCI_DEV_SLOT_MASK),
+				pci_dev->irq);
+		}
+        }
+
+	return number_S514_cards;
+
+}
+
+
+
+EXPORT_SYMBOL(wanpipe_hw_probe);
+
+unsigned wanpipe_hw_probe(void)
+{
+	sdlahw_t hw;
+	unsigned* opt = s508_port_options; 
+	unsigned cardno=0;
+	int i;
+	
+	memset(&hw, 0, sizeof(hw));
+	
+	for (i = 1; i <= opt[0]; i++) {
+		if (detect_s508(opt[i])){
+			/* S508 card can support up to two physical links */
+			cardno+=2;
+			printk(KERN_INFO "wanpipe: S508-ISA card found, port 0x%x\n",opt[i]);
+		}
+	}
+
+      #ifdef CONFIG_PCI
+	hw.S514_slot_no = 0;
+	cardno += pci_probe(&hw);
+      #else
+	printk(KERN_INFO "wanpipe: Warning, Kernel not compiled for PCI support!\n");
+	printk(KERN_INFO "wanpipe: PCI Hardware Probe Failed!\n");
+      #endif
+
+	return cardno;
+}
 
 /****** End *****************************************************************/

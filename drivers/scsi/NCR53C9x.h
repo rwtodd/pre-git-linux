@@ -14,6 +14,7 @@
 #define NCR53C9X_H
 
 #include <linux/config.h>
+#include <linux/interrupt.h>
 
 /* djweis for mac driver */
 #if defined(CONFIG_MAC)
@@ -140,7 +141,7 @@
  * Yet, they all live within the same IO space.
  */
 
-#ifndef __i386__
+#if !defined(__i386__) && !defined(__x86_64__)
 
 #ifndef MULTIPLE_PAD_SIZES
 
@@ -232,7 +233,7 @@ struct ESP_regs {
 
 #endif
 
-#else /* !defined __i386__ */
+#else /* !defined(__i386__) && !defined(__x86_64__) */
 
 #define esp_write(__reg, __val) outb((__val), (__reg))
 #define esp_read(__reg) inb((__reg))
@@ -267,7 +268,7 @@ struct ESP_regs {
 #define esp_fgrnd   io_addr + 15 /* rw  Data base for fifo             0x3c  */
 };
 
-#endif /* !defined(__i386__) */
+#endif /* !defined(__i386__) && !defined(__x86_64__) */
 
 /* Various revisions of the ESP board. */
 enum esp_rev {
@@ -281,6 +282,17 @@ enum esp_rev {
   fas216     = 0x07,
   fsc        = 0x08,  /* SYM53C94-2 */
   espunknown = 0x09
+};
+
+/* We allocate one of these for each scsi device and attach it to
+ * SDptr->hostdata for use in the driver
+ */
+struct esp_device {
+  unsigned char sync_min_period;
+  unsigned char sync_max_offset;
+  unsigned sync:1;
+  unsigned wide:1;
+  unsigned disconnect:1;
 };
 
 /* We get one of these for each ESP probed. */
@@ -396,6 +408,7 @@ struct NCR_ESP {
    * cannot be assosciated with any specific command.
    */
   unchar resetting_bus;
+  wait_queue_head_t reset_queue;
 
   unchar do_pio_cmds;		/* Do command transfer with pio */
 
@@ -639,11 +652,18 @@ extern int nesps, esps_in_use, esps_running;
 
 
 /* External functions */
-extern inline void esp_cmd(struct NCR_ESP *esp, struct ESP_regs *eregs,
-			   unchar cmd);
+extern void esp_bootup_reset(struct NCR_ESP *esp, struct ESP_regs *eregs);
 extern struct NCR_ESP *esp_allocate(Scsi_Host_Template *, void *);
 extern void esp_deallocate(struct NCR_ESP *);
 extern void esp_release(void);
 extern void esp_initialize(struct NCR_ESP *);
-extern void esp_intr(int, void *, struct pt_regs *);
+extern irqreturn_t esp_intr(int, void *, struct pt_regs *);
+extern const char *esp_info(struct Scsi_Host *);
+extern int esp_queue(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+extern int esp_abort(Scsi_Cmnd *);
+extern int esp_reset(Scsi_Cmnd *);
+extern int esp_proc_info(struct Scsi_Host *shost, char *buffer, char **start, off_t offset, int length,
+			 int inout);
+extern int esp_slave_alloc(Scsi_Device *);
+extern void esp_slave_destroy(Scsi_Device *);
 #endif /* !(NCR53C9X_H) */

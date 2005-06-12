@@ -1,20 +1,19 @@
-// $Id: icc.c,v 1.5 2000/11/24 17:05:37 kai Exp $
-//-----------------------------------------------------------------------------
-//
-// ICC specific routines
-//
-// Author       Matt Henderson & Guy Ellis - Traverse Tecnologies Pty Ltd
-//              www.traverse.com.au
-//
-// 1999.6.25 Initial implementation of routines for Siemens ISDN
-// Communication Controler PEB 2070 based on the ISAC routines
-// written by Karsten Keil.
-//
-// This file is (c) under GNU PUBLIC LICENSE
-//
-//-----------------------------------------------------------------------------
+/* $Id: icc.c,v 1.8.2.3 2004/01/13 14:31:25 keil Exp $
+ *
+ * ICC specific routines
+ *
+ * Author       Matt Henderson & Guy Ellis
+ * Copyright    by Traverse Technologies Pty Ltd, www.travers.com.au
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * 1999.6.25 Initial implementation of routines for Siemens ISDN
+ * Communication Controller PEB 2070 based on the ISAC routines
+ * written by Karsten Keil.
+ *
+ */
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "icc.h"
@@ -28,7 +27,7 @@
 static char *ICCVer[] __initdata =
 {"2070 A1/A3", "2070 B1", "2070 B2/B3", "2070 V2.4"};
 
-void
+void __init
 ICCVersion(struct IsdnCardState *cs, char *s)
 {
 	int val;
@@ -113,7 +112,6 @@ void
 icc_empty_fifo(struct IsdnCardState *cs, int count)
 {
 	u_char *ptr;
-	long flags;
 
 	if ((cs->debug & L1_DEB_ISAC) && !(cs->debug & L1_DEB_ISAC_FIFO))
 		debugl1(cs, "icc_empty_fifo");
@@ -128,11 +126,8 @@ icc_empty_fifo(struct IsdnCardState *cs, int count)
 	}
 	ptr = cs->rcvbuf + cs->rcvidx;
 	cs->rcvidx += count;
-	save_flags(flags);
-	cli();
 	cs->readisacfifo(cs, ptr, count);
 	cs->writeisac(cs, ICC_CMDR, 0x80);
-	restore_flags(flags);
 	if (cs->debug & L1_DEB_ISAC_FIFO) {
 		char *t = cs->dlog;
 
@@ -147,7 +142,6 @@ icc_fill_fifo(struct IsdnCardState *cs)
 {
 	int count, more;
 	u_char *ptr;
-	long flags;
 
 	if ((cs->debug & L1_DEB_ISAC) && !(cs->debug & L1_DEB_ISAC_FIFO))
 		debugl1(cs, "icc_fill_fifo");
@@ -164,8 +158,6 @@ icc_fill_fifo(struct IsdnCardState *cs)
 		more = !0;
 		count = 32;
 	}
-	save_flags(flags);
-	cli();
 	ptr = cs->tx_skb->data;
 	skb_pull(cs->tx_skb, count);
 	cs->tx_cnt += count;
@@ -178,7 +170,6 @@ icc_fill_fifo(struct IsdnCardState *cs)
 	init_timer(&cs->dbusytimer);
 	cs->dbusytimer.expires = jiffies + ((DBUSY_TIMER_VALUE * HZ)/1000);
 	add_timer(&cs->dbusytimer);
-	restore_flags(flags);
 	if (cs->debug & L1_DEB_ISAC_FIFO) {
 		char *t = cs->dlog;
 
@@ -189,20 +180,11 @@ icc_fill_fifo(struct IsdnCardState *cs)
 }
 
 void
-icc_sched_event(struct IsdnCardState *cs, int event)
-{
-	test_and_set_bit(event, &cs->event);
-	queue_task(&cs->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
-}
-
-void
 icc_interrupt(struct IsdnCardState *cs, u_char val)
 {
 	u_char exval, v1;
 	struct sk_buff *skb;
 	unsigned int count;
-	long flags;
 
 	if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "ICC interrupt %x", val);
@@ -229,8 +211,6 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 			if (count == 0)
 				count = 32;
 			icc_empty_fifo(cs, count);
-			save_flags(flags);
-			cli();
 			if ((count = cs->rcvidx) > 0) {
 				cs->rcvidx = 0;
 				if (!(skb = alloc_skb(count, GFP_ATOMIC)))
@@ -240,10 +220,9 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 					skb_queue_tail(&cs->rq, skb);
 				}
 			}
-			restore_flags(flags);
 		}
 		cs->rcvidx = 0;
-		icc_sched_event(cs, D_RCVBUFREADY);
+		schedule_event(cs, D_RCVBUFREADY);
 	}
 	if (val & 0x40) {	/* RPF */
 		icc_empty_fifo(cs, 32);
@@ -257,7 +236,7 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 		if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
 			del_timer(&cs->dbusytimer);
 		if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-			icc_sched_event(cs, D_CLEARBUSY);
+			schedule_event(cs, D_CLEARBUSY);
 		if (cs->tx_skb) {
 			if (cs->tx_skb->len) {
 				icc_fill_fifo(cs);
@@ -272,7 +251,7 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 			cs->tx_cnt = 0;
 			icc_fill_fifo(cs);
 		} else
-			icc_sched_event(cs, D_XMTBUFREADY);
+			schedule_event(cs, D_XMTBUFREADY);
 	}
       afterXPR:
 	if (val & 0x04) {	/* CISQ */
@@ -283,7 +262,7 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 			cs->dc.icc.ph_state = (exval >> 2) & 0xf;
 			if (cs->debug & L1_DEB_ISAC)
 				debugl1(cs, "ph_state change %x", cs->dc.icc.ph_state);
-			icc_sched_event(cs, D_L1STATECHANGE);
+			schedule_event(cs, D_L1STATECHANGE);
 		}
 		if (exval & 1) {
 			exval = cs->readisac(cs, ICC_CIR1);
@@ -313,7 +292,7 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 			if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
 				del_timer(&cs->dbusytimer);
 			if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-				icc_sched_event(cs, D_CLEARBUSY);
+				schedule_event(cs, D_CLEARBUSY);
 			if (cs->tx_skb) { /* Restart frame */
 				skb_push(cs->tx_skb, cs->tx_cnt);
 				cs->tx_cnt = 0;
@@ -391,14 +370,14 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 				cs->writeisac(cs, ICC_MOCR, cs->dc.icc.mocr);
 				cs->dc.icc.mocr |= 0x0a;
 				cs->writeisac(cs, ICC_MOCR, cs->dc.icc.mocr);
-				icc_sched_event(cs, D_RX_MON0);
+				schedule_event(cs, D_RX_MON0);
 			}
 			if (v1 & 0x40) {
 				cs->dc.icc.mocr &= 0x0f;
 				cs->writeisac(cs, ICC_MOCR, cs->dc.icc.mocr);
 				cs->dc.icc.mocr |= 0xa0;
 				cs->writeisac(cs, ICC_MOCR, cs->dc.icc.mocr);
-				icc_sched_event(cs, D_RX_MON1);
+				schedule_event(cs, D_RX_MON1);
 			}
 			if (v1 & 0x02) {
 				if ((!cs->dc.icc.mon_tx) || (cs->dc.icc.mon_txc && 
@@ -410,11 +389,11 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 					cs->writeisac(cs, ICC_MOCR, cs->dc.icc.mocr);
 					if (cs->dc.icc.mon_txc &&
 						(cs->dc.icc.mon_txp >= cs->dc.icc.mon_txc))
-						icc_sched_event(cs, D_TX_MON0);
+						schedule_event(cs, D_TX_MON0);
 					goto AfterMOX0;
 				}
 				if (cs->dc.icc.mon_txc && (cs->dc.icc.mon_txp >= cs->dc.icc.mon_txc)) {
-					icc_sched_event(cs, D_TX_MON0);
+					schedule_event(cs, D_TX_MON0);
 					goto AfterMOX0;
 				}
 				cs->writeisac(cs, ICC_MOX0,
@@ -433,11 +412,11 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 					cs->writeisac(cs, ICC_MOCR, cs->dc.icc.mocr);
 					if (cs->dc.icc.mon_txc &&
 						(cs->dc.icc.mon_txp >= cs->dc.icc.mon_txc))
-						icc_sched_event(cs, D_TX_MON1);
+						schedule_event(cs, D_TX_MON1);
 					goto AfterMOX1;
 				}
 				if (cs->dc.icc.mon_txc && (cs->dc.icc.mon_txp >= cs->dc.icc.mon_txc)) {
-					icc_sched_event(cs, D_TX_MON1);
+					schedule_event(cs, D_TX_MON1);
 					goto AfterMOX1;
 				}
 				cs->writeisac(cs, ICC_MOX1,
@@ -456,6 +435,7 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 {
 	struct IsdnCardState *cs = (struct IsdnCardState *) st->l1.hardware;
 	struct sk_buff *skb = arg;
+	u_long flags;
 	int  val;
 
 	switch (pr) {
@@ -464,6 +444,7 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 				LogFrame(cs, skb->data, skb->len);
 			if (cs->debug & DEB_DLOG_VERBOSE)
 				dlogframe(cs, skb, 0);
+			spin_lock_irqsave(&cs->lock, flags);
 			if (cs->tx_skb) {
 				skb_queue_tail(&cs->sq, skb);
 #ifdef L2FRAME_DEBUG		/* psa */
@@ -479,8 +460,10 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 #endif
 				icc_fill_fifo(cs);
 			}
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (PH_PULL |INDICATION):
+			spin_lock_irqsave(&cs->lock, flags);
 			if (cs->tx_skb) {
 				if (cs->debug & L1_DEB_WARN)
 					debugl1(cs, " l2l1 tx_skb exist this shouldn't happen");
@@ -498,6 +481,7 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 				Logl2Frame(cs, skb, "PH_DATA_PULLED", 0);
 #endif
 			icc_fill_fifo(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (PH_PULL | REQUEST):
 #ifdef L2FRAME_DEBUG		/* psa */
@@ -511,22 +495,31 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 				test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 			break;
 		case (HW_RESET | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			if ((cs->dc.icc.ph_state == ICC_IND_EI1) ||
 				(cs->dc.icc.ph_state == ICC_IND_DR))
 			        ph_command(cs, ICC_CMD_DI);
 			else
 				ph_command(cs, ICC_CMD_RES);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_ENABLE | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			ph_command(cs, ICC_CMD_DI);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_INFO1 | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			ph_command(cs, ICC_CMD_AR);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_INFO3 | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			ph_command(cs, ICC_CMD_AI);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_TESTLOOP | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			val = 0;
 			if (1 & (long) arg)
 				val |= 0x0c;
@@ -549,10 +542,11 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 				else
 					cs->writeisac(cs, ICC_ADF1, 0x0);
 			}
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_DEACTIVATE | RESPONSE):
-			discard_queue(&cs->rq);
-			discard_queue(&cs->sq);
+			skb_queue_purge(&cs->rq);
+			skb_queue_purge(&cs->sq);
 			if (cs->tx_skb) {
 				dev_kfree_skb_any(cs->tx_skb);
 				cs->tx_skb = NULL;
@@ -560,7 +554,7 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 			if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
 				del_timer(&cs->dbusytimer);
 			if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-				icc_sched_event(cs, D_CLEARBUSY);
+				schedule_event(cs, D_CLEARBUSY);
 			break;
 		default:
 			if (cs->debug & L1_DEB_WARN)
@@ -626,14 +620,10 @@ dbusy_timer_handler(struct IsdnCardState *cs)
 void __init
 initicc(struct IsdnCardState *cs)
 {
-	cs->tqueue.routine = (void *) (void *) icc_bh;
 	cs->setstack_d = setstack_icc;
 	cs->DC_Close = DC_Close_icc;
 	cs->dc.icc.mon_tx = NULL;
 	cs->dc.icc.mon_rx = NULL;
-	cs->dbusytimer.function = (void *) dbusy_timer_handler;
-	cs->dbusytimer.data = (long) cs;
-	init_timer(&cs->dbusytimer);
   	cs->writeisac(cs, ICC_MASK, 0xff);
   	cs->dc.icc.mocr = 0xaa;
 	if (test_bit(HW_IOM1, &cs->HW_Flags)) {
@@ -680,7 +670,16 @@ clear_pending_icc_ints(struct IsdnCardState *cs)
 	val = cs->readisac(cs, ICC_CIR0);
 	debugl1(cs, "ICC CIR0 %x", val);
 	cs->dc.icc.ph_state = (val >> 2) & 0xf;
-	icc_sched_event(cs, D_L1STATECHANGE);
+	schedule_event(cs, D_L1STATECHANGE);
 	/* Disable all IRQ */
 	cs->writeisac(cs, ICC_MASK, 0xFF);
+}
+
+void __devinit
+setup_icc(struct IsdnCardState *cs)
+{
+	INIT_WORK(&cs->tqueue, (void *)(void *) icc_bh, cs);
+	cs->dbusytimer.function = (void *) dbusy_timer_handler;
+	cs->dbusytimer.data = (long) cs;
+	init_timer(&cs->dbusytimer);
 }

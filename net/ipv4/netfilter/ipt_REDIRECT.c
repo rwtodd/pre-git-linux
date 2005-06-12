@@ -1,4 +1,12 @@
 /* Redirect.  Simple mapping which alters dst to a local IP address. */
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <linux/timer.h>
@@ -11,6 +19,10 @@
 #include <net/checksum.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables REDIRECT target module");
 
 #if 0
 #define DEBUGP printk
@@ -26,7 +38,7 @@ redirect_check(const char *tablename,
 	       unsigned int targinfosize,
 	       unsigned int hook_mask)
 {
-	const struct ip_nat_multi_range *mr = targinfo;
+	const struct ip_nat_multi_range_compat *mr = targinfo;
 
 	if (strcmp(tablename, "nat") != 0) {
 		DEBUGP("redirect_check: bad table `%s'.\n", table);
@@ -53,17 +65,17 @@ redirect_check(const char *tablename,
 
 static unsigned int
 redirect_target(struct sk_buff **pskb,
-		unsigned int hooknum,
 		const struct net_device *in,
 		const struct net_device *out,
+		unsigned int hooknum,
 		const void *targinfo,
 		void *userinfo)
 {
 	struct ip_conntrack *ct;
 	enum ip_conntrack_info ctinfo;
 	u_int32_t newdst;
-	const struct ip_nat_multi_range *mr = targinfo;
-	struct ip_nat_multi_range newrange;
+	const struct ip_nat_multi_range_compat *mr = targinfo;
+	struct ip_nat_range newrange;
 
 	IP_NF_ASSERT(hooknum == NF_IP_PRE_ROUTING
 		     || hooknum == NF_IP_LOCAL_OUT);
@@ -74,24 +86,34 @@ redirect_target(struct sk_buff **pskb,
 	/* Local packets: make them go to loopback */
 	if (hooknum == NF_IP_LOCAL_OUT)
 		newdst = htonl(0x7F000001);
-	else
+	else {
+		struct in_device *indev;
+
+		/* Device might not have an associated in_device. */
+		indev = (struct in_device *)(*pskb)->dev->ip_ptr;
+		if (indev == NULL || indev->ifa_list == NULL)
+			return NF_DROP;
+
 		/* Grab first address on interface. */
-		newdst = (((struct in_device *)(*pskb)->dev->ip_ptr)
-			  ->ifa_list->ifa_local);
+		newdst = indev->ifa_list->ifa_local;
+	}
 
 	/* Transfer from original range. */
-	newrange = ((struct ip_nat_multi_range)
-		{ 1, { { mr->range[0].flags | IP_NAT_RANGE_MAP_IPS,
-			 newdst, newdst,
-			 mr->range[0].min, mr->range[0].max } } });
+	newrange = ((struct ip_nat_range)
+		{ mr->range[0].flags | IP_NAT_RANGE_MAP_IPS,
+		  newdst, newdst,
+		  mr->range[0].min, mr->range[0].max });
 
 	/* Hand modified range to generic setup. */
 	return ip_nat_setup_info(ct, &newrange, hooknum);
 }
 
-static struct ipt_target redirect_reg
-= { { NULL, NULL }, "REDIRECT", redirect_target, redirect_check, NULL,
-    THIS_MODULE };
+static struct ipt_target redirect_reg = {
+	.name		= "REDIRECT",
+	.target		= redirect_target,
+	.checkentry	= redirect_check,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

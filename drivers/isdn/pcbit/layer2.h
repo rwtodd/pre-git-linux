@@ -1,10 +1,12 @@
 /*
+ * PCBIT-D low-layer interface definitions
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
@@ -12,12 +14,10 @@
  * Hacked to compile with egcs and run with current version of isdn modules
 */
 
-/*        
- *        PCBIT-D low-layer interface definitions
- */
-
 #ifndef LAYER2_H
 #define LAYER2_H
+
+#include <linux/interrupt.h>
 
 #include <asm/byteorder.h>
 
@@ -121,12 +121,10 @@ struct frame_buf {
         struct frame_buf * next;
 };
 
-#define MIN(a,b) ((a<b)?a:b)
-
 extern int pcbit_l2_write(struct pcbit_dev * dev, ulong msg, ushort refnum, 
                           struct sk_buff *skb, unsigned short hdr_len);
 
-extern void pcbit_irq_handler(int interrupt, void *, struct pt_regs *regs);
+extern irqreturn_t pcbit_irq_handler(int interrupt, void *, struct pt_regs *regs);
 
 extern struct pcbit_dev * dev_pcbit[MAX_PCBIT_CARDS];
 

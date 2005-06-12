@@ -16,7 +16,7 @@
  *    along with this program; if not, write to the Free Software
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *    Questions/Comments/Bugfixes to arrays@compaq.com
+ *    Questions/Comments/Bugfixes to iss_storagedev@hp.com
  *
  *    If you want to make changes, improve or add functionality to this
  *    driver, you'll probably need the Compaq Array Controller Interface
@@ -27,8 +27,7 @@
 
 #ifdef __KERNEL__
 #include <linux/blkdev.h>
-#include <linux/locks.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/timer.h>
 #endif
@@ -91,9 +90,10 @@ struct ctlr_info {
 	__u32	board_id;
 	char	*product_name;	
 
-	void *vaddr;
+	void __iomem *vaddr;
 	unsigned long paddr;
-	unsigned long ioaddr;
+	unsigned long io_mem_addr;
+	unsigned long io_mem_length;
 	int	intr;
 	int	usage_count;
 	drv_info_t	drv[NWD];
@@ -104,7 +104,10 @@ struct ctlr_info {
 	cmdlist_t *reqQ;
 	cmdlist_t *cmpQ;
 	cmdlist_t *cmd_pool;
-	__u32	*cmd_pool_bits;
+	dma_addr_t cmd_pool_dhandle;
+	unsigned long *cmd_pool_bits;
+	struct request_queue *queue;
+	spinlock_t lock;
 
 	unsigned int Qdepth;
 	unsigned int maxQsinceinit;
@@ -115,6 +118,9 @@ struct ctlr_info {
 	struct timer_list timer;
 	unsigned int misc_tflags;
 };
+
+#define IDA_LOCK(i)	(&hba[i]->lock)
+
 #endif
 
 #endif /* CPQARRAY_H */

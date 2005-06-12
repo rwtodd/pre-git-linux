@@ -1,17 +1,12 @@
 /*
  * include/asm-m68k/serial.h
  *
- * currently this seems usefull only for a Q40,
- * its an almost exact copy of ../asm/alpha/serial.h 
+ * currently this seems useful only for a Q40,
+ * it's an almost exact copy of ../asm-alpha/serial.h
  *
  */
 
 #include <linux/config.h>
-#if 0
-#define rs_init serial_rs_init
-#define register_serial serial_register_serial
-#define unregister_serial serial_unregister_serial
-#endif
 
 /*
  * This assumes you have a 1.8432 MHz clock for your UART.
@@ -35,11 +30,8 @@
 #define FOURPORT_FLAGS ASYNC_FOURPORT
 #define ACCENT_FLAGS 0
 #define BOCA_FLAGS 0
-#define RS_TABLE_SIZE  64
-#else
-#define RS_TABLE_SIZE  4
 #endif
-	
+
 #define STD_SERIAL_PORT_DEFNS			\
 	/* UART CLK   PORT IRQ     FLAGS        */			\
 	{ 0, BASE_BAUD, 0x3F8, 4, STD_COM_FLAGS },	/* ttyS0 */	\
@@ -50,7 +42,7 @@
 
 #ifdef CONFIG_SERIAL_MANY_PORTS
 #define EXTRA_SERIAL_PORT_DEFNS			\
-	{ 0, BASE_BAUD, 0x1A0, 9, FOURPORT_FLAGS }, 	/* ttyS4 */	\
+	{ 0, BASE_BAUD, 0x1A0, 9, FOURPORT_FLAGS },	/* ttyS4 */	\
 	{ 0, BASE_BAUD, 0x1A8, 9, FOURPORT_FLAGS },	/* ttyS5 */	\
 	{ 0, BASE_BAUD, 0x1B0, 9, FOURPORT_FLAGS },	/* ttyS6 */	\
 	{ 0, BASE_BAUD, 0x1B8, 9, FOURPORT_FLAGS },	/* ttyS7 */	\

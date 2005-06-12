@@ -82,12 +82,12 @@ const struct powerpc_operand powerpc_operands[] =
   /* The zero index is used to indicate the end of the list of
      operands.  */
 #define UNUSED (0)
-  { 0, 0, 0, 0, 0 },
+  { 0, 0, NULL, NULL, 0 },
 
   /* The BA field in an XL form instruction.  */
 #define BA (1)
 #define BA_MASK (0x1f << 16)
-  { 5, 16, 0, 0, PPC_OPERAND_CR },
+  { 5, 16, NULL, NULL, PPC_OPERAND_CR },
 
   /* The BA field in an XL form instruction when it must be the same
      as the BT field in the same instruction.  */
@@ -97,7 +97,7 @@ const struct powerpc_operand powerpc_operands[] =
   /* The BB field in an XL form instruction.  */
 #define BB (3)
 #define BB_MASK (0x1f << 11)
-  { 5, 11, 0, 0, PPC_OPERAND_CR },
+  { 5, 11, NULL, NULL, PPC_OPERAND_CR },
 
   /* The BB field in an XL form instruction when it must be the same
      as the BA field in the same instruction.  */
@@ -140,21 +140,21 @@ const struct powerpc_operand powerpc_operands[] =
 
   /* The BF field in an X or XL form instruction.  */
 #define BF (11)
-  { 3, 23, 0, 0, PPC_OPERAND_CR },
+  { 3, 23, NULL, NULL, PPC_OPERAND_CR },
 
   /* An optional BF field.  This is used for comparison instructions,
      in which an omitted BF field is taken as zero.  */
 #define OBF (12)
-  { 3, 23, 0, 0, PPC_OPERAND_CR | PPC_OPERAND_OPTIONAL },
+  { 3, 23, NULL, NULL, PPC_OPERAND_CR | PPC_OPERAND_OPTIONAL },
 
   /* The BFA field in an X or XL form instruction.  */
 #define BFA (13)
-  { 3, 18, 0, 0, PPC_OPERAND_CR },
+  { 3, 18, NULL, NULL, PPC_OPERAND_CR },
 
   /* The BI field in a B form or XL form instruction.  */
 #define BI (14)
 #define BI_MASK (0x1f << 16)
-  { 5, 16, 0, 0, PPC_OPERAND_CR },
+  { 5, 16, NULL, NULL, PPC_OPERAND_CR },
 
   /* The BO field in a B form instruction.  Certain values are
      illegal.  */
@@ -169,20 +169,20 @@ const struct powerpc_operand powerpc_operands[] =
 
   /* The BT field in an X or XL form instruction.  */
 #define BT (17)
-  { 5, 21, 0, 0, PPC_OPERAND_CR },
+  { 5, 21, NULL, NULL, PPC_OPERAND_CR },
 
   /* The condition register number portion of the BI field in a B form
      or XL form instruction.  This is used for the extended
      conditional branch mnemonics, which set the lower two bits of the
      BI field.  This field is optional.  */
 #define CR (18)
-  { 3, 18, 0, 0, PPC_OPERAND_CR | PPC_OPERAND_OPTIONAL },
+  { 3, 18, NULL, NULL, PPC_OPERAND_CR | PPC_OPERAND_OPTIONAL },
 
   /* The D field in a D form instruction.  This is a displacement off
      a register, and implies that the next operand is a register in
      parentheses.  */
 #define D (19)
-  { 16, 0, 0, 0, PPC_OPERAND_PARENS | PPC_OPERAND_SIGNED },
+  { 16, 0, NULL, NULL, PPC_OPERAND_PARENS | PPC_OPERAND_SIGNED },
 
   /* The DS field in a DS form instruction.  This is like D, but the
      lower two bits are forced to zero.  */
@@ -191,49 +191,49 @@ const struct powerpc_operand powerpc_operands[] =
 
   /* The FL1 field in a POWER SC form instruction.  */
 #define FL1 (21)
-  { 4, 12, 0, 0, 0 },
+  { 4, 12, NULL, NULL, 0 },
 
   /* The FL2 field in a POWER SC form instruction.  */
 #define FL2 (22)
-  { 3, 2, 0, 0, 0 },
+  { 3, 2, NULL, NULL, 0 },
 
   /* The FLM field in an XFL form instruction.  */
 #define FLM (23)
-  { 8, 17, 0, 0, 0 },
+  { 8, 17, NULL, NULL, 0 },
 
   /* The FRA field in an X or A form instruction.  */
 #define FRA (24)
 #define FRA_MASK (0x1f << 16)
-  { 5, 16, 0, 0, PPC_OPERAND_FPR },
+  { 5, 16, NULL, NULL, PPC_OPERAND_FPR },
 
   /* The FRB field in an X or A form instruction.  */
 #define FRB (25)
 #define FRB_MASK (0x1f << 11)
-  { 5, 11, 0, 0, PPC_OPERAND_FPR },
+  { 5, 11, NULL, NULL, PPC_OPERAND_FPR },
 
   /* The FRC field in an A form instruction.  */
 #define FRC (26)
 #define FRC_MASK (0x1f << 6)
-  { 5, 6, 0, 0, PPC_OPERAND_FPR },
+  { 5, 6, NULL, NULL, PPC_OPERAND_FPR },
 
   /* The FRS field in an X form instruction or the FRT field in a D, X
      or A form instruction.  */
 #define FRS (27)
 #define FRT (FRS)
-  { 5, 21, 0, 0, PPC_OPERAND_FPR },
+  { 5, 21, NULL, NULL, PPC_OPERAND_FPR },
 
   /* The FXM field in an XFX instruction.  */
 #define FXM (28)
 #define FXM_MASK (0xff << 12)
-  { 8, 12, 0, 0, 0 },
+  { 8, 12, NULL, NULL, 0 },
 
   /* The L field in a D or X form instruction.  */
 #define L (29)
-  { 1, 21, 0, 0, PPC_OPERAND_OPTIONAL },
+  { 1, 21, NULL, NULL, PPC_OPERAND_OPTIONAL },
 
   /* The LEV field in a POWER SC form instruction.  */
 #define LEV (30)
-  { 7, 5, 0, 0, 0 },
+  { 7, 5, NULL, NULL, 0 },
 
   /* The LI field in an I form instruction.  The lower two bits are
      forced to zero.  */
@@ -248,19 +248,19 @@ const struct powerpc_operand powerpc_operands[] =
   /* The MB field in an M form instruction.  */
 #define MB (33)
 #define MB_MASK (0x1f << 6)
-  { 5, 6, 0, 0, 0 },
+  { 5, 6, NULL, NULL, 0 },
 
   /* The ME field in an M form instruction.  */
 #define ME (34)
 #define ME_MASK (0x1f << 1)
-  { 5, 1, 0, 0, 0 },
+  { 5, 1, NULL, NULL, 0 },
 
   /* The MB and ME fields in an M form instruction expressed a single
      operand which is a bitmask indicating which bits to select.  This
      is a two operand form using PPC_OPERAND_NEXT.  See the
      description in opcode/ppc.h for what this means.  */
 #define MBE (35)
-  { 5, 6, 0, 0, PPC_OPERAND_OPTIONAL | PPC_OPERAND_NEXT },
+  { 5, 6, NULL, NULL, PPC_OPERAND_OPTIONAL | PPC_OPERAND_NEXT },
   { 32, 0, insert_mbe, extract_mbe, 0 },
 
   /* The MB or ME field in an MD or MDS form instruction.  The high
@@ -284,29 +284,29 @@ const struct powerpc_operand powerpc_operands[] =
   /* The RA field in an D, DS, X, XO, M, or MDS form instruction.  */
 #define RA (40)
 #define RA_MASK (0x1f << 16)
-  { 5, 16, 0, 0, PPC_OPERAND_GPR },
+  { 5, 16, NULL, NULL, PPC_OPERAND_GPR },
 
   /* The RA field in a D or X form instruction which is an updating
      load, which means that the RA field may not be zero and may not
      equal the RT field.  */
 #define RAL (41)
-  { 5, 16, insert_ral, 0, PPC_OPERAND_GPR },
+  { 5, 16, insert_ral, NULL, PPC_OPERAND_GPR },
 
   /* The RA field in an lmw instruction, which has special value
      restrictions.  */
 #define RAM (42)
-  { 5, 16, insert_ram, 0, PPC_OPERAND_GPR },
+  { 5, 16, insert_ram, NULL, PPC_OPERAND_GPR },
 
   /* The RA field in a D or X form instruction which is an updating
      store or an updating floating point load, which means that the RA
      field may not be zero.  */
 #define RAS (43)
-  { 5, 16, insert_ras, 0, PPC_OPERAND_GPR },
+  { 5, 16, insert_ras, NULL, PPC_OPERAND_GPR },
 
   /* The RB field in an X, XO, M, or MDS form instruction.  */
 #define RB (44)
 #define RB_MASK (0x1f << 11)
-  { 5, 11, 0, 0, PPC_OPERAND_GPR },
+  { 5, 11, NULL, NULL, PPC_OPERAND_GPR },
 
   /* The RB field in an X form instruction when it must be the same as
      the RS field in the instruction.  This is used for extended
@@ -320,12 +320,12 @@ const struct powerpc_operand powerpc_operands[] =
 #define RS (46)
 #define RT (RS)
 #define RT_MASK (0x1f << 21)
-  { 5, 21, 0, 0, PPC_OPERAND_GPR },
+  { 5, 21, NULL, NULL, PPC_OPERAND_GPR },
 
   /* The SH field in an X or M form instruction.  */
 #define SH (47)
 #define SH_MASK (0x1f << 11)
-  { 5, 11, 0, 0, 0 },
+  { 5, 11, NULL, NULL, 0 },
 
   /* The SH field in an MD form instruction.  This is split.  */
 #define SH6 (48)
@@ -334,12 +334,12 @@ const struct powerpc_operand powerpc_operands[] =
 
   /* The SI field in a D form instruction.  */
 #define SI (49)
-  { 16, 0, 0, 0, PPC_OPERAND_SIGNED },
+  { 16, 0, NULL, NULL, PPC_OPERAND_SIGNED },
 
   /* The SI field in a D form instruction when we accept a wide range
      of positive values.  */
 #define SISIGNOPT (50)
-  { 16, 0, 0, 0, PPC_OPERAND_SIGNED | PPC_OPERAND_SIGNOPT },
+  { 16, 0, NULL, NULL, PPC_OPERAND_SIGNED | PPC_OPERAND_SIGNOPT },
 
   /* The SPR field in an XFX form instruction.  This is flipped--the
      lower 5 bits are stored in the upper 5 and vice- versa.  */
@@ -350,20 +350,20 @@ const struct powerpc_operand powerpc_operands[] =
   /* The BAT index number in an XFX form m[ft]ibat[lu] instruction.  */
 #define SPRBAT (52)
 #define SPRBAT_MASK (0x3 << 17)
-  { 2, 17, 0, 0, 0 },
+  { 2, 17, NULL, NULL, 0 },
 
   /* The SPRG register number in an XFX form m[ft]sprg instruction.  */
 #define SPRG (53)
 #define SPRG_MASK (0x3 << 16)
-  { 2, 16, 0, 0, 0 },
+  { 2, 16, NULL, NULL, 0 },
 
   /* The SR field in an X form instruction.  */
 #define SR (54)
-  { 4, 16, 0, 0, 0 },
+  { 4, 16, NULL, NULL, 0 },
 
   /* The SV field in a POWER SC form instruction.  */
 #define SV (55)
-  { 14, 2, 0, 0, 0 },
+  { 14, 2, NULL, NULL, 0 },
 
   /* The TBR field in an XFX form instruction.  This is like the SPR
      field, but it is optional.  */
@@ -373,15 +373,15 @@ const struct powerpc_operand powerpc_operands[] =
   /* The TO field in a D or X form instruction.  */
 #define TO (57)
 #define TO_MASK (0x1f << 21)
-  { 5, 21, 0, 0, 0 },
+  { 5, 21, NULL, NULL, 0 },
 
   /* The U field in an X form instruction.  */
 #define U (58)
-  { 4, 12, 0, 0, 0 },
+  { 4, 12, NULL, NULL, 0 },
 
   /* The UI field in a D form instruction.  */
 #define UI (59)
-  { 16, 0, 0, 0, 0 },
+  { 16, 0, NULL, NULL, 0 },
 };
 
 /* The functions used to insert and extract complicated operands.  */
@@ -393,19 +393,14 @@ const struct powerpc_operand powerpc_operands[] =
    same.  */
 
 /*ARGSUSED*/
-static unsigned long 
-insert_bat (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+static unsigned long
+insert_bat(unsigned long insn, long value, const char **errmsg)
 {
   return insn | (((insn >> 21) & 0x1f) << 16);
 }
 
 static long
-extract_bat (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_bat(unsigned long insn, int *invalid)
 {
   if (invalid != (int *) NULL
       && ((insn >> 21) & 0x1f) != ((insn >> 16) & 0x1f))
@@ -421,18 +416,13 @@ extract_bat (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_bba (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_bba(unsigned long insn, long value, const char **errmsg)
 {
   return insn | (((insn >> 16) & 0x1f) << 11);
 }
 
 static long
-extract_bba (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_bba(unsigned long insn, int *invalid)
 {
   if (invalid != (int *) NULL
       && ((insn >> 16) & 0x1f) != ((insn >> 11) & 0x1f))
@@ -445,19 +435,14 @@ extract_bba (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_bd (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_bd(unsigned long insn, long value, const char **errmsg)
 {
   return insn | (value & 0xfffc);
 }
 
 /*ARGSUSED*/
 static long
-extract_bd (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_bd(unsigned long insn, int *invalid)
 {
   if ((insn & 0x8000) != 0)
     return (insn & 0xfffc) - 0x10000;
@@ -474,10 +459,7 @@ extract_bd (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_bdm (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_bdm(unsigned long insn, long value, const char **errmsg)
 {
   if ((value & 0x8000) != 0)
     insn |= 1 << 21;
@@ -485,9 +467,7 @@ insert_bdm (insn, value, errmsg)
 }
 
 static long
-extract_bdm (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_bdm(unsigned long insn, int *invalid)
 {
   if (invalid != (int *) NULL
       && ((insn & (1 << 21)) == 0
@@ -505,10 +485,7 @@ extract_bdm (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_bdp (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_bdp(unsigned long insn, long value, const char **errmsg)
 {
   if ((value & 0x8000) == 0)
     insn |= 1 << 21;
@@ -516,9 +493,7 @@ insert_bdp (insn, value, errmsg)
 }
 
 static long
-extract_bdp (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_bdp(unsigned long insn, int *invalid)
 {
   if (invalid != (int *) NULL
       && ((insn & (1 << 21)) == 0
@@ -561,10 +536,7 @@ valid_bo (long value)
    the field to an illegal value.  */
 
 static unsigned long
-insert_bo (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_bo(unsigned long insn, long value, const char **errmsg)
 {
   if (errmsg != (const char **) NULL
       && ! valid_bo (value))
@@ -573,9 +545,7 @@ insert_bo (insn, value, errmsg)
 }
 
 static long
-extract_bo (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_bo(unsigned long insn, int *invalid)
 {
   long value;
 
@@ -591,10 +561,7 @@ extract_bo (insn, invalid)
    extracting it, we force it to be even.  */
 
 static unsigned long
-insert_boe (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_boe(unsigned long insn, long value, const char **errmsg)
 {
   if (errmsg != (const char **) NULL)
     {
@@ -607,9 +574,7 @@ insert_boe (insn, value, errmsg)
 }
 
 static long
-extract_boe (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_boe(unsigned long insn, int *invalid)
 {
   long value;
 
@@ -625,19 +590,14 @@ extract_boe (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_ds (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_ds(unsigned long insn, long value, const char **errmsg)
 {
   return insn | (value & 0xfffc);
 }
 
 /*ARGSUSED*/
 static long
-extract_ds (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_ds(unsigned long insn, int *invalid)
 {
   if ((insn & 0x8000) != 0)
     return (insn & 0xfffc) - 0x10000;
@@ -650,19 +610,14 @@ extract_ds (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_li (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_li(unsigned long insn, long value, const char **errmsg)
 {
   return insn | (value & 0x3fffffc);
 }
 
 /*ARGSUSED*/
 static long
-extract_li (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_li(unsigned long insn, int *invalid)
 {
   if ((insn & 0x2000000) != 0)
     return (insn & 0x3fffffc) - 0x4000000;
@@ -676,10 +631,7 @@ extract_li (insn, invalid)
    instruction which uses a field of this type.  */
 
 static unsigned long
-insert_mbe (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_mbe(unsigned long insn, long value, const char **errmsg)
 {
   unsigned long uval;
   int mb, me;
@@ -718,9 +670,7 @@ insert_mbe (insn, value, errmsg)
 }
 
 static long
-extract_mbe (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_mbe(unsigned long insn, int *invalid)
 {
   long ret;
   int mb, me;
@@ -742,19 +692,14 @@ extract_mbe (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_mb6 (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_mb6(unsigned long insn, long value, const char **errmsg)
 {
   return insn | ((value & 0x1f) << 6) | (value & 0x20);
 }
 
 /*ARGSUSED*/
 static long
-extract_mb6 (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_mb6(unsigned long insn, int *invalid)
 {
   return ((insn >> 6) & 0x1f) | (insn & 0x20);
 }
@@ -763,10 +708,7 @@ extract_mb6 (insn, invalid)
    0.  */
 
 static unsigned long
-insert_nb (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_nb(unsigned long insn, long value, const char **errmsg)
 {
   if (value < 0 || value > 32)
     *errmsg = "value out of range";
@@ -777,9 +719,7 @@ insert_nb (insn, value, errmsg)
 
 /*ARGSUSED*/
 static long
-extract_nb (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_nb(unsigned long insn, int *invalid)
 {
   long ret;
 
@@ -796,18 +736,13 @@ extract_nb (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_nsi (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_nsi(unsigned long insn, long value, const char **errmsg)
 {
   return insn | ((- value) & 0xffff);
 }
 
 static long
-extract_nsi (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_nsi(unsigned long insn, int *invalid)
 {
   if (invalid != (int *) NULL)
     *invalid = 1;
@@ -822,10 +757,7 @@ extract_nsi (insn, invalid)
    equal the RT field.  */
 
 static unsigned long
-insert_ral (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_ral(unsigned long insn, long value, const char **errmsg)
 {
   if (value == 0
       || value == ((insn >> 21) & 0x1f))
@@ -837,10 +769,7 @@ insert_ral (insn, value, errmsg)
    restrictions.  */
 
 static unsigned long
-insert_ram (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_ram(unsigned long insn, long value, const char **errmsg)
 {
   if (value >= ((insn >> 21) & 0x1f))
     *errmsg = "index register in load range";
@@ -852,10 +781,7 @@ insert_ram (insn, value, errmsg)
    field may not be zero.  */
 
 static unsigned long
-insert_ras (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_ras(unsigned long insn, long value, const char **errmsg)
 {
   if (value == 0)
     *errmsg = "invalid register operand when updating";
@@ -869,19 +795,14 @@ insert_ras (insn, value, errmsg)
    extraction function just checks that the fields are the same.  */
 
 /*ARGSUSED*/
-static unsigned long 
-insert_rbs (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+static unsigned long
+insert_rbs(unsigned long insn, long value, const char **errmsg)
 {
   return insn | (((insn >> 21) & 0x1f) << 11);
 }
 
 static long
-extract_rbs (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_rbs(unsigned long insn, int *invalid)
 {
   if (invalid != (int *) NULL
       && ((insn >> 21) & 0x1f) != ((insn >> 11) & 0x1f))
@@ -893,19 +814,14 @@ extract_rbs (insn, invalid)
 
 /*ARGSUSED*/
 static unsigned long
-insert_sh6 (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_sh6(unsigned long insn, long value, const char **errmsg)
 {
   return insn | ((value & 0x1f) << 11) | ((value & 0x20) >> 4);
 }
 
 /*ARGSUSED*/
 static long
-extract_sh6 (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_sh6(unsigned long insn, int *invalid)
 {
   return ((insn >> 11) & 0x1f) | ((insn << 4) & 0x20);
 }
@@ -914,18 +830,13 @@ extract_sh6 (insn, invalid)
    lower 5 bits are stored in the upper 5 and vice- versa.  */
 
 static unsigned long
-insert_spr (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_spr(unsigned long insn, long value, const char **errmsg)
 {
   return insn | ((value & 0x1f) << 16) | ((value & 0x3e0) << 6);
 }
 
 static long
-extract_spr (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_spr(unsigned long insn, int *invalid)
 {
   return ((insn >> 16) & 0x1f) | ((insn >> 6) & 0x3e0);
 }
@@ -941,10 +852,7 @@ extract_spr (insn, invalid)
 #define TB (268)
 
 static unsigned long
-insert_tbr (insn, value, errmsg)
-     unsigned long insn;
-     long value;
-     const char **errmsg;
+insert_tbr(unsigned long insn, long value, const char **errmsg)
 {
   if (value == 0)
     value = TB;
@@ -952,9 +860,7 @@ insert_tbr (insn, value, errmsg)
 }
 
 static long
-extract_tbr (insn, invalid)
-     unsigned long insn;
-     int *invalid;
+extract_tbr(unsigned long insn, int *invalid)
 {
   long ret;
 

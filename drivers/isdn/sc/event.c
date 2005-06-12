@@ -1,22 +1,11 @@
-/*
- *  $Id: event.c,v 1.4 1997/10/09 22:30:58 fritz Exp $
- *  Copyright (C) 1996  SpellCaster Telecommunications Inc.
+/* $Id: event.c,v 1.4.8.1 2001/09/23 22:24:59 kai Exp $
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- *  For more information, please contact gpl-info@spellcast.com or write:
+ * For more information, please contact gpl-info@spellcast.com or write:
  *
  *     SpellCaster Telecommunications Inc.
  *     5621 Finch Avenue East, Unit #3
@@ -26,14 +15,13 @@
  *     +1 (416) 297-6433 Facsimile
  */
 
-#define __NO_VERSION__
 #include "includes.h"
 #include "hardware.h"
 #include "message.h"
 #include "card.h"
 
 extern int cinst;
-extern board *adapter[];
+extern board *sc_adapter[];
 
 #ifdef DEBUG
 static char *events[] = { "ISDN_STAT_STAVAIL",
@@ -58,9 +46,9 @@ int indicate_status(int card, int event,ulong Channel,char *Data)
 	isdn_ctrl cmd;
 
 	pr_debug("%s: Indicating event %s on Channel %d\n",
-		adapter[card]->devicename, events[event-256], Channel);
+		sc_adapter[card]->devicename, events[event-256], Channel);
 	if (Data != NULL){
-		pr_debug("%s: Event data: %s\n", adapter[card]->devicename,
+		pr_debug("%s: Event data: %s\n", sc_adapter[card]->devicename,
 			Data);
 		switch (event) {
 			case ISDN_STAT_BSENT:
@@ -75,7 +63,7 @@ int indicate_status(int card, int event,ulong Channel,char *Data)
 	}
 
 	cmd.command = event;
-	cmd.driver = adapter[card]->driverId;
+	cmd.driver = sc_adapter[card]->driverId;
 	cmd.arg = Channel;
-	return adapter[card]->card->statcallb(&cmd);
+	return sc_adapter[card]->card->statcallb(&cmd);
 }

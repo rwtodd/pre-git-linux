@@ -38,7 +38,7 @@
  *    - zbuffer linear offset and pitch -- also invarient
  *    - drawing origin in back and depth buffers.
  *
- * Keep the depth/back buffer state here to acommodate private buffers
+ * Keep the depth/back buffer state here to accommodate private buffers
  * in the future.
  */
 #define I810_DESTREG_DI0  0	/* CMD_OP_DESTBUFFER_INFO (2 dwords) */
@@ -88,18 +88,48 @@
 #define I810_TEXREG_MCS  7	/* GFX_OP_MAP_COORD_SETS ??? */
 #define I810_TEX_SETUP_SIZE 8
 
+/* Flags for clear ioctl
+ */
 #define I810_FRONT   0x1
 #define I810_BACK    0x2
 #define I810_DEPTH   0x4
 
+typedef enum _drm_i810_init_func {
+	I810_INIT_DMA = 0x01,
+	I810_CLEANUP_DMA = 0x02,
+	I810_INIT_DMA_1_4 = 0x03
+ } drm_i810_init_func_t;
 
+/* This is the init structure after v1.2 */
 typedef struct _drm_i810_init {
-	enum {
-		I810_INIT_DMA = 0x01,
-		I810_CLEANUP_DMA = 0x02
-	} func;
+	drm_i810_init_func_t func;
+#if CONFIG_XFREE86_VERSION < XFREE86_VERSION(4,1,0,0)
 	int ring_map_idx;
 	int buffer_map_idx;
+#else
+	unsigned int mmio_offset;
+	unsigned int buffers_offset;
+#endif
+	int sarea_priv_offset;
+	unsigned int ring_start;
+	unsigned int ring_end;
+	unsigned int ring_size;
+	unsigned int front_offset;
+	unsigned int back_offset;
+	unsigned int depth_offset;
+	unsigned int overlay_offset;
+	unsigned int overlay_physical;
+	unsigned int w;
+	unsigned int h;
+	unsigned int pitch;
+	unsigned int pitch_bits; 
+} drm_i810_init_t;
+
+/* This is the init structure prior to v1.2 */
+typedef struct _drm_i810_pre12_init {
+	drm_i810_init_func_t func;
+	unsigned int mmio_offset;
+	unsigned int buffers_offset;
 	int sarea_priv_offset;
 	unsigned int ring_start;
 	unsigned int ring_end;
@@ -111,7 +141,7 @@ typedef struct _drm_i810_init {
 	unsigned int h;
 	unsigned int pitch;
 	unsigned int pitch_bits; 
-} drm_i810_init_t;
+} drm_i810_pre12_init_t;
 
 /* Warning: If you change the SAREA structure you must change the Xserver
  * structure as well */
@@ -157,15 +187,55 @@ typedef struct _drm_i810_sarea {
 
 	int vertex_prim;
 
+	int pf_enabled;               /* is pageflipping allowed? */
+	int pf_active;
+	int pf_current_page;	    /* which buffer is being displayed? */
 } drm_i810_sarea_t;
+
+/* WARNING: If you change any of these defines, make sure to change the
+ * defines in the Xserver file (xf86drmMga.h)
+ */
+
+/* i810 specific ioctls
+ * The device specific ioctl range is 0x40 to 0x79.
+ */
+#define DRM_I810_INIT		0x00
+#define DRM_I810_VERTEX		0x01
+#define DRM_I810_CLEAR		0x02
+#define DRM_I810_FLUSH		0x03
+#define DRM_I810_GETAGE		0x04
+#define DRM_I810_GETBUF		0x05
+#define DRM_I810_SWAP		0x06
+#define DRM_I810_COPY		0x07
+#define DRM_I810_DOCOPY		0x08
+#define DRM_I810_OV0INFO	0x09
+#define DRM_I810_FSTATUS	0x0a
+#define DRM_I810_OV0FLIP	0x0b
+#define DRM_I810_MC		0x0c
+#define DRM_I810_RSTATUS	0x0d
+#define DRM_I810_FLIP		0x0e
+
+#define DRM_IOCTL_I810_INIT		DRM_IOW( DRM_COMMAND_BASE + DRM_I810_INIT, drm_i810_init_t)
+#define DRM_IOCTL_I810_VERTEX		DRM_IOW( DRM_COMMAND_BASE + DRM_I810_VERTEX, drm_i810_vertex_t)
+#define DRM_IOCTL_I810_CLEAR		DRM_IOW( DRM_COMMAND_BASE + DRM_I810_CLEAR, drm_i810_clear_t)
+#define DRM_IOCTL_I810_FLUSH		DRM_IO(  DRM_COMMAND_BASE + DRM_I810_FLUSH)
+#define DRM_IOCTL_I810_GETAGE		DRM_IO(  DRM_COMMAND_BASE + DRM_I810_GETAGE)
+#define DRM_IOCTL_I810_GETBUF		DRM_IOWR(DRM_COMMAND_BASE + DRM_I810_GETBUF, drm_i810_dma_t)
+#define DRM_IOCTL_I810_SWAP		DRM_IO(  DRM_COMMAND_BASE + DRM_I810_SWAP)
+#define DRM_IOCTL_I810_COPY		DRM_IOW( DRM_COMMAND_BASE + DRM_I810_COPY, drm_i810_copy_t)
+#define DRM_IOCTL_I810_DOCOPY		DRM_IO(  DRM_COMMAND_BASE + DRM_I810_DOCOPY)
+#define DRM_IOCTL_I810_OV0INFO		DRM_IOR( DRM_COMMAND_BASE + DRM_I810_OV0INFO, drm_i810_overlay_t)
+#define DRM_IOCTL_I810_FSTATUS		DRM_IO ( DRM_COMMAND_BASE + DRM_I810_FSTATUS)
+#define DRM_IOCTL_I810_OV0FLIP		DRM_IO ( DRM_COMMAND_BASE + DRM_I810_OV0FLIP)
+#define DRM_IOCTL_I810_MC		DRM_IOW( DRM_COMMAND_BASE + DRM_I810_MC, drm_i810_mc_t)
+#define DRM_IOCTL_I810_RSTATUS		DRM_IO ( DRM_COMMAND_BASE + DRM_I810_RSTATUS)
+#define DRM_IOCTL_I810_FLIP             DRM_IO ( DRM_COMMAND_BASE + DRM_I810_FLIP)
 
 typedef struct _drm_i810_clear {
 	int clear_color;
 	int clear_depth;
 	int flags;
 } drm_i810_clear_t;
-
-
 
 /* These may be placeholders if we have more cliprects than
  * I810_NR_SAREA_CLIPRECTS.  In that case, the client sets discard to
@@ -184,11 +254,36 @@ typedef struct _drm_i810_copy_t {
 	void *address;		/* Address to copy from */
 } drm_i810_copy_t;
 
+#define PR_TRIANGLES         (0x0<<18)
+#define PR_TRISTRIP_0        (0x1<<18)
+#define PR_TRISTRIP_1        (0x2<<18)
+#define PR_TRIFAN            (0x3<<18)
+#define PR_POLYGON           (0x4<<18)
+#define PR_LINES             (0x5<<18)
+#define PR_LINESTRIP         (0x6<<18)
+#define PR_RECTS             (0x7<<18)
+#define PR_MASK              (0x7<<18)
+
+
 typedef struct drm_i810_dma {
 	void *virtual;
 	int request_idx;
 	int request_size;
 	int granted;
 } drm_i810_dma_t;
+
+typedef struct _drm_i810_overlay_t {
+	unsigned int offset;    /* Address of the Overlay Regs */
+	unsigned int physical;
+} drm_i810_overlay_t;
+
+typedef struct _drm_i810_mc {
+	int idx;                /* buffer index */
+	int used;               /* nr bytes in use */
+	int num_blocks;         /* number of GFXBlocks */
+	int *length;            /* List of lengths for GFXBlocks (FUTURE)*/
+	unsigned int last_render; /* Last Render Request */
+} drm_i810_mc_t;
+
 
 #endif /* _I810_DRM_H_ */

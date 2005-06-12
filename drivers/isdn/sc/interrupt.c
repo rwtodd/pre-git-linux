@@ -1,22 +1,11 @@
-/*
- *  $Id: interrupt.c,v 1.4 1998/01/31 22:10:52 keil Exp $
- *  Copyright (C) 1996  SpellCaster Telecommunications Inc.
+/* $Id: interrupt.c,v 1.4.8.3 2001/09/23 22:24:59 kai Exp $
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- *  For more information, please contact gpl-info@spellcast.com or write:
+ * For more information, please contact gpl-info@spellcast.com or write:
  *
  *     SpellCaster Telecommunications Inc.
  *     5621 Finch Avenue East, Unit #3
@@ -26,29 +15,28 @@
  *     +1 (416) 297-6433 Facsimile
  */
 
-#define __NO_VERSION__
 #include "includes.h"
 #include "hardware.h"
 #include "message.h"
 #include "card.h"
+#include <linux/interrupt.h>
 
 extern int indicate_status(int, int, ulong, char *);
 extern void check_phystat(unsigned long);
-extern void dump_messages(int);
 extern int receivemessage(int, RspMessage *);
 extern int sendmessage(int, unsigned int, unsigned int, unsigned int,
         unsigned int, unsigned int, unsigned int, unsigned int *);
 extern void rcvpkt(int, RspMessage *);
 
 extern int cinst;
-extern board *adapter[];
+extern board *sc_adapter[];
 
 int get_card_from_irq(int irq)
 {
 	int i;
 
 	for(i = 0 ; i < cinst ; i++) {
-		if(adapter[i]->interrupt == irq)
+		if(sc_adapter[i]->interrupt == irq)
 			return i;
 	}
 	return -1;
@@ -57,7 +45,8 @@ int get_card_from_irq(int irq)
 /*
  * 
  */
-void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
+irqreturn_t interrupt_handler(int interrupt, void *cardptr, struct pt_regs *regs)
+{
 
 	RspMessage rcvmsg;
 	int channel;
@@ -67,10 +56,11 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 
 	if(!IS_VALID_CARD(card)) {
 		pr_debug("Invalid param: %d is not a valid card id\n", card);
-		return;
+		return IRQ_NONE;
 	}
 
-	pr_debug("%s: Entered Interrupt handler\n", adapter[card]->devicename);
+	pr_debug("%s: Entered Interrupt handler\n",
+			sc_adapter[card]->devicename);
 	
  	/*
 	 * Pull all of the waiting messages off the response queue
@@ -80,8 +70,9 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		 * Push the message to the adapter structure for
 		 * send_and_receive to snoop
 		 */
-		if(adapter[card]->want_async_messages)
-			memcpy(&(adapter[card]->async_msg), &rcvmsg, sizeof(RspMessage));
+		if(sc_adapter[card]->want_async_messages)
+			memcpy(&(sc_adapter[card]->async_msg),
+					&rcvmsg, sizeof(RspMessage));
 
 		channel = (unsigned int) rcvmsg.phy_link_no;
 		
@@ -90,7 +81,8 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		 */
 		if(IS_CM_MESSAGE(rcvmsg, 0, 0, Invalid)) {
 			pr_debug("%s: Invalid request Message, rsp_status = %d\n", 
-				adapter[card]->devicename, rcvmsg.rsp_status);
+				sc_adapter[card]->devicename,
+				rcvmsg.rsp_status);
 			break;	
 		}
 		
@@ -100,7 +92,7 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		if (IS_CE_MESSAGE(rcvmsg, Lnk, 1, Read))
 		{
 			pr_debug("%s: Received packet 0x%x bytes long at 0x%x\n",
-						adapter[card]->devicename,
+						sc_adapter[card]->devicename,
 						rcvmsg.msg_data.response.msg_len,
 						rcvmsg.msg_data.response.buff_offset);
 			rcvpkt(card, &rcvmsg);
@@ -112,9 +104,10 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		 * Handle a write acknoledgement
 		 */
 		if(IS_CE_MESSAGE(rcvmsg, Lnk, 1, Write)) {
-			pr_debug("%s: Packet Send ACK on channel %d\n", adapter[card]->devicename,
+			pr_debug("%s: Packet Send ACK on channel %d\n",
+				sc_adapter[card]->devicename,
 				rcvmsg.phy_link_no);
-			adapter[card]->channel[rcvmsg.phy_link_no-1].free_sendbufs++;
+			sc_adapter[card]->channel[rcvmsg.phy_link_no-1].free_sendbufs++;
 			continue;
 		}
 
@@ -126,7 +119,7 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 			unsigned int callid;
 			setup_parm setup;	
 			pr_debug("%s: Connect message: line %d: status %d: cause 0x%x\n",
-						adapter[card]->devicename,
+						sc_adapter[card]->devicename,
 						rcvmsg.phy_link_no,
 						rcvmsg.rsp_status,
 						rcvmsg.msg_data.byte_array[2]);
@@ -134,16 +127,19 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 			memcpy(&callid,rcvmsg.msg_data.byte_array,sizeof(int));
 			if(callid>=0x8000 && callid<=0xFFFF)
 			{		
-				pr_debug("%s: Got Dial-Out Rsp\n", adapter[card]->devicename);	
+				pr_debug("%s: Got Dial-Out Rsp\n",
+					sc_adapter[card]->devicename);
 				indicate_status(card, ISDN_STAT_DCONN,
 						(unsigned long)rcvmsg.phy_link_no-1,NULL);
 				
 			}
 			else if(callid>=0x0000 && callid<=0x7FFF)
 			{
-				pr_debug("%s: Got Incomming Call\n", adapter[card]->devicename);	
+				pr_debug("%s: Got Incoming Call\n",
+						sc_adapter[card]->devicename);
 				strcpy(setup.phone,&(rcvmsg.msg_data.byte_array[4]));
-				strcpy(setup.eazmsn,adapter[card]->channel[rcvmsg.phy_link_no-1].dn);
+				strcpy(setup.eazmsn,
+					sc_adapter[card]->channel[rcvmsg.phy_link_no-1].dn);
 				setup.si1 = 7;
 				setup.si2 = 0;
 				setup.plan = 0;
@@ -161,7 +157,7 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		if (IS_CE_MESSAGE(rcvmsg, Phy, 1, Disconnect)) 
 		{
 			pr_debug("%s: disconnect message: line %d: status %d: cause 0x%x\n",
-						adapter[card]->devicename,
+						sc_adapter[card]->devicename,
 						rcvmsg.phy_link_no,
 						rcvmsg.rsp_status,
 					 	rcvmsg.msg_data.byte_array[2]);
@@ -176,15 +172,16 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		 * Handle a startProc engine up message
 		 */
 		if (IS_CM_MESSAGE(rcvmsg, 5, 0, MiscEngineUp)) {
-			pr_debug("%s: Received EngineUp message\n", adapter[card]->devicename);
-			adapter[card]->EngineUp = 1;
+			pr_debug("%s: Received EngineUp message\n",
+				sc_adapter[card]->devicename);
+			sc_adapter[card]->EngineUp = 1;
 			sendmessage(card, CEPID,ceReqTypeCall,ceReqClass0,ceReqCallGetMyNumber,1,0,NULL);
 			sendmessage(card, CEPID,ceReqTypeCall,ceReqClass0,ceReqCallGetMyNumber,2,0,NULL);
-			init_timer(&adapter[card]->stat_timer);
-			adapter[card]->stat_timer.function = check_phystat;
-			adapter[card]->stat_timer.data = card;
-			adapter[card]->stat_timer.expires = jiffies + CHECKSTAT_TIME;
-			add_timer(&adapter[card]->stat_timer);
+			init_timer(&sc_adapter[card]->stat_timer);
+			sc_adapter[card]->stat_timer.function = check_phystat;
+			sc_adapter[card]->stat_timer.data = card;
+			sc_adapter[card]->stat_timer.expires = jiffies + CHECKSTAT_TIME;
+			add_timer(&sc_adapter[card]->stat_timer);
 			continue;
 		}
 
@@ -192,7 +189,8 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		 * Start proc response
 		 */
 		if (IS_CM_MESSAGE(rcvmsg, 2, 0, StartProc)) {
-			pr_debug("%s: StartProc Response Status %d\n", adapter[card]->devicename,
+			pr_debug("%s: StartProc Response Status %d\n",
+				sc_adapter[card]->devicename,
 				rcvmsg.rsp_status);
 			continue;
 		}
@@ -201,7 +199,7 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		 * Handle a GetMyNumber Rsp
 		 */
 		if (IS_CE_MESSAGE(rcvmsg,Call,0,GetMyNumber)){
-			strcpy(adapter[card]->channel[rcvmsg.phy_link_no-1].dn,rcvmsg.msg_data.byte_array);
+			strcpy(sc_adapter[card]->channel[rcvmsg.phy_link_no-1].dn,rcvmsg.msg_data.byte_array);
 			continue;
 		}
 			
@@ -217,9 +215,10 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 			b1stat = (unsigned int) rcvmsg.msg_data.byte_array[0];
 			b2stat = (unsigned int) rcvmsg.msg_data.byte_array[1];
 
-			adapter[card]->nphystat = (b2stat >> 8) | b1stat; /* endian?? */
-			pr_debug("%s: PhyStat is 0x%2x\n", adapter[card]->devicename,
-				adapter[card]->nphystat);
+			sc_adapter[card]->nphystat = (b2stat >> 8) | b1stat; /* endian?? */
+			pr_debug("%s: PhyStat is 0x%2x\n",
+				sc_adapter[card]->devicename,
+				sc_adapter[card]->nphystat);
 			continue;
 		}
 
@@ -234,7 +233,7 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 				 * Set board format to HDLC if it wasn't already
 				 */
 				pr_debug("%s: current frame format: 0x%x, will change to HDLC\n",
-						adapter[card]->devicename,
+						sc_adapter[card]->devicename,
 					rcvmsg.msg_data.byte_array[0]);
 				sendmessage(card, CEPID, ceReqTypeCall,
 						ceReqClass0,
@@ -249,10 +248,13 @@ void interrupt_handler(int interrupt, void * cardptr, struct pt_regs *regs ) {
 		 * Hmm...
 		 */
 		pr_debug("%s: Received unhandled message (%d,%d,%d) link %d\n",
-			adapter[card]->devicename, rcvmsg.type, rcvmsg.class, rcvmsg.code, 
+			sc_adapter[card]->devicename,
+			rcvmsg.type, rcvmsg.class, rcvmsg.code,
 			rcvmsg.phy_link_no);
 
 	}	/* while */
 
-	pr_debug("%s: Exiting Interrupt Handler\n", adapter[card]->devicename);
+	pr_debug("%s: Exiting Interrupt Handler\n",
+			sc_adapter[card]->devicename);
+	return IRQ_HANDLED;
 }

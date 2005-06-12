@@ -33,9 +33,8 @@
 static char *_rioroute_c_sccs_ = "@(#)rioroute.c	1.3";
 #endif
 
-#define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -46,7 +45,6 @@ static char *_rioroute_c_sccs_ = "@(#)rioroute.c	1.3";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 
@@ -84,6 +82,12 @@ static char *_rioroute_c_sccs_ = "@(#)rioroute.c	1.3";
 #include "param.h"
 #include "list.h"
 #include "sam.h"
+
+static int RIOCheckIsolated(struct rio_info *, struct Host *, uint);
+static int RIOIsolate(struct rio_info *, struct Host *, uint);
+static int RIOCheck(struct Host *, uint);
+static void RIOConCon(struct rio_info *, struct Host *, uint, uint, uint, uint, int);
+
 
 /*
 ** Incoming on the ROUTE_RUP
@@ -521,7 +525,7 @@ int RIORouteRup( struct rio_info *p, uint Rup, struct Host *HostP, PKT *PacketP 
       /*
       ** If either of the modules on this unit is read-only or write-only
       ** or none-xprint, then we need to transfer that info over to the
-      ** relevent ports.
+      ** relevant ports.
       */
       if ( HostP->Mapping[ThisUnit].SysPort != NO_PORT )
       {
@@ -657,6 +661,7 @@ uint unit;
 			*/
 			if (PortP->TxStart == 0) {
 					rio_dprintk (RIO_DEBUG_ROUTE, "Tx pkts not set up yet\n");
+					rio_spin_unlock_irqrestore(&PortP->portSem, flags);
 					break;
 			}
 
@@ -718,7 +723,7 @@ uint unit;
 ** the world about it. This is done to ensure that the configurator
 ** only gets up-to-date information about what is going on.
 */
-int
+static int
 RIOCheckIsolated(p, HostP, UnitId)
 struct rio_info *	p;
 struct Host *HostP;
@@ -748,7 +753,7 @@ uint UnitId;
 ** all the units attached to it. This will mean that the entire
 ** subnet will re-introduce itself.
 */
-int
+static int
 RIOIsolate(p, HostP, UnitId)
 struct rio_info *	p;
 struct Host *		HostP;
@@ -762,7 +767,7 @@ uint UnitId;
 #endif
 	UnitId--;		/* this trick relies on the Unit Id being UNSIGNED! */
 
-	if ( UnitId > MAX_RUP )		/* dontcha just lurv unsigned maths! */
+	if ( UnitId >= MAX_RUP )	/* dontcha just lurv unsigned maths! */
 		return(0);
 
 	if ( HostP->Mapping[UnitId].Flags & BEEN_HERE )
@@ -783,7 +788,7 @@ uint UnitId;
 	return 1;
 }
 
-int
+static int
 RIOCheck(HostP, UnitId)
 struct Host *HostP;
 uint UnitId;
@@ -884,7 +889,7 @@ struct rio_info *	p;
 	return(0);
 }
 
-void
+static void
 RIOConCon(p, HostP, FromId, FromLink, ToId, ToLink, Change)
 struct rio_info *	p;
 struct Host *HostP;
@@ -967,7 +972,7 @@ int Change;
 ** Delete and RTA entry from the saved table given to us
 ** by the configuration program.
 */
-int
+static int
 RIORemoveFromSavedTable(struct rio_info *p, struct Map *pMap)
 {
     int		entry;
@@ -975,7 +980,7 @@ RIORemoveFromSavedTable(struct rio_info *p, struct Map *pMap)
     /*
     ** We loop for all entries even after finding an entry and
     ** zeroing it because we may have two entries to delete if
-    ** its a 16 port RTA.
+    ** it's a 16 port RTA.
     */
     for (entry = 0; entry < TOTAL_MAP_ENTRIES; entry++)
     {
@@ -994,7 +999,7 @@ RIORemoveFromSavedTable(struct rio_info *p, struct Map *pMap)
 ** Scan the unit links to and return zero if the unit is completely
 ** disconnected.
 */
-int
+static int
 RIOFreeDisconnected(struct rio_info *p, struct Host *HostP, int unit)
 {
     int		link;

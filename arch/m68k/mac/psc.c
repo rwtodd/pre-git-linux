@@ -20,9 +20,9 @@
 #include <linux/init.h>
 
 #include <asm/traps.h>
-#include <asm/bootinfo.h> 
-#include <asm/macintosh.h> 
-#include <asm/macints.h> 
+#include <asm/bootinfo.h>
+#include <asm/macintosh.h>
+#include <asm/macints.h>
 #include <asm/mac_psc.h>
 
 #define DEBUG_PSC
@@ -30,7 +30,7 @@
 int psc_present;
 volatile __u8 *psc;
 
-void psc_irq(int, void *, struct pt_regs *);
+irqreturn_t psc_irq(int, void *, struct pt_regs *);
 
 /*
  * Debugging dump, used in various places to see what's going on.
@@ -117,21 +117,17 @@ void __init psc_init(void)
 
 void __init psc_register_interrupts(void)
 {
-	sys_request_irq(3, psc_irq, IRQ_FLG_LOCK, "psc3",
-			(void *) 0x30);
-	sys_request_irq(4, psc_irq, IRQ_FLG_LOCK, "psc4",
-			(void *) 0x40);
-	sys_request_irq(5, psc_irq, IRQ_FLG_LOCK, "psc5",
-			(void *) 0x50);
-	sys_request_irq(6, psc_irq, IRQ_FLG_LOCK, "psc6",
-			(void *) 0x60);
+	cpu_request_irq(3, psc_irq, IRQ_FLG_LOCK, "psc3", (void *) 0x30);
+	cpu_request_irq(4, psc_irq, IRQ_FLG_LOCK, "psc4", (void *) 0x40);
+	cpu_request_irq(5, psc_irq, IRQ_FLG_LOCK, "psc5", (void *) 0x50);
+	cpu_request_irq(6, psc_irq, IRQ_FLG_LOCK, "psc6", (void *) 0x60);
 }
 
 /*
  * PSC interrupt handler. It's a lot like the VIA interrupt handler.
  */
 
-void psc_irq(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t psc_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int pIFR	= pIFRbase + ((int) dev_id);
 	int pIER	= pIERbase + ((int) dev_id);
@@ -139,7 +135,6 @@ void psc_irq(int irq, void *dev_id, struct pt_regs *regs)
 	int irq_bit,i;
 	unsigned char events;
 
-	irq -= VEC_SPUR;
 	base_irq = irq << 3;
 
 #ifdef DEBUG_IRQS
@@ -148,7 +143,8 @@ void psc_irq(int irq, void *dev_id, struct pt_regs *regs)
 #endif
 
 	events = psc_read_byte(pIFR) & psc_read_byte(pIER) & 0xF;
-	if (!events) return;
+	if (!events)
+		return IRQ_NONE;
 
 	for (i = 0, irq_bit = 1 ; i < 4 ; i++, irq_bit <<= 1) {
 	        if (events & irq_bit) {
@@ -158,6 +154,7 @@ void psc_irq(int irq, void *dev_id, struct pt_regs *regs)
 			psc_write_byte(pIER, irq_bit | 0x80);
 		}
 	}
+	return IRQ_HANDLED;
 }
 
 void psc_irq_enable(int irq) {

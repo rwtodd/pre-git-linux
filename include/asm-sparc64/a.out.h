@@ -1,4 +1,4 @@
-/* $Id: a.out.h,v 1.6 1999/08/04 07:04:21 jj Exp $ */
+/* $Id: a.out.h,v 1.8 2002/02/09 19:49:31 davem Exp $ */
 #ifndef __SPARC64_A_OUT_H__
 #define __SPARC64_A_OUT_H__
 
@@ -21,7 +21,7 @@ struct exec {
 	unsigned int a_drsize;
 };
 
-#endif __ASSEMBLY__
+#endif /* !__ASSEMBLY__ */
 
 /* Where in the file does the text information begin? */
 #define N_TXTOFF(x)     (N_MAGIC(x) == ZMAGIC ? 0 : sizeof (struct exec))
@@ -95,7 +95,7 @@ struct relocation_info /* used when header.a_machtype == M_SPARC */
 
 #ifdef __KERNEL__
 
-#define STACK_TOP (current->thread.flags & SPARC_FLAG_32BIT ? 0xf0000000 : 0x80000000000L)
+#define STACK_TOP (test_thread_flag(TIF_32BIT) ? 0xf0000000 : 0x80000000000L)
 
 #endif
 

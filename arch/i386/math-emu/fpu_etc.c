@@ -68,7 +68,7 @@ static void ftst_(FPU_REG *st0_ptr, u_char st0tag)
 	      /* This is weird! */
 	      if (getsign(st0_ptr) == SIGN_POS)
 		setcc(SW_C3);
-#endif PECULIAR_486
+#endif /* PECULIAR_486 */
 	      return;
 	    }
 	  break;
@@ -137,7 +137,7 @@ static FUNC_ST0 const fp_etc_table[] = {
   ftst_, fxam, (FUNC_ST0)FPU_illegal, (FUNC_ST0)FPU_illegal
 };
 
-void FPU_etc()
+void FPU_etc(void)
 {
   (fp_etc_table[FPU_rm])(&st(0), FPU_gettag0());
 }

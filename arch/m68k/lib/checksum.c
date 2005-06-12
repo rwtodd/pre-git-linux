@@ -32,6 +32,7 @@
  *		csum_partial_copy_from_user.
  */
 
+#include <linux/module.h>
 #include <net/checksum.h>
 
 /*
@@ -125,6 +126,7 @@ csum_partial (const unsigned char *buff, int len, unsigned int sum)
 	return(sum);
 }
 
+EXPORT_SYMBOL(csum_partial);
 
 
 /*
@@ -132,8 +134,8 @@ csum_partial (const unsigned char *buff, int len, unsigned int sum)
  */
 
 unsigned int
-csum_partial_copy_from_user(const char *src, char *dst, int len,
-			    int sum, int *csum_err)
+csum_partial_copy_from_user(const unsigned char *src, unsigned char *dst,
+			    int len, int sum, int *csum_err)
 {
 	/*
 	 * GCC doesn't like more than 10 operands for the asm
@@ -243,7 +245,7 @@ csum_partial_copy_from_user(const char *src, char *dst, int len,
 	     "8:\n"
 		".section .fixup,\"ax\"\n"
 		".even\n"
-		/* If any execption occurs zero out the rest.
+		/* If any exception occurs zero out the rest.
 		   Similarities with the code above are intentional :-) */
 	     "90:\t"
 		"clrw %3@+\n\t"
@@ -324,7 +326,7 @@ csum_partial_copy_from_user(const char *src, char *dst, int len,
  */
 
 unsigned int
-csum_partial_copy(const char *src, char *dst, int len, int sum)
+csum_partial_copy_nocheck(const unsigned char *src, unsigned char *dst, int len, int sum)
 {
 	unsigned long tmp1, tmp2;
 	__asm__("movel %2,%4\n\t"

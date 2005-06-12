@@ -21,6 +21,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/init.h>
 #include <asm/processor.h>
 #include <asm/i387.h>
 #include <asm/msr.h>
@@ -76,26 +77,23 @@ static void __init check_fpu(void)
 	}
 
 /* Enable FXSR and company _before_ testing for FP problems. */
-#if defined(CONFIG_X86_FXSR) || defined(CONFIG_X86_RUNTIME_FXSR)
 	/*
 	 * Verify that the FXSAVE/FXRSTOR data will be 16-byte aligned.
 	 */
-	if (offsetof(struct task_struct, thread.i387.fxsave) & 15)
-		panic("Kernel compiled for PII/PIII+ with FXSR, data not 16-byte aligned!");
-
+	if (offsetof(struct task_struct, thread.i387.fxsave) & 15) {
+		extern void __buggy_fxsr_alignment(void);
+		__buggy_fxsr_alignment();
+	}
 	if (cpu_has_fxsr) {
 		printk(KERN_INFO "Enabling fast FPU save and restore... ");
 		set_in_cr4(X86_CR4_OSFXSR);
 		printk("done.\n");
 	}
-#endif
-#ifdef CONFIG_X86_XMM
 	if (cpu_has_xmm) {
 		printk(KERN_INFO "Enabling unmasked SIMD FPU exception support... ");
 		set_in_cr4(X86_CR4_OSXMMEXCPT);
 		printk("done.\n");
 	}
-#endif
 
 	/* Test for the divl bug.. */
 	__asm__("fninit\n\t"
@@ -182,14 +180,6 @@ static void __init check_config(void)
 #endif
 
 /*
- * If we configured ourselves for PGE, we'd better have it.
- */
-#ifdef CONFIG_X86_PGE
-	if (!cpu_has_pge)
-		panic("Kernel compiled for PPro+, requires PGE feature!");
-#endif
-
-/*
  * If we were told we had a good local APIC, check for buggy Pentia,
  * i.e. all B steppings and the C2 stepping of P54C when using their
  * integrated APIC (see 11AP erratum in "Pentium Processor
@@ -197,21 +187,15 @@ static void __init check_config(void)
  */
 #if defined(CONFIG_X86_LOCAL_APIC) && defined(CONFIG_X86_GOOD_APIC)
 	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL
-	    && test_bit(X86_FEATURE_APIC, &boot_cpu_data.x86_capability)
+	    && cpu_has_apic
 	    && boot_cpu_data.x86 == 5
 	    && boot_cpu_data.x86_model == 2
 	    && (boot_cpu_data.x86_mask < 6 || boot_cpu_data.x86_mask == 11))
 		panic("Kernel compiled for PMMX+, assumes a local APIC without the read-before-write bug!");
 #endif
-
-/*
- * If we configured ourselves for FXSR, we'd better have it.
- */
-#ifdef CONFIG_X86_FXSR
-	if (!cpu_has_fxsr)
-		panic("Kernel compiled for PII/PIII+, requires FXSR feature!");
-#endif
 }
+
+extern void alternative_instructions(void);
 
 static void __init check_bugs(void)
 {
@@ -225,4 +209,5 @@ static void __init check_bugs(void)
 	check_hlt();
 	check_popad();
 	system_utsname.machine[1] = '0' + (boot_cpu_data.x86 > 6 ? 6 : boot_cpu_data.x86);
+	alternative_instructions(); 
 }

@@ -3,6 +3,9 @@
  *
  *	Created 15 Jun 1997 by Geert Uytterhoeven
  *
+ *	2001 - Documented with DocBook
+ *	- Brad Douglas <brad@neruo.com>
+ *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License.  See the file COPYING in the main directory of this archive for
  *  more details.
@@ -73,189 +76,208 @@ static struct fb_cmap default_16_colors = {
 };
 
 
-    /*
-     *  Allocate a colormap
-     */
+/**
+ *	fb_alloc_cmap - allocate a colormap
+ *	@cmap: frame buffer colormap structure
+ *	@len: length of @cmap
+ *	@transp: boolean, 1 if there is transparency, 0 otherwise
+ *
+ *	Allocates memory for a colormap @cmap.  @len is the
+ *	number of entries in the palette.
+ *
+ *	Returns -1 errno on error, or zero on success.
+ *
+ */
 
 int fb_alloc_cmap(struct fb_cmap *cmap, int len, int transp)
 {
     int size = len*sizeof(u16);
 
     if (cmap->len != len) {
-	if (cmap->red)
-	    kfree(cmap->red);
-	if (cmap->green)
-	    kfree(cmap->green);
-	if (cmap->blue)
-	    kfree(cmap->blue);
-	if (cmap->transp)
-	    kfree(cmap->transp);
-	cmap->red = cmap->green = cmap->blue = cmap->transp = NULL;
-	cmap->len = 0;
+	fb_dealloc_cmap(cmap);
 	if (!len)
 	    return 0;
 	if (!(cmap->red = kmalloc(size, GFP_ATOMIC)))
-	    return -1;
+	    goto fail;
 	if (!(cmap->green = kmalloc(size, GFP_ATOMIC)))
-	    return -1;
+	    goto fail;
 	if (!(cmap->blue = kmalloc(size, GFP_ATOMIC)))
-	    return -1;
+	    goto fail;
 	if (transp) {
 	    if (!(cmap->transp = kmalloc(size, GFP_ATOMIC)))
-		return -1;
+		goto fail;
 	} else
 	    cmap->transp = NULL;
     }
     cmap->start = 0;
     cmap->len = len;
-    fb_copy_cmap(fb_default_cmap(len), cmap, 0);
+    fb_copy_cmap(fb_default_cmap(len), cmap);
     return 0;
+
+fail:
+    fb_dealloc_cmap(cmap);
+    return -1;
 }
 
+/**
+ *      fb_dealloc_cmap - deallocate a colormap
+ *      @cmap: frame buffer colormap structure
+ *
+ *      Deallocates a colormap that was previously allocated with
+ *      fb_alloc_cmap().
+ *
+ */
 
-    /*
-     *  Copy a colormap
-     */
-
-void fb_copy_cmap(struct fb_cmap *from, struct fb_cmap *to, int fsfromto)
+void fb_dealloc_cmap(struct fb_cmap *cmap)
 {
-    int size;
-    int tooff = 0, fromoff = 0;
+	kfree(cmap->red);
+	kfree(cmap->green);
+	kfree(cmap->blue);
+	kfree(cmap->transp);
 
-    if (to->start > from->start)
-	fromoff = to->start-from->start;
-    else
-	tooff = from->start-to->start;
-    size = to->len-tooff;
-    if (size > from->len-fromoff)
-	size = from->len-fromoff;
-    if (size < 0)
-	return;
-    size *= sizeof(u16);
-    
-    switch (fsfromto) {
-    case 0:
+	cmap->red = cmap->green = cmap->blue = cmap->transp = NULL;
+	cmap->len = 0;
+}
+
+/**
+ *	fb_copy_cmap - copy a colormap
+ *	@from: frame buffer colormap structure
+ *	@to: frame buffer colormap structure
+ *
+ *	Copy contents of colormap from @from to @to.
+ */
+
+int fb_copy_cmap(struct fb_cmap *from, struct fb_cmap *to)
+{
+	int tooff = 0, fromoff = 0;
+	int size;
+
+	if (to->start > from->start)
+		fromoff = to->start - from->start;
+	else
+		tooff = from->start - to->start;
+	size = to->len - tooff;
+	if (size > (int) (from->len - fromoff))
+		size = from->len - fromoff;
+	if (size <= 0)
+		return -EINVAL;
+	size *= sizeof(u16);
+
 	memcpy(to->red+tooff, from->red+fromoff, size);
 	memcpy(to->green+tooff, from->green+fromoff, size);
 	memcpy(to->blue+tooff, from->blue+fromoff, size);
 	if (from->transp && to->transp)
-	    memcpy(to->transp+tooff, from->transp+fromoff, size);
-        break;
-    case 1:
-	copy_from_user(to->red+tooff, from->red+fromoff, size);
-	copy_from_user(to->green+tooff, from->green+fromoff, size);
-	copy_from_user(to->blue+tooff, from->blue+fromoff, size);
-	if (from->transp && to->transp)
-            copy_from_user(to->transp+tooff, from->transp+fromoff, size);
-	break;
-    case 2:
-	copy_to_user(to->red+tooff, from->red+fromoff, size);
-	copy_to_user(to->green+tooff, from->green+fromoff, size);
-	copy_to_user(to->blue+tooff, from->blue+fromoff, size);
-	if (from->transp && to->transp)
-	    copy_to_user(to->transp+tooff, from->transp+fromoff, size);
-	break;
-    }
+		memcpy(to->transp+tooff, from->transp+fromoff, size);
+	return 0;
 }
 
-
-    /*
-     *  Get the colormap for a screen
-     */
-
-int fb_get_cmap(struct fb_cmap *cmap, int kspc,
-    	    	int (*getcolreg)(u_int, u_int *, u_int *, u_int *, u_int *,
-				 struct fb_info *),
-		struct fb_info *info)
+int fb_cmap_to_user(struct fb_cmap *from, struct fb_cmap_user *to)
 {
-    int i, start;
-    u16 *red, *green, *blue, *transp;
-    u_int hred, hgreen, hblue, htransp;
+	int tooff = 0, fromoff = 0;
+	int size;
 
-    red = cmap->red;
-    green = cmap->green;
-    blue = cmap->blue;
-    transp = cmap->transp;
-    start = cmap->start;
-    if (start < 0)
-	return -EINVAL;
-    for (i = 0; i < cmap->len; i++) {
-	if (getcolreg(start++, &hred, &hgreen, &hblue, &htransp, info))
-	    return 0;
-	if (kspc) {
-	    *red = hred;
-	    *green = hgreen;
-	    *blue = hblue;
-	    if (transp)
-		*transp = htransp;
-	} else {
-	    put_user(hred, red);
-	    put_user(hgreen, green);
-	    put_user(hblue, blue);
-	    if (transp)
-		put_user(htransp, transp);
-	}
-	red++;
-	green++;
-	blue++;
-	if (transp)
-	    transp++;
-    }
-    return 0;
+	if (to->start > from->start)
+		fromoff = to->start - from->start;
+	else
+		tooff = from->start - to->start;
+	size = to->len - tooff;
+	if (size > (int) (from->len - fromoff))
+		size = from->len - fromoff;
+	if (size <= 0)
+		return -EINVAL;
+	size *= sizeof(u16);
+
+	if (copy_to_user(to->red+tooff, from->red+fromoff, size))
+		return -EFAULT;
+	if (copy_to_user(to->green+tooff, from->green+fromoff, size))
+		return -EFAULT;
+	if (copy_to_user(to->blue+tooff, from->blue+fromoff, size))
+		return -EFAULT;
+	if (from->transp && to->transp)
+		if (copy_to_user(to->transp+tooff, from->transp+fromoff, size))
+			return -EFAULT;
+	return 0;
 }
 
+/**
+ *	fb_set_cmap - set the colormap
+ *	@cmap: frame buffer colormap structure
+ *	@info: frame buffer info structure
+ *
+ *	Sets the colormap @cmap for a screen of device @info.
+ *
+ *	Returns negative errno on error, or zero on success.
+ *
+ */
 
-    /*
-     *  Set the colormap for a screen
-     */
-
-int fb_set_cmap(struct fb_cmap *cmap, int kspc,
-    	    	int (*setcolreg)(u_int, u_int, u_int, u_int, u_int,
-				 struct fb_info *),
-		struct fb_info *info)
+int fb_set_cmap(struct fb_cmap *cmap, struct fb_info *info)
 {
-    int i, start;
-    u16 *red, *green, *blue, *transp;
-    u_int hred, hgreen, hblue, htransp;
+	int i, start;
+	u16 *red, *green, *blue, *transp;
+	u_int hred, hgreen, hblue, htransp = 0xffff;
 
-    red = cmap->red;
-    green = cmap->green;
-    blue = cmap->blue;
-    transp = cmap->transp;
-    start = cmap->start;
+	red = cmap->red;
+	green = cmap->green;
+	blue = cmap->blue;
+	transp = cmap->transp;
+	start = cmap->start;
 
-    if (start < 0)
-	return -EINVAL;
-    for (i = 0; i < cmap->len; i++) {
-	if (kspc) {
-	    hred = *red;
-	    hgreen = *green;
-	    hblue = *blue;
-	    htransp = transp ? *transp : 0;
-	} else {
-	    get_user(hred, red);
-	    get_user(hgreen, green);
-	    get_user(hblue, blue);
-	    if (transp)
-		get_user(htransp, transp);
-	    else
-		htransp = 0;
+	if (start < 0 || !info->fbops->fb_setcolreg)
+		return -EINVAL;
+	for (i = 0; i < cmap->len; i++) {
+		hred = *red++;
+		hgreen = *green++;
+		hblue = *blue++;
+		if (transp)
+			htransp = *transp++;
+		if (info->fbops->fb_setcolreg(start++,
+					      hred, hgreen, hblue, htransp,
+					      info))
+			break;
 	}
-	red++;
-	green++;
-	blue++;
-	if (transp)
-	    transp++;
-	if (setcolreg(start++, hred, hgreen, hblue, htransp, info))
-	    return 0;
-    }
-    return 0;
+	return 0;
 }
 
+int fb_set_user_cmap(struct fb_cmap_user *cmap, struct fb_info *info)
+{
+	int i, start;
+	u16 __user *red, *green, *blue, *transp;
+	u_int hred, hgreen, hblue, htransp = 0xffff;
 
-    /*
-     *  Get the default colormap for a specific screen depth
-     */
+	red = cmap->red;
+	green = cmap->green;
+	blue = cmap->blue;
+	transp = cmap->transp;
+	start = cmap->start;
+
+	if (start < 0 || !info->fbops->fb_setcolreg)
+		return -EINVAL;
+	for (i = 0; i < cmap->len; i++, red++, blue++, green++) {
+		if (get_user(hred, red) ||
+		    get_user(hgreen, green) ||
+		    get_user(hblue, blue) ||
+		    (transp && get_user(htransp, transp)))
+			return -EFAULT;
+		if (info->fbops->fb_setcolreg(start++,
+					      hred, hgreen, hblue, htransp,
+					      info))
+			return 0;
+		if (transp)
+			transp++;
+	}
+	return 0;
+}
+
+/**
+ *	fb_default_cmap - get default colormap
+ *	@len: size of palette for a depth
+ *
+ *	Gets the default colormap for a specific screen depth.  @len
+ *	is the size of the palette for a particular screen depth.
+ *
+ *	Returns pointer to a frame buffer colormap structure.
+ *
+ */
 
 struct fb_cmap *fb_default_cmap(int len)
 {
@@ -269,9 +291,12 @@ struct fb_cmap *fb_default_cmap(int len)
 }
 
 
-    /*
-     *  Invert all default colormaps
-     */
+/**
+ *	fb_invert_cmaps - invert all defaults colormaps
+ *
+ *	Invert all default colormaps.
+ *
+ */
 
 void fb_invert_cmaps(void)
 {
@@ -305,8 +330,8 @@ void fb_invert_cmaps(void)
      */
 
 EXPORT_SYMBOL(fb_alloc_cmap);
+EXPORT_SYMBOL(fb_dealloc_cmap);
 EXPORT_SYMBOL(fb_copy_cmap);
-EXPORT_SYMBOL(fb_get_cmap);
 EXPORT_SYMBOL(fb_set_cmap);
 EXPORT_SYMBOL(fb_default_cmap);
 EXPORT_SYMBOL(fb_invert_cmaps);

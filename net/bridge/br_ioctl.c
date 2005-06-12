@@ -15,66 +15,135 @@
 
 #include <linux/kernel.h>
 #include <linux/if_bridge.h>
-#include <linux/inetdevice.h>
+#include <linux/netdevice.h>
+#include <linux/times.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
 
-static int br_ioctl_device(struct net_bridge *br,
-			   unsigned int cmd,
-			   unsigned long arg0,
-			   unsigned long arg1,
-			   unsigned long arg2)
+/* called with RTNL */
+static int get_bridge_ifindices(int *indices, int num)
 {
-	if (br == NULL)
-		return -EINVAL;
+	struct net_device *dev;
+	int i = 0;
 
-	switch (cmd)
-	{
+	for (dev = dev_base; dev && i < num; dev = dev->next) {
+		if (dev->priv_flags & IFF_EBRIDGE) 
+			indices[i++] = dev->ifindex;
+	}
+
+	return i;
+}
+
+/* called with RTNL */
+static void get_port_ifindices(struct net_bridge *br, int *ifindices, int num)
+{
+	struct net_bridge_port *p;
+
+	list_for_each_entry(p, &br->port_list, list) {
+		if (p->port_no < num)
+			ifindices[p->port_no] = p->dev->ifindex;
+	}
+}
+
+/*
+ * Format up to a page worth of forwarding table entries
+ * userbuf -- where to copy result
+ * maxnum  -- maximum number of entries desired
+ *            (limited to a page for sanity)
+ * offset  -- number of records to skip
+ */
+static int get_fdb_entries(struct net_bridge *br, void __user *userbuf, 
+			   unsigned long maxnum, unsigned long offset)
+{
+	int num;
+	void *buf;
+	size_t size = maxnum * sizeof(struct __fdb_entry);
+
+	if (size > PAGE_SIZE) {
+		size = PAGE_SIZE;
+		maxnum = PAGE_SIZE/sizeof(struct __fdb_entry);
+	}
+
+	buf = kmalloc(size, GFP_USER);
+	if (!buf)
+		return -ENOMEM;
+	
+	num = br_fdb_fillbuf(br, buf, maxnum, offset);
+	if (num > 0) {
+		if (copy_to_user(userbuf, buf, num*sizeof(struct __fdb_entry)))
+			num = -EFAULT;
+	}
+	kfree(buf);
+
+	return num;
+}
+
+static int add_del_if(struct net_bridge *br, int ifindex, int isadd)
+{
+	struct net_device *dev;
+	int ret;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	dev = dev_get_by_index(ifindex);
+	if (dev == NULL)
+		return -EINVAL;
+	
+	if (isadd)
+		ret = br_add_if(br, dev);
+	else
+		ret = br_del_if(br, dev);
+
+	dev_put(dev);
+	return ret;
+}
+
+/*
+ * Legacy ioctl's through SIOCDEVPRIVATE
+ * This interface is deprecated because it was too difficult to
+ * to do the translation for 32/64bit ioctl compatability.
+ */
+static int old_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+{
+	struct net_bridge *br = netdev_priv(dev);
+	unsigned long args[4];
+	
+	if (copy_from_user(args, rq->ifr_data, sizeof(args)))
+		return -EFAULT;
+
+	switch (args[0]) {
 	case BRCTL_ADD_IF:
 	case BRCTL_DEL_IF:
-	{
-		struct net_device *dev;
-		int ret;
-
-		dev = dev_get_by_index(arg0);
-		if (dev == NULL)
-			return -EINVAL;
-
-		if (cmd == BRCTL_ADD_IF)
-			ret = br_add_if(br, dev);
-		else
-			ret = br_del_if(br, dev);
-
-		dev_put(dev);
-		return ret;
-	}
+		return add_del_if(br, args[1], args[0] == BRCTL_ADD_IF);
 
 	case BRCTL_GET_BRIDGE_INFO:
 	{
 		struct __bridge_info b;
 
 		memset(&b, 0, sizeof(struct __bridge_info));
+		rcu_read_lock();
 		memcpy(&b.designated_root, &br->designated_root, 8);
 		memcpy(&b.bridge_id, &br->bridge_id, 8);
 		b.root_path_cost = br->root_path_cost;
-		b.max_age = br->max_age;
-		b.hello_time = br->hello_time;
+		b.max_age = jiffies_to_clock_t(br->max_age);
+		b.hello_time = jiffies_to_clock_t(br->hello_time);
 		b.forward_delay = br->forward_delay;
 		b.bridge_max_age = br->bridge_max_age;
 		b.bridge_hello_time = br->bridge_hello_time;
-		b.bridge_forward_delay = br->bridge_forward_delay;
+		b.bridge_forward_delay = jiffies_to_clock_t(br->bridge_forward_delay);
 		b.topology_change = br->topology_change;
 		b.topology_change_detected = br->topology_change_detected;
 		b.root_port = br->root_port;
 		b.stp_enabled = br->stp_enabled;
-		b.ageing_time = br->ageing_time;
-		b.gc_interval = br->gc_interval;
-		b.hello_timer_value = br_timer_get_residue(&br->hello_timer);
-		b.tcn_timer_value = br_timer_get_residue(&br->tcn_timer);
-		b.topology_change_timer_value = br_timer_get_residue(&br->topology_change_timer);
-		b.gc_timer_value = br_timer_get_residue(&br->gc_timer);
+		b.ageing_time = jiffies_to_clock_t(br->ageing_time);
+		b.hello_timer_value = br_timer_value(&br->hello_timer);
+		b.tcn_timer_value = br_timer_value(&br->tcn_timer);
+		b.topology_change_timer_value = br_timer_value(&br->topology_change_timer);
+		b.gc_timer_value = br_timer_value(&br->gc_timer);
+	        rcu_read_unlock();
 
-		if (copy_to_user((void *)arg0, &b, sizeof(b)))
+		if (copy_to_user((void __user *)args[1], &b, sizeof(b)))
 			return -EFAULT;
 
 		return 0;
@@ -82,43 +151,67 @@ static int br_ioctl_device(struct net_bridge *br,
 
 	case BRCTL_GET_PORT_LIST:
 	{
-		int i;
-		int indices[256];
+		int num, *indices;
 
-		for (i=0;i<256;i++)
-			indices[i] = 0;
+		num = args[2];
+		if (num < 0)
+			return -EINVAL;
+		if (num == 0)
+			num = 256;
+		if (num > BR_MAX_PORTS)
+			num = BR_MAX_PORTS;
 
-		br_get_port_ifindices(br, indices);
-		if (copy_to_user((void *)arg0, indices, 256*sizeof(int)))
-			return -EFAULT;
+		indices = kmalloc(num*sizeof(int), GFP_KERNEL);
+		if (indices == NULL)
+			return -ENOMEM;
 
-		return 0;
+		memset(indices, 0, num*sizeof(int));
+
+		get_port_ifindices(br, indices, num);
+		if (copy_to_user((void __user *)args[1], indices, num*sizeof(int)))
+			num =  -EFAULT;
+		kfree(indices);
+		return num;
 	}
 
 	case BRCTL_SET_BRIDGE_FORWARD_DELAY:
-		br->bridge_forward_delay = arg0;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		spin_lock_bh(&br->lock);
+		br->bridge_forward_delay = clock_t_to_jiffies(args[1]);
 		if (br_is_root_bridge(br))
-			br->forward_delay = arg0;
+			br->forward_delay = br->bridge_forward_delay;
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_BRIDGE_HELLO_TIME:
-		br->bridge_hello_time = arg0;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		spin_lock_bh(&br->lock);
+		br->bridge_hello_time = clock_t_to_jiffies(args[1]);
 		if (br_is_root_bridge(br))
-			br->hello_time = arg0;
+			br->hello_time = br->bridge_hello_time;
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_BRIDGE_MAX_AGE:
-		br->bridge_max_age = arg0;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		spin_lock_bh(&br->lock);
+		br->bridge_max_age = clock_t_to_jiffies(args[1]);
 		if (br_is_root_bridge(br))
-			br->max_age = arg0;
+			br->max_age = br->bridge_max_age;
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_AGEING_TIME:
-		br->ageing_time = arg0;
-		return 0;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 
-	case BRCTL_SET_GC_INTERVAL:
-		br->gc_interval = arg0;
+		br->ageing_time = clock_t_to_jiffies(args[1]);
 		return 0;
 
 	case BRCTL_GET_PORT_INFO:
@@ -126,8 +219,11 @@ static int br_ioctl_device(struct net_bridge *br,
 		struct __port_info p;
 		struct net_bridge_port *pt;
 
-		if ((pt = br_get_port(br, arg1)) == NULL)
+		rcu_read_lock();
+		if ((pt = br_get_port(br, args[2])) == NULL) {
+			rcu_read_unlock();
 			return -EINVAL;
+		}
 
 		memset(&p, 0, sizeof(struct __port_info));
 		memcpy(&p.designated_root, &pt->designated_root, 8);
@@ -139,75 +235,107 @@ static int br_ioctl_device(struct net_bridge *br,
 		p.state = pt->state;
 		p.top_change_ack = pt->topology_change_ack;
 		p.config_pending = pt->config_pending;
-		p.message_age_timer_value = br_timer_get_residue(&pt->message_age_timer);
-		p.forward_delay_timer_value = br_timer_get_residue(&pt->forward_delay_timer);
-		p.hold_timer_value = br_timer_get_residue(&pt->hold_timer);
+		p.message_age_timer_value = br_timer_value(&pt->message_age_timer);
+		p.forward_delay_timer_value = br_timer_value(&pt->forward_delay_timer);
+		p.hold_timer_value = br_timer_value(&pt->hold_timer);
 
-		if (copy_to_user((void *)arg0, &p, sizeof(p)))
+		rcu_read_unlock();
+
+		if (copy_to_user((void __user *)args[1], &p, sizeof(p)))
 			return -EFAULT;
 
 		return 0;
 	}
 
 	case BRCTL_SET_BRIDGE_STP_STATE:
-		br->stp_enabled = arg0?1:0;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		br->stp_enabled = args[1]?1:0;
 		return 0;
 
 	case BRCTL_SET_BRIDGE_PRIORITY:
-		br_stp_set_bridge_priority(br, arg0);
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		spin_lock_bh(&br->lock);
+		br_stp_set_bridge_priority(br, args[1]);
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_PORT_PRIORITY:
 	{
 		struct net_bridge_port *p;
+		int ret = 0;
 
-		if ((p = br_get_port(br, arg0)) == NULL)
-			return -EINVAL;
-		br_stp_set_port_priority(p, arg1);
-		return 0;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		if (args[2] >= (1<<(16-BR_PORT_BITS)))
+			return -ERANGE;
+
+		spin_lock_bh(&br->lock);
+		if ((p = br_get_port(br, args[1])) == NULL) 
+			ret = -EINVAL;
+		else
+			br_stp_set_port_priority(p, args[2]);
+		spin_unlock_bh(&br->lock);
+		return ret;
 	}
 
 	case BRCTL_SET_PATH_COST:
 	{
 		struct net_bridge_port *p;
+		int ret = 0;
 
-		if ((p = br_get_port(br, arg0)) == NULL)
-			return -EINVAL;
-		br_stp_set_path_cost(p, arg1);
-		return 0;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		spin_lock_bh(&br->lock);
+		if ((p = br_get_port(br, args[1])) == NULL)
+			ret = -EINVAL;
+		else
+			br_stp_set_path_cost(p, args[2]);
+		spin_unlock_bh(&br->lock);
+		return ret;
 	}
 
 	case BRCTL_GET_FDB_ENTRIES:
-		return br_fdb_get_entries(br, (void *)arg0, arg1, arg2);
+		return get_fdb_entries(br, (void __user *)args[1], 
+				       args[2], args[3]);
 	}
 
 	return -EOPNOTSUPP;
 }
 
-static int br_ioctl_deviceless(unsigned int cmd,
-			       unsigned long arg0,
-			       unsigned long arg1)
+static int old_deviceless(void __user *uarg)
 {
-	switch (cmd)
-	{
+	unsigned long args[3];
+
+	if (copy_from_user(args, uarg, sizeof(args)))
+		return -EFAULT;
+
+	switch (args[0]) {
 	case BRCTL_GET_VERSION:
 		return BRCTL_VERSION;
 
 	case BRCTL_GET_BRIDGES:
 	{
-		int i;
-		int indices[64];
+		int *indices;
+		int ret = 0;
 
-		for (i=0;i<64;i++)
-			indices[i] = 0;
+		indices = kmalloc(args[2]*sizeof(int), GFP_KERNEL);
+		if (indices == NULL)
+			return -ENOMEM;
 
-		if (arg1 > 64)
-			arg1 = 64;
-		arg1 = br_get_bridge_ifindices(indices, arg1);
-		if (copy_to_user((void *)arg0, indices, arg1*sizeof(int)))
-			return -EFAULT;
+		memset(indices, 0, args[2]*sizeof(int));
+		args[2] = get_bridge_ifindices(indices, args[2]);
 
-		return arg1;
+		ret = copy_to_user((void __user *)args[1], indices, args[2]*sizeof(int))
+			? -EFAULT : args[2];
+
+		kfree(indices);
+		return ret;
 	}
 
 	case BRCTL_ADD_BRIDGE:
@@ -215,12 +343,15 @@ static int br_ioctl_deviceless(unsigned int cmd,
 	{
 		char buf[IFNAMSIZ];
 
-		if (copy_from_user(buf, (void *)arg0, IFNAMSIZ))
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+
+		if (copy_from_user(buf, (void __user *)args[1], IFNAMSIZ))
 			return -EFAULT;
 
 		buf[IFNAMSIZ-1] = 0;
 
-		if (cmd == BRCTL_ADD_BRIDGE)
+		if (args[0] == BRCTL_ADD_BRIDGE)
 			return br_add_bridge(buf);
 
 		return br_del_bridge(buf);
@@ -230,45 +361,48 @@ static int br_ioctl_deviceless(unsigned int cmd,
 	return -EOPNOTSUPP;
 }
 
-DECLARE_MUTEX(ioctl_mutex);
-
-int br_ioctl_deviceless_stub(unsigned long arg)
+int br_ioctl_deviceless_stub(unsigned int cmd, void __user *uarg)
 {
-	int err;
-	unsigned long i[3];
+	switch (cmd) {
+	case SIOCGIFBR:
+	case SIOCSIFBR:
+		return old_deviceless(uarg);
+		
+	case SIOCBRADDBR:
+	case SIOCBRDELBR:
+	{
+		char buf[IFNAMSIZ];
 
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 
-	if (copy_from_user(i, (void *)arg, 3*sizeof(unsigned long)))
-		return -EFAULT;
+		if (copy_from_user(buf, uarg, IFNAMSIZ))
+			return -EFAULT;
 
-	down(&ioctl_mutex);
-	err = br_ioctl_deviceless(i[0], i[1], i[2]);
-	up(&ioctl_mutex);
+		buf[IFNAMSIZ-1] = 0;
+		if (cmd == SIOCBRADDBR)
+			return br_add_bridge(buf);
 
-	return err;
+		return br_del_bridge(buf);
+	}
+	}
+	return -EOPNOTSUPP;
 }
 
-int br_ioctl(struct net_bridge *br, unsigned int cmd, unsigned long arg0, unsigned long arg1, unsigned long arg2)
+int br_dev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
-	int err;
+	struct net_bridge *br = netdev_priv(dev);
 
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
+	switch(cmd) {
+	case SIOCDEVPRIVATE:
+		return old_dev_ioctl(dev, rq, cmd);
 
-	down(&ioctl_mutex);
-	err = br_ioctl_deviceless(cmd, arg0, arg1);
-	if (err == -EOPNOTSUPP)
-		err = br_ioctl_device(br, cmd, arg0, arg1, arg2);
-	up(&ioctl_mutex);
+	case SIOCBRADDIF:
+	case SIOCBRDELIF:
+		return add_del_if(br, rq->ifr_ifindex, cmd == SIOCBRADDIF);
 
-	return err;
-}
+	}
 
-void br_call_ioctl_atomic(void (*fn)(void))
-{
-	down(&ioctl_mutex);
-	fn();
-	up(&ioctl_mutex);
+	pr_debug("Bridge does not support ioctl 0x%x\n", cmd);
+	return -EOPNOTSUPP;
 }

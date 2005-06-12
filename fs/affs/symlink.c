@@ -8,13 +8,7 @@
  *  affs symlink handling code
  */
 
-#include <linux/errno.h>
-#include <linux/fs.h>
-#include <linux/stat.h>
-#include <linux/affs_fs.h>
-#include <linux/amigaffs.h>
-#include <linux/pagemap.h>
-#include <linux/smp_lock.h>
+#include "affs.h"
 
 static int affs_symlink_readpage(struct file *file, struct page *page)
 {
@@ -31,16 +25,14 @@ static int affs_symlink_readpage(struct file *file, struct page *page)
 	pr_debug("AFFS: follow_link(ino=%lu)\n",inode->i_ino);
 
 	err = -EIO;
-	lock_kernel();
-	bh = affs_bread(inode->i_dev,inode->i_ino,AFFS_I2BSIZE(inode));
-	unlock_kernel();
+	bh = affs_bread(inode->i_sb, inode->i_ino);
 	if (!bh)
 		goto fail;
 	i  = 0;
 	j  = 0;
 	lf = (struct slink_front *)bh->b_data;
 	lc = 0;
-	pf = inode->i_sb->u.affs_sb.s_prefix ? inode->i_sb->u.affs_sb.s_prefix : "/";
+	pf = AFFS_SB(inode->i_sb)->s_prefix ? AFFS_SB(inode->i_sb)->s_prefix : "/";
 
 	if (strchr(lf->symname,':')) {	/* Handle assign or volume name */
 		while (i < 1023 && (c = pf[i]))
@@ -62,26 +54,25 @@ static int affs_symlink_readpage(struct file *file, struct page *page)
 		j++;
 	}
 	link[i] = '\0';
-	lock_kernel();
 	affs_brelse(bh);
-	unlock_kernel();
 	SetPageUptodate(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
 fail:
 	SetPageError(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return err;
 }
 
 struct address_space_operations affs_symlink_aops = {
-	readpage:	affs_symlink_readpage,
+	.readpage	= affs_symlink_readpage,
 };
 
 struct inode_operations affs_symlink_inode_operations = {
-	readlink:	page_readlink,
-	follow_link:	page_follow_link,
-	setattr:	affs_notify_change,
+	.readlink	= generic_readlink,
+	.follow_link	= page_follow_link_light,
+	.put_link	= page_put_link,
+	.setattr	= affs_notify_change,
 };

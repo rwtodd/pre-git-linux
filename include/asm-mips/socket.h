@@ -1,10 +1,18 @@
+/*
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1997, 1999, 2000, 2001 Ralf Baechle
+ * Copyright (C) 2000, 2001 Silicon Graphics, Inc.
+ */
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
 #include <asm/sockios.h>
 
 /*
- * For setsockoptions(2)
+ * For setsockopt(2)
  *
  * This defines are ABI conformant as far as Linux supports these ...
  */
@@ -33,6 +41,7 @@ To add: #define SO_REUSEPORT 0x0200	/* Allow local address and port reuse.  */
 #define SO_RCVLOWAT	0x1004	/* receive low-water mark */
 #define SO_SNDTIMEO	0x1005	/* send timeout */
 #define SO_RCVTIMEO 	0x1006	/* receive timeout */
+#define SO_ACCEPTCONN	0x1009
 
 /* linux-specific, might as well be the same as on i386 */
 #define SO_NO_CHECK	11
@@ -57,19 +66,37 @@ To add: #define SO_REUSEPORT 0x0200	/* Allow local address and port reuse.  */
 #define SO_TIMESTAMP		29
 #define SCM_TIMESTAMP		SO_TIMESTAMP
 
-/* Nast libc5 fixup - bletch */
-#if defined(__KERNEL__)
-/* Socket types. */
-#define SOCK_DGRAM	1		/* datagram (conn.less) socket	*/
-#define SOCK_STREAM	2		/* stream (connection) socket	*/
-#define SOCK_RAW	3		/* raw socket			*/
-#define SOCK_RDM	4		/* reliably-delivered message	*/
-#define SOCK_SEQPACKET	5		/* sequential packet socket	*/
-#define SOCK_PACKET	10		/* linux specific way of	*/
-					/* getting packets at the dev	*/
-					/* level.  For writing rarp and	*/
-					/* other similar things on the	*/
-					/* user level.			*/
-#endif
+#define SO_PEERSEC		30
+
+#ifdef __KERNEL__
+
+/** sock_type - Socket types
+ *
+ * Please notice that for binary compat reasons MIPS has to
+ * override the enum sock_type in include/linux/net.h, so
+ * we define ARCH_HAS_SOCKET_TYPES here.
+ *
+ * @SOCK_DGRAM - datagram (conn.less) socket
+ * @SOCK_STREAM - stream (connection) socket
+ * @SOCK_RAW - raw socket
+ * @SOCK_RDM - reliably-delivered message
+ * @SOCK_SEQPACKET - sequential packet socket 
+ * @SOCK_PACKET - linux specific way of getting packets at the dev level.
+ *		  For writing rarp and other similar things on the user level.
+ */
+enum sock_type {
+	SOCK_DGRAM	= 1,
+	SOCK_STREAM	= 2,
+	SOCK_RAW	= 3,
+	SOCK_RDM	= 4,
+	SOCK_SEQPACKET	= 5,
+	SOCK_PACKET	= 10,
+};
+
+#define SOCK_MAX (SOCK_PACKET + 1)
+
+#define ARCH_HAS_SOCKET_TYPES 1
+
+#endif /* __KERNEL__ */
 
 #endif /* _ASM_SOCKET_H */

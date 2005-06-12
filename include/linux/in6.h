@@ -40,6 +40,17 @@ struct in6_addr
 #define s6_addr32		in6_u.u6_addr32
 };
 
+/* IPv6 Wildcard Address (::) and Loopback Address (::1) defined in RFC2553
+ * NOTE: Be aware the IN6ADDR_* constants and in6addr_* externals are defined
+ * in network byte order, not in host byte order as are the IPv4 equivalents
+ */
+#if 0
+extern const struct in6_addr in6addr_any;
+#define IN6ADDR_ANY_INIT { { { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 } } }
+#endif
+extern const struct in6_addr in6addr_loopback;
+#define IN6ADDR_LOOPBACK_INIT { { { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 } } }
+
 struct sockaddr_in6 {
 	unsigned short int	sin6_family;    /* AF_INET6 */
 	__u16			sin6_port;      /* Transport layer port # */
@@ -55,6 +66,8 @@ struct ipv6_mreq {
 	/* local IPv6 address of interface */
 	int		ipv6mr_ifindex;
 };
+
+#define ipv6mr_acaddr	ipv6mr_multiaddr
 
 struct in6_flowlabel_req
 {
@@ -156,6 +169,9 @@ struct in6_flowlabel_req
 #define IPV6_MTU_DISCOVER	23
 #define IPV6_MTU		24
 #define IPV6_RECVERR		25
+#define IPV6_V6ONLY		26
+#define IPV6_JOIN_ANYCAST	27
+#define IPV6_LEAVE_ANYCAST	28
 
 /* IPV6_MTU_DISCOVER values */
 #define IPV6_PMTUDISC_DONT		0
@@ -166,5 +182,20 @@ struct in6_flowlabel_req
 #define IPV6_FLOWLABEL_MGR	32
 #define IPV6_FLOWINFO_SEND	33
 
+#define IPV6_IPSEC_POLICY	34
+#define IPV6_XFRM_POLICY	35
+
+/*
+ * Multicast:
+ * Following socket options are shared between IPv4 and IPv6.
+ *
+ * MCAST_JOIN_GROUP		42
+ * MCAST_BLOCK_SOURCE		43
+ * MCAST_UNBLOCK_SOURCE		44
+ * MCAST_LEAVE_GROUP		45
+ * MCAST_JOIN_SOURCE_GROUP	46
+ * MCAST_LEAVE_SOURCE_GROUP	47
+ * MCAST_MSFILTER		48
+ */
 
 #endif

@@ -5,131 +5,111 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1998-2000 by David Mosberger-Tang <davidm@hpl.hp.com>
+# Copyright (C) 1998-2004 by David Mosberger-Tang <davidm@hpl.hp.com>
 #
 
 NM := $(CROSS_COMPILE)nm -B
-AWK := awk
+READELF := $(CROSS_COMPILE)readelf
 
 export AWK
 
-LINKFLAGS = -static -T arch/$(ARCH)/vmlinux.lds
-AFLAGS += -Wa,-x 
-AFLAGS_KERNEL := -mconstant-gp
-EXTRA	=
+CHECKFLAGS	+= -m64 -D__ia64=1 -D__ia64__=1 -D_LP64 -D__LP64__
 
-CFLAGS := $(CFLAGS) -pipe $(EXTRA) -Wa,-x -ffixed-r13 -mfixed-range=f10-f15,f32-f127 \
-	  -funwind-tables -falign-functions=32
-# -frename-registers
-CFLAGS_KERNEL := -mconstant-gp
+OBJCOPYFLAGS	:= --strip-all
+LDFLAGS_vmlinux	:= -static
+LDFLAGS_MODULE	+= -T $(srctree)/arch/ia64/module.lds
+AFLAGS_KERNEL	:= -mconstant-gp
+EXTRA		:=
 
-ifeq ($(CONFIG_ITANIUM_ASTEP_SPECIFIC),y)
-	CFLAGS += -ma-step
-endif
-ifeq ($(CONFIG_ITANIUM_BSTEP_SPECIFIC),y)
-	CFLAGS += -mb-step
-endif
+cflags-y	:= -pipe $(EXTRA) -ffixed-r13 -mfixed-range=f12-f15,f32-f127 \
+		   -falign-functions=32 -frename-registers -fno-optimize-sibling-calls
+CFLAGS_KERNEL	:= -mconstant-gp
 
-ifdef CONFIG_IA64_GENERIC
-	CORE_FILES      :=      arch/$(ARCH)/hp/hp.a	\
-				arch/$(ARCH)/sn/sn.a	\
-				arch/$(ARCH)/dig/dig.a	\
-				arch/$(ARCH)/sn/io/sgiio.o \
-				$(CORE_FILES)
-	SUBDIRS		:=	arch/$(ARCH)/hp		\
-				arch/$(ARCH)/sn/sn1	\
-				arch/$(ARCH)/sn		\
-				arch/$(ARCH)/dig	\
-				arch/$(ARCH)/sn/io	\
-				$(SUBDIRS)
+GCC_VERSION     := $(call cc-version)
+GAS_STATUS	= $(shell $(srctree)/arch/ia64/scripts/check-gas "$(CC)" "$(OBJDUMP)")
+CPPFLAGS += $(shell $(srctree)/arch/ia64/scripts/toolchain-flags "$(CC)" "$(OBJDUMP)" "$(READELF)")
 
-else # !GENERIC
-
-ifdef CONFIG_IA64_HP_SIM
-        SUBDIRS         :=      arch/$(ARCH)/hp		\
-                                $(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/hp/hp.a	\
-                                $(CORE_FILES)
+ifeq ($(GAS_STATUS),buggy)
+$(error Sorry, you need a newer version of the assember, one that is built from	\
+	a source-tree that post-dates 18-Dec-2002.  You can find a pre-compiled	\
+	static binary of such an assembler at:					\
+										\
+		ftp://ftp.hpl.hp.com/pub/linux-ia64/gas-030124.tar.gz)
 endif
 
-ifdef CONFIG_IA64_SGI_SN1
-CFLAGS += -DBRINGUP
-        SUBDIRS         :=      arch/$(ARCH)/sn/sn1	\
-				arch/$(ARCH)/sn		\
-				arch/$(ARCH)/sn/io	\
-				arch/$(ARCH)/sn/fprom	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/sn/sn.a	\
-				arch/$(ARCH)/sn/io/sgiio.o\
-				$(CORE_FILES)
+ifneq ($(shell if [ $(GCC_VERSION) -lt 0300 ] ; then echo "bad"; fi ;),)
+$(error Sorry, your compiler is too old.  GCC v2.96 is known to generate bad code.)
 endif
 
-ifdef CONFIG_IA64_SOFTSDV
-        SUBDIRS         :=      arch/$(ARCH)/dig	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
-				$(CORE_FILES)
+ifeq ($(GCC_VERSION),0304)
+	cflags-$(CONFIG_ITANIUM)	+= -mtune=merced
+	cflags-$(CONFIG_MCKINLEY)	+= -mtune=mckinley
 endif
 
-ifdef CONFIG_IA64_DIG
-        SUBDIRS         :=      arch/$(ARCH)/dig	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
-				$(CORE_FILES)
-endif
+CFLAGS += $(cflags-y)
+head-y := arch/ia64/kernel/head.o arch/ia64/kernel/init_task.o
 
-endif # !GENERIC
+libs-y				+= arch/ia64/lib/
+core-y				+= arch/ia64/kernel/ arch/ia64/mm/
+core-$(CONFIG_IA32_SUPPORT)	+= arch/ia64/ia32/
+core-$(CONFIG_IA64_DIG) 	+= arch/ia64/dig/
+core-$(CONFIG_IA64_GENERIC) 	+= arch/ia64/dig/
+core-$(CONFIG_IA64_HP_ZX1)	+= arch/ia64/dig/
+core-$(CONFIG_IA64_HP_ZX1_SWIOTLB) += arch/ia64/dig/
+core-$(CONFIG_IA64_SGI_SN2)	+= arch/ia64/sn/
 
-ifdef CONFIG_IA32_SUPPORT
-	SUBDIRS		:=	arch/$(ARCH)/ia32 $(SUBDIRS)
-	CORE_FILES	:=	arch/$(ARCH)/ia32/ia32.o $(CORE_FILES)
-endif
+drivers-$(CONFIG_PCI)		+= arch/ia64/pci/
+drivers-$(CONFIG_IA64_HP_SIM)	+= arch/ia64/hp/sim/
+drivers-$(CONFIG_IA64_HP_ZX1)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/
+drivers-$(CONFIG_IA64_HP_ZX1_SWIOTLB) += arch/ia64/hp/common/ arch/ia64/hp/zx1/
+drivers-$(CONFIG_IA64_GENERIC)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/ arch/ia64/hp/sim/ arch/ia64/sn/
+drivers-$(CONFIG_OPROFILE)	+= arch/ia64/oprofile/
 
-HEAD := arch/$(ARCH)/kernel/head.o arch/ia64/kernel/init_task.o
+boot := arch/ia64/hp/sim/boot
 
-SUBDIRS := arch/$(ARCH)/tools arch/$(ARCH)/kernel arch/$(ARCH)/mm arch/$(ARCH)/lib $(SUBDIRS)
-CORE_FILES := arch/$(ARCH)/kernel/kernel.o arch/$(ARCH)/mm/mm.o $(CORE_FILES)
+.PHONY: boot compressed check
 
-LIBS := $(TOPDIR)/arch/$(ARCH)/lib/lib.a $(LIBS) \
-	$(TOPDIR)/arch/$(ARCH)/lib/lib.a
+all: compressed unwcheck
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+compressed: vmlinux.gz
 
-vmlinux: arch/$(ARCH)/vmlinux.lds
+vmlinux.gz: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
 
-arch/$(ARCH)/vmlinux.lds: arch/$(ARCH)/vmlinux.lds.S FORCE
-	$(CPP) -D__ASSEMBLY__ -C -P -I$(HPATH) -I$(HPATH)/asm-$(ARCH) \
-		-traditional arch/$(ARCH)/vmlinux.lds.S > $@
-
-FORCE: ;
-
-rawboot:
-	@$(MAKEBOOT) rawboot
-
-#
-# My boot writes directly to a specific disk partition, I doubt most
-# people will want to do that without changes..
-#
-msb my-special-boot:
-	@$(MAKEBOOT) msb
-
-bootimage:
-	@$(MAKEBOOT) bootimage
-
-srmboot:
-	@$(MAKEBOOT) srmboot
+unwcheck: vmlinux
+	-$(Q)READELF=$(READELF) $(srctree)/arch/ia64/scripts/unwcheck.py $<
 
 archclean:
-	@$(MAKE) -C arch/$(ARCH)/kernel clean
-	@$(MAKE) -C arch/$(ARCH)/tools clean
-	@$(MAKEBOOT) clean
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-archmrproper:
-	rm -f arch/$(ARCH)/vmlinux.lds
-	@$(MAKE) -C arch/$(ARCH)/tools mrproper
+CLEAN_FILES += include/asm-ia64/.offsets.h.stamp vmlinux.gz bootloader
 
-archdep:
-	@$(MAKEBOOT) dep
+MRPROPER_FILES += include/asm-ia64/offsets.h
 
-bootpfile:
-	@$(MAKEBOOT) bootpfile
+prepare: include/asm-ia64/offsets.h
+
+arch/ia64/kernel/asm-offsets.s: include/asm include/linux/version.h include/config/MARKER
+
+include/asm-ia64/offsets.h: arch/ia64/kernel/asm-offsets.s
+	$(call filechk,gen-asm-offsets)
+
+arch/ia64/kernel/asm-offsets.s: include/asm-ia64/.offsets.h.stamp
+
+include/asm-ia64/.offsets.h.stamp:
+	mkdir -p include/asm-ia64
+	[ -s include/asm-ia64/offsets.h ] \
+	 || echo "#define IA64_TASK_SIZE 0" > include/asm-ia64/offsets.h
+	touch $@
+
+boot:	lib/lib.a vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
+
+install: vmlinux.gz
+	sh $(srctree)/arch/ia64/install.sh $(KERNELRELEASE) $< System.map "$(INSTALL_PATH)"
+
+define archhelp
+  echo '* compressed	- Build compressed kernel image'
+  echo '  install	- Install compressed kernel image'
+  echo '  boot		- Build vmlinux and bootloader for Ski simulator'
+  echo '* unwcheck	- Check vmlinux for invalid unwind info'
+endef

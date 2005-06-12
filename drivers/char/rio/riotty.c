@@ -36,10 +36,11 @@ static char *_riotty_c_sccs_ = "@(#)riotty.c	1.3";
 
 #define __EXPLICIT_DEF_H__
 
-#define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/tty.h>
+#include <linux/string.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/string.h>
@@ -50,7 +51,6 @@ static char *_riotty_c_sccs_ = "@(#)riotty.c	1.3";
 
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 
@@ -95,9 +95,12 @@ static void ttyseth_pv(struct Port *, struct ttystatics *,
 #endif
 
 static void RIOClearUp(struct Port *PortP);
-static int RIOShortCommand(struct rio_info *p, struct Port *PortP, 
+int RIOShortCommand(struct rio_info *p, struct Port *PortP, 
 			   int command, int len, int arg);
 
+#if 0
+static int RIOCookMode(struct ttystatics *);
+#endif
 
 extern int	conv_vb[];	/* now defined in ttymgr.c */
 extern int	conv_bv[];	/* now defined in ttymgr.c */
@@ -140,7 +143,6 @@ default_sg =
 
 
 extern struct rio_info *p;
-extern void rio_inc_mod_count (void);
 
 
 int
@@ -160,8 +162,8 @@ riotopen(struct tty_struct * tty, struct file * filp)
 	*/
 	tty->driver_data = NULL;
         
-	SysPort = rio_minor (tty->device);
-	Modem   = rio_ismodem (tty->device);
+	SysPort = rio_minor(tty);
+	Modem   = rio_ismodem(tty);
 
 	if ( p->RIOFailed ) {
 		rio_dprintk (RIO_DEBUG_TTY, "System initialisation failed\n");
@@ -206,8 +208,6 @@ riotopen(struct tty_struct * tty, struct file * filp)
 	tty->driver_data = PortP;
 
 	PortP->gs.tty = tty;
-	if (!PortP->gs.count)
-		rio_inc_mod_count ();
 	PortP->gs.count++;
 
 	rio_dprintk (RIO_DEBUG_TTY, "%d bytes in tx buffer\n",
@@ -216,8 +216,6 @@ riotopen(struct tty_struct * tty, struct file * filp)
 	retval = gs_init_port (&PortP->gs);
 	if (retval) {
 		PortP->gs.count--;
-		if (PortP->gs.count)
-			rio_dec_mod_count ();
 		return -ENXIO;
 	}
 	/*
@@ -451,8 +449,11 @@ bombout:
 				PortP->gs.tty->termios->c_state |= WOPEN;
 				*/
 				PortP->State |= RIO_WOPEN;
+				rio_spin_unlock_irqrestore(&PortP->portSem, flags);
+				if (RIODelay (PortP, HUNDRED_MS) == RIO_FAIL)
 #if 0
 				if ( sleep((caddr_t)&tp->tm.c_canqo, TTIPRI|PCATCH))
+#endif
 				{
 					/*
 					** ACTION: verify that this is a good thing
@@ -470,7 +471,6 @@ bombout:
 					func_exit ();
 					return -EINTR;
 				}
-#endif
 			}
 			PortP->State &= ~RIO_WOPEN;
 		}
@@ -526,8 +526,10 @@ riotclose(void  *ptr)
 #endif
 	struct Port *PortP =ptr;	/* pointer to the port structure */
 	int deleted = 0;
-	int	try = 25;
-	int	repeat_this = 0xff;
+	int	try = -1; /* Disable the timeouts by setting them to -1 */
+	int	repeat_this = -1; /* Congrats to those having 15 years of 
+				     uptime! (You get to break the driver.) */
+	long end_time;
 	struct tty_struct * tty;
 	unsigned long flags;
 	int Modem;
@@ -540,7 +542,13 @@ riotclose(void  *ptr)
 	/* tp = PortP->TtyP;*/			/* Get tty */
 	tty = PortP->gs.tty;
 	rio_dprintk (RIO_DEBUG_TTY, "TTY is at address 0x%x\n",(int)tty);
-	Modem = rio_ismodem(tty->device);
+
+	if (PortP->gs.closing_wait) 
+		end_time = jiffies + PortP->gs.closing_wait;
+	else 
+		end_time = jiffies + MAX_SCHEDULE_TIMEOUT;
+
+	Modem = rio_ismodem(tty);
 #if 0
 	/* What F.CKING cache? Even then, a higly idle multiprocessor,
 	   system with large caches this won't work . Better find out when 
@@ -572,7 +580,8 @@ riotclose(void  *ptr)
 	** clear the open bits for this device
 	*/
 	PortP->State &= (Modem ? ~RIO_MOPEN : ~RIO_LOPEN);
-
+	PortP->State &= ~RIO_CARR_ON;
+	PortP->ModemState &= ~MSVR1_CD;
 	/*
 	** If the device was open as both a Modem and a tty line
 	** then we need to wimp out here, as the port has not really
@@ -604,7 +613,6 @@ riotclose(void  *ptr)
 	*/
 	rio_dprintk (RIO_DEBUG_TTY, "Timeout 1 starts\n");
 
-#if 0
 	if (!deleted)
 	while ( (PortP->InUse != NOT_INUSE) && !p->RIOHalted && 
 		(PortP->TxBufferIn != PortP->TxBufferOut) ) {
@@ -625,7 +633,7 @@ riotclose(void  *ptr)
 		}
 		rio_spin_lock_irqsave(&PortP->portSem, flags);
 	}
-#endif
+
 	PortP->TxBufferIn = PortP->TxBufferOut = 0;
 	repeat_this = 0xff;
 
@@ -661,7 +669,7 @@ riotclose(void  *ptr)
 	if (!deleted)
 	  while (try && (PortP->PortState & PORT_ISOPEN)) {
 	        try--;
-		if (try == 0) {
+		if (time_after (jiffies, end_time)) {
 		  rio_dprintk (RIO_DEBUG_TTY, "Run out of tries - force the bugger shut!\n" );
 		  RIOPreemptiveCmd(p, PortP,FCLOSE);
 		  break;
@@ -673,7 +681,11 @@ riotclose(void  *ptr)
 			RIOClearUp( PortP );
 			goto close_end;
 		}
-		RIODelay_ni(PortP, HUNDRED_MS);
+		if (RIODelay(PortP, HUNDRED_MS) == RIO_FAIL) {
+			rio_dprintk (RIO_DEBUG_TTY, "RTA EINTR in delay \n");
+			RIOPreemptiveCmd(p, PortP,FCLOSE);
+			break;
+		}
 	}
 	rio_spin_lock_irqsave(&PortP->portSem, flags);
 	rio_dprintk (RIO_DEBUG_TTY, "Close: try was %d on completion\n", try );
@@ -718,14 +730,15 @@ close_end:
 ** COOK_WELL if the line discipline must be used to do the processing
 ** COOK_MEDIUM if the card can do all the processing necessary.
 */
-int
+#if 0
+static int
 RIOCookMode(struct ttystatics *tp)
 {
 	/*
-	** We cant handle tm.c_mstate != 0 on SCO
-	** We cant handle mapping
-	** We cant handle non-ttwrite line disc.
-	** We cant handle lflag XCASE
+	** We can't handle tm.c_mstate != 0 on SCO
+	** We can't handle mapping
+	** We can't handle non-ttwrite line disc.
+	** We can't handle lflag XCASE
 	** We can handle oflag OPOST & (OCRNL, ONLCR, TAB3)
 	*/
 
@@ -749,7 +762,7 @@ RIOCookMode(struct ttystatics *tp)
 	*/
 	return COOK_MEDIUM;
 }
-
+#endif
 
 static void
 RIOClearUp(PortP)
@@ -778,7 +791,7 @@ struct Port *PortP;
 ** Other values of len aren't allowed, and will cause
 ** a panic.
 */
-static int RIOShortCommand(struct rio_info *p, struct Port *PortP,
+int RIOShortCommand(struct rio_info *p, struct Port *PortP,
 		int command, int len, int arg)
 {
 	PKT *PacketP;
@@ -869,11 +882,7 @@ static int RIOShortCommand(struct rio_info *p, struct Port *PortP,
 ** its all about.
 */
 int
-riotioctl(p, dev, cmd, arg)
-struct rio_info *		p;
-dev_t dev;
-register int cmd;
-register caddr_t arg;
+riotioctl(struct rio_info *p, struct tty_struct *tty, int cmd, caddr_t arg)
 {
 	register struct		Port *PortP;
 	register struct		ttystatics *tp;
@@ -885,8 +894,8 @@ register caddr_t arg;
 	short				vpix_cflag;
 	short				divisor;
 	int					baud;
-	uint				SysPort = dev;
-	int					Modem = rio_ismodem(dev);
+	uint				SysPort = rio_minor(tty);
+	int				Modem = rio_ismodem(tty);
 	int					ioctl_processed;
 
 	rio_dprintk (RIO_DEBUG_TTY, "port ioctl SysPort %d command 0x%x argument 0x%x %s\n",
@@ -1007,8 +1016,8 @@ register caddr_t arg;
 				pseterr(EFAULT);
 			}
 			PortP->Xprint.XpOn[MAX_XP_CTRL_LEN-1] = '\0';
-			PortP->Xprint.XpLen = RIOStrlen(PortP->Xprint.XpOn)+
-												RIOStrlen(PortP->Xprint.XpOff);
+			PortP->Xprint.XpLen = strlen(PortP->Xprint.XpOn)+
+												strlen(PortP->Xprint.XpOff);
 			rio_spin_unlock_irqrestore(&PortP->portSem, flags);
 			return 0;
 
@@ -1022,8 +1031,8 @@ register caddr_t arg;
 				pseterr(EFAULT);
 			}
 			PortP->Xprint.XpOff[MAX_XP_CTRL_LEN-1] = '\0';
-			PortP->Xprint.XpLen = RIOStrlen(PortP->Xprint.XpOn)+
-										RIOStrlen(PortP->Xprint.XpOff);
+			PortP->Xprint.XpLen = strlen(PortP->Xprint.XpOn)+
+										strlen(PortP->Xprint.XpOff);
 			rio_spin_unlock_irqrestore(&PortP->portSem, flags);
 			return 0;
 
@@ -1272,7 +1281,7 @@ register caddr_t arg;
 }
 
 /*
-	ttyseth -- set hardware dependant tty settings
+	ttyseth -- set hardware dependent tty settings
 */
 void
 ttyseth(PortP, s, sg)
@@ -1327,7 +1336,7 @@ struct old_sgttyb *sg;
 }
 
 /*
-	ttyseth_pv -- set hardware dependant tty settings using either the
+	ttyseth_pv -- set hardware dependent tty settings using either the
 			POSIX termios structure or the System V termio structure.
 				sysv = 0 => (POSIX):	 struct termios *sg
 				sysv != 0 => (System V): struct termio *sg

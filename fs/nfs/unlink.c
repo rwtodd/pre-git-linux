@@ -6,7 +6,7 @@
  * NOTE: we rely on holding the BKL for list manipulation protection.
  */
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/dcache.h>
 #include <linux/sunrpc/sched.h>
@@ -24,7 +24,7 @@ struct nfs_unlinkdata {
 };
 
 static struct nfs_unlinkdata	*nfs_deletes;
-static struct rpc_wait_queue	nfs_delete_queue = RPC_INIT_WAITQ("nfs_delete_queue");
+static RPC_WAITQ(nfs_delete_queue, "nfs_delete_queue");
 
 /**
  * nfs_detach_unlinkdata - Remove asynchronous unlink from global list
@@ -93,17 +93,18 @@ nfs_async_unlink_init(struct rpc_task *task)
 {
 	struct nfs_unlinkdata	*data = (struct nfs_unlinkdata *)task->tk_calldata;
 	struct dentry		*dir = data->dir;
-	struct rpc_message	msg;
+	struct rpc_message	msg = {
+		.rpc_cred	= data->cred,
+	};
 	int			status = -ENOENT;
 
 	if (!data->name.len)
 		goto out_err;
 
-	memset(&msg, 0, sizeof(msg));
-	msg.rpc_cred = data->cred;
 	status = NFS_PROTO(dir->d_inode)->unlink_setup(&msg, dir, &data->name);
 	if (status < 0)
 		goto out_err;
+	nfs_begin_data_update(dir->d_inode);
 	rpc_call_setup(task, &msg, 0);
 	return;
  out_err:
@@ -126,9 +127,10 @@ nfs_async_unlink_done(struct rpc_task *task)
 	if (!dir)
 		return;
 	dir_i = dir->d_inode;
-	nfs_zap_caches(dir_i);
-	NFS_PROTO(dir_i)->unlink_done(dir, &task->tk_msg);
-	rpcauth_releasecred(task->tk_auth, data->cred);
+	nfs_end_data_update(dir_i);
+	if (NFS_PROTO(dir_i)->unlink_done(dir, task))
+		return;
+	put_rpccred(data->cred);
 	data->cred = NULL;
 	dput(dir);
 }
@@ -149,8 +151,7 @@ nfs_async_unlink_release(struct rpc_task *task)
 
 /**
  * nfs_async_unlink - asynchronous unlinking of a file
- * @dir: directory in which the file resides.
- * @name: name of the file to unlink.
+ * @dentry: dentry to unlink
  */
 int
 nfs_async_unlink(struct dentry *dentry)
@@ -179,7 +180,9 @@ nfs_async_unlink(struct dentry *dentry)
 	task->tk_action = nfs_async_unlink_init;
 	task->tk_release = nfs_async_unlink_release;
 
+	spin_lock(&dentry->d_lock);
 	dentry->d_flags |= DCACHE_NFSFS_RENAMED;
+	spin_unlock(&dentry->d_lock);
 	data->cred = rpcauth_lookupcred(clnt->cl_auth, 0);
 
 	rpc_sleep_on(&nfs_delete_queue, task, NULL, NULL);
@@ -189,7 +192,7 @@ nfs_async_unlink(struct dentry *dentry)
 }
 
 /**
- * nfs_complete_remove - Initialize completion of the sillydelete
+ * nfs_complete_unlink - Initialize completion of the sillydelete
  * @dentry: dentry to delete
  *
  * Since we're most likely to be called by dentry_iput(), we
@@ -209,8 +212,9 @@ nfs_complete_unlink(struct dentry *dentry)
 		return;
 	data->count++;
 	nfs_copy_dname(dentry, data);
+	spin_lock(&dentry->d_lock);
 	dentry->d_flags &= ~DCACHE_NFSFS_RENAMED;
-	if (data->task.tk_rpcwait == &nfs_delete_queue)
-		rpc_wake_up_task(&data->task);
+	spin_unlock(&dentry->d_lock);
+	rpc_wake_up_task(&data->task);
 	nfs_put_unlinkdata(data);
 }

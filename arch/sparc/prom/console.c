@@ -1,9 +1,9 @@
-/* $Id: console.c,v 1.23 2000/08/26 02:38:03 anton Exp $
+/* $Id: console.c,v 1.25 2001/10/30 04:54:22 davem Exp $
  * console.c: Routines that deal with sending and receiving IO
  *            to/from the current console device using the PROM.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 1998 Pete Zaitcev <zaitcev@metabyte.com>
+ * Copyright (C) 1998 Pete Zaitcev <zaitcev@yahoo.com>
  */
 
 #include <linux/types.h>
@@ -105,12 +105,13 @@ prom_putchar(char c)
 
 /* Query for input device type */
 enum prom_input_device
-prom_query_input_device()
+prom_query_input_device(void)
 {
 	unsigned long flags;
 	int st_p;
 	char propb[64];
 	char *p;
+	int propl;
 
 	switch(prom_vers) {
 	case PROM_V0:
@@ -139,14 +140,16 @@ prom_query_input_device()
 		if(strncmp(propb, "serial", sizeof("serial")))
 			return PROMDEV_I_UNK;
 		}
-		prom_getproperty(prom_root_node, "stdin-path", propb, sizeof(propb));
-		p = propb;
-		while(*p) p++; p -= 2;
-		if(p[0] == ':') {
-			if(p[1] == 'a')
-				return PROMDEV_ITTYA;
-			else if(p[1] == 'b')
-				return PROMDEV_ITTYB;
+		propl = prom_getproperty(prom_root_node, "stdin-path", propb, sizeof(propb));
+		if(propl > 2) {
+			p = propb;
+			while(*p) p++; p -= 2;
+			if(p[0] == ':') {
+				if(p[1] == 'a')
+					return PROMDEV_ITTYA;
+				else if(p[1] == 'b')
+					return PROMDEV_ITTYB;
+			}
 		}
 		return PROMDEV_I_UNK;
 	}
@@ -155,7 +158,7 @@ prom_query_input_device()
 /* Query for output device type */
 
 enum prom_output_device
-prom_query_output_device()
+prom_query_output_device(void)
 {
 	unsigned long flags;
 	int st_p;
@@ -179,7 +182,7 @@ prom_query_output_device()
 		restore_current();
 		spin_unlock_irqrestore(&prom_lock, flags);
 		propl = prom_getproperty(st_p, "device_type", propb, sizeof(propb));
-		if (propl >= 0 && propl == sizeof("display") &&
+		if (propl == sizeof("display") &&
 			strncmp("display", propb, sizeof("display")) == 0)
 		{
 			return PROMDEV_OSCREEN;
@@ -188,16 +191,20 @@ prom_query_output_device()
 			if(propl >= 0 &&
 			    strncmp("serial", propb, sizeof("serial")) != 0)
 				return PROMDEV_O_UNK;
-			prom_getproperty(prom_root_node, "stdout-path", propb, sizeof(propb));
-			if(strncmp(propb, con_name_jmc, CON_SIZE_JMC) == 0)
+			propl = prom_getproperty(prom_root_node, "stdout-path",
+						 propb, sizeof(propb));
+			if(propl == CON_SIZE_JMC &&
+			    strncmp(propb, con_name_jmc, CON_SIZE_JMC) == 0)
 				return PROMDEV_OTTYA;
-			p = propb;
-			while(*p) p++; p -= 2;
-			if(p[0]==':') {
-				if(p[1] == 'a')
-					return PROMDEV_OTTYA;
-				else if(p[1] == 'b')
-					return PROMDEV_OTTYB;
+			if(propl > 2) {
+				p = propb;
+				while(*p) p++; p-= 2;
+				if(p[0]==':') {
+					if(p[1] == 'a')
+						return PROMDEV_OTTYA;
+					else if(p[1] == 'b')
+						return PROMDEV_OTTYB;
+				}
 			}
 		} else {
 			switch(*romvec->pv_stdin) {
@@ -207,6 +214,7 @@ prom_query_output_device()
 		}
 		break;
 	default:
-	}
+		;
+	};
 	return PROMDEV_O_UNK;
 }

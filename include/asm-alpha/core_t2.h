@@ -3,8 +3,9 @@
 
 #include <linux/config.h>
 #include <linux/types.h>
+#include <linux/spinlock.h>
 #include <asm/compiler.h>
-
+#include <asm/system.h>
 
 /*
  * T2 is the internal name for the core logic chipset which provides
@@ -19,9 +20,10 @@
  *
  */
 
-#define T2_MEM_R1_MASK 0x03ffffff  /* Mem sparse region 1 mask is 26 bits */
+#define T2_MEM_R1_MASK 0x07ffffff  /* Mem sparse region 1 mask is 26 bits */
 
 /* GAMMA-SABLE is a SABLE with EV5-based CPUs */
+/* All LYNX machines, EV4 or EV5, use the GAMMA bias also */
 #define _GAMMA_BIAS		0x8000000000UL
 
 #if defined(CONFIG_ALPHA_GENERIC)
@@ -57,9 +59,32 @@
 #define T2_WMASK2		(IDENT_ADDR + GAMMA_BIAS + 0x38e0001c0UL)
 #define T2_TBASE2		(IDENT_ADDR + GAMMA_BIAS + 0x38e0001e0UL)
 #define T2_TLBBR		(IDENT_ADDR + GAMMA_BIAS + 0x38e000200UL)
-
+#define T2_IVR			(IDENT_ADDR + GAMMA_BIAS + 0x38e000220UL)
 #define T2_HAE_3		(IDENT_ADDR + GAMMA_BIAS + 0x38e000240UL)
 #define T2_HAE_4		(IDENT_ADDR + GAMMA_BIAS + 0x38e000260UL)
+
+/* The CSRs below are T3/T4 only */
+#define T2_WBASE3		(IDENT_ADDR + GAMMA_BIAS + 0x38e000280UL)
+#define T2_WMASK3		(IDENT_ADDR + GAMMA_BIAS + 0x38e0002a0UL)
+#define T2_TBASE3		(IDENT_ADDR + GAMMA_BIAS + 0x38e0002c0UL)
+
+#define T2_TDR0			(IDENT_ADDR + GAMMA_BIAS + 0x38e000300UL)
+#define T2_TDR1			(IDENT_ADDR + GAMMA_BIAS + 0x38e000320UL)
+#define T2_TDR2			(IDENT_ADDR + GAMMA_BIAS + 0x38e000340UL)
+#define T2_TDR3			(IDENT_ADDR + GAMMA_BIAS + 0x38e000360UL)
+#define T2_TDR4			(IDENT_ADDR + GAMMA_BIAS + 0x38e000380UL)
+#define T2_TDR5			(IDENT_ADDR + GAMMA_BIAS + 0x38e0003a0UL)
+#define T2_TDR6			(IDENT_ADDR + GAMMA_BIAS + 0x38e0003c0UL)
+#define T2_TDR7			(IDENT_ADDR + GAMMA_BIAS + 0x38e0003e0UL)
+
+#define T2_WBASE4		(IDENT_ADDR + GAMMA_BIAS + 0x38e000400UL)
+#define T2_WMASK4		(IDENT_ADDR + GAMMA_BIAS + 0x38e000420UL)
+#define T2_TBASE4		(IDENT_ADDR + GAMMA_BIAS + 0x38e000440UL)
+
+#define T2_AIR			(IDENT_ADDR + GAMMA_BIAS + 0x38e000460UL)
+#define T2_VAR			(IDENT_ADDR + GAMMA_BIAS + 0x38e000480UL)
+#define T2_DIR			(IDENT_ADDR + GAMMA_BIAS + 0x38e0004a0UL)
+#define T2_ICE			(IDENT_ADDR + GAMMA_BIAS + 0x38e0004c0UL)
 
 #define T2_HAE_ADDRESS		T2_HAE_1
 
@@ -100,6 +125,9 @@
 #define T2_CPU1_BASE            (IDENT_ADDR + GAMMA_BIAS + 0x381000000L)
 #define T2_CPU2_BASE            (IDENT_ADDR + GAMMA_BIAS + 0x382000000L)
 #define T2_CPU3_BASE            (IDENT_ADDR + GAMMA_BIAS + 0x383000000L)
+
+#define T2_CPUn_BASE(n)		(T2_CPU0_BASE + (((n)&3) * 0x001000000L))
+
 #define T2_MEM0_BASE            (IDENT_ADDR + GAMMA_BIAS + 0x388000000L)
 #define T2_MEM1_BASE            (IDENT_ADDR + GAMMA_BIAS + 0x389000000L)
 #define T2_MEM2_BASE            (IDENT_ADDR + GAMMA_BIAS + 0x38a000000L)
@@ -171,8 +199,8 @@ struct el_t2_procdata_mcheck {
 
 struct el_t2_logout_header {
 	unsigned int	elfl_size;	/* size in bytes of logout area. */
-	int		elfl_sbz1:31;	/* Should be zero. */
-	char		elfl_retry:1;	/* Retry flag. */
+	unsigned int	elfl_sbz1:31;	/* Should be zero. */
+	unsigned int	elfl_retry:1;	/* Retry flag. */
 	unsigned int	elfl_procoffset; /* Processor-specific offset. */
 	unsigned int	elfl_sysoffset;	 /* Offset of system-specific. */
 	unsigned int	elfl_error_type;	/* PAL error type code. */
@@ -329,13 +357,13 @@ struct el_t2_frame_corrected {
 #define vip	volatile int *
 #define vuip	volatile unsigned int *
 
-__EXTERN_INLINE unsigned int t2_inb(unsigned long addr)
+static inline u8 t2_inb(unsigned long addr)
 {
 	long result = *(vip) ((addr << 5) + T2_IO + 0x00);
 	return __kernel_extbl(result, addr & 3);
 }
 
-__EXTERN_INLINE void t2_outb(unsigned char b, unsigned long addr)
+static inline void t2_outb(u8 b, unsigned long addr)
 {
 	unsigned long w;
 
@@ -344,13 +372,13 @@ __EXTERN_INLINE void t2_outb(unsigned char b, unsigned long addr)
 	mb();
 }
 
-__EXTERN_INLINE unsigned int t2_inw(unsigned long addr)
+static inline u16 t2_inw(unsigned long addr)
 {
 	long result = *(vip) ((addr << 5) + T2_IO + 0x08);
 	return __kernel_extwl(result, addr & 3);
 }
 
-__EXTERN_INLINE void t2_outw(unsigned short b, unsigned long addr)
+static inline void t2_outw(u16 b, unsigned long addr)
 {
 	unsigned long w;
 
@@ -359,12 +387,12 @@ __EXTERN_INLINE void t2_outw(unsigned short b, unsigned long addr)
 	mb();
 }
 
-__EXTERN_INLINE unsigned int t2_inl(unsigned long addr)
+static inline u32 t2_inl(unsigned long addr)
 {
 	return *(vuip) ((addr << 5) + T2_IO + 0x18);
 }
 
-__EXTERN_INLINE void t2_outl(unsigned int b, unsigned long addr)
+static inline void t2_outl(u32 b, unsigned long addr)
 {
 	*(vuip) ((addr << 5) + T2_IO + 0x18) = b;
 	mb();
@@ -402,108 +430,145 @@ __EXTERN_INLINE void t2_outl(unsigned int b, unsigned long addr)
  *
  */
 
-__EXTERN_INLINE unsigned long t2_readb(unsigned long addr)
-{
-	unsigned long result, msb;
+#define t2_set_hae { \
+	msb = addr  >> 27; \
+	addr &= T2_MEM_R1_MASK; \
+	set_hae(msb); \
+}
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+static spinlock_t t2_hae_lock = SPIN_LOCK_UNLOCKED;
+
+__EXTERN_INLINE u8 t2_readb(const volatile void __iomem *xaddr)
+{
+	unsigned long addr = (unsigned long) xaddr;
+	unsigned long result, msb;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
+
+	t2_set_hae;
 
 	result = *(vip) ((addr << 5) + T2_SPARSE_MEM + 0x00);
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
 	return __kernel_extbl(result, addr & 3);
 }
 
-__EXTERN_INLINE unsigned long t2_readw(unsigned long addr)
+__EXTERN_INLINE u16 t2_readw(const volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	unsigned long result, msb;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+	t2_set_hae;
 
 	result = *(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x08);
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
 	return __kernel_extwl(result, addr & 3);
 }
 
-/* On SABLE with T2, we must use SPARSE memory even for 32-bit access. */
-__EXTERN_INLINE unsigned long t2_readl(unsigned long addr)
+/*
+ * On SABLE with T2, we must use SPARSE memory even for 32-bit access,
+ * because we cannot access all of DENSE without changing its HAE.
+ */
+__EXTERN_INLINE u32 t2_readl(const volatile void __iomem *xaddr)
 {
-	unsigned long msb;
+	unsigned long addr = (unsigned long) xaddr;
+	unsigned long result, msb;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+	t2_set_hae;
 
-	return *(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x18);
+	result = *(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x18);
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
+	return result & 0xffffffffUL;
 }
 
-__EXTERN_INLINE unsigned long t2_readq(unsigned long addr)
+__EXTERN_INLINE u64 t2_readq(const volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	unsigned long r0, r1, work, msb;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+	t2_set_hae;
 
 	work = (addr << 5) + T2_SPARSE_MEM + 0x18;
 	r0 = *(vuip)(work);
 	r1 = *(vuip)(work + (4 << 5));
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
 	return r1 << 32 | r0;
 }
 
-__EXTERN_INLINE void t2_writeb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void t2_writeb(u8 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	unsigned long msb, w;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+	t2_set_hae;
 
 	w = __kernel_insbl(b, addr & 3);
 	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x00) = w;
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
 }
 
-__EXTERN_INLINE void t2_writew(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void t2_writew(u16 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	unsigned long msb, w;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+	t2_set_hae;
 
 	w = __kernel_inswl(b, addr & 3);
 	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x08) = w;
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
 }
 
-/* On SABLE with T2, we must use SPARSE memory even for 32-bit access. */
-__EXTERN_INLINE void t2_writel(unsigned int b, unsigned long addr)
+/*
+ * On SABLE with T2, we must use SPARSE memory even for 32-bit access,
+ * because we cannot access all of DENSE without changing its HAE.
+ */
+__EXTERN_INLINE void t2_writel(u32 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	unsigned long msb;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+	t2_set_hae;
 
 	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x18) = b;
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
 }
 
-__EXTERN_INLINE void t2_writeq(unsigned long b, unsigned long addr)
+__EXTERN_INLINE void t2_writeq(u64 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	unsigned long msb, work;
+	unsigned long flags;
+	spin_lock_irqsave(&t2_hae_lock, flags);
 
-	msb = addr & 0xE0000000;
-	addr &= T2_MEM_R1_MASK;
-	set_hae(msb);
+	t2_set_hae;
 
 	work = (addr << 5) + T2_SPARSE_MEM + 0x18;
 	*(vuip)work = b;
 	*(vuip)(work + (4 << 5)) = b >> 32;
+	spin_unlock_irqrestore(&t2_hae_lock, flags);
 }
 
-__EXTERN_INLINE unsigned long t2_ioremap(unsigned long addr)
+__EXTERN_INLINE void __iomem *t2_ioportmap(unsigned long addr)
 {
-	return addr;
+	return (void __iomem *)(addr + T2_IO);
+}
+
+__EXTERN_INLINE void __iomem *t2_ioremap(unsigned long addr, 
+					 unsigned long size)
+{
+	return (void __iomem *)(addr + T2_DENSE_MEM);
 }
 
 __EXTERN_INLINE int t2_is_ioaddr(unsigned long addr)
@@ -511,29 +576,47 @@ __EXTERN_INLINE int t2_is_ioaddr(unsigned long addr)
 	return (long)addr >= 0;
 }
 
+__EXTERN_INLINE int t2_is_mmio(const volatile void __iomem *addr)
+{
+	return (unsigned long)addr >= T2_DENSE_MEM;
+}
+
+/* New-style ioread interface.  The mmio routines are so ugly for T2 that
+   it doesn't make sense to merge the pio and mmio routines.  */
+
+#define IOPORT(OS, NS)							\
+__EXTERN_INLINE unsigned int t2_ioread##NS(void __iomem *xaddr)		\
+{									\
+	if (t2_is_mmio(xaddr))						\
+		return t2_read##OS(xaddr - T2_DENSE_MEM);		\
+	else								\
+		return t2_in##OS((unsigned long)xaddr - T2_IO);		\
+}									\
+__EXTERN_INLINE void t2_iowrite##NS(u##NS b, void __iomem *xaddr)	\
+{									\
+	if (t2_is_mmio(xaddr))						\
+		t2_write##OS(b, xaddr - T2_DENSE_MEM);			\
+	else								\
+		t2_out##OS(b, (unsigned long)xaddr - T2_IO);		\
+}
+
+IOPORT(b, 8)
+IOPORT(w, 16)
+IOPORT(l, 32)
+
+#undef IOPORT
+
 #undef vip
 #undef vuip
 
-#ifdef __WANT_IO_DEF
-
-#define __inb(p)		t2_inb((unsigned long)(p))
-#define __inw(p)		t2_inw((unsigned long)(p))
-#define __inl(p)		t2_inl((unsigned long)(p))
-#define __outb(x,p)		t2_outb((x),(unsigned long)(p))
-#define __outw(x,p)		t2_outw((x),(unsigned long)(p))
-#define __outl(x,p)		t2_outl((x),(unsigned long)(p))
-#define __readb(a)		t2_readb((unsigned long)(a))
-#define __readw(a)		t2_readw((unsigned long)(a))
-#define __readl(a)		t2_readl((unsigned long)(a))
-#define __readq(a)		t2_readq((unsigned long)(a))
-#define __writeb(x,a)		t2_writeb((x),(unsigned long)(a))
-#define __writew(x,a)		t2_writew((x),(unsigned long)(a))
-#define __writel(x,a)		t2_writel((x),(unsigned long)(a))
-#define __writeq(x,a)		t2_writeq((x),(unsigned long)(a))
-#define __ioremap(a)		t2_ioremap((unsigned long)(a))
-#define __is_ioaddr(a)		t2_is_ioaddr((unsigned long)(a))
-
-#endif /* __WANT_IO_DEF */
+#undef __IO_PREFIX
+#define __IO_PREFIX		t2
+#define t2_trivial_rw_bw	0
+#define t2_trivial_rw_lq	0
+#define t2_trivial_io_bw	0
+#define t2_trivial_io_lq	0
+#define t2_trivial_iounmap	1
+#include <asm/io_trivial.h>
 
 #ifdef __IO_EXTERN_INLINE
 #undef __EXTERN_INLINE

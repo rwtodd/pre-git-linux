@@ -1,34 +1,53 @@
 #
 # Makefile for the linux kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
 
-USE_STANDARD_AS_RULE := true
+# Common support
+obj-y := generic.o irq.o dma.o time.o
+obj-m :=
+obj-n :=
+obj-  :=
+led-y := leds.o
 
-O_TARGET		:= sa1100.o
+obj-$(CONFIG_CPU_FREQ_SA1100)		+= cpu-sa1100.o
+obj-$(CONFIG_CPU_FREQ_SA1110)		+= cpu-sa1110.o
 
-# Object file lists.
+# Specific board support
+obj-$(CONFIG_SA1100_ASSABET)		+= assabet.o
+led-$(CONFIG_SA1100_ASSABET)		+= leds-assabet.o
+obj-$(CONFIG_ASSABET_NEPONSET)		+= neponset.o
 
-obj-y			:= arch.o hw.o #dma.o mm.o
-obj-m			:=
-obj-n			:=
-obj-			:=
+obj-$(CONFIG_SA1100_BADGE4)		+= badge4.o
+led-$(CONFIG_SA1100_BADGE4)		+= leds-badge4.o
 
-export-objs		:= hw.o leds.o
+obj-$(CONFIG_SA1100_CERF)		+= cerf.o
+led-$(CONFIG_SA1100_CERF)		+= leds-cerf.o
 
-obj-$(CONFIG_LEDS)	+= leds.o
+obj-$(CONFIG_SA1100_COLLIE)		+= collie.o
 
-# Files that are both resident and modular; remove from modular.
+obj-$(CONFIG_SA1100_H3600)		+= h3600.o
 
-obj-m		:= $(filter-out $(obj-y), $(obj-m))
+obj-$(CONFIG_SA1100_HACKKIT)		+= hackkit.o
+led-$(CONFIG_SA1100_HACKKIT)		+= leds-hackkit.o
 
-# Translate to Rules.make lists.
+obj-$(CONFIG_SA1100_JORNADA720)		+= jornada720.o
 
-O_OBJS		:= $(filter-out $(export-objs), $(obj-y))
-OX_OBJS 	:= $(filter	$(export-objs), $(obj-y))
-M_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-m)))
-MX_OBJS 	:= $(sort $(filter     $(export-objs), $(obj-m)))
+obj-$(CONFIG_SA1100_LART)		+= lart.o
+led-$(CONFIG_SA1100_LART)		+= leds-lart.o
 
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_SA1100_PLEB)		+= pleb.o
+
+obj-$(CONFIG_SA1100_SHANNON)		+= shannon.o
+
+obj-$(CONFIG_SA1100_SIMPAD)		+= simpad.o
+led-$(CONFIG_SA1100_SIMPAD)		+= leds-simpad.o
+
+# LEDs support
+obj-$(CONFIG_LEDS) += $(led-y)
+
+# SA1110 USB client support
+#obj-$(CONFIG_SA1100_USB)		+= usb/
+
+# Miscelaneous functions
+obj-$(CONFIG_PM)			+= pm.o sleep.o
+obj-$(CONFIG_SA1100_SSP)		+= ssp.o

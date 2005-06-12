@@ -12,9 +12,6 @@
 #ifndef GENERIC_SERIAL_H
 #define GENERIC_SERIAL_H
 
-
-
-
 struct real_driver {
   void                    (*disable_tx_interrupts) (void *);
   void                    (*enable_tx_interrupts) (void *);
@@ -39,16 +36,12 @@ struct gs_port {
   int                     xmit_cnt;
   /*  struct semaphore        port_write_sem; */
   int                     flags;
-  struct termios          normal_termios;
-  struct termios          callout_termios;
   wait_queue_head_t       open_wait;
   wait_queue_head_t       close_wait;
-  long                    session;
-  long                    pgrp;
   int                     count;
   int                     blocked_open;
   struct tty_struct       *tty;
-  int                     event;
+  unsigned long           event;
   unsigned short          closing_wait;
   int                     close_delay;
   struct real_driver      *rd;
@@ -70,8 +63,6 @@ struct gs_port {
 
 
 #define GS_TYPE_NORMAL   1
-#define GS_TYPE_CALLOUT  2
-
 
 #define GS_DEBUG_FLUSH   0x00000001
 #define GS_DEBUG_BTR     0x00000002
@@ -82,7 +73,7 @@ struct gs_port {
 
 
 void gs_put_char(struct tty_struct *tty, unsigned char ch);
-int  gs_write(struct tty_struct *tty, int from_user, 
+int  gs_write(struct tty_struct *tty, 
              const unsigned char *buf, int count);
 int  gs_write_room(struct tty_struct *tty);
 int  gs_chars_in_buffer(struct tty_struct *tty);
@@ -91,14 +82,14 @@ void gs_flush_chars(struct tty_struct *tty);
 void gs_stop(struct tty_struct *tty);
 void gs_start(struct tty_struct *tty);
 void gs_hangup(struct tty_struct *tty);
-void gs_do_softint(void *private_);
 int  gs_block_til_ready(void *port, struct file *filp);
 void gs_close(struct tty_struct *tty, struct file *filp);
 void gs_set_termios (struct tty_struct * tty, 
                      struct termios * old_termios);
 int  gs_init_port(struct gs_port *port);
-int  gs_setserial(struct gs_port *port, struct serial_struct *sp);
-void gs_getserial(struct gs_port *port, struct serial_struct *sp);
+int  gs_setserial(struct gs_port *port, struct serial_struct __user *sp);
+int  gs_getserial(struct gs_port *port, struct serial_struct __user *sp);
+void gs_got_break(struct gs_port *port);
 
 extern int gs_debug;
 

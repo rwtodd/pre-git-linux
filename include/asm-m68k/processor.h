@@ -18,14 +18,16 @@
 #include <asm/fpu.h>
 #include <asm/ptrace.h>
 
-extern inline unsigned long rdusp(void) {
-  	unsigned long usp;
+static inline unsigned long rdusp(void)
+{
+	unsigned long usp;
 
 	__asm__ __volatile__("move %/usp,%0" : "=a" (usp));
 	return usp;
 }
 
-extern inline void wrusp(unsigned long usp) {
+static inline void wrusp(unsigned long usp)
+{
 	__asm__ __volatile__("move %0,%/usp" : : "a" (usp));
 }
 
@@ -53,17 +55,16 @@ extern inline void wrusp(unsigned long usp) {
 #endif
 #define TASK_UNMAPPED_ALIGN(addr, off)	PAGE_ALIGN(addr)
 
-/*
- * Bus types
- */
-#define EISA_bus 0
-#define MCA_bus 0
+struct task_work {
+	unsigned char sigpending;
+	unsigned char notify_resume;	/* request for notification on
+					   userspace execution resumption */
+	char          need_resched;
+	unsigned char delayed_trace;	/* single step a syscall */
+	unsigned char syscall_trace;	/* count of syscall interceptors */
+	unsigned char pad[3];
+};
 
-/* 
- * if you change this structure, you must change the code and offsets
- * in m68k/machasm.S
- */
-   
 struct thread_struct {
 	unsigned long  ksp;		/* kernel stack pointer */
 	unsigned long  usp;		/* user stack pointer */
@@ -76,13 +77,14 @@ struct thread_struct {
 	unsigned long  fp[8*3];
 	unsigned long  fpcntl[3];	/* fp control regs */
 	unsigned char  fpstate[FPSTATESIZE];  /* floating point state */
+	struct task_work work;
 };
 
-#define INIT_MMAP { &init_mm, 0, 0x40000000, NULL, __pgprot(_PAGE_PRESENT|_PAGE_ACCESSED), VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
-
-#define INIT_THREAD  { \
-	sizeof(init_stack) + (unsigned long) init_stack, 0, \
-	PS_S, __KERNEL_DS, \
+#define INIT_THREAD  {							\
+	ksp:	sizeof(init_stack) + (unsigned long) init_stack,	\
+	sr:	PS_S,							\
+	fs:	__KERNEL_DS,						\
+	info:	INIT_THREAD_INFO(init_task)				\
 }
 
 /*
@@ -107,10 +109,10 @@ static inline void release_thread(struct task_struct *dead_task)
 {
 }
 
-extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
+/* Prepare to copy thread state - unlazy all lazy status */
+#define prepare_to_copy(tsk)	do { } while (0)
 
-#define copy_segments(tsk, mm)		do { } while (0)
-#define release_segments(mm)		do { } while (0)
+extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 /*
  * Free current thread data structures etc..
@@ -119,21 +121,7 @@ static inline void exit_thread(void)
 {
 }
 
-/*
- * Return saved PC of a blocked thread.
- */
-extern inline unsigned long thread_saved_pc(struct thread_struct *t)
-{
-	extern void scheduling_functions_start_here(void);
-	extern void scheduling_functions_end_here(void);
-	struct switch_stack *sw = (struct switch_stack *)t->ksp;
-	/* Check whether the thread is blocked in resume() */
-	if (sw->retpc > (unsigned long)scheduling_functions_start_here &&
-	    sw->retpc < (unsigned long)scheduling_functions_end_here)
-		return ((unsigned long *)sw->a6)[1];
-	else
-		return sw->retpc;
-}
+extern unsigned long thread_saved_pc(struct task_struct *tsk);
 
 unsigned long get_wchan(struct task_struct *p);
 
@@ -141,20 +129,11 @@ unsigned long get_wchan(struct task_struct *p);
     ({			\
 	unsigned long eip = 0;	 \
 	if ((tsk)->thread.esp0 > PAGE_SIZE && \
-	    (VALID_PAGE(virt_to_page((tsk)->thread.esp0)))) \
+	    (virt_addr_valid((tsk)->thread.esp0))) \
 	      eip = ((struct pt_regs *) (tsk)->thread.esp0)->pc; \
 	eip; })
 #define	KSTK_ESP(tsk)	((tsk) == current ? rdusp() : (tsk)->thread.usp)
 
-#define THREAD_SIZE (2*PAGE_SIZE)
-
-/* Allocation and freeing of basic task resources. */
-#define alloc_task_struct() \
-	((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
-#define free_task_struct(p)	free_pages((unsigned long)(p),1)
-#define get_task_struct(tsk)      atomic_inc(&virt_to_page(tsk)->count)
-
-#define init_task	(init_task_union.task)
-#define init_stack	(init_task_union.stack)
+#define cpu_relax()	barrier()
 
 #endif

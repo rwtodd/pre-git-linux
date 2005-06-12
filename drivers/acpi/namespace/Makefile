@@ -2,15 +2,11 @@
 # Makefile for all Linux ACPI interpreter subdirectories
 #
 
-O_TARGET := ../$(shell basename `pwd`).o
+obj-y := nsaccess.o  nsload.o    nssearch.o  nsxfeval.o \
+	 nsalloc.o   nseval.o    nsnames.o   nsutils.o   nsxfname.o \
+	 nsdump.o    nsinit.o    nsobject.o  nswalk.o    nsxfobj.o  \
+	 nsparse.o
 
-obj-$(CONFIG_ACPI) := $(patsubst %.c,%.o,$(wildcard *.c))
-
-EXTRA_CFLAGS += -I../include
+obj-$(ACPI_FUTURE_USAGE) += nsdumpdv.o
 
 EXTRA_CFLAGS += $(ACPI_CFLAGS)
-
-include $(TOPDIR)/Rules.make
-
-clean:
-	$(RM) *.o 

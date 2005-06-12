@@ -1,12 +1,11 @@
 /*
  * Definitions for Sun3 custom MMU.
  */
-#include <asm/movs.h>
-
 #ifndef __SUN3_MMU_H__
 #define __SUN3_MMU_H__
 
-#define FC_CONTROL 3
+#include <asm/movs.h>
+#include <asm/sun3-head.h>
 
 /* MMU characteristics. */
 #define SUN3_SEGMAPS_PER_CONTEXT	2048
@@ -69,7 +68,7 @@
 #ifndef __ASSEMBLY__
 
 /* Read bus error status register (implicitly clearing it). */
-extern __inline__ unsigned char sun3_get_buserr (void)
+static inline unsigned char sun3_get_buserr(void)
 {
 	unsigned char sfc, c;
 
@@ -82,7 +81,7 @@ extern __inline__ unsigned char sun3_get_buserr (void)
 }
 
 /* Read segmap from hardware MMU. */
-extern __inline__ unsigned long sun3_get_segmap (unsigned long addr)
+static inline unsigned long sun3_get_segmap(unsigned long addr)
 {
         register unsigned long entry;
         unsigned char c, sfc;
@@ -97,7 +96,7 @@ extern __inline__ unsigned long sun3_get_segmap (unsigned long addr)
 }
 
 /* Write segmap to hardware MMU. */
-extern __inline__ void sun3_put_segmap (unsigned long addr, unsigned long entry)
+static inline void sun3_put_segmap(unsigned long addr, unsigned long entry)
 {
         unsigned char sfc;
 
@@ -110,7 +109,7 @@ extern __inline__ void sun3_put_segmap (unsigned long addr, unsigned long entry)
 }
 
 /* Read PTE from hardware MMU. */
-extern __inline__ unsigned long sun3_get_pte (unsigned long addr)
+static inline unsigned long sun3_get_pte(unsigned long addr)
 {
         register unsigned long entry;
         unsigned char sfc;
@@ -124,7 +123,7 @@ extern __inline__ unsigned long sun3_get_pte (unsigned long addr)
 }
 
 /* Write PTE to hardware MMU. */
-extern __inline__ void sun3_put_pte (unsigned long addr, unsigned long entry)
+static inline void sun3_put_pte(unsigned long addr, unsigned long entry)
 {
         unsigned char sfc;
 
@@ -137,7 +136,7 @@ extern __inline__ void sun3_put_pte (unsigned long addr, unsigned long entry)
 }
 
 /* get current context */
-extern __inline__ unsigned char sun3_get_context(void)
+static inline unsigned char sun3_get_context(void)
 {
 	unsigned char sfc, c;
 
@@ -145,22 +144,26 @@ extern __inline__ unsigned char sun3_get_context(void)
 	SET_SFC(FC_CONTROL);
 	GET_CONTROL_BYTE(AC_CONTEXT, c);
 	SET_SFC(sfc);
-	
+
 	return c;
 }
 
 /* set alternate context */
-extern __inline__ void sun3_put_context(unsigned char c)
+static inline void sun3_put_context(unsigned char c)
 {
 	unsigned char dfc;
 	GET_DFC(dfc);
 	SET_DFC(FC_CONTROL);
 	SET_CONTROL_BYTE(AC_CONTEXT, c);
 	SET_DFC(dfc);
-	
+
 	return;
 }
 
+extern void *sun3_ioremap(unsigned long phys, unsigned long size,
+			  unsigned long type);
+
+extern int sun3_map_test(unsigned long addr, char *val);
 
 #endif	/* !__ASSEMBLY__ */
 

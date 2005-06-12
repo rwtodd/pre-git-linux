@@ -1,13 +1,16 @@
-/* $Id: isdnl1.c,v 2.41.6.1 2000/12/10 22:01:04 kai Exp $
+/* $Id: isdnl1.c,v 2.46.2.5 2004/02/11 13:21:34 keil Exp $
  *
- * isdnl1.c     common low level stuff for Siemens Chipsetbased isdn cards
+ * common low level stuff for Siemens Chipsetbased isdn cards
+ *
+ * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
@@ -15,9 +18,8 @@
  *
  */
 
-const char *l1_revision = "$Revision: 2.41.6.1 $";
+const char *l1_revision = "$Revision: 2.46.2.5 $";
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "isdnl1.h"
@@ -188,12 +190,13 @@ DChannel_proc_xmt(struct IsdnCardState *cs)
 		return;
 
 	stptr = cs->stlist;
-	while (stptr != NULL)
+	while (stptr != NULL) {
 		if (test_and_clear_bit(FLG_L1_PULL_REQ, &stptr->l1.Flags)) {
 			stptr->l1.l1l2(stptr, PH_PULL | CONFIRM, NULL);
 			break;
 		} else
 			stptr = stptr->next;
+	}
 }
 
 void
@@ -296,6 +299,20 @@ BChannel_proc_rcv(struct BCState *bcs)
 	}
 }
 
+static void
+BChannel_proc_ack(struct BCState *bcs)
+{
+	u_long	flags;
+	int	ack;
+
+	spin_lock_irqsave(&bcs->aclock, flags);
+	ack = bcs->ackcnt;
+	bcs->ackcnt = 0;
+	spin_unlock_irqrestore(&bcs->aclock, flags);
+	if (ack)
+		lli_writewakeup(bcs->st, ack);
+}
+
 void
 BChannel_bh(struct BCState *bcs)
 {
@@ -305,6 +322,8 @@ BChannel_bh(struct BCState *bcs)
 		BChannel_proc_rcv(bcs);
 	if (test_and_clear_bit(B_XMTBUFREADY, &bcs->event))
 		BChannel_proc_xmt(bcs);
+	if (test_and_clear_bit(B_ACKPENDING, &bcs->event))
+		BChannel_proc_ack(bcs);
 }
 
 void
@@ -336,16 +355,14 @@ HiSax_rmlist(struct IsdnCardState *cs,
 }
 
 void
-init_bcstate(struct IsdnCardState *cs,
-	     int bc)
+init_bcstate(struct IsdnCardState *cs, int bc)
 {
 	struct BCState *bcs = cs->bcs + bc;
 
 	bcs->cs = cs;
 	bcs->channel = bc;
-	bcs->tqueue.sync = 0;
-	bcs->tqueue.routine = (void *) (void *) BChannel_bh;
-	bcs->tqueue.data = bcs;
+	INIT_WORK(&bcs->tqueue, (void *)(void *) BChannel_bh, bcs);
+	spin_lock_init(&bcs->aclock);
 	bcs->BC_SetStack = NULL;
 	bcs->BC_Close = NULL;
 	bcs->Flag = 0;
@@ -736,26 +753,41 @@ static struct FsmNode L1BFnList[] __initdata =
 
 #define L1B_FN_COUNT (sizeof(L1BFnList)/sizeof(struct FsmNode))
 
-void __init 
+int __init 
 Isdnl1New(void)
 {
+	int retval;
+
+	l1fsm_s.state_count = L1S_STATE_COUNT;
+	l1fsm_s.event_count = L1_EVENT_COUNT;
+	l1fsm_s.strEvent = strL1Event;
+	l1fsm_s.strState = strL1SState;
+	retval = FsmNew(&l1fsm_s, L1SFnList, L1S_FN_COUNT);
+	if (retval)
+		return retval;
+
+	l1fsm_b.state_count = L1B_STATE_COUNT;
+	l1fsm_b.event_count = L1_EVENT_COUNT;
+	l1fsm_b.strEvent = strL1Event;
+	l1fsm_b.strState = strL1BState;
+	retval = FsmNew(&l1fsm_b, L1BFnList, L1B_FN_COUNT);
+	if (retval) {
+		FsmFree(&l1fsm_s);
+		return retval;
+	}
 #ifdef HISAX_UINTERFACE
 	l1fsm_u.state_count = L1U_STATE_COUNT;
 	l1fsm_u.event_count = L1_EVENT_COUNT;
 	l1fsm_u.strEvent = strL1Event;
 	l1fsm_u.strState = strL1UState;
-	FsmNew(&l1fsm_u, L1UFnList, L1U_FN_COUNT);
+	retval = FsmNew(&l1fsm_u, L1UFnList, L1U_FN_COUNT);
+	if (retval) {
+		FsmFree(&l1fsm_s);
+		FsmFree(&l1fsm_b);
+		return retval;
+	}
 #endif
-	l1fsm_s.state_count = L1S_STATE_COUNT;
-	l1fsm_s.event_count = L1_EVENT_COUNT;
-	l1fsm_s.strEvent = strL1Event;
-	l1fsm_s.strState = strL1SState;
-	FsmNew(&l1fsm_s, L1SFnList, L1S_FN_COUNT);
-	l1fsm_b.state_count = L1B_STATE_COUNT;
-	l1fsm_b.event_count = L1_EVENT_COUNT;
-	l1fsm_b.strEvent = strL1Event;
-	l1fsm_b.strState = strL1BState;
-	FsmNew(&l1fsm_b, L1BFnList, L1B_FN_COUNT);
+	return 0;
 }
 
 void Isdnl1Free(void)
@@ -880,7 +912,8 @@ setstack_HiSax(struct PStack *st, struct IsdnCardState *cs)
 	setstack_manager(st);
 	st->l1.stlistp = &(cs->stlist);
 	st->l2.l2l1  = dch_l2l1;
-	cs->setstack_d(st, cs);
+	if (cs->setstack_d)
+		cs->setstack_d(st, cs);
 }
 
 void

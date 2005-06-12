@@ -3,12 +3,19 @@
 
 #ifdef	__KERNEL__
 #include <linux/config.h>
+
+#define BITS_TO_LONGS(bits) \
+	(((bits)+BITS_PER_LONG-1)/BITS_PER_LONG)
+#define DECLARE_BITMAP(name,bits) \
+	unsigned long name[BITS_TO_LONGS(bits)]
 #endif
 
 #include <linux/posix_types.h>
 #include <asm/types.h>
 
 #ifndef __KERNEL_STRICT_NAMES
+
+typedef __u32 __kernel_dev_t;
 
 typedef __kernel_fd_set		fd_set;
 typedef __kernel_dev_t		dev_t;
@@ -20,6 +27,9 @@ typedef __kernel_pid_t		pid_t;
 typedef __kernel_daddr_t	daddr_t;
 typedef __kernel_key_t		key_t;
 typedef __kernel_suseconds_t	suseconds_t;
+typedef __kernel_timer_t	timer_t;
+typedef __kernel_clockid_t	clockid_t;
+typedef __kernel_mqd_t		mqd_t;
 
 #ifdef __KERNEL__
 typedef __kernel_uid32_t	uid_t;
@@ -113,12 +123,44 @@ typedef		__u64		u_int64_t;
 typedef		__s64		int64_t;
 #endif
 
+/*
+ * The type used for indexing onto a disc or disc partition.
+ * If required, asm/types.h can override it and define
+ * HAVE_SECTOR_T
+ */
+#ifndef HAVE_SECTOR_T
+typedef unsigned long sector_t;
+#endif
+
+/*
+ * The type of an index into the pagecache.  Use a #define so asm/types.h
+ * can override it.
+ */
+#ifndef pgoff_t
+#define pgoff_t unsigned long
+#endif
+
 #endif /* __KERNEL_STRICT_NAMES */
 
 /*
  * Below are truly Linux-specific types that should never collide with
  * any application/library that wants linux/types.h.
  */
+
+#ifdef __CHECKER__
+#define __bitwise __attribute__((bitwise))
+#else
+#define __bitwise
+#endif
+
+typedef __u16 __bitwise __le16;
+typedef __u16 __bitwise __be16;
+typedef __u32 __bitwise __le32;
+typedef __u32 __bitwise __be32;
+#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
+typedef __u64 __bitwise __le64;
+typedef __u64 __bitwise __be64;
+#endif
 
 struct ustat {
 	__kernel_daddr_t	f_tfree;

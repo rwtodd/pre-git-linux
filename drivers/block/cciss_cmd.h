@@ -89,6 +89,7 @@ typedef union _u64bit
 //STRUCTURES
 //###########################################################################
 #define CISS_MAX_LUN	16	
+#define CISS_MAX_PHYS_LUN	1024
 // SCSI-3 Cmmands 
 
 #pragma pack(1)	
@@ -101,6 +102,7 @@ typedef struct _InquiryData_struct
 } InquiryData_struct;
 
 #define CISS_REPORT_LOG 0xc2    /* Report Logical LUNs */
+#define CISS_REPORT_PHYS 0xc3   /* Report Physical LUNs */
 // Data returned
 typedef struct _ReportLUNdata_struct
 {
@@ -122,23 +124,29 @@ typedef struct _ReadCapdata_struct
  #define CCISS_READ   0x28    // Read(10)
  #define CCISS_WRITE  0x2a    // Write(10)
 
+// BMIC commands 
+#define BMIC_READ 0x26
+#define BMIC_WRITE 0x27
+#define BMIC_CACHE_FLUSH 0xc2
+#define CCISS_CACHE_FLUSH 0x01	//C2 was already being used by CCISS
+
 //Command List Structure
 typedef union _SCSI3Addr_struct {
    struct {
+    BYTE Dev;
     BYTE Bus:6;
     BYTE Mode:2;        // b00
-    BYTE Dev;
   } PeripDev;
    struct {
+    BYTE DevLSB;
     BYTE DevMSB:6;
     BYTE Mode:2;        // b01
-    BYTE DevLSB;
   } LogDev;
    struct {
-    BYTE Targ:6;
-    BYTE Mode:2;        // b10
     BYTE Dev:5;
     BYTE Bus:3;
+    BYTE Targ:6;
+    BYTE Mode:2;        // b10
   } LogUnit;
 } SCSI3Addr_struct;
 
@@ -214,7 +222,9 @@ typedef struct _ErrorInfo_struct {
 /* Command types */
 #define CMD_RWREQ       0x00
 #define CMD_IOCTL_PEND  0x01
-#define CMD_IOCTL_DONE  0x02
+#define CMD_SCSI	0x03
+#define CMD_MSG_DONE	0x04
+#define CMD_MSG_TIMEOUT 0x05
 
 typedef struct _CommandList_struct {
   CommandListHeader_struct Header;
@@ -222,12 +232,18 @@ typedef struct _CommandList_struct {
   ErrDescriptor_struct     ErrDesc;
   SGDescriptor_struct      SG[MAXSGENTRIES];
 	/* information associated with the command */ 
-  __u32			   busaddr; /* physical addres of this record */
+  __u32			   busaddr; /* physical address of this record */
   ErrorInfo_struct * 	   err_info; /* pointer to the allocated mem */ 
+  int			   ctlr;
   int			   cmd_type; 
   struct _CommandList_struct *prev;
   struct _CommandList_struct *next;
-  struct buffer_head *	   bh;
+  struct request *	   rq;
+  struct completion *waiting;
+  int	 retry_count;
+#ifdef CONFIG_CISS_SCSI_TAPE
+  void * scsi_cmd;
+#endif
 } CommandList_struct;
 
 //Configuration Table Structure
@@ -249,6 +265,7 @@ typedef struct _CfgTable_struct {
   DWORD            Reserved; 
   BYTE             ServerName[16];
   DWORD            HeartBeat;
+  DWORD            SCSI_Prefetch;
 } CfgTable_struct;
 #pragma pack()	 
 #endif // CCISS_CMD_H

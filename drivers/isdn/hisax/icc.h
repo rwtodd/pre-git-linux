@@ -1,19 +1,17 @@
-// $Id: icc.h,v 1.2 2000/06/26 08:59:13 keil Exp $
-//-----------------------------------------------------------------------------
-//
-// ICC specific routines
-//
-// Author       Matt Henderson & Guy Ellis - Traverse Tecnologies Pty Ltd
-//              www.traverse.com.au
-//
-// 1999.7.14 Initial implementation of routines for Siemens ISDN 
-// Communication Controler PEB 2070 based on the ISAC routines 
-// written by Karsten Keil.
-//
-// This file is (c) under GNU PUBLIC LICENSE
-//
-//-----------------------------------------------------------------------------
-
+/* $Id: icc.h,v 1.4.2.2 2004/01/12 22:52:26 keil Exp $
+ *
+ * ICC specific routines
+ *
+ * Author       Matt Henderson & Guy Ellis
+ * Copyright    by Traverse Technologies Pty Ltd, www.travers.com.au
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * 1999.7.14 Initial implementation of routines for Siemens ISDN 
+ * Communication Controller PEB 2070 based on the ISAC routines 
+ * written by Karsten Keil.
+ */
 
 /* All Registers original Siemens Spec  */
 
@@ -67,7 +65,8 @@
 #define ICC_IND_AIL    0xE
 #define ICC_IND_DC     0xF
 
-extern void ICCVersion(struct IsdnCardState *cs, char *s);
+extern void __init ICCVersion(struct IsdnCardState *cs, char *s);
 extern void initicc(struct IsdnCardState *cs);
 extern void icc_interrupt(struct IsdnCardState *cs, u_char val);
 extern void clear_pending_icc_ints(struct IsdnCardState *cs);
+extern void setup_icc(struct IsdnCardState *);

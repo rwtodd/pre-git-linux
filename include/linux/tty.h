@@ -20,7 +20,7 @@
 #include <linux/fs.h>
 #include <linux/major.h>
 #include <linux/termios.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_ldisc.h>
 
@@ -28,68 +28,53 @@
 
 
 /*
- * Note: don't mess with NR_PTYS until you understand the tty minor 
- * number allocation game...
  * (Note: the *_driver.minor_start values 1, 64, 128, 192 are
  * hardcoded at present.)
  */
-#define NR_PTYS		256	/* ptys/major */
-#define NR_LDISCS	16
-
-/*
- * Unix98 PTY's can be defined as any multiple of NR_PTYS up to
- * UNIX98_PTY_MAJOR_COUNT; this section defines what we need from the
- * config options
- */
-#ifdef CONFIG_UNIX98_PTYS
-# define UNIX98_NR_MAJORS ((CONFIG_UNIX98_PTY_COUNT+NR_PTYS-1)/NR_PTYS)
-# if UNIX98_NR_MAJORS <= 0
-#  undef CONFIG_UNIX98_PTYS
-# elif UNIX98_NR_MAJORS > UNIX98_PTY_MAJOR_COUNT
-#  error  Too many Unix98 ptys defined
-#  undef  UNIX98_NR_MAJORS
-#  define UNIX98_NR_MAJORS UNIX98_PTY_MAJOR_COUNT
-# endif
-#endif
+#define NR_PTYS	CONFIG_LEGACY_PTY_COUNT   /* Number of legacy ptys */
+#define NR_UNIX98_PTY_DEFAULT	4096      /* Default maximum for Unix98 ptys */
+#define NR_UNIX98_PTY_MAX	(1 << MINORBITS) /* Absolute limit */
+#define NR_LDISCS		16
 
 /*
  * These are set up by the setup-routine at boot-time:
  */
 
 struct screen_info {
-	unsigned char  orig_x;			/* 0x00 */
-	unsigned char  orig_y;			/* 0x01 */
-	unsigned short dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
-	unsigned short orig_video_page;		/* 0x04 */
-	unsigned char  orig_video_mode;		/* 0x06 */
-	unsigned char  orig_video_cols;		/* 0x07 */
-	unsigned short unused2;			/* 0x08 */
-	unsigned short orig_video_ega_bx;	/* 0x0a */
-	unsigned short unused3;			/* 0x0c */
-	unsigned char  orig_video_lines;	/* 0x0e */
-	unsigned char  orig_video_isVGA;	/* 0x0f */
-	unsigned short orig_video_points;	/* 0x10 */
+	u8  orig_x;		/* 0x00 */
+	u8  orig_y;		/* 0x01 */
+	u16 dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
+	u16 orig_video_page;	/* 0x04 */
+	u8  orig_video_mode;	/* 0x06 */
+	u8  orig_video_cols;	/* 0x07 */
+	u16 unused2;		/* 0x08 */
+	u16 orig_video_ega_bx;	/* 0x0a */
+	u16 unused3;		/* 0x0c */
+	u8  orig_video_lines;	/* 0x0e */
+	u8  orig_video_isVGA;	/* 0x0f */
+	u16 orig_video_points;	/* 0x10 */
 
 	/* VESA graphic mode -- linear frame buffer */
-	unsigned short lfb_width;		/* 0x12 */
-	unsigned short lfb_height;		/* 0x14 */
-	unsigned short lfb_depth;		/* 0x16 */
-	unsigned long  lfb_base;		/* 0x18 */
-	unsigned long  lfb_size;		/* 0x1c */
-	unsigned short dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
-	unsigned short lfb_linelength;		/* 0x24 */
-	unsigned char  red_size;		/* 0x26 */
-	unsigned char  red_pos;			/* 0x27 */
-	unsigned char  green_size;		/* 0x28 */
-	unsigned char  green_pos;		/* 0x29 */
-	unsigned char  blue_size;		/* 0x2a */
-	unsigned char  blue_pos;		/* 0x2b */
-	unsigned char  rsvd_size;		/* 0x2c */
-	unsigned char  rsvd_pos;		/* 0x2d */
-	unsigned short vesapm_seg;		/* 0x2e */
-	unsigned short vesapm_off;		/* 0x30 */
-	unsigned short pages;			/* 0x32 */
-						/* 0x34 -- 0x3f reserved for future expansion */
+	u16 lfb_width;		/* 0x12 */
+	u16 lfb_height;		/* 0x14 */
+	u16 lfb_depth;		/* 0x16 */
+	u32 lfb_base;		/* 0x18 */
+	u32 lfb_size;		/* 0x1c */
+	u16 dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
+	u16 lfb_linelength;	/* 0x24 */
+	u8  red_size;		/* 0x26 */
+	u8  red_pos;		/* 0x27 */
+	u8  green_size;		/* 0x28 */
+	u8  green_pos;		/* 0x29 */
+	u8  blue_size;		/* 0x2a */
+	u8  blue_pos;		/* 0x2b */
+	u8  rsvd_size;		/* 0x2c */
+	u8  rsvd_pos;		/* 0x2d */
+	u16 vesapm_seg;		/* 0x2e */
+	u16 vesapm_off;		/* 0x30 */
+	u16 pages;		/* 0x32 */
+	u16 vesa_attributes;	/* 0x34 */
+				/* 0x36 -- 0x3f reserved for future expansion */
 };
 
 extern struct screen_info screen_info;
@@ -112,7 +97,6 @@ extern struct screen_info screen_info;
 
 #define VIDEO_TYPE_PICA_S3	0x30	/* ACER PICA-61 local S3 video	*/
 #define VIDEO_TYPE_MIPS_G364	0x31    /* MIPS Magnum 4000 G364 video  */
-#define VIDEO_TYPE_SNI_RM	0x32    /* SNI RM200 PCI video          */
 #define VIDEO_TYPE_SGI          0x33    /* Various SGI graphics hardware */
 
 #define VIDEO_TYPE_TGAC		0x40	/* DEC TGA */
@@ -137,7 +121,7 @@ extern struct screen_info screen_info;
 #define TTY_FLIPBUF_SIZE 512
 
 struct tty_flip_buffer {
-	struct tq_struct tqueue;
+	struct work_struct		work;
 	struct semaphore pty_sem;
 	char		*char_buf_ptr;
 	unsigned char	*flag_buf_ptr;
@@ -199,6 +183,7 @@ struct tty_flip_buffer {
 #define I_IXANY(tty)	_I_FLAG((tty),IXANY)
 #define I_IXOFF(tty)	_I_FLAG((tty),IXOFF)
 #define I_IMAXBEL(tty)	_I_FLAG((tty),IMAXBEL)
+#define I_IUTF8(tty)	_I_FLAG((tty),IUTF8)
 
 #define O_OPOST(tty)	_O_FLAG((tty),OPOST)
 #define O_OLCUC(tty)	_O_FLAG((tty),OLCUC)
@@ -242,6 +227,7 @@ struct tty_flip_buffer {
 #define L_PENDIN(tty)	_L_FLAG((tty),PENDIN)
 #define L_IEXTEN(tty)	_L_FLAG((tty),IEXTEN)
 
+struct device;
 /*
  * Where all of the state associated with a tty is kept while the tty
  * is open.  Since the termios state should be kept even if the tty
@@ -251,19 +237,18 @@ struct tty_flip_buffer {
  * treatment, but (1) the default 80x24 is usually right and (2) it's
  * most often used by a windowing system, which will set the correct
  * size each time the window is created or resized anyway.
- * IMPORTANT: since this structure is dynamically allocated, it must
- * be no larger than 4096 bytes.  Changing TTY_FLIPBUF_SIZE will change
- * the size of this structure, and it needs to be done with care.
  * 						- TYT, 9/14/92
  */
 struct tty_struct {
 	int	magic;
-	struct tty_driver driver;
+	struct tty_driver *driver;
+	int index;
 	struct tty_ldisc ldisc;
+	struct semaphore termios_sem;
 	struct termios *termios, *termios_locked;
+	char name[64];
 	int pgrp;
 	int session;
-	kdev_t	device;
 	unsigned long flags;
 	int count;
 	struct winsize winsize;
@@ -278,7 +263,7 @@ struct tty_struct {
 	int alt_speed;		/* For magic substitution of 38400 bps */
 	wait_queue_head_t write_wait;
 	wait_queue_head_t read_wait;
-	struct tq_struct tq_hangup;
+	struct work_struct hangup_work;
 	void *disc_data;
 	void *driver_data;
 	struct list_head tty_files;
@@ -293,7 +278,7 @@ struct tty_struct {
 	unsigned char lnext:1, erasing:1, raw:1, real_raw:1, icanon:1;
 	unsigned char closing:1;
 	unsigned short minimum_to_wake;
-	unsigned overrun_time;
+	unsigned long overrun_time;
 	int num_overrun;
 	unsigned long process_char_map[256/(8*sizeof(unsigned long))];
 	char *read_buf;
@@ -306,7 +291,11 @@ struct tty_struct {
 	unsigned int canon_column;
 	struct semaphore atomic_read;
 	struct semaphore atomic_write;
+	unsigned char *write_buf;
+	int write_cnt;
 	spinlock_t read_lock;
+	/* If the tty has a pending do_SAK, queue it here - akpm */
+	struct work_struct SAK_work;
 };
 
 /* tty magic number */
@@ -320,52 +309,35 @@ struct tty_struct {
  * tty->write.  Thus, you must use the inline functions set_bit() and
  * clear_bit() to make things atomic.
  */
-#define TTY_THROTTLED 0
-#define TTY_IO_ERROR 1
-#define TTY_OTHER_CLOSED 2
-#define TTY_EXCLUSIVE 3
-#define TTY_DEBUG 4
-#define TTY_DO_WRITE_WAKEUP 5
-#define TTY_PUSH 6
-#define TTY_CLOSING 7
-#define TTY_DONT_FLIP 8
-#define TTY_HW_COOK_OUT 14
-#define TTY_HW_COOK_IN 15
-#define TTY_PTY_LOCK 16
-#define TTY_NO_WRITE_SPLIT 17
+#define TTY_THROTTLED 		0	/* Call unthrottle() at threshold min */
+#define TTY_IO_ERROR 		1	/* Canse an I/O error (may be no ldisc too) */
+#define TTY_OTHER_CLOSED 	2	/* Other side (if any) has closed */
+#define TTY_EXCLUSIVE 		3	/* Exclusive open mode */
+#define TTY_DEBUG 		4	/* Debugging */
+#define TTY_DO_WRITE_WAKEUP 	5	/* Call write_wakeup after queuing new */
+#define TTY_PUSH 		6	/* n_tty private */
+#define TTY_CLOSING 		7	/* ->close() in progress */
+#define TTY_DONT_FLIP 		8	/* Defer buffer flip */
+#define TTY_LDISC 		9	/* Line discipline attached */
+#define TTY_HW_COOK_OUT 	14	/* Hardware can do output cooking */
+#define TTY_HW_COOK_IN 		15	/* Hardware can do input cooking */
+#define TTY_PTY_LOCK 		16	/* pty private */
+#define TTY_NO_WRITE_SPLIT 	17	/* Preserve write boundaries to driver */
+#define TTY_HUPPED 		18	/* Post driver->hangup() */
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
 extern void tty_write_flush(struct tty_struct *);
 
 extern struct termios tty_std_termios;
-extern struct tty_struct * redirect;
-extern struct tty_ldisc ldiscs[];
 extern int fg_console, last_console, want_console;
 
 extern int kmsg_redirect;
 
-extern void con_init(void);
 extern void console_init(void);
-
-extern int lp_init(void);
-extern int pty_init(void);
-extern void tty_init(void);
-extern int mxser_init(void);
-extern int moxa_init(void);
-extern int ip2_init(void);
-extern int pcxe_init(void);
-extern int pc_init(void);
 extern int vcs_init(void);
-extern int rp_init(void);
-extern int cy_init(void);
-extern int stl_init(void);
-extern int stli_init(void);
-extern int specialix_init(void);
-extern int espserial_init(void);
-extern int macserial_init(void);
 
-extern int tty_paranoia_check(struct tty_struct *tty, kdev_t device,
+extern int tty_paranoia_check(struct tty_struct *tty, struct inode *inode,
 			      const char *routine);
 extern char *tty_name(struct tty_struct *tty, char *buf);
 extern void tty_wait_until_sent(struct tty_struct * tty, long timeout);
@@ -375,9 +347,8 @@ extern void start_tty(struct tty_struct * tty);
 extern int tty_register_ldisc(int disc, struct tty_ldisc *new_ldisc);
 extern int tty_register_driver(struct tty_driver *driver);
 extern int tty_unregister_driver(struct tty_driver *driver);
-extern void tty_register_devfs (struct tty_driver *driver, unsigned int flags,
-				unsigned minor);
-extern void tty_unregister_devfs (struct tty_driver *driver, unsigned minor);
+extern void tty_register_device(struct tty_driver *driver, unsigned index, struct device *dev);
+extern void tty_unregister_device(struct tty_driver *driver, unsigned index);
 extern int tty_read_raw_data(struct tty_struct *tty, unsigned char *bufp,
 			     int buflen);
 extern void tty_write_message(struct tty_struct *tty, char *msg);
@@ -393,6 +364,20 @@ extern void do_SAK(struct tty_struct *tty);
 extern void disassociate_ctty(int priv);
 extern void tty_flip_buffer_push(struct tty_struct *tty);
 extern int tty_get_baud_rate(struct tty_struct *tty);
+extern int tty_termios_baud_rate(struct termios *termios);
+
+extern struct tty_ldisc *tty_ldisc_ref(struct tty_struct *);
+extern void tty_ldisc_deref(struct tty_ldisc *);
+extern struct tty_ldisc *tty_ldisc_ref_wait(struct tty_struct *);
+
+extern struct tty_ldisc *tty_ldisc_get(int);
+extern void tty_ldisc_put(int);
+
+extern void tty_wakeup(struct tty_struct *tty);
+extern void tty_ldisc_flush(struct tty_struct *tty);
+
+struct semaphore;
+extern struct semaphore tty_sem;
 
 /* n_tty.c */
 extern struct tty_ldisc tty_ldisc_N_TTY;
@@ -417,6 +402,11 @@ extern void console_print(const char *);
 
 extern int vt_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg);
+
+static inline dev_t tty_devnum(struct tty_struct *tty)
+{
+	return MKDEV(tty->driver->major, tty->driver->minor_start) + tty->index;
+}
 
 #endif /* __KERNEL__ */
 #endif

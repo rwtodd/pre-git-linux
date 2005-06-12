@@ -27,6 +27,7 @@
 #include "i2ellis.h"
 #include "i2pack.h"
 #include "i2cmd.h"
+#include <linux/workqueue.h>
 
 //------------------------------------------------------------------------------
 // i2ChanStr -- Channel Structure:
@@ -91,8 +92,6 @@ typedef struct _i2ChanStr
 	int      throttled;		// Set if upper layer can take no data
 
 	int      flags;         // Defined in tty.h
-	int      session;       // Defined in tty.h
-	int      pgrp;          // Defined in tty.h
 
 	PWAITQ   open_wait;     // Pointer for OS sleep function.
 	PWAITQ   close_wait;    // Pointer for OS sleep function.
@@ -101,9 +100,6 @@ typedef struct _i2ChanStr
 
 	struct timer_list  BookmarkTimer;   // Used by i2DrainOutput
 	wait_queue_head_t pBookmarkWait;   // Used by i2DrainOutput
-
-	struct termios NormalTermios;
-	struct termios CalloutTermios;
 
 	int      BaudBase;
 	int      BaudDivisor;
@@ -150,7 +146,7 @@ typedef struct _i2ChanStr
 	// though these are in the channel structure, the channel is also written
 	// here, the easier to send it to the fifo when ready. HOWEVER, individual
 	// packets here are NOT padded to even length: the routines for writing
-	// blocks to the the fifo will pad to even byte counts.
+	// blocks to the fifo will pad to even byte counts.
 	//
 	UCHAR	Obuf[OBUF_SIZE+MAX_OBUF_BLOCK+4];
 	volatile
@@ -224,9 +220,9 @@ typedef struct _i2ChanStr
 	/*
 	 *	Task queues for processing input packets from the board.
 	 */
-	struct tq_struct	tqueue_input;
-	struct tq_struct	tqueue_status;
-	struct tq_struct	tqueue_hangup;
+	struct work_struct	tqueue_input;
+	struct work_struct	tqueue_status;
+	struct work_struct	tqueue_hangup;
 
 	rwlock_t Ibuf_spinlock;
 	rwlock_t Obuf_spinlock;
@@ -340,6 +336,12 @@ static int  i2Output(i2ChanStrPtr, const char *, int, int);
 static int  i2OutputFree(i2ChanStrPtr);
 static int  i2ServiceBoard(i2eBordStrPtr);
 static void i2DrainOutput(i2ChanStrPtr, int);
+
+#ifdef IP2DEBUG_TRACE
+void ip2trace(unsigned short,unsigned char,unsigned char,unsigned long,...);
+#else
+#define ip2trace(a,b,c,d...) do {} while (0)
+#endif
 
 // Argument to i2QueueCommands
 //

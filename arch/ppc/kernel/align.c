@@ -21,11 +21,11 @@ struct aligninfo {
 	unsigned char flags;
 };
 
-#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+#if defined(CONFIG_4xx) || defined(CONFIG_POWER4) || defined(CONFIG_BOOKE)
 #define	OPCD(inst)	(((inst) & 0xFC000000) >> 26)
 #define	RS(inst)	(((inst) & 0x03E00000) >> 21)
 #define	RA(inst)	(((inst) & 0x001F0000) >> 16)
-#define	IS_DFORM(code)	((code) >= 32 && (code) <= 47)
+#define	IS_XFORM(code)	((code) == 31)
 #endif
 
 #define INVALID	{ 0, 0 }
@@ -37,6 +37,7 @@ struct aligninfo {
 #define U	0x10	/* update index register */
 #define M	0x20	/* multiple load/store */
 #define S	0x40	/* single-precision fp, or byte-swap value */
+#define SX	0x40	/* byte count in XER */
 #define HARD	0x80	/* string, stwcx. */
 
 #define DCBZ	0x5f	/* 8xx/82xx dcbz faults when cache not enabled */
@@ -61,9 +62,9 @@ static struct aligninfo aligninfo[128] = {
 	{ 4, ST+F+S },		/* 00 0 1010: stfs */
 	{ 8, ST+F },		/* 00 0 1011: stfd */
 	INVALID,		/* 00 0 1100 */
-	INVALID,		/* 00 0 1101 */
+	INVALID,		/* 00 0 1101: ld/ldu/lwa */
 	INVALID,		/* 00 0 1110 */
-	INVALID,		/* 00 0 1111 */
+	INVALID,		/* 00 0 1111: std/stdu */
 	{ 4, LD+U },		/* 00 1 0000: lwzu */
 	INVALID,		/* 00 1 0001 */
 	{ 4, ST+U },		/* 00 1 0010: stwu */
@@ -80,28 +81,28 @@ static struct aligninfo aligninfo[128] = {
 	INVALID,		/* 00 1 1101 */
 	INVALID,		/* 00 1 1110 */
 	INVALID,		/* 00 1 1111 */
-	INVALID,		/* 01 0 0000 */
+	INVALID,		/* 01 0 0000: ldx */
 	INVALID,		/* 01 0 0001 */
-	INVALID,		/* 01 0 0010 */
+	INVALID,		/* 01 0 0010: stdx */
 	INVALID,		/* 01 0 0011 */
 	INVALID,		/* 01 0 0100 */
-	INVALID,		/* 01 0 0101: lwax?? */
+	INVALID,		/* 01 0 0101: lwax */
 	INVALID,		/* 01 0 0110 */
 	INVALID,		/* 01 0 0111 */
-	{ 0, LD+HARD },		/* 01 0 1000: lswx */
-	{ 0, LD+HARD },		/* 01 0 1001: lswi */
-	{ 0, ST+HARD },		/* 01 0 1010: stswx */
-	{ 0, ST+HARD },		/* 01 0 1011: stswi */
+	{ 4, LD+M+HARD+SX },	/* 01 0 1000: lswx */
+	{ 4, LD+M+HARD },	/* 01 0 1001: lswi */
+	{ 4, ST+M+HARD+SX },	/* 01 0 1010: stswx */
+	{ 4, ST+M+HARD },	/* 01 0 1011: stswi */
 	INVALID,		/* 01 0 1100 */
 	INVALID,		/* 01 0 1101 */
 	INVALID,		/* 01 0 1110 */
 	INVALID,		/* 01 0 1111 */
-	INVALID,		/* 01 1 0000 */
+	INVALID,		/* 01 1 0000: ldux */
 	INVALID,		/* 01 1 0001 */
-	INVALID,		/* 01 1 0010 */
+	INVALID,		/* 01 1 0010: stdux */
 	INVALID,		/* 01 1 0011 */
 	INVALID,		/* 01 1 0100 */
-	INVALID,		/* 01 1 0101: lwaux?? */
+	INVALID,		/* 01 1 0101: lwaux */
 	INVALID,		/* 01 1 0110 */
 	INVALID,		/* 01 1 0111 */
 	INVALID,		/* 01 1 1000 */
@@ -157,9 +158,9 @@ static struct aligninfo aligninfo[128] = {
 	{ 4, ST+F+S },		/* 11 0 1010: stfsx */
 	{ 8, ST+F },		/* 11 0 1011: stfdx */
 	INVALID,		/* 11 0 1100 */
-	INVALID,		/* 11 0 1101 */
+	INVALID,		/* 11 0 1101: lmd */
 	INVALID,		/* 11 0 1110 */
-	INVALID,		/* 11 0 1111 */
+	INVALID,		/* 11 0 1111: stmd */
 	{ 4, LD+U },		/* 11 1 0000: lwzux */
 	INVALID,		/* 11 1 0001 */
 	{ 4, ST+U },		/* 11 1 0010: stwux */
@@ -184,12 +185,14 @@ int
 fix_alignment(struct pt_regs *regs)
 {
 	int instr, nb, flags;
-#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+#if defined(CONFIG_4xx) || defined(CONFIG_POWER4) || defined(CONFIG_BOOKE)
 	int opcode, f1, f2, f3;
 #endif
 	int i, t;
 	int reg, areg;
-	unsigned char *addr;
+	int offset, nb0;
+	unsigned char __user *addr;
+	unsigned char *rptr;
 	union {
 		long l;
 		float f;
@@ -197,19 +200,22 @@ fix_alignment(struct pt_regs *regs)
 		unsigned char v[8];
 	} data;
 
-#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
-	/* The 4xx-family processors have no DSISR register,
+	CHECK_FULL_REGS(regs);
+
+#if defined(CONFIG_4xx) || defined(CONFIG_POWER4) || defined(CONFIG_BOOKE)
+	/* The 4xx-family & Book-E processors have no DSISR register,
 	 * so we emulate it.
 	 * The POWER4 has a DSISR register but doesn't set it on
 	 * an alignment fault.  -- paulus
 	 */
 
-	instr = *((unsigned int *)regs->nip);
+	if (__get_user(instr, (unsigned int __user *) regs->nip))
+		return 0;
 	opcode = OPCD(instr);
 	reg = RS(instr);
 	areg = RA(instr);
 
-	if (IS_DFORM(opcode)) {
+	if (!IS_XFORM(opcode)) {
 		f1 = 0;
 		f2 = (instr & 0x04000000) >> 26;
 		f3 = (instr & 0x78000000) >> 27;
@@ -228,7 +234,7 @@ fix_alignment(struct pt_regs *regs)
 
 	nb = aligninfo[instr].len;
 	if (nb == 0) {
-		long *p;
+		long __user *p;
 		int i;
 
 		if (instr != DCBZ)
@@ -240,19 +246,85 @@ fix_alignment(struct pt_regs *regs)
 		 * case when we are running with the cache disabled
 		 * for debugging.
 		 */
-		p = (long *) (regs->dar & -L1_CACHE_BYTES);
+		p = (long __user *) (regs->dar & -L1_CACHE_BYTES);
+		if (user_mode(regs)
+		    && verify_area(VERIFY_WRITE, p, L1_CACHE_BYTES))
+			return -EFAULT;
 		for (i = 0; i < L1_CACHE_BYTES / sizeof(long); ++i)
-			p[i] = 0;
+			if (__put_user(0, p+i))
+				return -EFAULT;
 		return 1;
 	}
 
 	flags = aligninfo[instr].flags;
+	if ((flags & (LD|ST)) == 0)
+		return 0;
 
-	/* For the 4xx-family processors, the 'dar' field of the
+	/* For the 4xx-family & Book-E processors, the 'dar' field of the
 	 * pt_regs structure is overloaded and is really from the DEAR.
 	 */
 
-	addr = (unsigned char *)regs->dar;
+	addr = (unsigned char __user *)regs->dar;
+
+	if (flags & M) {
+		/* lmw, stmw, lswi/x, stswi/x */
+		nb0 = 0;
+		if (flags & HARD) {
+			if (flags & SX) {
+				nb = regs->xer & 127;
+				if (nb == 0)
+					return 1;
+			} else {
+				if (__get_user(instr,
+					    (unsigned int __user *)regs->nip))
+					return 0;
+				nb = (instr >> 11) & 0x1f;
+				if (nb == 0)
+					nb = 32;
+			}
+			if (nb + reg * 4 > 128) {
+				nb0 = nb + reg * 4 - 128;
+				nb = 128 - reg * 4;
+			}
+		} else {
+			/* lwm, stmw */
+			nb = (32 - reg) * 4;
+		}
+		rptr = (unsigned char *) &regs->gpr[reg];
+		if (flags & LD) {
+			for (i = 0; i < nb; ++i)
+				if (__get_user(rptr[i], addr+i))
+					return -EFAULT;
+			if (nb0 > 0) {
+				rptr = (unsigned char *) &regs->gpr[0];
+				addr += nb;
+				for (i = 0; i < nb0; ++i)
+					if (__get_user(rptr[i], addr+i))
+						return -EFAULT;
+			}
+			for (; (i & 3) != 0; ++i)
+				rptr[i] = 0;
+		} else {
+			for (i = 0; i < nb; ++i)
+				if (__put_user(rptr[i], addr+i))
+					return -EFAULT;
+			if (nb0 > 0) {
+				rptr = (unsigned char *) &regs->gpr[0];
+				addr += nb;
+				for (i = 0; i < nb0; ++i)
+					if (__put_user(rptr[i], addr+i))
+						return -EFAULT;
+			}
+		}
+		return 1;
+	}
+
+	offset = 0;
+	if (nb < 4) {
+		/* read/write the least significant bits */
+		data.l = 0;
+		offset = 4 - nb;
+	}
 
 	/* Verify the address of the operand */
 	if (user_mode(regs)) {
@@ -260,47 +332,32 @@ fix_alignment(struct pt_regs *regs)
 			return -EFAULT;	/* bad address */
 	}
 
-	if ((flags & F) && (regs->msr & MSR_FP))
-		giveup_fpu(current);
-	if (flags & M)
-		return 0;		/* too hard for now */
+	if (flags & F) {
+		preempt_disable();
+		if (regs->msr & MSR_FP)
+			giveup_fpu(current);
+		preempt_enable();
+	}
 
-	/* If we read the operand, copy it in */
+	/* If we read the operand, copy it in, else get register values */
 	if (flags & LD) {
-		if (nb == 2) {
-			data.v[0] = data.v[1] = 0;
-			if (__get_user(data.v[2], addr)
-			    || __get_user(data.v[3], addr+1))
+		for (i = 0; i < nb; ++i)
+			if (__get_user(data.v[offset+i], addr+i))
 				return -EFAULT;
-		} else {
-			for (i = 0; i < nb; ++i)
-				if (__get_user(data.v[i], addr+i))
-					return -EFAULT;
-		}
+	} else if (flags & F) {
+		data.d = current->thread.fpr[reg];
+	} else {
+		data.l = regs->gpr[reg];
 	}
 
 	switch (flags & ~U) {
-	case LD+SE:
+	case LD+SE:	/* sign extend */
 		if (data.v[2] >= 0x80)
 			data.v[0] = data.v[1] = -1;
-		/* fall through */
-	case LD:
-		regs->gpr[reg] = data.l;
 		break;
-	case LD+S:
-		if (nb == 2) {
-			SWAP(data.v[2], data.v[3]);
-		} else {
-			SWAP(data.v[0], data.v[3]);
-			SWAP(data.v[1], data.v[2]);
-		}
-		regs->gpr[reg] = data.l;
-		break;
-	case ST:
-		data.l = regs->gpr[reg];
-		break;
+
+	case LD+S:	/* byte-swap */
 	case ST+S:
-		data.l = regs->gpr[reg];
 		if (nb == 2) {
 			SWAP(data.v[2], data.v[3]);
 		} else {
@@ -308,46 +365,34 @@ fix_alignment(struct pt_regs *regs)
 			SWAP(data.v[1], data.v[2]);
 		}
 		break;
-	case LD+F:
-		current->thread.fpr[reg] = data.d;
-		break;
-	case ST+F:
-		data.d = current->thread.fpr[reg];
-		break;
-	/* these require some floating point conversions... */
-	/* we'd like to use the assignment, but we have to compile
-	 * the kernel with -msoft-float so it doesn't use the
-	 * fp regs for copying 8-byte objects. */
+
+	/* Single-precision FP load and store require conversions... */
 	case LD+F+S:
+		preempt_disable();
 		enable_kernel_fp();
-		cvt_fd(&data.f, &current->thread.fpr[reg], &current->thread.fpscr);
-		/* current->thread.fpr[reg] = data.f; */
+		cvt_fd(&data.f, &data.d, &current->thread.fpscr);
+		preempt_enable();
 		break;
 	case ST+F+S:
+		preempt_disable();
 		enable_kernel_fp();
-		cvt_df(&current->thread.fpr[reg], &data.f, &current->thread.fpscr);
-		/* data.f = current->thread.fpr[reg]; */
+		cvt_df(&data.d, &data.f, &current->thread.fpscr);
+		preempt_enable();
 		break;
-	default:
-		printk("align: can't handle flags=%x\n", flags);
-		return 0;
 	}
 
 	if (flags & ST) {
-		if (nb == 2) {
-			if (__put_user(data.v[2], addr)
-			    || __put_user(data.v[3], addr+1))
+		for (i = 0; i < nb; ++i)
+			if (__put_user(data.v[offset+i], addr+i))
 				return -EFAULT;
-		} else {
-			for (i = 0; i < nb; ++i)
-				if (__put_user(data.v[i], addr+i))
-					return -EFAULT;
-		}
+	} else if (flags & F) {
+		current->thread.fpr[reg] = data.d;
+	} else {
+		regs->gpr[reg] = data.l;
 	}
 
-	if (flags & U) {
+	if (flags & U)
 		regs->gpr[areg] = regs->dar;
-	}
 
 	return 1;
 }

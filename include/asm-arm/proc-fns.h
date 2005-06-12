@@ -21,43 +21,65 @@
 #undef MULTI_CPU
 #undef CPU_NAME
 
-#ifdef CONFIG_CPU_26
-# define CPU_INCLUDE_NAME "asm/cpu-multi26.h"
-# define MULTI_CPU
-#endif
+/*
+ * CPU_NAME - the prefix for CPU related functions
+ */
 
 #ifdef CONFIG_CPU_32
-# define CPU_INCLUDE_NAME "asm/cpu-multi32.h"
-# ifdef CONFIG_CPU_ARM6
+# ifdef CONFIG_CPU_ARM610
 #  ifdef CPU_NAME
 #   undef  MULTI_CPU
 #   define MULTI_CPU
 #  else
-#   define CPU_NAME arm6
+#   define CPU_NAME cpu_arm6
 #  endif
 # endif
-# ifdef CONFIG_CPU_ARM7
+# ifdef CONFIG_CPU_ARM710
 #  ifdef CPU_NAME
 #   undef  MULTI_CPU
 #   define MULTI_CPU
 #  else
-#   define CPU_NAME arm7
+#   define CPU_NAME cpu_arm7
 #  endif
 # endif
-# ifdef CONFIG_CPU_ARM720
+# ifdef CONFIG_CPU_ARM720T
 #  ifdef CPU_NAME
 #   undef  MULTI_CPU
 #   define MULTI_CPU
 #  else
-#   define CPU_NAME arm720
+#   define CPU_NAME cpu_arm720
 #  endif
 # endif
-# ifdef CONFIG_CPU_ARM920
+# ifdef CONFIG_CPU_ARM920T
 #  ifdef CPU_NAME
 #   undef  MULTI_CPU
 #   define MULTI_CPU
 #  else
-#   define CPU_NAME arm920
+#   define CPU_NAME cpu_arm920
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM922T
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm922
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM925T
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm925
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM926T
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm926
 #  endif
 # endif
 # ifdef CONFIG_CPU_SA110
@@ -65,7 +87,7 @@
 #   undef  MULTI_CPU
 #   define MULTI_CPU
 #  else
-#   define CPU_NAME sa110
+#   define CPU_NAME cpu_sa110
 #  endif
 # endif
 # ifdef CONFIG_CPU_SA1100
@@ -73,28 +95,80 @@
 #   undef  MULTI_CPU
 #   define MULTI_CPU
 #  else
-#   define CPU_NAME sa1100
+#   define CPU_NAME cpu_sa1100
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM1020
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm1020
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM1020E
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm1020e
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM1022
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm1022
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM1026
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm1026
+#  endif
+# endif
+# ifdef CONFIG_CPU_XSCALE
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_xscale
+#  endif
+# endif
+# ifdef CONFIG_CPU_V6
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_v6
 #  endif
 # endif
 #endif
 
+#ifndef __ASSEMBLY__
+
 #ifndef MULTI_CPU
-#undef CPU_INCLUDE_NAME
-#define CPU_INCLUDE_NAME "asm/cpu-single.h"
+#include "asm/cpu-single.h"
+#else
+#include "asm/cpu-multi32.h"
 #endif
 
-#include CPU_INCLUDE_NAME
+#include <asm/memory.h>
 
+#define cpu_switch_mm(pgd,mm) cpu_do_switch_mm(virt_to_phys(pgd),mm)
+
+#define cpu_get_pgd()	\
+	({						\
+		unsigned long pg;			\
+		__asm__("mrc	p15, 0, %0, c2, c0, 0"	\
+			 : "=r" (pg) : : "cc");		\
+		pg &= ~0x3fff;				\
+		(pgd_t *)phys_to_virt(pg);		\
+	})
+
+#endif /* __ASSEMBLY__ */
 #endif /* __KERNEL__ */
-
-#if 0
- * The following is to fool mkdep into generating the correct
- * dependencies.  Without this, it cant figure out that this
- * file does indeed depend on the cpu-*.h files.
-#include <asm/cpu-single.h>
-#include <asm/cpu-multi26.h>
-#include <asm/cpu-multi32.h>
- *
-#endif
-
 #endif /* __ASM_PROCFNS_H */

@@ -12,14 +12,19 @@
  * Any part of this program may be used in documents licensed under
  * the GNU Free Documentation License, Version 1.1 or any later version
  * published by the Free Software Foundation.
+ *
+ * Various hacks, Fred Barnes <frmb2@ukc.ac.uk>, 04/2000
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/threads.h>
 #include <linux/parport.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
+#include <linux/timer.h>
+#include <linux/sched.h>
 
 #undef DEBUG /* undef me for production */
 
@@ -35,7 +40,7 @@
 
 /* Make parport_wait_peripheral wake up.
  * It will be useful to call this from an interrupt handler. */
-void parport_ieee1284_wakeup (struct parport *port)
+static void parport_ieee1284_wakeup (struct parport *port)
 {
 	up (&port->physport->ieee1284.irq);
 }
@@ -117,17 +122,19 @@ int parport_poll_peripheral(struct parport *port,
 			    int usec)
 {
 	/* Zero return code is success, >0 is timeout. */
-	int counter = usec / 5;
+	int count = usec / 5 + 2;
+	int i;
 	unsigned char status;
-	for (; counter > 0; counter--) {
+	for (i = 0; i < count; i++) {
 		status = parport_read_status (port);
 		if ((status & mask) == result)
 			return 0;
 		if (signal_pending (current))
 			return -EINTR;
-		if (current->need_resched)
+		if (need_resched())
 			break;
-		udelay (5);
+		if (i >= 2)
+			udelay (5);
 	}
 
 	return 1;
@@ -164,7 +171,7 @@ int parport_wait_peripheral(struct parport *port,
 {
 	int ret;
 	int usec;
-	long deadline;
+	unsigned long deadline;
 	unsigned char status;
 
 	usec = port->physport->spintime; /* usecs of fast polling */
@@ -523,9 +530,10 @@ int parport_negotiate (struct parport *port, int mode)
 		r = parport_wait_peripheral (port,
 					     PARPORT_STATUS_PAPEROUT,
 					     PARPORT_STATUS_PAPEROUT);
-		if (r)
+		if (r) {
 			DPRINTK (KERN_INFO "%s: Timeout at event 31\n",
-				 port->name);
+				port->name);
+		}
 
 		port->ieee1284.phase = IEEE1284_PH_FWD_IDLE;
 		DPRINTK (KERN_DEBUG "%s: ECP direction: forward\n",
@@ -614,6 +622,7 @@ ssize_t parport_write (struct parport *port, const void *buffer, size_t len)
 	/* Use the mode we're in. */
 	switch (mode) {
 	case IEEE1284_MODE_NIBBLE:
+	case IEEE1284_MODE_BYTE:
 		parport_negotiate (port, IEEE1284_MODE_COMPAT);
 	case IEEE1284_MODE_COMPAT:
 		DPRINTK (KERN_DEBUG "%s: Using compatibility mode\n",
@@ -623,19 +632,29 @@ ssize_t parport_write (struct parport *port, const void *buffer, size_t len)
 
 	case IEEE1284_MODE_EPP:
 		DPRINTK (KERN_DEBUG "%s: Using EPP mode\n", port->name);
-		if (addr)
+		if (addr) {
 			fn = port->ops->epp_write_addr;
-		else
+		} else {
 			fn = port->ops->epp_write_data;
+		}
 		break;
-
+	case IEEE1284_MODE_EPPSWE:
+		DPRINTK (KERN_DEBUG "%s: Using software-emulated EPP mode\n",
+			port->name);
+		if (addr) {
+			fn = parport_ieee1284_epp_write_addr;
+		} else {
+			fn = parport_ieee1284_epp_write_data;
+		}
+		break;
 	case IEEE1284_MODE_ECP:
 	case IEEE1284_MODE_ECPRLE:
 		DPRINTK (KERN_DEBUG "%s: Using ECP mode\n", port->name);
-		if (addr)
+		if (addr) {
 			fn = port->ops->ecp_write_addr;
-		else
+		} else {
 			fn = port->ops->ecp_write_data;
+		}
 		break;
 
 	case IEEE1284_MODE_ECPSWE:
@@ -643,10 +662,11 @@ ssize_t parport_write (struct parport *port, const void *buffer, size_t len)
 			 port->name);
 		/* The caller has specified that it must be emulated,
 		 * even if we have ECP hardware! */
-		if (addr)
+		if (addr) {
 			fn = parport_ieee1284_ecp_write_addr;
-		else
+		} else {
 			fn = parport_ieee1284_ecp_write_data;
+		}
 		break;
 
 	default:
@@ -656,8 +676,7 @@ ssize_t parport_write (struct parport *port, const void *buffer, size_t len)
 	}
 
 	retval = (*fn) (port, buffer, len, 0);
-	DPRINTK (KERN_DEBUG "%s: wrote %d/%d bytes\n", port->name, retval,
-		 len);
+	DPRINTK (KERN_DEBUG "%s: wrote %d/%d bytes\n", port->name, retval, len);
 	return retval;
 #endif /* IEEE1284 support */
 }
@@ -696,8 +715,22 @@ ssize_t parport_read (struct parport *port, void *buffer, size_t len)
 	/* Use the mode we're in. */
 	switch (mode) {
 	case IEEE1284_MODE_COMPAT:
-		if (parport_negotiate (port, IEEE1284_MODE_NIBBLE))
+		/* if we can tri-state use BYTE mode instead of NIBBLE mode,
+		 * if that fails, revert to NIBBLE mode -- ought to store somewhere
+		 * the device's ability to do BYTE mode reverse transfers, so we don't
+		 * end up needlessly calling negotiate(BYTE) repeately..  (fb)
+		 */
+		if ((port->physport->modes & PARPORT_MODE_TRISTATE) &&
+		    !parport_negotiate (port, IEEE1284_MODE_BYTE)) {
+			/* got into BYTE mode OK */
+			DPRINTK (KERN_DEBUG "%s: Using byte mode\n", port->name);
+			fn = port->ops->byte_read_data;
+			break;
+		}
+		if (parport_negotiate (port, IEEE1284_MODE_NIBBLE)) {
 			return -EIO;
+		}
+		/* fall through to NIBBLE */
 	case IEEE1284_MODE_NIBBLE:
 		DPRINTK (KERN_DEBUG "%s: Using nibble mode\n", port->name);
 		fn = port->ops->nibble_read_data;
@@ -710,12 +743,21 @@ ssize_t parport_read (struct parport *port, void *buffer, size_t len)
 
 	case IEEE1284_MODE_EPP:
 		DPRINTK (KERN_DEBUG "%s: Using EPP mode\n", port->name);
-		if (addr)
+		if (addr) {
 			fn = port->ops->epp_read_addr;
-		else
+		} else {
 			fn = port->ops->epp_read_data;
+		}
 		break;
-
+	case IEEE1284_MODE_EPPSWE:
+		DPRINTK (KERN_DEBUG "%s: Using software-emulated EPP mode\n",
+			port->name);
+		if (addr) {
+			fn = parport_ieee1284_epp_read_addr;
+		} else {
+			fn = parport_ieee1284_epp_read_data;
+		}
+		break;
 	case IEEE1284_MODE_ECP:
 	case IEEE1284_MODE_ECPRLE:
 		DPRINTK (KERN_DEBUG "%s: Using ECP mode\n", port->name);
@@ -765,3 +807,13 @@ long parport_set_timeout (struct pardevice *dev, long inactivity)
 
 	return old;
 }
+
+/* Exported symbols for modules. */
+
+EXPORT_SYMBOL(parport_negotiate);
+EXPORT_SYMBOL(parport_write);
+EXPORT_SYMBOL(parport_read);
+EXPORT_SYMBOL(parport_wait_peripheral);
+EXPORT_SYMBOL(parport_wait_event);
+EXPORT_SYMBOL(parport_set_timeout);
+EXPORT_SYMBOL(parport_ieee1284_interrupt);

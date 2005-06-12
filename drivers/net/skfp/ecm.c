@@ -17,23 +17,23 @@
 /*
 	SMT ECM
 	Entity Coordination Management
-	Hardware independant state machine
+	Hardware independent state machine
 */
 
 /*
- * Hardware independant state machine implemantation
+ * Hardware independent state machine implemantation
  * The following external SMT functions are referenced :
  *
  * 		queue_event()
  * 		smt_timer_start()
  * 		smt_timer_stop()
  *
- * 	The following external HW dependant functions are referenced :
+ * 	The following external HW dependent functions are referenced :
  * 		sm_pm_bypass_req()
  * 		sm_pm_ls_latch()
  * 		sm_pm_get_ls()
  * 
- * 	The following HW dependant events are required :
+ * 	The following HW dependent events are required :
  *		NONE
  *
  */
@@ -94,17 +94,16 @@ static const char * const ecm_events[] = {
  * function declarations
  */
 
-static void ecm_fsm() ;
-static void start_ecm_timer() ;
-static void stop_ecm_timer() ;
-static void prop_actions() ;
+static void ecm_fsm(struct s_smc *smc, int cmd);
+static void start_ecm_timer(struct s_smc *smc, u_long value, int event);
+static void stop_ecm_timer(struct s_smc *smc);
+static void prop_actions(struct s_smc *smc);
 
 /*
 	init ECM state machine
 	clear all ECM vars and flags
 */
-void ecm_init(smc)
-struct s_smc *smc ;
+void ecm_init(struct s_smc *smc)
 {
 	smc->e.path_test = PT_PASSED ;
 	smc->e.trace_prop = 0 ;
@@ -122,9 +121,7 @@ struct s_smc *smc ;
 		process event
 	until SM is stable
 */
-void ecm(smc,event)
-struct s_smc *smc ;
-int event ;
+void ecm(struct s_smc *smc, int event)
 {
 	int	state ;
 
@@ -143,9 +140,7 @@ int event ;
 /*
 	process ECM event
 */
-static void ecm_fsm(smc,cmd)
-struct s_smc *smc ;
-int cmd ;
+static void ecm_fsm(struct s_smc *smc, int cmd)
 {
 	int ls_a ;			/* current line state PHY A */
 	int ls_b ;			/* current line state PHY B */
@@ -429,8 +424,7 @@ int cmd ;
 /*
  * trace propagation actions for SAS & DAS
  */
-static void prop_actions(smc)
-struct s_smc *smc ;
+static void prop_actions(struct s_smc *smc)
 {
 	int	port_in = 0 ;
 	int	port_out = 0 ;
@@ -480,8 +474,7 @@ struct s_smc *smc ;
 /*
  * trace propagation actions for Concentrator
  */
-static void prop_actions(smc)
-struct s_smc *smc ;
+static void prop_actions(struct s_smc *smc)
 {
 	int	initiator ;
 	int	upstream ;
@@ -527,10 +520,7 @@ struct s_smc *smc ;
  * SMT timer interface
  *	start ECM timer
  */
-static void start_ecm_timer(smc,value,event)
-struct s_smc *smc ;
-u_long value;
-int event ;
+static void start_ecm_timer(struct s_smc *smc, u_long value, int event)
 {
 	smt_timer_start(smc,&smc->e.ecm_timer,value,EV_TOKEN(EVENT_ECM,event));
 }
@@ -539,8 +529,7 @@ int event ;
  * SMT timer interface
  *	stop ECM timer
  */
-static void stop_ecm_timer(smc)
-struct s_smc *smc ;
+static void stop_ecm_timer(struct s_smc *smc)
 {
 	if (smc->e.ecm_timer.tm_active)
 		smt_timer_stop(smc,&smc->e.ecm_timer) ;

@@ -1,10 +1,12 @@
-/*
- * $Id: capi.h,v 1.4 2000/06/12 09:20:20 kai Exp $
+/* $Id: capi.h,v 1.4.6.1 2001/09/23 22:25:05 kai Exp $
  * 
  * CAPI 2.0 Interface for Linux
  * 
  * Copyright 1997 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  */
 
 #ifndef __LINUX_CAPI_H__
@@ -34,7 +36,7 @@ typedef struct capi_register_params {	/* CAPI_REGISTER */
 
 #define CAPI_MANUFACTURER_LEN		64
 
-#define	CAPI_GET_MANUFACTURER	_IOWR('C',0x06,CAPI_MANUFACTURER_LEN)
+#define	CAPI_GET_MANUFACTURER	_IOWR('C',0x06,int)	/* broken: wanted size 64 (CAPI_MANUFACTURER_LEN) */
 
 /*
  * CAPI_GET_VERSION
@@ -54,7 +56,7 @@ typedef struct capi_version {
  */
 
 #define CAPI_SERIAL_LEN		8
-#define CAPI_GET_SERIAL		_IOWR('C',0x08, CAPI_SERIAL_LEN)
+#define CAPI_GET_SERIAL		_IOWR('C',0x08,int)	/* broken: wanted size 8 (CAPI_SERIAL_LEN) */
 
 /*
  * CAPI_GET_PROFILE
@@ -75,7 +77,7 @@ typedef struct capi_profile {
 
 typedef struct capi_manufacturer_cmd {
 	unsigned long cmd;
-	void *data;
+	void __user *data;
 } capi_manufacturer_cmd;
 
 /*

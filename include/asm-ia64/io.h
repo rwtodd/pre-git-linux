@@ -13,8 +13,8 @@
  * over and over again with slight variations and possibly making a
  * mistake somewhere.
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 Asit Mallick <asit.k.mallick@intel.com>
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  */
@@ -23,15 +23,54 @@
 #define __SLOW_DOWN_IO	do { } while (0)
 #define SLOW_DOWN_IO	do { } while (0)
 
-#define __IA64_UNCACHED_OFFSET	0xc000000000000000	/* region 6 */
+#define __IA64_UNCACHED_OFFSET	0xc000000000000000UL	/* region 6 */
 
-#define IO_SPACE_LIMIT 0xffff
+/*
+ * The legacy I/O space defined by the ia64 architecture supports only 65536 ports, but
+ * large machines may have multiple other I/O spaces so we can't place any a priori limit
+ * on IO_SPACE_LIMIT.  These additional spaces are described in ACPI.
+ */
+#define IO_SPACE_LIMIT		0xffffffffffffffffUL
+
+#define MAX_IO_SPACES_BITS		4
+#define MAX_IO_SPACES			(1UL << MAX_IO_SPACES_BITS)
+#define IO_SPACE_BITS			24
+#define IO_SPACE_SIZE			(1UL << IO_SPACE_BITS)
+
+#define IO_SPACE_NR(port)		((port) >> IO_SPACE_BITS)
+#define IO_SPACE_BASE(space)		((space) << IO_SPACE_BITS)
+#define IO_SPACE_PORT(port)		((port) & (IO_SPACE_SIZE - 1))
+
+#define IO_SPACE_SPARSE_ENCODING(p)	((((p) >> 2) << 12) | (p & 0xfff))
+
+struct io_space {
+	unsigned long mmio_base;	/* base in MMIO space */
+	int sparse;
+};
+
+extern struct io_space io_space[];
+extern unsigned int num_io_spaces;
 
 # ifdef __KERNEL__
 
+/*
+ * All MMIO iomem cookies are in region 6; anything less is a PIO cookie:
+ *	0xCxxxxxxxxxxxxxxx	MMIO cookie (return from ioremap)
+ *	0x000000001SPPPPPP	PIO cookie (S=space number, P..P=port)
+ *
+ * ioread/writeX() uses the leading 1 in PIO cookies (PIO_OFFSET) to catch
+ * code that uses bare port numbers without the prerequisite pci_iomap().
+ */
+#define PIO_OFFSET		(1UL << (MAX_IO_SPACES_BITS + IO_SPACE_BITS))
+#define PIO_MASK		(PIO_OFFSET - 1)
+#define PIO_RESERVED		__IA64_UNCACHED_OFFSET
+#define HAVE_ARCH_PIO_SIZE
+
+#include <asm/intrinsics.h>
 #include <asm/machvec.h>
 #include <asm/page.h>
 #include <asm/system.h>
+#include <asm-generic/iomap.h>
 
 /*
  * Change virtual addresses to physical addresses and vv.
@@ -43,10 +82,13 @@ virt_to_phys (volatile void *address)
 }
 
 static inline void*
-phys_to_virt(unsigned long address)
+phys_to_virt (unsigned long address)
 {
 	return (void *) (address + PAGE_OFFSET);
 }
+
+#define ARCH_HAS_VALID_PHYS_ADDR_RANGE
+extern int valid_phys_addr_range (unsigned long addr, size_t *count); /* efi.c */
 
 /*
  * The following two macros are deprecated and scheduled for removal.
@@ -54,6 +96,7 @@ phys_to_virt(unsigned long address)
  */
 #define bus_to_virt	phys_to_virt
 #define virt_to_bus	virt_to_phys
+#define page_to_bus	page_to_phys
 
 # endif /* KERNEL */
 
@@ -61,7 +104,21 @@ phys_to_virt(unsigned long address)
  * Memory fence w/accept.  This should never be used in code that is
  * not IA-64 specific.
  */
-#define __ia64_mf_a()	__asm__ __volatile__ ("mf.a" ::: "memory")
+#define __ia64_mf_a()	ia64_mfa()
+
+/**
+ * ___ia64_mmiowb - I/O write barrier
+ *
+ * Ensure ordering of I/O space writes.  This will make sure that writes
+ * following the barrier will arrive after all previous writes.  For most
+ * ia64 platforms, this is a simple 'mf.a' instruction.
+ *
+ * See Documentation/DocBook/deviceiobook.tmpl for more information.
+ */
+static inline void ___ia64_mmiowb(void)
+{
+	ia64_mfa();
+}
 
 static inline const unsigned long
 __ia64_get_io_port_base (void)
@@ -74,33 +131,49 @@ __ia64_get_io_port_base (void)
 static inline void*
 __ia64_mk_io_addr (unsigned long port)
 {
-	const unsigned long io_base = __ia64_get_io_port_base();
-	unsigned long addr;
+	struct io_space *space;
+	unsigned long offset;
 
-	addr = io_base | ((port >> 2) << 12) | (port & 0xfff);
-	return (void *) addr;
+	space = &io_space[IO_SPACE_NR(port)];
+	port = IO_SPACE_PORT(port);
+	if (space->sparse)
+		offset = IO_SPACE_SPARSE_ENCODING(port);
+	else
+		offset = port;
+
+	return (void *) (space->mmio_base | offset);
 }
 
+#define __ia64_inb	___ia64_inb
+#define __ia64_inw	___ia64_inw
+#define __ia64_inl	___ia64_inl
+#define __ia64_outb	___ia64_outb
+#define __ia64_outw	___ia64_outw
+#define __ia64_outl	___ia64_outl
+#define __ia64_readb	___ia64_readb
+#define __ia64_readw	___ia64_readw
+#define __ia64_readl	___ia64_readl
+#define __ia64_readq	___ia64_readq
+#define __ia64_readb_relaxed	___ia64_readb
+#define __ia64_readw_relaxed	___ia64_readw
+#define __ia64_readl_relaxed	___ia64_readl
+#define __ia64_readq_relaxed	___ia64_readq
+#define __ia64_writeb	___ia64_writeb
+#define __ia64_writew	___ia64_writew
+#define __ia64_writel	___ia64_writel
+#define __ia64_writeq	___ia64_writeq
+#define __ia64_mmiowb	___ia64_mmiowb
+
 /*
- * For the in/out instructions, we need to do:
- *
- *	o "mf" _before_ doing the I/O access to ensure that all prior
- *	  accesses to memory occur before the I/O access
- *	o "mf.a" _after_ doing the I/O access to ensure that the access
- *	  has completed before we're doing any other I/O accesses
- *
- * The former is necessary because we might be doing normal (cached) memory
- * accesses, e.g., to set up a DMA descriptor table and then do an "outX()"
- * to tell the DMA controller to start the DMA operation.  The "mf" ahead
- * of the I/O operation ensures that the DMA table is correct when the I/O
- * access occurs.
- *
- * The mf.a is necessary to ensure that all I/O access occur in program
- * order. --davidm 99/12/07 
+ * For the in/out routines, we need to do "mf.a" _after_ doing the I/O access to ensure
+ * that the access has completed before executing other I/O accesses.  Since we're doing
+ * the accesses through an uncachable (UC) translation, the CPU will execute them in
+ * program order.  However, we still need to tell the compiler not to shuffle them around
+ * during optimization, which is why we use "volatile" pointers.
  */
 
 static inline unsigned int
-__ia64_inb (unsigned long port)
+___ia64_inb (unsigned long port)
 {
 	volatile unsigned char *addr = __ia64_mk_io_addr(port);
 	unsigned char ret;
@@ -111,7 +184,7 @@ __ia64_inb (unsigned long port)
 }
 
 static inline unsigned int
-__ia64_inw (unsigned long port)
+___ia64_inw (unsigned long port)
 {
 	volatile unsigned short *addr = __ia64_mk_io_addr(port);
 	unsigned short ret;
@@ -122,7 +195,7 @@ __ia64_inw (unsigned long port)
 }
 
 static inline unsigned int
-__ia64_inl (unsigned long port)
+___ia64_inl (unsigned long port)
 {
 	volatile unsigned int *addr = __ia64_mk_io_addr(port);
 	unsigned int ret;
@@ -133,7 +206,7 @@ __ia64_inl (unsigned long port)
 }
 
 static inline void
-__ia64_outb (unsigned char val, unsigned long port)
+___ia64_outb (unsigned char val, unsigned long port)
 {
 	volatile unsigned char *addr = __ia64_mk_io_addr(port);
 
@@ -142,7 +215,7 @@ __ia64_outb (unsigned char val, unsigned long port)
 }
 
 static inline void
-__ia64_outw (unsigned short val, unsigned long port)
+___ia64_outw (unsigned short val, unsigned long port)
 {
 	volatile unsigned short *addr = __ia64_mk_io_addr(port);
 
@@ -151,7 +224,7 @@ __ia64_outw (unsigned short val, unsigned long port)
 }
 
 static inline void
-__ia64_outl (unsigned int val, unsigned long port)
+___ia64_outl (unsigned int val, unsigned long port)
 {
 	volatile unsigned int *addr = __ia64_mk_io_addr(port);
 
@@ -164,17 +237,8 @@ __insb (unsigned long port, void *dst, unsigned long count)
 {
 	unsigned char *dp = dst;
 
-	if (platform_inb == __ia64_inb) {
-		volatile unsigned char *addr = __ia64_mk_io_addr(port);
-
-		__ia64_mf_a();
-		while (count--)
-			*dp++ = *addr;
-		__ia64_mf_a();
-	} else
-		while (count--)
-			*dp++ = platform_inb(port);
-	return;
+	while (count--)
+		*dp++ = platform_inb(port);
 }
 
 static inline void
@@ -182,17 +246,8 @@ __insw (unsigned long port, void *dst, unsigned long count)
 {
 	unsigned short *dp = dst;
 
-	if (platform_inw == __ia64_inw) {
-		volatile unsigned short *addr = __ia64_mk_io_addr(port);
-
-		__ia64_mf_a();
-		while (count--)
-			*dp++ = *addr;
-		__ia64_mf_a();
-	} else
-		while (count--)
-			*dp++ = platform_inw(port);
-	return;
+	while (count--)
+		*dp++ = platform_inw(port);
 }
 
 static inline void
@@ -200,17 +255,8 @@ __insl (unsigned long port, void *dst, unsigned long count)
 {
 	unsigned int *dp = dst;
 
-	if (platform_inl == __ia64_inl) {
-		volatile unsigned int *addr = __ia64_mk_io_addr(port);
-
-		__ia64_mf_a();
-		while (count--)
-			*dp++ = *addr;
-		__ia64_mf_a();
-	} else
-		while (count--)
-			*dp++ = platform_inl(port);
-	return;
+	while (count--)
+		*dp++ = platform_inl(port);
 }
 
 static inline void
@@ -218,16 +264,8 @@ __outsb (unsigned long port, const void *src, unsigned long count)
 {
 	const unsigned char *sp = src;
 
-	if (platform_outb == __ia64_outb) {
-		volatile unsigned char *addr = __ia64_mk_io_addr(port);
-
-		while (count--)
-			*addr = *sp++;
-		__ia64_mf_a();
-	} else
-		while (count--)
-			platform_outb(*sp++, port);
-	return;
+	while (count--)
+		platform_outb(*sp++, port);
 }
 
 static inline void
@@ -235,39 +273,23 @@ __outsw (unsigned long port, const void *src, unsigned long count)
 {
 	const unsigned short *sp = src;
 
-	if (platform_outw == __ia64_outw) {
-		volatile unsigned short *addr = __ia64_mk_io_addr(port);
-
-		while (count--)
-			*addr = *sp++;
-		__ia64_mf_a();
-	} else
-		while (count--)
-			platform_outw(*sp++, port);
-	return;
+	while (count--)
+		platform_outw(*sp++, port);
 }
 
 static inline void
-__outsl (unsigned long port, void *src, unsigned long count)
+__outsl (unsigned long port, const void *src, unsigned long count)
 {
 	const unsigned int *sp = src;
 
-	if (platform_outl == __ia64_outl) {
-		volatile unsigned int *addr = __ia64_mk_io_addr(port);
-
-		while (count--)
-			*addr = *sp++;
-		__ia64_mf_a();
-	} else
-		while (count--)
-			platform_outl(*sp++, port);
-	return;
+	while (count--)
+		platform_outl(*sp++, port);
 }
 
 /*
- * Unfortunately, some platforms are broken and do not follow the
- * IA-64 architecture specification regarding legacy I/O support.
- * Thus, we have to make these operations platform dependent...
+ * Unfortunately, some platforms are broken and do not follow the IA-64 architecture
+ * specification regarding legacy I/O support.  Thus, we have to make these operations
+ * platform dependent...
  */
 #define __inb		platform_inb
 #define __inw		platform_inw
@@ -275,83 +297,107 @@ __outsl (unsigned long port, void *src, unsigned long count)
 #define __outb		platform_outb
 #define __outw		platform_outw
 #define __outl		platform_outl
+#define __mmiowb	platform_mmiowb
 
-#define inb		__inb
-#define inw		__inw
-#define inl		__inl
-#define insb		__insb
-#define insw		__insw
-#define insl		__insl
-#define outb		__outb
-#define outw		__outw
-#define outl		__outl
-#define outsb		__outsb
-#define outsw		__outsw
-#define outsl		__outsl
+#define inb(p)		__inb(p)
+#define inw(p)		__inw(p)
+#define inl(p)		__inl(p)
+#define insb(p,d,c)	__insb(p,d,c)
+#define insw(p,d,c)	__insw(p,d,c)
+#define insl(p,d,c)	__insl(p,d,c)
+#define outb(v,p)	__outb(v,p)
+#define outw(v,p)	__outw(v,p)
+#define outl(v,p)	__outl(v,p)
+#define outsb(p,s,c)	__outsb(p,s,c)
+#define outsw(p,s,c)	__outsw(p,s,c)
+#define outsl(p,s,c)	__outsl(p,s,c)
+#define mmiowb()	__mmiowb()
 
 /*
  * The address passed to these functions are ioremap()ped already.
+ *
+ * We need these to be machine vectors since some platforms don't provide
+ * DMA coherence via PIO reads (PCI drivers and the spec imply that this is
+ * a good idea).  Writes are ok though for all existing ia64 platforms (and
+ * hopefully it'll stay that way).
  */
 static inline unsigned char
-__readb (void *addr)
+___ia64_readb (const volatile void __iomem *addr)
 {
-	return *(volatile unsigned char *)addr;
+	return *(volatile unsigned char __force *)addr;
 }
 
 static inline unsigned short
-__readw (void *addr)
+___ia64_readw (const volatile void __iomem *addr)
 {
-	return *(volatile unsigned short *)addr;
+	return *(volatile unsigned short __force *)addr;
 }
 
 static inline unsigned int
-__readl (void *addr)
+___ia64_readl (const volatile void __iomem *addr)
 {
-	return *(volatile unsigned int *) addr;
+	return *(volatile unsigned int __force *) addr;
 }
 
 static inline unsigned long
-__readq (void *addr)
+___ia64_readq (const volatile void __iomem *addr)
 {
-	return *(volatile unsigned long *) addr;
+	return *(volatile unsigned long __force *) addr;
 }
 
 static inline void
-__writeb (unsigned char val, void *addr)
+__writeb (unsigned char val, volatile void __iomem *addr)
 {
-	*(volatile unsigned char *) addr = val;
+	*(volatile unsigned char __force *) addr = val;
 }
 
 static inline void
-__writew (unsigned short val, void *addr)
+__writew (unsigned short val, volatile void __iomem *addr)
 {
-	*(volatile unsigned short *) addr = val;
+	*(volatile unsigned short __force *) addr = val;
 }
 
 static inline void
-__writel (unsigned int val, void *addr)
+__writel (unsigned int val, volatile void __iomem *addr)
 {
-	*(volatile unsigned int *) addr = val;
+	*(volatile unsigned int __force *) addr = val;
 }
 
 static inline void
-__writeq (unsigned long val, void *addr)
+__writeq (unsigned long val, volatile void __iomem *addr)
 {
-	*(volatile unsigned long *) addr = val;
+	*(volatile unsigned long __force *) addr = val;
 }
 
-#define readb(a)	__readb((void *)(a))
-#define readw(a)	__readw((void *)(a))
-#define readl(a)	__readl((void *)(a))
-#define readq(a)	__readqq((void *)(a))
+#define __readb		platform_readb
+#define __readw		platform_readw
+#define __readl		platform_readl
+#define __readq		platform_readq
+#define __readb_relaxed	platform_readb_relaxed
+#define __readw_relaxed	platform_readw_relaxed
+#define __readl_relaxed	platform_readl_relaxed
+#define __readq_relaxed	platform_readq_relaxed
+
+#define readb(a)	__readb((a))
+#define readw(a)	__readw((a))
+#define readl(a)	__readl((a))
+#define readq(a)	__readq((a))
+#define readb_relaxed(a)	__readb_relaxed((a))
+#define readw_relaxed(a)	__readw_relaxed((a))
+#define readl_relaxed(a)	__readl_relaxed((a))
+#define readq_relaxed(a)	__readq_relaxed((a))
 #define __raw_readb	readb
 #define __raw_readw	readw
 #define __raw_readl	readl
 #define __raw_readq	readq
-#define writeb(v,a)	__writeb((v), (void *) (a))
-#define writew(v,a)	__writew((v), (void *) (a))
-#define writel(v,a)	__writel((v), (void *) (a))
-#define writeq(v,a)	__writeq((v), (void *) (a))
+#define __raw_readb_relaxed	readb_relaxed
+#define __raw_readw_relaxed	readw_relaxed
+#define __raw_readl_relaxed	readl_relaxed
+#define __raw_readq_relaxed	readq_relaxed
+#define writeb(v,a)	__writeb((v), (a))
+#define writew(v,a)	__writew((v), (a))
+#define writel(v,a)	__writel((v), (a))
+#define writeq(v,a)	__writeq((v), (a))
 #define __raw_writeb	writeb
 #define __raw_writew	writew
 #define __raw_writel	writel
@@ -378,20 +424,19 @@ __writeq (unsigned long val, void *addr)
 #endif
 
 /*
- * An "address" in IO memory space is not clearly either an integer
- * or a pointer. We will accept both, thus the casts.
+ * An "address" in IO memory space is not clearly either an integer or a pointer. We will
+ * accept both, thus the casts.
  *
- * On ia-64, we access the physical I/O memory space through the
- * uncached kernel region.
+ * On ia-64, we access the physical I/O memory space through the uncached kernel region.
  */
-static inline void *
+static inline void __iomem *
 ioremap (unsigned long offset, unsigned long size)
 {
-	return (void *) (__IA64_UNCACHED_OFFSET | (offset));
-} 
+	return (void __iomem *) (__IA64_UNCACHED_OFFSET | (offset));
+}
 
 static inline void
-iounmap (void *addr)
+iounmap (volatile void __iomem *addr)
 {
 }
 
@@ -402,85 +447,38 @@ iounmap (void *addr)
 /*
  * String version of IO memory access ops:
  */
-extern void __ia64_memcpy_fromio (void *, unsigned long, long);
-extern void __ia64_memcpy_toio (unsigned long, void *, long);
-extern void __ia64_memset_c_io (unsigned long, unsigned long, long);
+extern void memcpy_fromio(void *dst, const volatile void __iomem *src, long n);
+extern void memcpy_toio(volatile void __iomem *dst, const void *src, long n);
+extern void memset_io(volatile void __iomem *s, int c, long n);
 
-#define memcpy_fromio(to,from,len) \
-  __ia64_memcpy_fromio((to),(unsigned long)(from),(len))
-#define memcpy_toio(to,from,len) \
-  __ia64_memcpy_toio((unsigned long)(to),(from),(len))
-#define memset_io(addr,c,len) \
-  __ia64_memset_c_io((unsigned long)(addr),0x0101010101010101UL*(u8)(c),(len))
-
-#define __HAVE_ARCH_MEMSETW_IO
-#define memsetw_io(addr,c,len) \
-  _memset_c_io((unsigned long)(addr),0x0001000100010001UL*(u16)(c),(len))
-
-/*
- * XXX - We don't have csum_partial_copy_fromio() yet, so we cheat here and 
- * just copy it. The net code will then do the checksum later. Presently 
- * only used by some shared memory 8390 Ethernet cards anyway.
- */
-
-#define eth_io_copy_and_sum(skb,src,len,unused)		memcpy_fromio((skb)->data,(src),(len))
-
-#if 0
-
-/*
- * XXX this is the kind of legacy stuff we want to get rid of with IA-64... --davidm 99/12/02
- */
-
-/*
- * This is used for checking BIOS signatures.  It's not clear at all
- * why this is here.  This implementation seems to be the same on
- * all architectures.  Strange.
- */
-static inline int
-check_signature (unsigned long io_addr, const unsigned char *signature, int length)
-{
-	int retval = 0;
-	do {
-		if (readb(io_addr) != *signature)
-			goto out;
-		io_addr++;
-		signature++;
-		length--;
-	} while (length);
-	retval = 1;
-out:
-	return retval;
-}
-
-#define RTC_PORT(x)		(0x70 + (x))
-#define RTC_ALWAYS_BCD		0
-
-#endif
-
-/*
- * The caches on some architectures aren't DMA-coherent and have need
- * to handle this in software.  There are two types of operations that
- * can be applied to dma buffers.
- *
- * - dma_cache_inv(start, size) invalidates the affected parts of the
- *   caches.  Dirty lines of the caches may be written back or simply
- *   be discarded.  This operation is necessary before dma operations
- *   to the memory.
- *
- * - dma_cache_wback(start, size) makes caches and memory coherent
- *   by writing the content of the caches back to memory, if necessary
- *   (cache flush).
- *
- * - dma_cache_wback_inv(start, size) Like dma_cache_wback() but the
- *   function also invalidates the affected part of the caches as
- *   necessary before DMA transfers from outside to memory.
- *
- * Fortunately, the IA-64 architecture mandates cache-coherent DMA, so
- * these functions can be implemented as no-ops.
- */
-#define dma_cache_inv(_start,_size)		do { } while (0)
-#define dma_cache_wback(_start,_size)		do { } while (0)
-#define dma_cache_wback_inv(_start,_size)	do { } while (0)
+#define dma_cache_inv(_start,_size)             do { } while (0)
+#define dma_cache_wback(_start,_size)           do { } while (0)
+#define dma_cache_wback_inv(_start,_size)       do { } while (0)
 
 # endif /* __KERNEL__ */
+
+/*
+ * Enabling BIO_VMERGE_BOUNDARY forces us to turn off I/O MMU bypassing.  It is said that
+ * BIO-level virtual merging can give up to 4% performance boost (not verified for ia64).
+ * On the other hand, we know that I/O MMU bypassing gives ~8% performance improvement on
+ * SPECweb-like workloads on zx1-based machines.  Thus, for now we favor I/O MMU bypassing
+ * over BIO-level virtual merging.
+ */
+extern unsigned long ia64_max_iommu_merge_mask;
+#if 1
+#define BIO_VMERGE_BOUNDARY	0
+#else
+/*
+ * It makes no sense at all to have this BIO_VMERGE_BOUNDARY macro here.  Should be
+ * replaced by dma_merge_mask() or something of that sort.  Note: the only way
+ * BIO_VMERGE_BOUNDARY is used is to mask off bits.  Effectively, our definition gets
+ * expanded into:
+ *
+ *	addr & ((ia64_max_iommu_merge_mask + 1) - 1) == (addr & ia64_max_iommu_vmerge_mask)
+ *
+ * which is precisely what we want.
+ */
+#define BIO_VMERGE_BOUNDARY	(ia64_max_iommu_merge_mask + 1)
+#endif
+
 #endif /* _ASM_IA64_IO_H */

@@ -12,19 +12,11 @@
 #define _S390_CURRENT_H
 
 #ifdef __KERNEL__
+#include <asm/lowcore.h>
 
 struct task_struct;
 
-static inline struct task_struct * get_current(void)
-{
-        struct task_struct *current;
-        __asm__("lhi   %0,-8192\n\t"
-                "nr    %0,15"
-                : "=r" (current) );
-        return current;
- }
-
-#define current get_current()
+#define current ((struct task_struct *const)S390_lowcore.current_task)
 
 #endif
 

@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/mm/mm-armv.c
  *
- *  Copyright (C) 1998-2000 Russell King
+ *  Copyright (C) 1998-2002 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -9,24 +9,69 @@
  *
  *  Page table sludge for ARM v3 and v4 processor architectures.
  */
-#include <linux/sched.h>
+#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
+#include <linux/highmem.h>
+#include <linux/nodemask.h>
 
-#include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/page.h>
 #include <asm/io.h>
 #include <asm/setup.h>
+#include <asm/tlbflush.h>
 
 #include <asm/mach/map.h>
 
-unsigned long *valid_addr_bitmap;
+#define CPOLICY_UNCACHED	0
+#define CPOLICY_BUFFERED	1
+#define CPOLICY_WRITETHROUGH	2
+#define CPOLICY_WRITEBACK	3
+#define CPOLICY_WRITEALLOC	4
 
-extern unsigned long get_page_2k(int priority);
-extern void free_page_2k(unsigned long page);
-extern pte_t *get_bad_pte_table(void);
+static unsigned int cachepolicy __initdata = CPOLICY_WRITEBACK;
+static unsigned int ecc_mask __initdata = 0;
+pgprot_t pgprot_kernel;
+
+EXPORT_SYMBOL(pgprot_kernel);
+
+struct cachepolicy {
+	const char	policy[16];
+	unsigned int	cr_mask;
+	unsigned int	pmd;
+	unsigned int	pte;
+};
+
+static struct cachepolicy cache_policies[] __initdata = {
+	{
+		.policy		= "uncached",
+		.cr_mask	= CR_W|CR_C,
+		.pmd		= PMD_SECT_UNCACHED,
+		.pte		= 0,
+	}, {
+		.policy		= "buffered",
+		.cr_mask	= CR_C,
+		.pmd		= PMD_SECT_BUFFERED,
+		.pte		= PTE_BUFFERABLE,
+	}, {
+		.policy		= "writethrough",
+		.cr_mask	= 0,
+		.pmd		= PMD_SECT_WT,
+		.pte		= PTE_CACHEABLE,
+	}, {
+		.policy		= "writeback",
+		.cr_mask	= 0,
+		.pmd		= PMD_SECT_WB,
+		.pte		= PTE_BUFFERABLE|PTE_CACHEABLE,
+	}, {
+		.policy		= "writealloc",
+		.cr_mask	= 0,
+		.pmd		= PMD_SECT_WBWA,
+		.pte		= PTE_BUFFERABLE|PTE_CACHEABLE,
+	}
+};
 
 /*
  * These are useful for identifing cache coherency
@@ -34,179 +79,180 @@ extern pte_t *get_bad_pte_table(void);
  * writebuffer to be turned off.  (Note: the write
  * buffer should not be on and the cache off).
  */
-static int __init nocache_setup(char *__unused)
+static void __init early_cachepolicy(char **p)
 {
-	cr_alignment &= ~4;
-	cr_no_alignment &= ~4;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cache_policies); i++) {
+		int len = strlen(cache_policies[i].policy);
+
+		if (memcmp(*p, cache_policies[i].policy, len) == 0) {
+			cachepolicy = i;
+			cr_alignment &= ~cache_policies[i].cr_mask;
+			cr_no_alignment &= ~cache_policies[i].cr_mask;
+			*p += len;
+			break;
+		}
+	}
+	if (i == ARRAY_SIZE(cache_policies))
+		printk(KERN_ERR "ERROR: unknown or unsupported cache policy\n");
 	flush_cache_all();
 	set_cr(cr_alignment);
-	return 1;
 }
 
-static int __init nowrite_setup(char *__unused)
+static void __init early_nocache(char **__unused)
 {
-	cr_alignment &= ~(8|4);
-	cr_no_alignment &= ~(8|4);
-	flush_cache_all();
-	set_cr(cr_alignment);
-	return 1;
+	char *p = "buffered";
+	printk(KERN_WARNING "nocache is deprecated; use cachepolicy=%s\n", p);
+	early_cachepolicy(&p);
 }
+
+static void __init early_nowrite(char **__unused)
+{
+	char *p = "uncached";
+	printk(KERN_WARNING "nowb is deprecated; use cachepolicy=%s\n", p);
+	early_cachepolicy(&p);
+}
+
+static void __init early_ecc(char **p)
+{
+	if (memcmp(*p, "on", 2) == 0) {
+		ecc_mask = PMD_PROTECTION;
+		*p += 2;
+	} else if (memcmp(*p, "off", 3) == 0) {
+		ecc_mask = 0;
+		*p += 3;
+	}
+}
+
+__early_param("nocache", early_nocache);
+__early_param("nowb", early_nowrite);
+__early_param("cachepolicy=", early_cachepolicy);
+__early_param("ecc=", early_ecc);
 
 static int __init noalign_setup(char *__unused)
 {
-	cr_alignment &= ~2;
-	cr_no_alignment &= ~2;
+	cr_alignment &= ~CR_A;
+	cr_no_alignment &= ~CR_A;
 	set_cr(cr_alignment);
 	return 1;
 }
 
 __setup("noalign", noalign_setup);
-__setup("nocache", nocache_setup);
-__setup("nowb", nowrite_setup);
 
 #define FIRST_KERNEL_PGD_NR	(FIRST_USER_PGD_NR + USER_PTRS_PER_PGD)
-
-#define clean_cache_area(start,size) \
-	cpu_cache_clean_invalidate_range((unsigned long)start, ((unsigned long)start) + size, 0);
-
 
 /*
  * need to get a 16k page for level 1
  */
-pgd_t *get_pgd_slow(void)
+pgd_t *get_pgd_slow(struct mm_struct *mm)
 {
-	pgd_t *pgd = (pgd_t *)__get_free_pages(GFP_KERNEL,2);
-	pmd_t *new_pmd;
+	pgd_t *new_pgd, *init_pgd;
+	pmd_t *new_pmd, *init_pmd;
+	pte_t *new_pte, *init_pte;
 
-	if (pgd) {
-		pgd_t *init = pgd_offset_k(0);
+	new_pgd = (pgd_t *)__get_free_pages(GFP_KERNEL, 2);
+	if (!new_pgd)
+		goto no_pgd;
 
-		memzero(pgd, FIRST_KERNEL_PGD_NR * sizeof(pgd_t));
-		memcpy(pgd  + FIRST_KERNEL_PGD_NR, init + FIRST_KERNEL_PGD_NR,
-		       (PTRS_PER_PGD - FIRST_KERNEL_PGD_NR) * sizeof(pgd_t));
+	memzero(new_pgd, FIRST_KERNEL_PGD_NR * sizeof(pgd_t));
+
+	init_pgd = pgd_offset_k(0);
+
+	if (!vectors_high()) {
 		/*
-		 * FIXME: this should not be necessary
+		 * This lock is here just to satisfy pmd_alloc and pte_lock
 		 */
-		clean_cache_area(pgd, PTRS_PER_PGD * sizeof(pgd_t));
+		spin_lock(&mm->page_table_lock);
 
 		/*
-		 * On ARM, first page must always be allocated
+		 * On ARM, first page must always be allocated since it
+		 * contains the machine vectors.
 		 */
-		if (!pmd_alloc(pgd, 0))
-			goto nomem;
-		else {
-			pmd_t *old_pmd = pmd_offset(init, 0);
-			new_pmd = pmd_offset(pgd, 0);
+		new_pmd = pmd_alloc(mm, new_pgd, 0);
+		if (!new_pmd)
+			goto no_pmd;
 
-			if (!pte_alloc(new_pmd, 0))
-				goto nomem_pmd;
-			else {
-				pte_t *new_pte = pte_offset(new_pmd, 0);
-				pte_t *old_pte = pte_offset(old_pmd, 0);
+		new_pte = pte_alloc_map(mm, new_pmd, 0);
+		if (!new_pte)
+			goto no_pte;
 
-				set_pte(new_pte, *old_pte);
-			}
-		}
+		init_pmd = pmd_offset(init_pgd, 0);
+		init_pte = pte_offset_map_nested(init_pmd, 0);
+		set_pte(new_pte, *init_pte);
+		pte_unmap_nested(init_pte);
+		pte_unmap(new_pte);
+
+		spin_unlock(&mm->page_table_lock);
 	}
-	return pgd;
 
-nomem_pmd:
+	/*
+	 * Copy over the kernel and IO PGD entries
+	 */
+	memcpy(new_pgd + FIRST_KERNEL_PGD_NR, init_pgd + FIRST_KERNEL_PGD_NR,
+		       (PTRS_PER_PGD - FIRST_KERNEL_PGD_NR) * sizeof(pgd_t));
+
+	clean_dcache_area(new_pgd, PTRS_PER_PGD * sizeof(pgd_t));
+
+	return new_pgd;
+
+no_pte:
+	spin_unlock(&mm->page_table_lock);
 	pmd_free(new_pmd);
-nomem:
-	free_pages((unsigned long)pgd, 2);
+	free_pages((unsigned long)new_pgd, 2);
+	return NULL;
+
+no_pmd:
+	spin_unlock(&mm->page_table_lock);
+	free_pages((unsigned long)new_pgd, 2);
+	return NULL;
+
+no_pgd:
 	return NULL;
 }
 
 void free_pgd_slow(pgd_t *pgd)
 {
-	if (pgd) { /* can pgd be NULL? */
-		pmd_t *pmd;
-		pte_t *pte;
+	pmd_t *pmd;
+	struct page *pte;
 
-		/* pgd is always present and good */
-		pmd = (pmd_t *)pgd;
-		if (pmd_none(*pmd))
-			goto free;
-		if (pmd_bad(*pmd)) {
-			pmd_ERROR(*pmd);
-			pmd_clear(pmd);
-			goto free;
-		}
+	if (!pgd)
+		return;
 
-		pte = pte_offset(pmd, 0);
+	/* pgd is always present and good */
+	pmd = (pmd_t *)pgd;
+	if (pmd_none(*pmd))
+		goto free;
+	if (pmd_bad(*pmd)) {
+		pmd_ERROR(*pmd);
 		pmd_clear(pmd);
-		pte_free(pte);
-		pmd_free(pmd);
+		goto free;
 	}
+
+	pte = pmd_page(*pmd);
+	pmd_clear(pmd);
+	dec_page_state(nr_page_table_pages);
+	pte_free(pte);
+	pmd_free(pmd);
 free:
 	free_pages((unsigned long) pgd, 2);
 }
 
-pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *pte;
-
-	pte = (pte_t *)get_page_2k(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			memzero(pte, 2 * PTRS_PER_PTE * sizeof(pte_t));
-			clean_cache_area(pte, PTRS_PER_PTE * sizeof(pte_t));
-			pte += PTRS_PER_PTE;
-			set_pmd(pmd, mk_user_pmd(pte));
-			return pte + offset;
-		}
-		set_pmd(pmd, mk_user_pmd(get_bad_pte_table()));
-		return NULL;
-	}
-	free_page_2k((unsigned long)pte);
-	if (pmd_bad(*pmd)) {
-		__handle_bad_pmd(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
-pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *pte;
-
-	pte = (pte_t *)get_page_2k(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			memzero(pte, 2 * PTRS_PER_PTE * sizeof(pte_t));
-			clean_cache_area(pte, PTRS_PER_PTE * sizeof(pte_t));
-			pte += PTRS_PER_PTE;
-			set_pmd(pmd, mk_kernel_pmd(pte));
-			return pte + offset;
-		}
-		set_pmd(pmd, mk_kernel_pmd(get_bad_pte_table()));
-		return NULL;
-	}
-	free_page_2k((unsigned long)pte);
-	if (pmd_bad(*pmd)) {
-		__handle_bad_pmd_kernel(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
-void free_pte_slow(pte_t *pte)
-{
-	free_page_2k((unsigned long)(pte - PTRS_PER_PTE));
-}
-
 /*
  * Create a SECTION PGD between VIRT and PHYS in domain
- * DOMAIN with protection PROT
+ * DOMAIN with protection PROT.  This operates on half-
+ * pgdir entry increments.
  */
 static inline void
 alloc_init_section(unsigned long virt, unsigned long phys, int prot)
 {
-	pmd_t pmd;
+	pmd_t *pmdp;
 
-	pmd_val(pmd) = phys | prot;
+	pmdp = pmd_offset(pgd_offset_k(virt), virt);
+	if (virt & (1 << 20))
+		pmdp++;
 
-	set_pmd(pmd_offset(pgd_offset_k(virt), virt), pmd);
+	set_pmd(pmdp, __pmd(phys | prot));
 }
 
 /*
@@ -217,7 +263,7 @@ alloc_init_section(unsigned long virt, unsigned long phys, int prot)
  * the hardware pte table.
  */
 static inline void
-alloc_init_page(unsigned long virt, unsigned long phys, int domain, int prot)
+alloc_init_page(unsigned long virt, unsigned long phys, unsigned int prot_l1, pgprot_t prot)
 {
 	pmd_t *pmdp;
 	pte_t *ptep;
@@ -225,16 +271,18 @@ alloc_init_page(unsigned long virt, unsigned long phys, int domain, int prot)
 	pmdp = pmd_offset(pgd_offset_k(virt), virt);
 
 	if (pmd_none(*pmdp)) {
-		pte_t *ptep = alloc_bootmem_low_pages(2 * PTRS_PER_PTE *
-						      sizeof(pte_t));
+		unsigned long pmdval;
+		ptep = alloc_bootmem_low_pages(2 * PTRS_PER_PTE *
+					       sizeof(pte_t));
 
-		ptep += PTRS_PER_PTE;
-
-		set_pmd(pmdp, __mk_pmd(ptep, PMD_TYPE_TABLE | PMD_DOMAIN(domain)));
+		pmdval = __pa(ptep) | prot_l1;
+		pmdp[0] = __pmd(pmdval);
+		pmdp[1] = __pmd(pmdval + 256 * sizeof(pte_t));
+		flush_pmd_entry(pmdp);
 	}
-	ptep = pte_offset(pmdp, virt);
+	ptep = pte_offset_kernel(pmdp, virt);
 
-	set_pte(ptep, mk_pte_phys(phys, __pgprot(prot)));
+	set_pte(ptep, pfn_pte(phys >> PAGE_SHIFT, prot));
 }
 
 /*
@@ -247,6 +295,143 @@ static inline void clear_mapping(unsigned long virt)
 	pmd_clear(pmd_offset(pgd_offset_k(virt), virt));
 }
 
+struct mem_types {
+	unsigned int	prot_pte;
+	unsigned int	prot_l1;
+	unsigned int	prot_sect;
+	unsigned int	domain;
+};
+
+static struct mem_types mem_types[] __initdata = {
+	[MT_DEVICE] = {
+		.prot_pte  = L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_DIRTY |
+				L_PTE_WRITE,
+		.prot_l1   = PMD_TYPE_TABLE,
+		.prot_sect = PMD_TYPE_SECT | PMD_SECT_UNCACHED |
+				PMD_SECT_AP_WRITE,
+		.domain    = DOMAIN_IO,
+	},
+	[MT_CACHECLEAN] = {
+		.prot_sect = PMD_TYPE_SECT,
+		.domain    = DOMAIN_KERNEL,
+	},
+	[MT_MINICLEAN] = {
+		.prot_sect = PMD_TYPE_SECT | PMD_SECT_MINICACHE,
+		.domain    = DOMAIN_KERNEL,
+	},
+	[MT_LOW_VECTORS] = {
+		.prot_pte  = L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_DIRTY |
+				L_PTE_EXEC,
+		.prot_l1   = PMD_TYPE_TABLE,
+		.domain    = DOMAIN_USER,
+	},
+	[MT_HIGH_VECTORS] = {
+		.prot_pte  = L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_DIRTY |
+				L_PTE_USER | L_PTE_EXEC,
+		.prot_l1   = PMD_TYPE_TABLE,
+		.domain    = DOMAIN_USER,
+	},
+	[MT_MEMORY] = {
+		.prot_sect = PMD_TYPE_SECT | PMD_SECT_AP_WRITE,
+		.domain    = DOMAIN_KERNEL,
+	},
+	[MT_ROM] = {
+		.prot_sect = PMD_TYPE_SECT,
+		.domain    = DOMAIN_KERNEL,
+	}
+};
+
+/*
+ * Adjust the PMD section entries according to the CPU in use.
+ */
+static void __init build_mem_type_table(void)
+{
+	struct cachepolicy *cp;
+	unsigned int cr = get_cr();
+	int cpu_arch = cpu_architecture();
+	int i;
+
+#if defined(CONFIG_CPU_DCACHE_DISABLE)
+	if (cachepolicy > CPOLICY_BUFFERED)
+		cachepolicy = CPOLICY_BUFFERED;
+#elif defined(CONFIG_CPU_DCACHE_WRITETHROUGH)
+	if (cachepolicy > CPOLICY_WRITETHROUGH)
+		cachepolicy = CPOLICY_WRITETHROUGH;
+#endif
+	if (cpu_arch < CPU_ARCH_ARMv5) {
+		if (cachepolicy >= CPOLICY_WRITEALLOC)
+			cachepolicy = CPOLICY_WRITEBACK;
+		ecc_mask = 0;
+	}
+
+	if (cpu_arch <= CPU_ARCH_ARMv5) {
+		for (i = 0; i < ARRAY_SIZE(mem_types); i++) {
+			if (mem_types[i].prot_l1)
+				mem_types[i].prot_l1 |= PMD_BIT4;
+			if (mem_types[i].prot_sect)
+				mem_types[i].prot_sect |= PMD_BIT4;
+		}
+	}
+
+	/*
+	 * ARMv6 and above have extended page tables.
+	 */
+	if (cpu_arch >= CPU_ARCH_ARMv6 && (cr & CR_XP)) {
+		/*
+		 * bit 4 becomes XN which we must clear for the
+		 * kernel memory mapping.
+		 */
+		mem_types[MT_MEMORY].prot_sect &= ~PMD_BIT4;
+		mem_types[MT_ROM].prot_sect &= ~PMD_BIT4;
+		/*
+		 * Mark cache clean areas read only from SVC mode
+		 * and no access from userspace.
+		 */
+		mem_types[MT_MINICLEAN].prot_sect |= PMD_SECT_APX|PMD_SECT_AP_WRITE;
+		mem_types[MT_CACHECLEAN].prot_sect |= PMD_SECT_APX|PMD_SECT_AP_WRITE;
+	}
+
+	cp = &cache_policies[cachepolicy];
+
+	if (cpu_arch >= CPU_ARCH_ARMv5) {
+		mem_types[MT_LOW_VECTORS].prot_pte |= cp->pte & PTE_CACHEABLE;
+		mem_types[MT_HIGH_VECTORS].prot_pte |= cp->pte & PTE_CACHEABLE;
+	} else {
+		mem_types[MT_LOW_VECTORS].prot_pte |= cp->pte;
+		mem_types[MT_HIGH_VECTORS].prot_pte |= cp->pte;
+		mem_types[MT_MINICLEAN].prot_sect &= ~PMD_SECT_TEX(1);
+	}
+
+	mem_types[MT_LOW_VECTORS].prot_l1 |= ecc_mask;
+	mem_types[MT_HIGH_VECTORS].prot_l1 |= ecc_mask;
+	mem_types[MT_MEMORY].prot_sect |= ecc_mask | cp->pmd;
+	mem_types[MT_ROM].prot_sect |= cp->pmd;
+
+	for (i = 0; i < 16; i++) {
+		unsigned long v = pgprot_val(protection_map[i]);
+		v &= (~(PTE_BUFFERABLE|PTE_CACHEABLE)) | cp->pte;
+		protection_map[i] = __pgprot(v);
+	}
+
+	pgprot_kernel = __pgprot(L_PTE_PRESENT | L_PTE_YOUNG |
+				 L_PTE_DIRTY | L_PTE_WRITE |
+				 L_PTE_EXEC | cp->pte);
+
+	switch (cp->pmd) {
+	case PMD_SECT_WT:
+		mem_types[MT_CACHECLEAN].prot_sect |= PMD_SECT_WT;
+		break;
+	case PMD_SECT_WB:
+	case PMD_SECT_WBWA:
+		mem_types[MT_CACHECLEAN].prot_sect |= PMD_SECT_WB;
+		break;
+	}
+	printk("Memory policy: ECC %sabled, Data cache %s\n",
+		ecc_mask ? "en" : "dis", cp->policy);
+}
+
+#define vectors_base()	(vectors_high() ? 0xffff0000 : 0)
+
 /*
  * Create the page directory entries and any necessary
  * page tables for the mapping specified by `md'.  We
@@ -256,41 +441,60 @@ static inline void clear_mapping(unsigned long virt)
 static void __init create_mapping(struct map_desc *md)
 {
 	unsigned long virt, length;
-	int prot_sect, prot_pte;
+	int prot_sect, prot_l1, domain;
+	pgprot_t prot_pte;
 	long off;
 
-	prot_pte = L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_DIRTY |
-		   (md->prot_read  ? L_PTE_USER       : 0) |
-		   (md->prot_write ? L_PTE_WRITE      : 0) |
-		   (md->cacheable  ? L_PTE_CACHEABLE  : 0) |
-		   (md->bufferable ? L_PTE_BUFFERABLE : 0);
+	if (md->virtual != vectors_base() && md->virtual < TASK_SIZE) {
+		printk(KERN_WARNING "BUG: not creating mapping for "
+		       "0x%08lx at 0x%08lx in user region\n",
+		       md->physical, md->virtual);
+		return;
+	}
 
-	prot_sect = PMD_TYPE_SECT | PMD_DOMAIN(md->domain) |
-		    (md->prot_read  ? PMD_SECT_AP_READ    : 0) |
-		    (md->prot_write ? PMD_SECT_AP_WRITE   : 0) |
-		    (md->cacheable  ? PMD_SECT_CACHEABLE  : 0) |
-		    (md->bufferable ? PMD_SECT_BUFFERABLE : 0);
+	if ((md->type == MT_DEVICE || md->type == MT_ROM) &&
+	    md->virtual >= PAGE_OFFSET && md->virtual < VMALLOC_END) {
+		printk(KERN_WARNING "BUG: mapping for 0x%08lx at 0x%08lx "
+		       "overlaps vmalloc space\n",
+		       md->physical, md->virtual);
+	}
+
+	domain	  = mem_types[md->type].domain;
+	prot_pte  = __pgprot(mem_types[md->type].prot_pte);
+	prot_l1   = mem_types[md->type].prot_l1 | PMD_DOMAIN(domain);
+	prot_sect = mem_types[md->type].prot_sect | PMD_DOMAIN(domain);
 
 	virt   = md->virtual;
 	off    = md->physical - virt;
 	length = md->length;
 
-	while ((virt & 1048575 || (virt + off) & 1048575) && length >= PAGE_SIZE) {
-		alloc_init_page(virt, virt + off, md->domain, prot_pte);
+	if (mem_types[md->type].prot_l1 == 0 &&
+	    (virt & 0xfffff || (virt + off) & 0xfffff || (virt + length) & 0xfffff)) {
+		printk(KERN_WARNING "BUG: map for 0x%08lx at 0x%08lx can not "
+		       "be mapped using pages, ignoring.\n",
+		       md->physical, md->virtual);
+		return;
+	}
+
+	while ((virt & 0xfffff || (virt + off) & 0xfffff) && length >= PAGE_SIZE) {
+		alloc_init_page(virt, virt + off, prot_l1, prot_pte);
 
 		virt   += PAGE_SIZE;
 		length -= PAGE_SIZE;
 	}
 
-	while (length >= PGDIR_SIZE) {
+	/*
+	 * A section mapping covers half a "pgdir" entry.
+	 */
+	while (length >= (PGDIR_SIZE / 2)) {
 		alloc_init_section(virt, virt + off, prot_sect);
 
-		virt   += PGDIR_SIZE;
-		length -= PGDIR_SIZE;
+		virt   += (PGDIR_SIZE / 2);
+		length -= (PGDIR_SIZE / 2);
 	}
 
 	while (length >= PAGE_SIZE) {
-		alloc_init_page(virt, virt + off, md->domain, prot_pte);
+		alloc_init_page(virt, virt + off, prot_l1, prot_pte);
 
 		virt   += PAGE_SIZE;
 		length -= PAGE_SIZE;
@@ -304,9 +508,11 @@ static void __init create_mapping(struct map_desc *md)
  */
 void setup_mm_for_reboot(char mode)
 {
+	unsigned long pmdval;
 	pgd_t *pgd;
-	pmd_t pmd;
+	pmd_t *pmd;
 	int i;
+	int cpu_arch = cpu_architecture();
 
 	if (current->mm && current->mm->pgd)
 		pgd = current->mm->pgd;
@@ -314,12 +520,18 @@ void setup_mm_for_reboot(char mode)
 		pgd = init_mm.pgd;
 
 	for (i = 0; i < FIRST_USER_PGD_NR + USER_PTRS_PER_PGD; i++) {
-		pmd_val(pmd) = (i << PGDIR_SHIFT) |
-			PMD_SECT_AP_WRITE | PMD_SECT_AP_READ |
-			PMD_TYPE_SECT;
-		set_pmd(pmd_offset(pgd + i, i << PGDIR_SHIFT), pmd);
+		pmdval = (i << PGDIR_SHIFT) |
+			 PMD_SECT_AP_WRITE | PMD_SECT_AP_READ |
+			 PMD_TYPE_SECT;
+		if (cpu_arch <= CPU_ARCH_ARMv5)
+			pmdval |= PMD_BIT4;
+		pmd = pmd_offset(pgd + i, i << PGDIR_SHIFT);
+		set_pmd(pmd, __pmd(pmdval));
+		set_pmd(pmd + 1, __pmd(pmdval + (1 << (PGDIR_SHIFT - 1))));
 	}
 }
+
+extern void _stext, _etext;
 
 /*
  * Setup initial mappings.  We use the page we allocated for zero page to hold
@@ -332,18 +544,17 @@ void __init memtable_init(struct meminfo *mi)
 	unsigned long address = 0;
 	int i;
 
+	build_mem_type_table();
+
 	init_maps = p = alloc_bootmem_low_pages(PAGE_SIZE);
 
-	p->physical   = virt_to_phys(init_maps);
-	p->virtual    = 0;
-	p->length     = PAGE_SIZE;
-	p->domain     = DOMAIN_USER;
-	p->prot_read  = 0;
-	p->prot_write = 0;
-	p->cacheable  = 1;
-	p->bufferable = 0;
-
+#ifdef CONFIG_XIP_KERNEL
+	p->physical   = CONFIG_XIP_PHYS_ADDR & PMD_MASK;
+	p->virtual    = (unsigned long)&_stext & PMD_MASK;
+	p->length     = ((unsigned long)&_etext - p->virtual + ~PMD_MASK) & PMD_MASK;
+	p->type       = MT_ROM;
 	p ++;
+#endif
 
 	for (i = 0; i < mi->nr_banks; i++) {
 		if (mi->bank[i].size == 0)
@@ -352,12 +563,7 @@ void __init memtable_init(struct meminfo *mi)
 		p->physical   = mi->bank[i].start;
 		p->virtual    = __phys_to_virt(p->physical);
 		p->length     = mi->bank[i].size;
-		p->domain     = DOMAIN_KERNEL;
-		p->prot_read  = 0;
-		p->prot_write = 1;
-		p->cacheable  = 1;
-		p->bufferable = 1;
-
+		p->type       = MT_MEMORY;
 		p ++;
 	}
 
@@ -365,12 +571,7 @@ void __init memtable_init(struct meminfo *mi)
 	p->physical   = FLUSH_BASE_PHYS;
 	p->virtual    = FLUSH_BASE;
 	p->length     = PGDIR_SIZE;
-	p->domain     = DOMAIN_KERNEL;
-	p->prot_read  = 1;
-	p->prot_write = 0;
-	p->cacheable  = 1;
-	p->bufferable = 1;
-
+	p->type       = MT_CACHECLEAN;
 	p ++;
 #endif
 
@@ -378,26 +579,14 @@ void __init memtable_init(struct meminfo *mi)
 	p->physical   = FLUSH_BASE_PHYS + PGDIR_SIZE;
 	p->virtual    = FLUSH_BASE_MINICACHE;
 	p->length     = PGDIR_SIZE;
-	p->domain     = DOMAIN_KERNEL;
-	p->prot_read  = 1;
-	p->prot_write = 0;
-	p->cacheable  = 1;
-	p->bufferable = 0;
-
+	p->type       = MT_MINICLEAN;
 	p ++;
 #endif
-
-	/*
-	 * We may have a mapping in virtual address 0.
-	 * Clear it out.
-	 */
-	clear_mapping(0);
 
 	/*
 	 * Go through the initial mappings, but clear out any
 	 * pgdir entries that are not in the description.
 	 */
-	i = 0;
 	q = init_maps;
 	do {
 		if (address < q->virtual || q == p) {
@@ -413,34 +602,63 @@ void __init memtable_init(struct meminfo *mi)
 		}
 	} while (address != 0);
 
+	/*
+	 * Create a mapping for the machine vectors at the high-vectors
+	 * location (0xffff0000).  If we aren't using high-vectors, also
+	 * create a mapping at the low-vectors virtual address.
+	 */
+	init_maps->physical   = virt_to_phys(init_maps);
+	init_maps->virtual    = 0xffff0000;
+	init_maps->length     = PAGE_SIZE;
+	init_maps->type       = MT_HIGH_VECTORS;
+	create_mapping(init_maps);
+
+	if (!vectors_high()) {
+		init_maps->virtual = 0;
+		init_maps->type = MT_LOW_VECTORS;
+		create_mapping(init_maps);
+	}
+
 	flush_cache_all();
+	flush_tlb_all();
 }
 
 /*
  * Create the architecture specific mappings
  */
-void __init iotable_init(struct map_desc *io_desc)
+void __init iotable_init(struct map_desc *io_desc, int nr)
 {
 	int i;
 
-	for (i = 0; io_desc[i].last == 0; i++)
+	for (i = 0; i < nr; i++)
 		create_mapping(io_desc + i);
 }
 
-static inline void free_memmap(int node, unsigned long start, unsigned long end)
+static inline void
+free_memmap(int node, unsigned long start_pfn, unsigned long end_pfn)
 {
+	struct page *start_pg, *end_pg;
 	unsigned long pg, pgend;
 
-	start = __phys_to_virt(start);
-	end   = __phys_to_virt(end);
+	/*
+	 * Convert start_pfn/end_pfn to a struct page pointer.
+	 */
+	start_pg = pfn_to_page(start_pfn);
+	end_pg = pfn_to_page(end_pfn);
 
-	pg    = PAGE_ALIGN((unsigned long)(virt_to_page(start)));
-	pgend = ((unsigned long)(virt_to_page(end))) & PAGE_MASK;
+	/*
+	 * Convert to physical addresses, and
+	 * round start upwards and end downwards.
+	 */
+	pg = PAGE_ALIGN(__pa(start_pg));
+	pgend = __pa(end_pg) & PAGE_MASK;
 
-	start = __virt_to_phys(pg);
-	end   = __virt_to_phys(pgend);
-
-	free_bootmem_node(NODE_DATA(node), start, end - start);
+	/*
+	 * If there are free pages between these,
+	 * free the section of the memmap array.
+	 */
+	if (pg < pgend)
+		free_bootmem_node(NODE_DATA(node), pg, pgend - pg);
 }
 
 static inline void free_unused_memmap_node(int node, struct meminfo *mi)
@@ -457,7 +675,12 @@ static inline void free_unused_memmap_node(int node, struct meminfo *mi)
 		if (mi->bank[i].size == 0 || mi->bank[i].node != node)
 			continue;
 
-		bank_start = mi->bank[i].start & PAGE_MASK;
+		bank_start = mi->bank[i].start >> PAGE_SHIFT;
+		if (bank_start < prev_bank_end) {
+			printk(KERN_ERR "MEM: unordered memory banks.  "
+				"Not freeing memmap.\n");
+			break;
+		}
 
 		/*
 		 * If we had a previous bank, and there is a space
@@ -467,7 +690,7 @@ static inline void free_unused_memmap_node(int node, struct meminfo *mi)
 			free_memmap(node, prev_bank_end, bank_start);
 
 		prev_bank_end = PAGE_ALIGN(mi->bank[i].start +
-					   mi->bank[i].size);
+					   mi->bank[i].size) >> PAGE_SHIFT;
 	}
 }
 
@@ -479,6 +702,6 @@ void __init create_memmap_holes(struct meminfo *mi)
 {
 	int node;
 
-	for (node = 0; node < numnodes; node++)
+	for_each_online_node(node)
 		free_unused_memmap_node(node, mi);
 }

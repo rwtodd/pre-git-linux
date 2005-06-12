@@ -11,30 +11,21 @@
 #include <linux/linkage.h>
 #include <asm/mach-types.h>
 
-#ifndef CONFIG_ARCH_SA1100
-#error What am I doing here...
-#endif
-
-		.section        ".start", #alloc, #execinstr
+		.section        ".start", "ax"
 
 __SA1100_start:
 
 		@ Preserve r8/r7 i.e. kernel entry values
-
-#ifdef CONFIG_SA1100_VICTOR
-		teq	r7, #MACH_TYPE_VICTOR
-		bne	10f
-
-		@ Copy cmdline to 0xc0000000
-		mov	r1, #0xc0000000
-		cmp	r0, #0
-		moveq	r2, #0
-1:		ldrneb	r2, [r0], #1
-		cmpne	r2, #0
-		strb	r2, [r1], #1
-		bne	1b
-10:
+#ifdef CONFIG_SA1100_COLLIE
+		mov	r7, #MACH_TYPE_COLLIE
 #endif
+#ifdef CONFIG_SA1100_SIMPAD
+		@ UNTIL we've something like an open bootldr
+		mov	r7, #MACH_TYPE_SIMPAD	@should be 87
+#endif
+		mrc	p15, 0, r0, c1, c0, 0	@ read control reg
+		ands	r0, r0, #0x0d
+		beq	99f
 
 		@ Data cache might be active.
 		@ Be sure to flush kernel binary out of the cache,
@@ -54,10 +45,4 @@ __SA1100_start:
 		bic	r0, r0, #0x0d		@ clear WB, DC, MMU
 		bic	r0, r0, #0x1000		@ clear Icache
 		mcr	p15, 0, r0, c1, c0, 0
-/*
- * Pause for a short time so that we give enough time
- * for the host to start a terminal up.
- */
-		mov	r0, #0x00200000
-1:		subs	r0, r0, #1
-		bne	1b
+99:

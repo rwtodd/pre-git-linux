@@ -1,5 +1,5 @@
-/* $Id$
- * vmelance.c: Ethernet driver for VME Lance cards on Baget/MIPS
+/*
+ * bagetlance.c: Ethernet driver for VME Lance cards on Baget/MIPS
  *      This code stealed and adopted from linux/drivers/net/atarilance.c
  *      See that for author info
  *
@@ -15,25 +15,20 @@
 static char *version = "bagetlance.c: v1.1 11/10/98\n";
 
 #include <linux/module.h>
-
 #include <linux/stddef.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
-
-#include <asm/irq.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+#include <linux/bitops.h>
 
+#include <asm/irq.h>
+#include <asm/io.h>
 #include <asm/baget/baget.h>
 
 #define BAGET_LANCE_IRQ  BAGET_IRQ_MASK(0xdf)
@@ -59,6 +54,8 @@ static int lance_debug = LANCE_DEBUG;
 static int lance_debug = 1;
 #endif
 MODULE_PARM(lance_debug, "i");
+MODULE_PARM_DESC(lance_debug, "Lance debug level (0-3)");
+MODULE_LICENSE("GPL");
 
 /* Print debug messages on probing? */
 #undef LANCE_DEBUG_PROBE
@@ -333,7 +330,7 @@ static int lance_probe1( struct net_device *dev, struct lance_addr *init_rec );
 static int lance_open( struct net_device *dev );
 static void lance_init_ring( struct net_device *dev );
 static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev );
-static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp );
+static irqreturn_t lance_interrupt( int irq, void *dev_id, struct pt_regs *fp );
 static int lance_rx( struct net_device *dev );
 static int lance_close( struct net_device *dev );
 static struct net_device_stats *lance_get_stats( struct net_device *dev );
@@ -468,29 +465,42 @@ void *slow_memcpy( void *dst, const void *src, size_t len )
 }
 
 
-int __init bagetlance_probe( struct net_device *dev )
-
-{	int i;
-	static int found = 0;
-
-	SET_MODULE_OWNER(dev);
+struct net_device * __init bagetlance_probe(int unit)
+{
+	struct net_device *dev;
+	int i;
+	static int found;
+	int err = -ENODEV;
 
 	if (found)
 		/* Assume there's only one board possible... That seems true, since
 		 * the Riebl/PAM board's address cannot be changed. */
-		return( -ENODEV );
+		return ERR_PTR(-ENODEV);
+
+	dev = alloc_etherdev(sizeof(struct lance_private));
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	SET_MODULE_OWNER(dev);
 
 	for( i = 0; i < N_LANCE_ADDR; ++i ) {
 		if (lance_probe1( dev, &lance_addr_list[i] )) {
 			found = 1;
-			return( 0 );
+			break;
 		}
 	}
-
-	return( -ENODEV );
+	if (!found)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	free_irq(dev->irq, dev);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
-
-
 
 /* Derived from hwreg_present() in vme/config.c: */
 
@@ -519,7 +529,7 @@ static int __init lance_probe1( struct net_device *dev,
 	struct lance_private	*lp;
 	struct lance_ioreg		*IO;
 	int 					i;
-	static int 				did_version = 0;
+	static int 				did_version;
 	unsigned short			save1, save2;
 
 	PROBE_PRINT(( "Probing for Lance card at mem %#lx io %#lx\n",
@@ -530,6 +540,7 @@ static int __init lance_probe1( struct net_device *dev,
 	if (!addr_accessible( memaddr, 1, 1 )) goto probe_fail;
 
 	if ((unsigned long)memaddr >= KSEG2) {
+			/* FIXME: do we need to undo that on cleanup paths? */
 			extern int kseg2_alloc_io (unsigned long addr, unsigned long size);
 			if (kseg2_alloc_io((unsigned long)memaddr, BAGET_LANCE_MEM_SIZE)) {
 					printk("bagetlance: unable map lance memory\n");
@@ -583,10 +594,7 @@ static int __init lance_probe1( struct net_device *dev,
 	return( 0 );
 
   probe_ok:
-	init_etherdev( dev, sizeof(struct lance_private) );
-	if (!dev->priv)
-		dev->priv = kmalloc( sizeof(struct lance_private), GFP_KERNEL );
-	lp = (struct lance_private *)dev->priv;
+	lp = netdev_priv(dev);
 	MEM = (struct lance_memory *)memaddr;
 	IO = lp->iobase = (struct lance_ioreg *)ioaddr;
 	dev->base_addr = (unsigned long)ioaddr; /* informational only */
@@ -617,8 +625,9 @@ static int __init lance_probe1( struct net_device *dev,
 	if (lp->cardtype == PAM_CARD ||
 		memaddr == (unsigned short *)0xffe00000) {
 		/* PAMs card and Riebl on ST use level 5 autovector */
-		request_irq(BAGET_LANCE_IRQ, lance_interrupt, IRQ_TYPE_PRIO,
-		            "PAM/Riebl-ST Ethernet", dev);
+		if (request_irq(BAGET_LANCE_IRQ, lance_interrupt, IRQ_TYPE_PRIO,
+		            "PAM/Riebl-ST Ethernet", dev))
+			goto probe_fail;
 		dev->irq = (unsigned short)BAGET_LANCE_IRQ;
 	}
 	else {
@@ -629,10 +638,11 @@ static int __init lance_probe1( struct net_device *dev,
 		unsigned long irq = BAGET_LANCE_IRQ; 
 		if (!irq) {
 			printk( "Lance: request for VME interrupt failed\n" );
-			return( 0 );
+			goto probe_fail;
 		}
-		request_irq(irq, lance_interrupt, IRQ_TYPE_PRIO,
-		            "Riebl-VME Ethernet", dev);
+		if (request_irq(irq, lance_interrupt, IRQ_TYPE_PRIO,
+		            "Riebl-VME Ethernet", dev))
+			goto probe_fail;
 		dev->irq = irq;
 	}
 
@@ -726,7 +736,7 @@ static int __init lance_probe1( struct net_device *dev,
 
 static int lance_open( struct net_device *dev )
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+{	struct lance_private *lp = netdev_priv(dev);
 	struct lance_ioreg	 *IO = lp->iobase;
 	int i;
 
@@ -768,7 +778,7 @@ static int lance_open( struct net_device *dev )
 
 static void lance_init_ring( struct net_device *dev )
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+{	struct lance_private *lp = netdev_priv(dev);
 	int i;
 	unsigned offset;
 
@@ -824,11 +834,23 @@ static void lance_init_ring( struct net_device *dev )
 
 static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+{	struct lance_private *lp = netdev_priv(dev);
 	struct lance_ioreg	 *IO = lp->iobase;
 	int entry, len;
 	struct lance_tx_head *head;
 	unsigned long flags;
+
+	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
+	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
+	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
+	if (lp->cardtype == PAM_CARD && (len & 1))
+		++len;
+
+	if (len > skb->len) {
+		skb = skb_padto(skb, len);
+		if (skb == NULL)
+			return 0;
+	}	
 
 	/* Transmitter timeout, serious problems. */
 	if (dev->tbusy) {
@@ -916,12 +938,6 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 	 * last.
 	 */
 
-	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
-	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
-	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
-	if (lp->cardtype == PAM_CARD && (len & 1))
-		++len;
-
 	head->length = -len;
 	head->misc = 0;
 	lp->memcpy_f( PKTBUF_ADDR(head), (void *)skb->data, skb->len );
@@ -930,9 +946,9 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 #else
     SET_FLAG(head,(TMD1_OWN_CHIP | TMD1_ENP | TMD1_STP));
 #endif
+	lp->stats.tx_bytes += skb->len;
 	dev_kfree_skb( skb );
 	lp->cur_tx++;
-	lp->stats.tx_bytes += skb->len;
 	while( lp->cur_tx >= TX_RING_SIZE && lp->dirty_tx >= TX_RING_SIZE ) {
 		lp->cur_tx -= TX_RING_SIZE;
 		lp->dirty_tx -= TX_RING_SIZE;
@@ -959,19 +975,20 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 
 /* The LANCE interrupt handler. */
 
-static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 {
 	struct net_device *dev = dev_id;
 	struct lance_private *lp;
 	struct lance_ioreg	 *IO;
 	int csr0, boguscnt = 10;
+	int handled = 0;
 
 	if (dev == NULL) {
 		DPRINTK( 1, ( "lance_interrupt(): interrupt for unknown device.\n" ));
-		return;
+		return IRQ_NONE;
 	}
 
-	lp = (struct lance_private *)dev->priv;
+	lp = netdev_priv(dev);
 	IO = lp->iobase;
 	AREG = CSR0;
 
@@ -986,6 +1003,7 @@ static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 
 	while( ((csr0 = DREG) & (CSR0_ERR | CSR0_TINT | CSR0_RINT)) &&
 		   --boguscnt >= 0) {
+		handled = 1;
 		/* Acknowledge all of the current interrupt sources ASAP. */
 		DREG = csr0 & ~(CSR0_INIT | CSR0_STRT | CSR0_STOP |
 									CSR0_TDMD | CSR0_INEA);
@@ -1077,13 +1095,13 @@ static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 	DPRINTK( 2, ( "%s: exiting interrupt, csr0=%#04x.\n",
 				  dev->name, DREG ));
 	dev->interrupt = 0;
-	return;
+	return IRQ_RETVAL(handled);
 }
 
 
 static int lance_rx( struct net_device *dev )
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+{	struct lance_private *lp = netdev_priv(dev);
 	int entry = lp->cur_rx & RX_RING_MOD_MASK;
 	int i;
 
@@ -1182,8 +1200,9 @@ static int lance_rx( struct net_device *dev )
 				lp->memcpy_f( skb->data, PKTBUF_ADDR(head), pkt_len );
 				skb->protocol = eth_type_trans( skb, dev );
 				netif_rx( skb );
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
-				lp->stats.rx_bytes += skb->len;
+				lp->stats.rx_bytes += pkt_len;
 			}
 		}
 
@@ -1206,7 +1225,7 @@ static int lance_rx( struct net_device *dev )
 
 static int lance_close( struct net_device *dev )
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+{	struct lance_private *lp = netdev_priv(dev);
 	struct lance_ioreg	 *IO = lp->iobase;
 
 	dev->start = 0;
@@ -1228,7 +1247,7 @@ static int lance_close( struct net_device *dev )
 static struct net_device_stats *lance_get_stats( struct net_device *dev )
 
 {	
-	struct lance_private *lp = (struct lance_private *)dev->priv;
+	struct lance_private *lp = netdev_priv(dev);
 	return &lp->stats;
 }
 
@@ -1242,7 +1261,7 @@ static struct net_device_stats *lance_get_stats( struct net_device *dev )
 
 static void set_multicast_list( struct net_device *dev )
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+{	struct lance_private *lp = netdev_priv(dev);
 	struct lance_ioreg	 *IO = lp->iobase;
 
 	if (!dev->start)
@@ -1284,7 +1303,7 @@ static void set_multicast_list( struct net_device *dev )
 
 static int lance_set_mac_address( struct net_device *dev, void *addr )
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+{	struct lance_private *lp = netdev_priv(dev);
 	struct sockaddr *saddr = addr;
 	int i;
 
@@ -1322,26 +1341,21 @@ static int lance_set_mac_address( struct net_device *dev, void *addr )
 
 
 #ifdef MODULE
-static struct net_device bagetlance_dev;
+static struct net_device *bagetlance_dev;
 
 int init_module(void)
-
-{	int err;
-
-	bagetlance_dev.init = bagetlance_probe;
-	if ((err = register_netdev( &bagetlance_dev ))) {
-		if (err == -EIO)  {
-			printk( "No Vme Lance board found. Module not loaded.\n");
-		}
-		return( err );
-	}
-	return( 0 );
+{
+	bagetlance_dev = bagetlance_probe(-1);
+	if (IS_ERR(bagetlance_dev))
+		return PTR_ERR(bagetlance_dev);
+	return 0;
 }
 
 void cleanup_module(void)
-
 {
-	unregister_netdev( &bagetlance_dev );
+	unregister_netdev(bagetlance_dev);
+	free_irq(bagetlance_dev->irq, bagetlance_dev);
+	free_netdev(bagetlance_dev);
 }
 
 #endif /* MODULE */

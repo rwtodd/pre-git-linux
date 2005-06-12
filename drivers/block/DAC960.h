@@ -2,7 +2,7 @@
 
   Linux Driver for Mylex DAC960/AcceleRAID/eXtremeRAID PCI RAID Controllers
 
-  Copyright 1998-2000 by Leonard N. Zubkoff <lnz@dandelion.com>
+  Copyright 1998-2001 by Leonard N. Zubkoff <lnz@dandelion.com>
 
   This program is free software; you may redistribute and/or modify it under
   the terms of the GNU General Public License Version 2 as published by the
@@ -60,6 +60,12 @@
 #define DAC960_V1_MaxPhysicalDevices		45
 #define DAC960_V2_MaxPhysicalDevices		272
 
+/*
+  Define the pci dma mask supported by DAC960 V1 and V2 Firmware Controlers
+ */
+
+#define DAC690_V1_PciDmaMask	0xffffffff
+#define DAC690_V2_PciDmaMask	0xffffffffffffffffULL
 
 /*
   Define a Boolean data type.
@@ -109,6 +115,20 @@ typedef unsigned int DAC960_ByteCount32_T;
 
 typedef unsigned long long DAC960_ByteCount64_T;
 
+
+/*
+  dma_loaf is used by helper routines to divide a region of
+  dma mapped memory into smaller pieces, where those pieces
+  are not of uniform size.
+ */
+
+struct dma_loaf {
+	void	*cpu_base;
+	dma_addr_t dma_base;
+	size_t  length;
+	void	*cpu_free;
+	dma_addr_t dma_free;
+};
 
 /*
   Define the SCSI INQUIRY Standard Data structure.
@@ -224,9 +244,9 @@ typedef enum
   DAC960_V1_ReadExtendedWithScatterGather =	0xB3,
   DAC960_V1_WriteExtendedWithScatterGather =	0xB4,
   DAC960_V1_Read =				0x36,
-  DAC960_V1_ReadWithOldScatterGather =		0xB6,
+  DAC960_V1_ReadWithScatterGather =		0xB6,
   DAC960_V1_Write =				0x37,
-  DAC960_V1_WriteWithOldScatterGather =		0xB7,
+  DAC960_V1_WriteWithScatterGather =		0xB7,
   DAC960_V1_DCDB =				0x04,
   DAC960_V1_DCDBWithScatterGather =		0x84,
   DAC960_V1_Flush =				0x0A,
@@ -259,6 +279,7 @@ typedef enum
   DAC960_V1_ClearBadDataTable =			0x26,
   DAC960_V1_GetErrorTable =			0x17,
   DAC960_V1_AddCapacityAsync =			0x2A,
+  DAC960_V1_BackgroundInitializationControl =	0x2B,
   /* Configuration Related Commands */
   DAC960_V1_ReadConfig2 =			0x3D,
   DAC960_V1_WriteConfig2 =			0x3C,
@@ -279,7 +300,14 @@ typedef enum
   DAC960_V1_RunDiagnostic =			0x32,
   /* Subsystem Service Commands */
   DAC960_V1_GetSubsystemData =			0x70,
-  DAC960_V1_SetSubsystemParameters =		0x71
+  DAC960_V1_SetSubsystemParameters =		0x71,
+  /* Version 2.xx Firmware Commands */
+  DAC960_V1_Enquiry_Old =			0x05,
+  DAC960_V1_GetDeviceState_Old =		0x14,
+  DAC960_V1_Read_Old =				0x02,
+  DAC960_V1_Write_Old =				0x03,
+  DAC960_V1_ReadWithScatterGather_Old =		0x82,
+  DAC960_V1_WriteWithScatterGather_Old =	0x83
 }
 __attribute__ ((packed))
 DAC960_V1_CommandOpcode_T;
@@ -326,6 +354,9 @@ typedef unsigned char DAC960_V1_CommandIdentifier_T;
 #define DAC960_V1_RebuildFailed_NewDriveFailed	0x0004	/* Consistency */
 #define DAC960_V1_RebuildSuccessful		0x0100	/* Consistency */
 #define DAC960_V1_RebuildSuccessfullyTerminated	0x0107	/* Consistency */
+#define DAC960_V1_BackgroundInitSuccessful	0x0100	/* Consistency */
+#define DAC960_V1_BackgroundInitAborted		0x0005	/* Consistency */
+#define DAC960_V1_NoBackgroundInitInProgress	0x0105	/* Consistency */
 #define DAC960_V1_AddCapacityInProgress		0x0004	/* Consistency */
 #define DAC960_V1_AddCapacityFailedOrSuspended	0x00F4	/* Consistency */
 #define DAC960_V1_Config2ChecksumError		0x0002	/* Configuration */
@@ -450,14 +481,16 @@ typedef struct DAC960_V1_Enquiry2
   unsigned int NonVolatileMemorySize;			/* Bytes 36-39 */
   struct {
     enum {
-      DAC960_V1_DRAM =				0x0,
-      DAC960_V1_EDO =				0x1,
-      DAC960_V1_SDRAM =				0x2
+      DAC960_V1_RamType_DRAM =			0x0,
+      DAC960_V1_RamType_EDO =			0x1,
+      DAC960_V1_RamType_SDRAM =			0x2,
+      DAC960_V1_RamType_Last =			0x7
     } __attribute__ ((packed)) RamType:3;		/* Byte 40 Bits 0-2 */
     enum {
-      DAC960_V1_None =				0x0,
-      DAC960_V1_Parity =			0x1,
-      DAC960_V1_ECC =				0x2
+      DAC960_V1_ErrorCorrection_None =		0x0,
+      DAC960_V1_ErrorCorrection_Parity =	0x1,
+      DAC960_V1_ErrorCorrection_ECC =		0x2,
+      DAC960_V1_ErrorCorrection_Last =		0x7
     } __attribute__ ((packed)) ErrorCorrection:3;	/* Byte 40 Bits 3-5 */
     boolean FastPageMode:1;				/* Byte 40 Bit 6 */
     boolean LowPowerMemory:1;				/* Byte 40 Bit 7 */
@@ -523,7 +556,9 @@ typedef struct DAC960_V1_Enquiry2
   struct {
     boolean Clustering:1;				/* Byte 116 Bit 0 */
     boolean MylexOnlineRAIDExpansion:1;			/* Byte 116 Bit 1 */
-    unsigned int :30;					/* Bytes 116-119 */
+    boolean ReadAhead:1;				/* Byte 116 Bit 2 */
+    boolean BackgroundInitialization:1;			/* Byte 116 Bit 3 */
+    unsigned int :28;					/* Bytes 116-119 */
   } FirmwareFeatures;
   unsigned int :32;					/* Bytes 120-123 */
   unsigned int :32;					/* Bytes 124-127 */
@@ -629,6 +664,8 @@ DAC960_V1_PhysicalDeviceState_T;
 
 /*
   Define the DAC960 V1 Firmware Get Device State Command reply structure.
+  The structure is padded by 2 bytes for compatibility with Version 2.xx
+  Firmware.
 */
 
 typedef struct DAC960_V1_DeviceState
@@ -653,6 +690,7 @@ typedef struct DAC960_V1_DeviceState
   unsigned char SynchronousOffset:5;			/* Byte 5 Bits 0-4 */
   unsigned char :3;					/* Byte 5 Bits 5-7 */
   unsigned int DiskSize __attribute__ ((packed));	/* Bytes 6-9 */
+  unsigned short :16;					/* Bytes 10-11 */
 }
 DAC960_V1_DeviceState_T;
 
@@ -668,6 +706,30 @@ typedef struct DAC960_V1_RebuildProgress
   unsigned int RemainingBlocks;				/* Bytes 8-11 */
 }
 DAC960_V1_RebuildProgress_T;
+
+
+/*
+  Define the DAC960 V1 Firmware Background Initialization Status Command
+  reply structure.
+*/
+
+typedef struct DAC960_V1_BackgroundInitializationStatus
+{
+  unsigned int LogicalDriveSize;			/* Bytes 0-3 */
+  unsigned int BlocksCompleted;				/* Bytes 4-7 */
+  unsigned char Reserved1[12];				/* Bytes 8-19 */
+  unsigned int LogicalDriveNumber;			/* Bytes 20-23 */
+  unsigned char RAIDLevel;				/* Byte 24 */
+  enum {
+    DAC960_V1_BackgroundInitializationInvalid =	    0x00,
+    DAC960_V1_BackgroundInitializationStarted =	    0x02,
+    DAC960_V1_BackgroundInitializationInProgress =  0x04,
+    DAC960_V1_BackgroundInitializationSuspended =   0x05,
+    DAC960_V1_BackgroundInitializationCancelled =   0x06
+  } __attribute__ ((packed)) Status;			/* Byte 25 */
+  unsigned char Reserved2[6];				/* Bytes 26-31 */
+}
+DAC960_V1_BackgroundInitializationStatus_T;
 
 
 /*
@@ -848,6 +910,14 @@ typedef union DAC960_V1_CommandMailbox
   struct {
     DAC960_V1_CommandOpcode_T CommandOpcode;		/* Byte 0 */
     DAC960_V1_CommandIdentifier_T CommandIdentifier;	/* Byte 1 */
+    unsigned char CommandOpcode2;			/* Byte 2 */
+    unsigned char Dummy1[5];				/* Bytes 3-7 */
+    DAC960_BusAddress32_T BusAddress;			/* Bytes 8-11 */
+    unsigned char Dummy2[4];				/* Bytes 12-15 */
+  } __attribute__ ((packed)) Type3B;
+  struct {
+    DAC960_V1_CommandOpcode_T CommandOpcode;		/* Byte 0 */
+    DAC960_V1_CommandIdentifier_T CommandIdentifier;	/* Byte 1 */
     unsigned char Dummy1[5];				/* Bytes 2-6 */
     unsigned char LogicalDriveNumber:6;			/* Byte 7 Bits 0-6 */
     boolean AutoRestore:1;				/* Byte 7 Bit 7 */
@@ -951,6 +1021,7 @@ typedef enum
   DAC960_V2_GetPhysicalDeviceInfoValid =	0x05,
   DAC960_V2_GetHealthStatus =			0x11,
   DAC960_V2_GetEvent =				0x15,
+  DAC960_V2_StartDiscovery =			0x81,
   DAC960_V2_SetDeviceState =			0x82,
   DAC960_V2_RebuildDeviceStart =		0x88,
   DAC960_V2_RebuildDeviceStop =			0x89,
@@ -977,7 +1048,10 @@ typedef unsigned short DAC960_V2_CommandIdentifier_T;
 
 #define DAC960_V2_NormalCompletion		0x00
 #define DAC960_V2_AbormalCompletion		0x02
+#define DAC960_V2_DeviceBusy			0x08
 #define DAC960_V2_DeviceNonresponsive		0x0E
+#define DAC960_V2_DeviceNonresponsive2		0x0F
+#define DAC960_V2_DeviceRevervationConflict	0x18
 
 typedef unsigned char DAC960_V2_CommandStatus_T;
 
@@ -993,7 +1067,8 @@ typedef struct DAC960_V2_MemoryType
     DAC960_V2_MemoryType_DRAM =			0x01,
     DAC960_V2_MemoryType_EDRAM =		0x02,
     DAC960_V2_MemoryType_EDO =			0x03,
-    DAC960_V2_MemoryType_SDRAM =		0x04
+    DAC960_V2_MemoryType_SDRAM =		0x04,
+    DAC960_V2_MemoryType_Last =			0x1F
   } __attribute__ ((packed)) MemoryType:5;		/* Byte 0 Bits 0-4 */
   boolean :1;						/* Byte 0 Bit 5 */
   boolean MemoryParity:1;				/* Byte 0 Bit 6 */
@@ -1050,7 +1125,8 @@ typedef struct DAC960_V2_ControllerInfo
     DAC960_V2_EXR2000P =			0x1C,
     DAC960_V2_EXR3000P =			0x1D,
     DAC960_V2_AcceleRAID352 =			0x1E,
-    DAC960_V2_AcceleRAID351 =			0x1F,
+    DAC960_V2_AcceleRAID170 =			0x1F,
+    DAC960_V2_AcceleRAID160 =			0x20,
     DAC960_V2_DAC960S =				0x60,
     DAC960_V2_DAC960SU =			0x61,
     DAC960_V2_DAC960SX =			0x62,
@@ -1067,7 +1143,9 @@ typedef struct DAC960_V2_ControllerInfo
   unsigned char :8;					/* Byte 3 */
   unsigned short BusInterfaceSpeedMHz;			/* Bytes 4-5 */
   unsigned char BusWidthBits;				/* Byte 6 */
-  unsigned char Reserved1[9];				/* Bytes 7-15 */
+  unsigned char FlashCodeTypeOrProductID;		/* Byte 7 */
+  unsigned char NumberOfHostPortsPresent;		/* Byte 8 */
+  unsigned char Reserved1[7];				/* Bytes 9-15 */
   unsigned char BusInterfaceName[16];			/* Bytes 16-31 */
   unsigned char ControllerName[16];			/* Bytes 32-47 */
   unsigned char Reserved2[16];				/* Bytes 48-63 */
@@ -1096,17 +1174,17 @@ typedef struct DAC960_V2_ControllerInfo
   unsigned char HardwareManufacturingMonth;		/* Byte 85 */
   unsigned char HardwareManufacturingYearHigh2Digits;	/* Byte 86 */
   unsigned char HardwareManufacturingYearLow2Digits;	/* Byte 87 */
-  unsigned char MaximumNumberOfPDDperXLDD;		/* Byte 88 */
-  unsigned char MaximumNumberOfILDDperXLDD;		/* Byte 89 */
+  unsigned char MaximumNumberOfPDDperXLD;		/* Byte 88 */
+  unsigned char MaximumNumberOfILDperXLD;		/* Byte 89 */
   unsigned short NonvolatileMemorySizeKB;		/* Bytes 90-91 */
-  unsigned char MaximumNumberOfXLDD;			/* Byte 92 */
+  unsigned char MaximumNumberOfXLD;			/* Byte 92 */
   unsigned int :24;					/* Bytes 93-95 */
   /* Unique Information per Controller */
   unsigned char ControllerSerialNumber[16];		/* Bytes 96-111 */
   unsigned char Reserved3[16];				/* Bytes 112-127 */
   /* Vendor Information */
   unsigned int :24;					/* Bytes 128-130 */
-  unsigned char OEM_Information;			/* Byte 131 */
+  unsigned char OEM_Code;				/* Byte 131 */
   unsigned char VendorName[16];				/* Bytes 132-147 */
   /* Other Physical/Controller/Operation Information */
   boolean BBU_Present:1;				/* Byte 148 Bit 0 */
@@ -1187,12 +1265,14 @@ typedef struct DAC960_V2_ControllerInfo
   unsigned short PhysicalDeviceHostCommandAbortsDone;	/* Bytes 370-371 */
   unsigned short PhysicalDevicePredictedFailuresDetected; /* Bytes 372-373 */
   unsigned short PhysicalDeviceHostCommandsFailed;	/* Bytes 374-375 */
-  unsigned char Reserved9[8];				/* Bytes 376-383 */
+  unsigned short PhysicalDeviceHardErrors;		/* Bytes 376-377 */
+  unsigned char Reserved9[6];				/* Bytes 378-383 */
   /* Error Counters on Logical Devices */
   unsigned short LogicalDeviceSoftErrors;		/* Bytes 384-385 */
   unsigned short LogicalDeviceCommandsFailed;		/* Bytes 386-387 */
   unsigned short LogicalDeviceHostCommandAbortsDone;	/* Bytes 388-389 */
   unsigned short :16;					/* Bytes 390-391 */
+  /* Error Counters on Controller */
   unsigned short ControllerMemoryErrors;		/* Bytes 392-393 */
   unsigned short ControllerHostCommandAbortsDone;	/* Bytes 394-395 */
   unsigned int :32;					/* Bytes 396-399 */
@@ -1204,8 +1284,7 @@ typedef struct DAC960_V2_ControllerInfo
   unsigned short RebuildsActive;			/* Bytes 408-409 */
   unsigned short OnlineExpansionsActive;		/* Bytes 410-411 */
   unsigned short PatrolActivitiesActive;		/* Bytes 412-413 */
-  unsigned char LongOperationStatus;			/* Byte 414 */
-  unsigned char :8;					/* Byte 415 */
+  unsigned short :16;					/* Bytes 414-415 */
   /* Flash ROM Information */
   unsigned char FlashType;				/* Byte 416 */
   unsigned char :8;					/* Byte 417 */
@@ -1228,8 +1307,7 @@ typedef struct DAC960_V2_ControllerInfo
   unsigned short NumberOfConfigurationGroups;		/* Bytes 474-475 */
   boolean InstallationAbortStatus:1;			/* Byte 476 Bit 0 */
   boolean MaintenanceModeStatus:1;			/* Byte 476 Bit 1 */
-  unsigned int :6;					/* Byte 476 Bits 2-7 */
-  unsigned int :24;					/* Bytes 477-479 */
+  unsigned int :24;					/* Bytes 476-479 */
   unsigned char Reserved10[32];				/* Bytes 480-511 */
   unsigned char Reserved11[512];			/* Bytes 512-1023 */
 }
@@ -1269,13 +1347,15 @@ typedef struct DAC960_V2_LogicalDeviceInfo
       DAC960_V2_ReadCacheDisabled =		0x0,
       DAC960_V2_ReadCacheEnabled =		0x1,
       DAC960_V2_ReadAheadEnabled =		0x2,
-      DAC960_V2_IntelligentReadAheadEnabled =	0x3
+      DAC960_V2_IntelligentReadAheadEnabled =	0x3,
+      DAC960_V2_ReadCache_Last =		0x7
     } __attribute__ ((packed)) ReadCache:3;		/* Byte 8 Bits 0-2 */
     enum {
       DAC960_V2_WriteCacheDisabled =		0x0,
       DAC960_V2_LogicalDeviceReadOnly =		0x1,
       DAC960_V2_WriteCacheEnabled =		0x2,
-      DAC960_V2_IntelligentWriteCacheEnabled =	0x3
+      DAC960_V2_IntelligentWriteCacheEnabled =	0x3,
+      DAC960_V2_WriteCache_Last =		0x7
     } __attribute__ ((packed)) WriteCache:3;		/* Byte 8 Bits 3-5 */
     boolean :1;						/* Byte 8 Bit 6 */
     boolean LogicalDeviceInitialized:1;			/* Byte 8 Bit 7 */
@@ -1303,7 +1383,7 @@ typedef struct DAC960_V2_LogicalDeviceInfo
     DAC960_V2_Geometry_Reserved1 =		0x2,
     DAC960_V2_Geometry_Reserved2 =		0x3
   } __attribute__ ((packed)) DriveGeometry:2;		/* Byte 14 Bits 5-6 */
-  unsigned char :1;					/* Byte 14 Bit 7 */
+  boolean SuperReadAheadEnabled:1;			/* Byte 14 Bit 7 */
   unsigned char :8;					/* Byte 15 */
   /* Error Counters */
   unsigned short SoftErrors;				/* Bytes 16-17 */
@@ -1315,8 +1395,8 @@ typedef struct DAC960_V2_LogicalDeviceInfo
   /* Device Size Information */
   unsigned short :16;					/* Bytes 32-33 */
   unsigned short DeviceBlockSizeInBytes;		/* Bytes 34-35 */
-  unsigned int OriginalDeviceSizeIn512ByteBlocksOrMB;	/* Bytes 36-39 */
-  unsigned int ConfigurableDeviceSizeIn512ByteBlocksOrMB; /* Bytes 40-43 */
+  unsigned int OriginalDeviceSize;			/* Bytes 36-39 */
+  unsigned int ConfigurableDeviceSize;			/* Bytes 40-43 */
   unsigned int :32;					/* Bytes 44-47 */
   unsigned char LogicalDeviceName[32];			/* Bytes 48-79 */
   unsigned char SCSI_InquiryData[36];			/* Bytes 80-115 */
@@ -1342,8 +1422,12 @@ typedef enum
 {
     DAC960_V2_Device_Unconfigured =		0x00,
     DAC960_V2_Device_Online =			0x01,
-    DAC960_V2_Device_WriteOnly =		0x03,
+    DAC960_V2_Device_Rebuild =			0x03,
+    DAC960_V2_Device_Missing =			0x04,
+    DAC960_V2_Device_Critical =			0x05,
     DAC960_V2_Device_Dead =			0x08,
+    DAC960_V2_Device_SuspectedDead =		0x0C,
+    DAC960_V2_Device_CommandedOffline =		0x10,
     DAC960_V2_Device_Standby =			0x21,
     DAC960_V2_Device_InvalidState =		0xFF
 }
@@ -1363,7 +1447,7 @@ typedef struct DAC960_V2_PhysicalDeviceInfo
   unsigned char LogicalUnit;				/* Byte 3 */
   /* Configuration Status Bits */
   boolean PhysicalDeviceFaultTolerant:1;		/* Byte 4 Bit 0 */
-  boolean :1;						/* Byte 4 Bit 1 */
+  boolean PhysicalDeviceConnected:1;			/* Byte 4 Bit 1 */
   boolean PhysicalDeviceLocalToController:1;		/* Byte 4 Bit 2 */
   unsigned char :5;					/* Byte 4 Bits 3-7 */
   /* Multiple Host/Controller Status Bits */
@@ -1399,15 +1483,15 @@ typedef struct DAC960_V2_PhysicalDeviceInfo
   unsigned int :32;					/* Bytes 44-47 */
   unsigned short :16;					/* Bytes 48-49 */
   unsigned short DeviceBlockSizeInBytes;		/* Bytes 50-51 */
-  unsigned int OriginalDeviceSizeIn512ByteBlocksOrMB;	/* Bytes 52-55 */
-  unsigned int ConfigurableDeviceSizeIn512ByteBlocksOrMB; /* Bytes 56-59 */
+  unsigned int OriginalDeviceSize;			/* Bytes 52-55 */
+  unsigned int ConfigurableDeviceSize;			/* Bytes 56-59 */
   unsigned int :32;					/* Bytes 60-63 */
   unsigned char PhysicalDeviceName[16];			/* Bytes 64-79 */
   unsigned char Reserved1[16];				/* Bytes 80-95 */
   unsigned char Reserved2[32];				/* Bytes 96-127 */
   unsigned char SCSI_InquiryData[36];			/* Bytes 128-163 */
-  unsigned char Reserved3[12];				/* Bytes 164-175 */
-  unsigned char Reserved4[16];				/* Bytes 176-191 */
+  unsigned char Reserved3[20];				/* Bytes 164-183 */
+  unsigned char Reserved4[8];				/* Bytes 184-191 */
   DAC960_ByteCount64_T LastReadBlockNumber;		/* Bytes 192-199 */
   DAC960_ByteCount64_T LastWrittenBlockNumber;		/* Bytes 200-207 */
   DAC960_ByteCount64_T ConsistencyCheckBlockNumber;	/* Bytes 208-215 */
@@ -1541,7 +1625,8 @@ typedef enum
   DAC960_V2_RAID_Channel =			0x03,
   DAC960_V2_Physical_Controller =		0x04,
   DAC960_V2_RAID_Controller =			0x05,
-  DAC960_V2_Configuration_Group =		0x10
+  DAC960_V2_Configuration_Group =		0x10,
+  DAC960_V2_Enclosure =				0x11
 }
 __attribute__ ((packed))
 DAC960_V2_OperationDevice_T;
@@ -1622,8 +1707,7 @@ typedef union DAC960_V2_CommandMailbox
     DAC960_V2_CommandIdentifier_T CommandIdentifier;	/* Bytes 0-1 */
     DAC960_V2_CommandOpcode_T CommandOpcode;		/* Byte 2 */
     DAC960_V2_CommandControlBits_T CommandControlBits;	/* Byte 3 */
-    DAC960_ByteCount32_T DataTransferSize:24;		/* Bytes 4-6 */
-    unsigned char DataTransferPageNumber;		/* Byte 7 */
+    DAC960_ByteCount32_T DataTransferSize;		/* Bytes 4-7 */
     DAC960_BusAddress64_T RequestSenseBusAddress;	/* Bytes 8-15 */
     DAC960_V2_PhysicalDevice_T PhysicalDevice;		/* Bytes 16-18 */
     DAC960_V2_CommandTimeout_T CommandTimeout;		/* Byte 19 */
@@ -1637,8 +1721,7 @@ typedef union DAC960_V2_CommandMailbox
     DAC960_V2_CommandIdentifier_T CommandIdentifier;	/* Bytes 0-1 */
     DAC960_V2_CommandOpcode_T CommandOpcode;		/* Byte 2 */
     DAC960_V2_CommandControlBits_T CommandControlBits;	/* Byte 3 */
-    DAC960_ByteCount32_T DataTransferSize:24;		/* Bytes 4-6 */
-    unsigned char DataTransferPageNumber;		/* Byte 7 */
+    DAC960_ByteCount32_T DataTransferSize;		/* Bytes 4-7 */
     DAC960_BusAddress64_T RequestSenseBusAddress;	/* Bytes 8-15 */
     DAC960_V2_PhysicalDevice_T PhysicalDevice;		/* Bytes 16-18 */
     DAC960_V2_CommandTimeout_T CommandTimeout;		/* Byte 19 */
@@ -1787,7 +1870,6 @@ typedef union DAC960_V2_CommandMailbox
       DataTransferMemoryAddress;			/* Bytes 32-63 */
   } DeviceOperation;
 }
-__attribute__ ((packed))
 DAC960_V2_CommandMailbox_T;
 
 
@@ -1832,8 +1914,8 @@ typedef struct DAC960_V1_UserCommand
   unsigned char ControllerNumber;
   DAC960_V1_CommandMailbox_T CommandMailbox;
   int DataTransferLength;
-  void *DataTransferBuffer;
-  DAC960_V1_DCDB_T *DCDB;
+  void __user *DataTransferBuffer;
+  DAC960_V1_DCDB_T __user *DCDB;
 }
 DAC960_V1_UserCommand_T;
 
@@ -1866,8 +1948,8 @@ typedef struct DAC960_V2_UserCommand
   DAC960_V2_CommandMailbox_T CommandMailbox;
   int DataTransferLength;
   int RequestSenseLength;
-  void *DataTransferBuffer;
-  void *RequestSenseBuffer;
+  void __user *DataTransferBuffer;
+  void __user *RequestSenseBuffer;
 }
 DAC960_V2_UserCommand_T;
 
@@ -1898,7 +1980,7 @@ DAC960_V2_KernelCommand_T;
 typedef struct DAC960_V2_GetHealthStatus
 {
   unsigned char ControllerNumber;
-  DAC960_V2_HealthStatusBuffer_T *HealthStatusBuffer;
+  DAC960_V2_HealthStatusBuffer_T __user *HealthStatusBuffer;
 }
 DAC960_V2_GetHealthStatus_T;
 
@@ -1981,41 +2063,6 @@ extern int DAC960_KernelIOCTL(unsigned int Request, void *Argument);
 #define DAC960_MaxPartitions			8
 #define DAC960_MaxPartitionsBits		3
 
-
-/*
-  Define macros to extract the Controller Number, Logical Drive Number, and
-  Partition Number from a Kernel Device, and to construct a Major Number, Minor
-  Number, and Kernel Device from the Controller Number, Logical Drive Number,
-  and Partition Number.  There is one Major Number assigned to each Controller.
-  The associated Minor Number is divided into the Logical Drive Number and
-  Partition Number.
-*/
-
-#define DAC960_ControllerNumber(Device) \
-  (MAJOR(Device) - DAC960_MAJOR)
-
-#define DAC960_LogicalDriveNumber(Device) \
-  (MINOR(Device) >> DAC960_MaxPartitionsBits)
-
-#define DAC960_PartitionNumber(Device) \
-  (MINOR(Device) & (DAC960_MaxPartitions - 1))
-
-#define DAC960_MajorNumber(ControllerNumber) \
-  (DAC960_MAJOR + (ControllerNumber))
-
-#define DAC960_MinorNumber(LogicalDriveNumber, PartitionNumber) \
-   (((LogicalDriveNumber) << DAC960_MaxPartitionsBits) | (PartitionNumber))
-
-#define DAC960_MinorCount			(DAC960_MaxLogicalDrives \
-						 * DAC960_MaxPartitions)
-
-#define DAC960_KernelDevice(ControllerNumber,				       \
-			    LogicalDriveNumber,				       \
-			    PartitionNumber)				       \
-   MKDEV(DAC960_MajorNumber(ControllerNumber),				       \
-	 DAC960_MinorNumber(LogicalDriveNumber, PartitionNumber))
-
-
 /*
   Define the DAC960 Controller fixed Block Size and Block Size Bits.
 */
@@ -2066,7 +2113,8 @@ typedef enum
   DAC960_LP_Controller =			2,	/* AcceleRAID 352 */
   DAC960_LA_Controller =			3,	/* DAC1164P */
   DAC960_PG_Controller =			4,	/* DAC960PTL/PJ/PG */
-  DAC960_PD_Controller =			5	/* DAC960PU/PD/PL */
+  DAC960_PD_Controller =			5,	/* DAC960PU/PD/PL/P */
+  DAC960_P_Controller =				6	/* DAC960PU/PD/PL/P */
 }
 DAC960_HardwareType_T;
 
@@ -2123,32 +2171,12 @@ static char
   DAC960_Message(DAC960_UserCriticalLevel, Format, ##Arguments)
 
 
-/*
-  Define types for some of the structures that interface with the rest
-  of the Linux Kernel and I/O Subsystem.
-*/
-
-typedef struct buffer_head BufferHeader_T;
-typedef struct file File_T;
-typedef struct block_device_operations BlockDeviceOperations_T;
-typedef struct gendisk GenericDiskInfo_T;
-typedef struct hd_geometry DiskGeometry_T;
-typedef struct hd_struct DiskPartition_T;
-typedef struct inode Inode_T;
-typedef struct inode_operations InodeOperations_T;
-typedef kdev_t KernelDevice_T;
-typedef struct list_head ListHead_T;
-typedef struct notifier_block NotifierBlock_T;
-typedef struct pci_dev PCI_Device_T;
-typedef struct proc_dir_entry PROC_DirectoryEntry_T;
-typedef unsigned long ProcessorFlags_T;
-typedef struct pt_regs Registers_T;
-typedef struct request IO_Request_T;
-typedef request_queue_t RequestQueue_T;
-typedef struct semaphore Semaphore_T;
-typedef struct super_block SuperBlock_T;
-typedef struct timer_list Timer_T;
-typedef wait_queue_head_t WaitQueue_T;
+struct DAC960_privdata {
+	DAC960_HardwareType_T	HardwareType;
+	DAC960_FirmwareType_T	FirmwareType;
+	irqreturn_t (*InterruptHandler)(int, void *, struct pt_regs *);
+	unsigned int		MemoryWindowSize;
+};
 
 
 /*
@@ -2212,21 +2240,22 @@ typedef struct DAC960_Command
   DAC960_CommandType_T CommandType;
   struct DAC960_Controller *Controller;
   struct DAC960_Command *Next;
-  Semaphore_T *Semaphore;
+  struct completion *Completion;
   unsigned int LogicalDriveNumber;
   unsigned int BlockNumber;
   unsigned int BlockCount;
   unsigned int SegmentCount;
-  BufferHeader_T *BufferHeader;
-  void *RequestBuffer;
+  int	DmaDirection;
+  struct scatterlist *cmd_sglist;
+  struct request *Request;
   union {
     struct {
       DAC960_V1_CommandMailbox_T CommandMailbox;
       DAC960_V1_KernelCommand_T *KernelCommand;
       DAC960_V1_CommandStatus_T CommandStatus;
-      DAC960_V1_ScatterGatherSegment_T
-	ScatterGatherList[DAC960_V1_ScatterGatherLimit]
-	__attribute__ ((aligned (sizeof(DAC960_V1_ScatterGatherSegment_T))));
+      DAC960_V1_ScatterGatherSegment_T *ScatterGatherList;
+      dma_addr_t ScatterGatherListDMA;
+      struct scatterlist ScatterList[DAC960_V1_ScatterGatherLimit];
       unsigned int EndMarker[0];
     } V1;
     struct {
@@ -2235,11 +2264,11 @@ typedef struct DAC960_Command
       DAC960_V2_CommandStatus_T CommandStatus;
       unsigned char RequestSenseLength;
       int DataTransferResidue;
-      DAC960_V2_ScatterGatherSegment_T
-	ScatterGatherList[DAC960_V2_ScatterGatherLimit]
-	__attribute__ ((aligned (sizeof(DAC960_V2_ScatterGatherSegment_T))));
-      DAC960_SCSI_RequestSense_T RequestSense
-	__attribute__ ((aligned (sizeof(int))));
+      DAC960_V2_ScatterGatherSegment_T *ScatterGatherList;
+      dma_addr_t ScatterGatherListDMA;
+      DAC960_SCSI_RequestSense_T *RequestSense;
+      dma_addr_t RequestSenseDMA;
+      struct scatterlist ScatterList[DAC960_V2_ScatterGatherLimit];
       unsigned int EndMarker[0];
     } V2;
   } FW;
@@ -2253,12 +2282,13 @@ DAC960_Command_T;
 
 typedef struct DAC960_Controller
 {
-  void *BaseAddress;
-  void *MemoryMappedAddress;
+  void __iomem *BaseAddress;
+  void __iomem *MemoryMappedAddress;
   DAC960_FirmwareType_T FirmwareType;
   DAC960_HardwareType_T HardwareType;
   DAC960_IO_Address_T IO_Address;
   DAC960_PCI_Address_T PCI_Address;
+  struct pci_dev *PCIDevice;
   unsigned char ControllerNumber;
   unsigned char ControllerName[4];
   unsigned char ModelName[20];
@@ -2278,38 +2308,39 @@ typedef struct DAC960_Controller
   unsigned short MaxBlocksPerCommand;
   unsigned short ControllerScatterGatherLimit;
   unsigned short DriverScatterGatherLimit;
-  unsigned int ControllerUsageCount;
+  u64		BounceBufferLimit;
   unsigned int CombinedStatusBufferLength;
   unsigned int InitialStatusLength;
   unsigned int CurrentStatusLength;
   unsigned int ProgressBufferLength;
   unsigned int UserStatusLength;
-  unsigned long MemoryMailboxPagesAddress;
-  unsigned long MemoryMailboxPagesOrder;
+  struct dma_loaf DmaPages;
   unsigned long MonitoringTimerCount;
   unsigned long PrimaryMonitoringTime;
   unsigned long SecondaryMonitoringTime;
+  unsigned long ShutdownMonitoringTimer;
   unsigned long LastProgressReportTime;
   unsigned long LastCurrentStatusTime;
-  boolean ControllerDetectionSuccessful;
   boolean ControllerInitialized;
   boolean MonitoringCommandDeferred;
   boolean EphemeralProgressMessage;
   boolean DriveSpinUpMessageDisplayed;
   boolean MonitoringAlertMode;
   boolean SuppressEnclosureMessages;
-  Timer_T MonitoringTimer;
-  GenericDiskInfo_T GenericDiskInfo;
+  struct timer_list MonitoringTimer;
+  struct gendisk *disks[DAC960_MaxLogicalDrives];
+  struct pci_pool *ScatterGatherPool;
   DAC960_Command_T *FreeCommands;
   unsigned char *CombinedStatusBuffer;
   unsigned char *CurrentStatusBuffer;
-  RequestQueue_T *RequestQueue;
-  WaitQueue_T CommandWaitQueue;
-  WaitQueue_T HealthStatusWaitQueue;
+  struct request_queue *RequestQueue[DAC960_MaxLogicalDrives];
+  int req_q_index;
+  spinlock_t queue_lock;
+  wait_queue_head_t CommandWaitQueue;
+  wait_queue_head_t HealthStatusWaitQueue;
   DAC960_Command_T InitialCommand;
   DAC960_Command_T *Commands[DAC960_MaxDriverQueueDepth];
-  PROC_DirectoryEntry_T *ControllerProcEntry;
-  unsigned int LogicalDriveUsageCount[DAC960_MaxLogicalDrives];
+  struct proc_dir_entry *ControllerProcEntry;
   boolean LogicalDriveInitiallyAccessible[DAC960_MaxLogicalDrives];
   void (*QueueCommand)(DAC960_Command_T *Command);
   boolean (*ReadControllerConfiguration)(struct DAC960_Controller *);
@@ -2328,6 +2359,7 @@ typedef struct DAC960_Controller
       unsigned short DeviceStateChannel;
       unsigned short DeviceStateTargetID;
       boolean DualModeMemoryMailboxInterface;
+      boolean BackgroundInitializationStatusSupported;
       boolean SAFTE_EnclosureManagementEnabled;
       boolean NeedLogicalDriveInformation;
       boolean NeedErrorTableInformation;
@@ -2336,35 +2368,68 @@ typedef struct DAC960_Controller
       boolean NeedDeviceSerialNumberInformation;
       boolean NeedRebuildProgress;
       boolean NeedConsistencyCheckProgress;
+      boolean NeedBackgroundInitializationStatus;
+      boolean StartDeviceStateScan;
       boolean RebuildProgressFirst;
       boolean RebuildFlagPending;
       boolean RebuildStatusPending;
+
+      dma_addr_t	FirstCommandMailboxDMA;
       DAC960_V1_CommandMailbox_T *FirstCommandMailbox;
       DAC960_V1_CommandMailbox_T *LastCommandMailbox;
       DAC960_V1_CommandMailbox_T *NextCommandMailbox;
       DAC960_V1_CommandMailbox_T *PreviousCommandMailbox1;
       DAC960_V1_CommandMailbox_T *PreviousCommandMailbox2;
+
+      dma_addr_t	FirstStatusMailboxDMA;
       DAC960_V1_StatusMailbox_T *FirstStatusMailbox;
       DAC960_V1_StatusMailbox_T *LastStatusMailbox;
       DAC960_V1_StatusMailbox_T *NextStatusMailbox;
-      DAC960_V1_DCDB_T MonitoringDCDB;
+
+      DAC960_V1_DCDB_T *MonitoringDCDB;
+      dma_addr_t MonitoringDCDB_DMA;
+
       DAC960_V1_Enquiry_T Enquiry;
-      DAC960_V1_Enquiry_T NewEnquiry;
+      DAC960_V1_Enquiry_T *NewEnquiry;
+      dma_addr_t NewEnquiryDMA;
+
       DAC960_V1_ErrorTable_T ErrorTable;
-      DAC960_V1_ErrorTable_T NewErrorTable;
-      DAC960_V1_EventLogEntry_T EventLogEntry;
-      DAC960_V1_RebuildProgress_T RebuildProgress;
+      DAC960_V1_ErrorTable_T *NewErrorTable;
+      dma_addr_t NewErrorTableDMA;
+
+      DAC960_V1_EventLogEntry_T *EventLogEntry;
+      dma_addr_t EventLogEntryDMA;
+
+      DAC960_V1_RebuildProgress_T *RebuildProgress;
+      dma_addr_t RebuildProgressDMA;
       DAC960_V1_CommandStatus_T LastRebuildStatus;
       DAC960_V1_CommandStatus_T PendingRebuildStatus;
+
       DAC960_V1_LogicalDriveInformationArray_T LogicalDriveInformation;
-      DAC960_V1_LogicalDriveInformationArray_T NewLogicalDriveInformation;
+      DAC960_V1_LogicalDriveInformationArray_T *NewLogicalDriveInformation;
+      dma_addr_t NewLogicalDriveInformationDMA;
+
+      DAC960_V1_BackgroundInitializationStatus_T
+        	*BackgroundInitializationStatus;
+      dma_addr_t BackgroundInitializationStatusDMA;
+      DAC960_V1_BackgroundInitializationStatus_T
+        	LastBackgroundInitializationStatus;
+
       DAC960_V1_DeviceState_T
 	DeviceState[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
-      DAC960_V1_DeviceState_T NewDeviceState;
+      DAC960_V1_DeviceState_T *NewDeviceState;
+      dma_addr_t	NewDeviceStateDMA;
+
       DAC960_SCSI_Inquiry_T
 	InquiryStandardData[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
+      DAC960_SCSI_Inquiry_T *NewInquiryStandardData;
+      dma_addr_t NewInquiryStandardDataDMA;
+
       DAC960_SCSI_Inquiry_UnitSerialNumber_T
 	InquiryUnitSerialNumber[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
+      DAC960_SCSI_Inquiry_UnitSerialNumber_T *NewInquiryUnitSerialNumber;
+      dma_addr_t NewInquiryUnitSerialNumberDMA;
+
       int DeviceResetCount[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
       boolean DirectCommandActive[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
     } V1;
@@ -2375,34 +2440,55 @@ typedef struct DAC960_Controller
       boolean NeedLogicalDeviceInformation;
       boolean NeedPhysicalDeviceInformation;
       boolean NeedDeviceSerialNumberInformation;
+      boolean StartLogicalDeviceInformationScan;
+      boolean StartPhysicalDeviceInformationScan;
+      struct pci_pool *RequestSensePool;
+
+      dma_addr_t	FirstCommandMailboxDMA;
       DAC960_V2_CommandMailbox_T *FirstCommandMailbox;
       DAC960_V2_CommandMailbox_T *LastCommandMailbox;
       DAC960_V2_CommandMailbox_T *NextCommandMailbox;
       DAC960_V2_CommandMailbox_T *PreviousCommandMailbox1;
       DAC960_V2_CommandMailbox_T *PreviousCommandMailbox2;
+
+      dma_addr_t	FirstStatusMailboxDMA;
       DAC960_V2_StatusMailbox_T *FirstStatusMailbox;
       DAC960_V2_StatusMailbox_T *LastStatusMailbox;
       DAC960_V2_StatusMailbox_T *NextStatusMailbox;
+
+      dma_addr_t	HealthStatusBufferDMA;
       DAC960_V2_HealthStatusBuffer_T *HealthStatusBuffer;
+
       DAC960_V2_ControllerInfo_T ControllerInformation;
-      DAC960_V2_ControllerInfo_T NewControllerInformation;
+      DAC960_V2_ControllerInfo_T *NewControllerInformation;
+      dma_addr_t	NewControllerInformationDMA;
+
       DAC960_V2_LogicalDeviceInfo_T
 	*LogicalDeviceInformation[DAC960_MaxLogicalDrives];
-      DAC960_V2_LogicalDeviceInfo_T NewLogicalDeviceInformation;
+      DAC960_V2_LogicalDeviceInfo_T *NewLogicalDeviceInformation;
+      dma_addr_t	 NewLogicalDeviceInformationDMA;
+
       DAC960_V2_PhysicalDeviceInfo_T
 	*PhysicalDeviceInformation[DAC960_V2_MaxPhysicalDevices];
-      DAC960_V2_PhysicalDeviceInfo_T NewPhysicalDeviceInformation;
+      DAC960_V2_PhysicalDeviceInfo_T *NewPhysicalDeviceInformation;
+      dma_addr_t	NewPhysicalDeviceInformationDMA;
+
+      DAC960_SCSI_Inquiry_UnitSerialNumber_T *NewInquiryUnitSerialNumber;
+      dma_addr_t	NewInquiryUnitSerialNumberDMA;
       DAC960_SCSI_Inquiry_UnitSerialNumber_T
 	*InquiryUnitSerialNumber[DAC960_V2_MaxPhysicalDevices];
+
+      DAC960_V2_Event_T *Event;
+      dma_addr_t EventDMA;
+
+      DAC960_V2_PhysicalToLogicalDevice_T *PhysicalToLogicalDevice;
+      dma_addr_t PhysicalToLogicalDeviceDMA;
+
       DAC960_V2_PhysicalDevice_T
 	LogicalDriveToVirtualDevice[DAC960_MaxLogicalDrives];
-      DAC960_V2_Event_T Event;
+      boolean LogicalDriveFoundDuringScan[DAC960_MaxLogicalDrives];
     } V2;
   } FW;
-  DiskPartition_T DiskPartitions[DAC960_MinorCount];
-  int PartitionSizes[DAC960_MinorCount];
-  int BlockSizes[DAC960_MinorCount];
-  int MaxSectorsPerRequest[DAC960_MinorCount];
   unsigned char ProgressBuffer[DAC960_ProgressBufferSize];
   unsigned char UserStatusBuffer[DAC960_UserMessageSize];
 }
@@ -2427,100 +2513,32 @@ DAC960_Controller_T;
 #define DAC960_QueueReadWriteCommand(Command) \
   (Controller->QueueReadWriteCommand)(Command)
 
-
 /*
-  DAC960_AcquireControllerLock acquires exclusive access to Controller.
-*/
-
+ * dma_addr_writeql is provided to write dma_addr_t types
+ * to a 64-bit pci address space register.  The controller
+ * will accept having the register written as two 32-bit
+ * values.
+ *
+ * In HIGHMEM kernels, dma_addr_t is a 64-bit value.
+ * without HIGHMEM,  dma_addr_t is a 32-bit value.
+ *
+ * The compiler should always fix up the assignment
+ * to u.wq appropriately, depending upon the size of
+ * dma_addr_t.
+ */
 static inline
-void DAC960_AcquireControllerLock(DAC960_Controller_T *Controller,
-				  ProcessorFlags_T *ProcessorFlags)
+void dma_addr_writeql(dma_addr_t addr, void __iomem *write_address)
 {
-  spin_lock_irqsave(&io_request_lock, *ProcessorFlags);
+	union {
+		u64 wq;
+		uint wl[2];
+	} u;
+
+	u.wq = addr;
+
+	writel(u.wl[0], write_address);
+	writel(u.wl[1], write_address + 4);
 }
-
-
-/*
-  DAC960_ReleaseControllerLock releases exclusive access to Controller.
-*/
-
-static inline
-void DAC960_ReleaseControllerLock(DAC960_Controller_T *Controller,
-				  ProcessorFlags_T *ProcessorFlags)
-{
-  spin_unlock_irqrestore(&io_request_lock, *ProcessorFlags);
-}
-
-
-/*
-  DAC960_AcquireControllerLockRF acquires exclusive access to Controller,
-  but is only called from the request function with the io_request_lock held.
-*/
-
-static inline
-void DAC960_AcquireControllerLockRF(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-}
-
-
-/*
-  DAC960_ReleaseControllerLockRF releases exclusive access to Controller,
-  but is only called from the request function with the io_request_lock held.
-*/
-
-static inline
-void DAC960_ReleaseControllerLockRF(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-}
-
-
-/*
-  DAC960_AcquireControllerLockIH acquires exclusive access to Controller,
-  but is only called from the interrupt handler.
-*/
-
-static inline
-void DAC960_AcquireControllerLockIH(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-  spin_lock_irqsave(&io_request_lock, *ProcessorFlags);
-}
-
-
-/*
-  DAC960_ReleaseControllerLockIH releases exclusive access to Controller,
-  but is only called from the interrupt handler.
-*/
-
-static inline
-void DAC960_ReleaseControllerLockIH(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-  spin_unlock_irqrestore(&io_request_lock, *ProcessorFlags);
-}
-
-
-/*
-  Virtual_to_Bus maps from Kernel Virtual Addresses to PCI Bus Addresses.
-*/
-
-static inline DAC960_BusAddress32_T Virtual_to_Bus(void *VirtualAddress)
-{
-  return (DAC960_BusAddress32_T) virt_to_bus(VirtualAddress);
-}
-
-
-/*
-  Bus_to_Virtual maps from PCI Bus Addresses to Kernel Virtual Addresses.
-*/
-
-static inline void *Bus_to_Virtual(DAC960_BusAddress32_T BusAddress)
-{
-  return (void *) bus_to_virt(BusAddress);
-}
-
 
 /*
   Define the DAC960 BA Series Controller Interface Register Offsets.
@@ -2625,7 +2643,7 @@ DAC960_BA_ErrorStatusRegister_T;
 */
 
 static inline
-void DAC960_BA_HardwareMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_BA_HardwareMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2635,7 +2653,7 @@ void DAC960_BA_HardwareMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
+void DAC960_BA_AcknowledgeHardwareMailboxStatus(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2645,7 +2663,7 @@ void DAC960_BA_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_GenerateInterrupt(void *ControllerBaseAddress)
+void DAC960_BA_GenerateInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2655,7 +2673,7 @@ void DAC960_BA_GenerateInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_ControllerReset(void *ControllerBaseAddress)
+void DAC960_BA_ControllerReset(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2665,7 +2683,7 @@ void DAC960_BA_ControllerReset(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_MemoryMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_BA_MemoryMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2675,7 +2693,7 @@ void DAC960_BA_MemoryMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_BA_HardwareMailboxFullP(void *ControllerBaseAddress)
+boolean DAC960_BA_HardwareMailboxFullP(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -2684,7 +2702,7 @@ boolean DAC960_BA_HardwareMailboxFullP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_BA_InitializationInProgressP(void *ControllerBaseAddress)
+boolean DAC960_BA_InitializationInProgressP(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -2693,7 +2711,7 @@ boolean DAC960_BA_InitializationInProgressP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_BA_AcknowledgeHardwareMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -2703,7 +2721,7 @@ void DAC960_BA_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_BA_AcknowledgeMemoryMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -2713,7 +2731,7 @@ void DAC960_BA_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_AcknowledgeInterrupt(void *ControllerBaseAddress)
+void DAC960_BA_AcknowledgeInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -2724,7 +2742,7 @@ void DAC960_BA_AcknowledgeInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_BA_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_BA_HardwareMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -2733,7 +2751,7 @@ boolean DAC960_BA_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_BA_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_BA_MemoryMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -2742,7 +2760,7 @@ boolean DAC960_BA_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_EnableInterrupts(void *ControllerBaseAddress)
+void DAC960_BA_EnableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0xFF;
@@ -2753,7 +2771,7 @@ void DAC960_BA_EnableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_BA_DisableInterrupts(void *ControllerBaseAddress)
+void DAC960_BA_DisableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0xFF;
@@ -2764,7 +2782,7 @@ void DAC960_BA_DisableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_BA_InterruptsEnabledP(void *ControllerBaseAddress)
+boolean DAC960_BA_InterruptsEnabledP(void __iomem *ControllerBaseAddress)
 {
   DAC960_BA_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All =
@@ -2785,28 +2803,30 @@ void DAC960_BA_WriteCommandMailbox(DAC960_V2_CommandMailbox_T
   mb();
 }
 
+
 static inline
-void DAC960_BA_WriteHardwareMailbox(void *ControllerBaseAddress,
-				    DAC960_V2_CommandMailbox_T *CommandMailbox)
+void DAC960_BA_WriteHardwareMailbox(void __iomem *ControllerBaseAddress,
+				    dma_addr_t CommandMailboxDMA)
 {
-  writel(Virtual_to_Bus(CommandMailbox),
-	 ControllerBaseAddress + DAC960_BA_CommandMailboxBusAddressOffset);
+	dma_addr_writeql(CommandMailboxDMA,
+		ControllerBaseAddress +
+		DAC960_BA_CommandMailboxBusAddressOffset);
 }
 
 static inline DAC960_V2_CommandIdentifier_T
-DAC960_BA_ReadCommandIdentifier(void *ControllerBaseAddress)
+DAC960_BA_ReadCommandIdentifier(void __iomem *ControllerBaseAddress)
 {
   return readw(ControllerBaseAddress + DAC960_BA_CommandStatusOffset);
 }
 
 static inline DAC960_V2_CommandStatus_T
-DAC960_BA_ReadCommandStatus(void *ControllerBaseAddress)
+DAC960_BA_ReadCommandStatus(void __iomem *ControllerBaseAddress)
 {
   return readw(ControllerBaseAddress + DAC960_BA_CommandStatusOffset + 2);
 }
 
 static inline boolean
-DAC960_BA_ReadErrorStatus(void *ControllerBaseAddress,
+DAC960_BA_ReadErrorStatus(void __iomem *ControllerBaseAddress,
 			  unsigned char *ErrorStatus,
 			  unsigned char *Parameter0,
 			  unsigned char *Parameter1)
@@ -2928,7 +2948,7 @@ DAC960_LP_ErrorStatusRegister_T;
 */
 
 static inline
-void DAC960_LP_HardwareMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_LP_HardwareMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2938,7 +2958,7 @@ void DAC960_LP_HardwareMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
+void DAC960_LP_AcknowledgeHardwareMailboxStatus(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2948,7 +2968,7 @@ void DAC960_LP_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_GenerateInterrupt(void *ControllerBaseAddress)
+void DAC960_LP_GenerateInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2958,7 +2978,7 @@ void DAC960_LP_GenerateInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_ControllerReset(void *ControllerBaseAddress)
+void DAC960_LP_ControllerReset(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2968,7 +2988,7 @@ void DAC960_LP_ControllerReset(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_MemoryMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_LP_MemoryMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -2978,7 +2998,7 @@ void DAC960_LP_MemoryMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LP_HardwareMailboxFullP(void *ControllerBaseAddress)
+boolean DAC960_LP_HardwareMailboxFullP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -2987,7 +3007,7 @@ boolean DAC960_LP_HardwareMailboxFullP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LP_InitializationInProgressP(void *ControllerBaseAddress)
+boolean DAC960_LP_InitializationInProgressP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -2996,7 +3016,7 @@ boolean DAC960_LP_InitializationInProgressP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_LP_AcknowledgeHardwareMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3006,7 +3026,7 @@ void DAC960_LP_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_LP_AcknowledgeMemoryMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3016,7 +3036,7 @@ void DAC960_LP_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_AcknowledgeInterrupt(void *ControllerBaseAddress)
+void DAC960_LP_AcknowledgeInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3027,7 +3047,7 @@ void DAC960_LP_AcknowledgeInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LP_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_LP_HardwareMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -3036,7 +3056,7 @@ boolean DAC960_LP_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LP_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_LP_MemoryMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -3045,7 +3065,7 @@ boolean DAC960_LP_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_EnableInterrupts(void *ControllerBaseAddress)
+void DAC960_LP_EnableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0xFF;
@@ -3055,7 +3075,7 @@ void DAC960_LP_EnableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LP_DisableInterrupts(void *ControllerBaseAddress)
+void DAC960_LP_DisableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0xFF;
@@ -3065,7 +3085,7 @@ void DAC960_LP_DisableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LP_InterruptsEnabledP(void *ControllerBaseAddress)
+boolean DAC960_LP_InterruptsEnabledP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LP_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All =
@@ -3087,27 +3107,28 @@ void DAC960_LP_WriteCommandMailbox(DAC960_V2_CommandMailbox_T
 }
 
 static inline
-void DAC960_LP_WriteHardwareMailbox(void *ControllerBaseAddress,
-				    DAC960_V2_CommandMailbox_T *CommandMailbox)
+void DAC960_LP_WriteHardwareMailbox(void __iomem *ControllerBaseAddress,
+				    dma_addr_t CommandMailboxDMA)
 {
-  writel(Virtual_to_Bus(CommandMailbox),
-	 ControllerBaseAddress + DAC960_LP_CommandMailboxBusAddressOffset);
+	dma_addr_writeql(CommandMailboxDMA,
+		ControllerBaseAddress +
+		DAC960_LP_CommandMailboxBusAddressOffset);
 }
 
 static inline DAC960_V2_CommandIdentifier_T
-DAC960_LP_ReadCommandIdentifier(void *ControllerBaseAddress)
+DAC960_LP_ReadCommandIdentifier(void __iomem *ControllerBaseAddress)
 {
   return readw(ControllerBaseAddress + DAC960_LP_CommandStatusOffset);
 }
 
 static inline DAC960_V2_CommandStatus_T
-DAC960_LP_ReadCommandStatus(void *ControllerBaseAddress)
+DAC960_LP_ReadCommandStatus(void __iomem *ControllerBaseAddress)
 {
   return readw(ControllerBaseAddress + DAC960_LP_CommandStatusOffset + 2);
 }
 
 static inline boolean
-DAC960_LP_ReadErrorStatus(void *ControllerBaseAddress,
+DAC960_LP_ReadErrorStatus(void __iomem *ControllerBaseAddress,
 			  unsigned char *ErrorStatus,
 			  unsigned char *Parameter0,
 			  unsigned char *Parameter1)
@@ -3241,7 +3262,7 @@ DAC960_LA_ErrorStatusRegister_T;
 */
 
 static inline
-void DAC960_LA_HardwareMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_LA_HardwareMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3251,7 +3272,7 @@ void DAC960_LA_HardwareMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
+void DAC960_LA_AcknowledgeHardwareMailboxStatus(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3261,7 +3282,7 @@ void DAC960_LA_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_GenerateInterrupt(void *ControllerBaseAddress)
+void DAC960_LA_GenerateInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3271,7 +3292,7 @@ void DAC960_LA_GenerateInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_ControllerReset(void *ControllerBaseAddress)
+void DAC960_LA_ControllerReset(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3281,7 +3302,7 @@ void DAC960_LA_ControllerReset(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_MemoryMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_LA_MemoryMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3291,7 +3312,7 @@ void DAC960_LA_MemoryMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LA_HardwareMailboxFullP(void *ControllerBaseAddress)
+boolean DAC960_LA_HardwareMailboxFullP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -3300,7 +3321,7 @@ boolean DAC960_LA_HardwareMailboxFullP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LA_InitializationInProgressP(void *ControllerBaseAddress)
+boolean DAC960_LA_InitializationInProgressP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -3309,7 +3330,7 @@ boolean DAC960_LA_InitializationInProgressP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_LA_AcknowledgeHardwareMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3319,7 +3340,7 @@ void DAC960_LA_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_LA_AcknowledgeMemoryMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3329,7 +3350,7 @@ void DAC960_LA_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_AcknowledgeInterrupt(void *ControllerBaseAddress)
+void DAC960_LA_AcknowledgeInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3340,7 +3361,7 @@ void DAC960_LA_AcknowledgeInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LA_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_LA_HardwareMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -3349,7 +3370,7 @@ boolean DAC960_LA_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LA_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_LA_MemoryMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -3358,7 +3379,7 @@ boolean DAC960_LA_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_EnableInterrupts(void *ControllerBaseAddress)
+void DAC960_LA_EnableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0xFF;
@@ -3368,7 +3389,7 @@ void DAC960_LA_EnableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_LA_DisableInterrupts(void *ControllerBaseAddress)
+void DAC960_LA_DisableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0xFF;
@@ -3378,7 +3399,7 @@ void DAC960_LA_DisableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_LA_InterruptsEnabledP(void *ControllerBaseAddress)
+boolean DAC960_LA_InterruptsEnabledP(void __iomem *ControllerBaseAddress)
 {
   DAC960_LA_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All =
@@ -3401,7 +3422,7 @@ void DAC960_LA_WriteCommandMailbox(DAC960_V1_CommandMailbox_T
 }
 
 static inline
-void DAC960_LA_WriteHardwareMailbox(void *ControllerBaseAddress,
+void DAC960_LA_WriteHardwareMailbox(void __iomem *ControllerBaseAddress,
 				    DAC960_V1_CommandMailbox_T *CommandMailbox)
 {
   writel(CommandMailbox->Words[0],
@@ -3415,20 +3436,20 @@ void DAC960_LA_WriteHardwareMailbox(void *ControllerBaseAddress,
 }
 
 static inline DAC960_V1_CommandIdentifier_T
-DAC960_LA_ReadStatusCommandIdentifier(void *ControllerBaseAddress)
+DAC960_LA_ReadStatusCommandIdentifier(void __iomem *ControllerBaseAddress)
 {
   return readb(ControllerBaseAddress
 	       + DAC960_LA_StatusCommandIdentifierRegOffset);
 }
 
 static inline DAC960_V1_CommandStatus_T
-DAC960_LA_ReadStatusRegister(void *ControllerBaseAddress)
+DAC960_LA_ReadStatusRegister(void __iomem *ControllerBaseAddress)
 {
   return readw(ControllerBaseAddress + DAC960_LA_StatusRegisterOffset);
 }
 
 static inline boolean
-DAC960_LA_ReadErrorStatus(void *ControllerBaseAddress,
+DAC960_LA_ReadErrorStatus(void __iomem *ControllerBaseAddress,
 			  unsigned char *ErrorStatus,
 			  unsigned char *Parameter0,
 			  unsigned char *Parameter1)
@@ -3446,43 +3467,6 @@ DAC960_LA_ReadErrorStatus(void *ControllerBaseAddress,
   writeb(0xFF, ControllerBaseAddress + DAC960_LA_ErrorStatusRegisterOffset);
   return true;
 }
-
-static inline
-void DAC960_LA_SaveMemoryMailboxInfo(DAC960_Controller_T *Controller)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  writel(0x743C485E,
-	 ControllerBaseAddress + DAC960_LA_CommandOpcodeRegisterOffset);
-  writel((unsigned long) Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_LA_MailboxRegister4Offset);
-  writew(Controller->V1.NextCommandMailbox - Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_LA_MailboxRegister8Offset);
-  writew(Controller->V1.NextStatusMailbox - Controller->V1.FirstStatusMailbox,
-	 ControllerBaseAddress + DAC960_LA_MailboxRegister10Offset);
-#endif
-}
-
-static inline
-void DAC960_LA_RestoreMemoryMailboxInfo(DAC960_Controller_T *Controller,
-					void **MemoryMailboxAddress,
-					short *NextCommandMailboxIndex,
-					short *NextStatusMailboxIndex)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  if (readl(ControllerBaseAddress
-	    + DAC960_LA_CommandOpcodeRegisterOffset) != 0x743C485E)
-    return;
-  *MemoryMailboxAddress =
-    (void *) readl(ControllerBaseAddress + DAC960_LA_MailboxRegister4Offset);
-  *NextCommandMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_LA_MailboxRegister8Offset);
-  *NextStatusMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_LA_MailboxRegister10Offset);
-#endif
-}
-
 
 /*
   Define the DAC960 PG Series Controller Interface Register Offsets.
@@ -3599,7 +3583,7 @@ DAC960_PG_ErrorStatusRegister_T;
 */
 
 static inline
-void DAC960_PG_HardwareMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_PG_HardwareMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3609,7 +3593,7 @@ void DAC960_PG_HardwareMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
+void DAC960_PG_AcknowledgeHardwareMailboxStatus(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3619,7 +3603,7 @@ void DAC960_PG_AcknowledgeHardwareMailboxStatus(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_GenerateInterrupt(void *ControllerBaseAddress)
+void DAC960_PG_GenerateInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3629,7 +3613,7 @@ void DAC960_PG_GenerateInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_ControllerReset(void *ControllerBaseAddress)
+void DAC960_PG_ControllerReset(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3639,7 +3623,7 @@ void DAC960_PG_ControllerReset(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_MemoryMailboxNewCommand(void *ControllerBaseAddress)
+void DAC960_PG_MemoryMailboxNewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3649,7 +3633,7 @@ void DAC960_PG_MemoryMailboxNewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PG_HardwareMailboxFullP(void *ControllerBaseAddress)
+boolean DAC960_PG_HardwareMailboxFullP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -3658,7 +3642,7 @@ boolean DAC960_PG_HardwareMailboxFullP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PG_InitializationInProgressP(void *ControllerBaseAddress)
+boolean DAC960_PG_InitializationInProgressP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -3667,7 +3651,7 @@ boolean DAC960_PG_InitializationInProgressP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_PG_AcknowledgeHardwareMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3677,7 +3661,7 @@ void DAC960_PG_AcknowledgeHardwareMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
+void DAC960_PG_AcknowledgeMemoryMailboxInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3687,7 +3671,7 @@ void DAC960_PG_AcknowledgeMemoryMailboxInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_AcknowledgeInterrupt(void *ControllerBaseAddress)
+void DAC960_PG_AcknowledgeInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -3698,7 +3682,7 @@ void DAC960_PG_AcknowledgeInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PG_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_PG_HardwareMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -3707,7 +3691,7 @@ boolean DAC960_PG_HardwareMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PG_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_PG_MemoryMailboxStatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -3716,7 +3700,7 @@ boolean DAC960_PG_MemoryMailboxStatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_EnableInterrupts(void *ControllerBaseAddress)
+void DAC960_PG_EnableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0;
@@ -3728,7 +3712,7 @@ void DAC960_PG_EnableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PG_DisableInterrupts(void *ControllerBaseAddress)
+void DAC960_PG_DisableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All = 0;
@@ -3740,7 +3724,7 @@ void DAC960_PG_DisableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PG_InterruptsEnabledP(void *ControllerBaseAddress)
+boolean DAC960_PG_InterruptsEnabledP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PG_InterruptMaskRegister_T InterruptMaskRegister;
   InterruptMaskRegister.All =
@@ -3763,7 +3747,7 @@ void DAC960_PG_WriteCommandMailbox(DAC960_V1_CommandMailbox_T
 }
 
 static inline
-void DAC960_PG_WriteHardwareMailbox(void *ControllerBaseAddress,
+void DAC960_PG_WriteHardwareMailbox(void __iomem *ControllerBaseAddress,
 				    DAC960_V1_CommandMailbox_T *CommandMailbox)
 {
   writel(CommandMailbox->Words[0],
@@ -3777,20 +3761,20 @@ void DAC960_PG_WriteHardwareMailbox(void *ControllerBaseAddress,
 }
 
 static inline DAC960_V1_CommandIdentifier_T
-DAC960_PG_ReadStatusCommandIdentifier(void *ControllerBaseAddress)
+DAC960_PG_ReadStatusCommandIdentifier(void __iomem *ControllerBaseAddress)
 {
   return readb(ControllerBaseAddress
 	       + DAC960_PG_StatusCommandIdentifierRegOffset);
 }
 
 static inline DAC960_V1_CommandStatus_T
-DAC960_PG_ReadStatusRegister(void *ControllerBaseAddress)
+DAC960_PG_ReadStatusRegister(void __iomem *ControllerBaseAddress)
 {
   return readw(ControllerBaseAddress + DAC960_PG_StatusRegisterOffset);
 }
 
 static inline boolean
-DAC960_PG_ReadErrorStatus(void *ControllerBaseAddress,
+DAC960_PG_ReadErrorStatus(void __iomem *ControllerBaseAddress,
 			  unsigned char *ErrorStatus,
 			  unsigned char *Parameter0,
 			  unsigned char *Parameter1)
@@ -3808,43 +3792,6 @@ DAC960_PG_ReadErrorStatus(void *ControllerBaseAddress,
   writeb(0, ControllerBaseAddress + DAC960_PG_ErrorStatusRegisterOffset);
   return true;
 }
-
-static inline
-void DAC960_PG_SaveMemoryMailboxInfo(DAC960_Controller_T *Controller)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  writel(0x743C485E,
-	 ControllerBaseAddress + DAC960_PG_CommandOpcodeRegisterOffset);
-  writel((unsigned long) Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_PG_MailboxRegister4Offset);
-  writew(Controller->V1.NextCommandMailbox - Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_PG_MailboxRegister8Offset);
-  writew(Controller->V1.NextStatusMailbox - Controller->V1.FirstStatusMailbox,
-	 ControllerBaseAddress + DAC960_PG_MailboxRegister10Offset);
-#endif
-}
-
-static inline
-void DAC960_PG_RestoreMemoryMailboxInfo(DAC960_Controller_T *Controller,
-					void **MemoryMailboxAddress,
-					short *NextCommandMailboxIndex,
-					short *NextStatusMailboxIndex)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  if (readl(ControllerBaseAddress
-	    + DAC960_PG_CommandOpcodeRegisterOffset) != 0x743C485E)
-    return;
-  *MemoryMailboxAddress =
-    (void *) readl(ControllerBaseAddress + DAC960_PG_MailboxRegister4Offset);
-  *NextCommandMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_PG_MailboxRegister8Offset);
-  *NextStatusMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_PG_MailboxRegister10Offset);
-#endif
-}
-
 
 /*
   Define the DAC960 PD Series Controller Interface Register Offsets.
@@ -3956,7 +3903,7 @@ DAC960_PD_ErrorStatusRegister_T;
 */
 
 static inline
-void DAC960_PD_NewCommand(void *ControllerBaseAddress)
+void DAC960_PD_NewCommand(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3966,7 +3913,7 @@ void DAC960_PD_NewCommand(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PD_AcknowledgeStatus(void *ControllerBaseAddress)
+void DAC960_PD_AcknowledgeStatus(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3976,7 +3923,7 @@ void DAC960_PD_AcknowledgeStatus(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PD_GenerateInterrupt(void *ControllerBaseAddress)
+void DAC960_PD_GenerateInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3986,7 +3933,7 @@ void DAC960_PD_GenerateInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PD_ControllerReset(void *ControllerBaseAddress)
+void DAC960_PD_ControllerReset(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All = 0;
@@ -3996,7 +3943,7 @@ void DAC960_PD_ControllerReset(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PD_MailboxFullP(void *ControllerBaseAddress)
+boolean DAC960_PD_MailboxFullP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -4005,7 +3952,7 @@ boolean DAC960_PD_MailboxFullP(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PD_InitializationInProgressP(void *ControllerBaseAddress)
+boolean DAC960_PD_InitializationInProgressP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InboundDoorBellRegister_T InboundDoorBellRegister;
   InboundDoorBellRegister.All =
@@ -4014,7 +3961,7 @@ boolean DAC960_PD_InitializationInProgressP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PD_AcknowledgeInterrupt(void *ControllerBaseAddress)
+void DAC960_PD_AcknowledgeInterrupt(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All = 0;
@@ -4024,7 +3971,7 @@ void DAC960_PD_AcknowledgeInterrupt(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PD_StatusAvailableP(void *ControllerBaseAddress)
+boolean DAC960_PD_StatusAvailableP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_OutboundDoorBellRegister_T OutboundDoorBellRegister;
   OutboundDoorBellRegister.All =
@@ -4033,7 +3980,7 @@ boolean DAC960_PD_StatusAvailableP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PD_EnableInterrupts(void *ControllerBaseAddress)
+void DAC960_PD_EnableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InterruptEnableRegister_T InterruptEnableRegister;
   InterruptEnableRegister.All = 0;
@@ -4043,7 +3990,7 @@ void DAC960_PD_EnableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PD_DisableInterrupts(void *ControllerBaseAddress)
+void DAC960_PD_DisableInterrupts(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InterruptEnableRegister_T InterruptEnableRegister;
   InterruptEnableRegister.All = 0;
@@ -4053,7 +4000,7 @@ void DAC960_PD_DisableInterrupts(void *ControllerBaseAddress)
 }
 
 static inline
-boolean DAC960_PD_InterruptsEnabledP(void *ControllerBaseAddress)
+boolean DAC960_PD_InterruptsEnabledP(void __iomem *ControllerBaseAddress)
 {
   DAC960_PD_InterruptEnableRegister_T InterruptEnableRegister;
   InterruptEnableRegister.All =
@@ -4062,7 +4009,7 @@ boolean DAC960_PD_InterruptsEnabledP(void *ControllerBaseAddress)
 }
 
 static inline
-void DAC960_PD_WriteCommandMailbox(void *ControllerBaseAddress,
+void DAC960_PD_WriteCommandMailbox(void __iomem *ControllerBaseAddress,
 				   DAC960_V1_CommandMailbox_T *CommandMailbox)
 {
   writel(CommandMailbox->Words[0],
@@ -4076,20 +4023,20 @@ void DAC960_PD_WriteCommandMailbox(void *ControllerBaseAddress,
 }
 
 static inline DAC960_V1_CommandIdentifier_T
-DAC960_PD_ReadStatusCommandIdentifier(void *ControllerBaseAddress)
+DAC960_PD_ReadStatusCommandIdentifier(void __iomem *ControllerBaseAddress)
 {
   return readb(ControllerBaseAddress
 	       + DAC960_PD_StatusCommandIdentifierRegOffset);
 }
 
 static inline DAC960_V1_CommandStatus_T
-DAC960_PD_ReadStatusRegister(void *ControllerBaseAddress)
+DAC960_PD_ReadStatusRegister(void __iomem *ControllerBaseAddress)
 {
   return readw(ControllerBaseAddress + DAC960_PD_StatusRegisterOffset);
 }
 
 static inline boolean
-DAC960_PD_ReadErrorStatus(void *ControllerBaseAddress,
+DAC960_PD_ReadErrorStatus(void __iomem *ControllerBaseAddress,
 			  unsigned char *ErrorStatus,
 			  unsigned char *Parameter0,
 			  unsigned char *Parameter1)
@@ -4108,39 +4055,60 @@ DAC960_PD_ReadErrorStatus(void *ControllerBaseAddress,
   return true;
 }
 
+static inline void DAC960_P_To_PD_TranslateEnquiry(void *Enquiry)
+{
+  memcpy(Enquiry + 132, Enquiry + 36, 64);
+  memset(Enquiry + 36, 0, 96);
+}
+
+static inline void DAC960_P_To_PD_TranslateDeviceState(void *DeviceState)
+{
+  memcpy(DeviceState + 2, DeviceState + 3, 1);
+  memcpy(DeviceState + 4, DeviceState + 5, 2);
+  memcpy(DeviceState + 6, DeviceState + 8, 4);
+}
+
+static inline
+void DAC960_PD_To_P_TranslateReadWriteCommand(DAC960_V1_CommandMailbox_T
+					      *CommandMailbox)
+{
+  int LogicalDriveNumber = CommandMailbox->Type5.LD.LogicalDriveNumber;
+  CommandMailbox->Bytes[3] &= 0x7;
+  CommandMailbox->Bytes[3] |= CommandMailbox->Bytes[7] << 6;
+  CommandMailbox->Bytes[7] = LogicalDriveNumber;
+}
+
+static inline
+void DAC960_P_To_PD_TranslateReadWriteCommand(DAC960_V1_CommandMailbox_T
+					      *CommandMailbox)
+{
+  int LogicalDriveNumber = CommandMailbox->Bytes[7];
+  CommandMailbox->Bytes[7] = CommandMailbox->Bytes[3] >> 6;
+  CommandMailbox->Bytes[3] &= 0x7;
+  CommandMailbox->Bytes[3] |= LogicalDriveNumber << 3;
+}
+
 
 /*
   Define prototypes for the forward referenced DAC960 Driver Internal Functions.
 */
 
 static void DAC960_FinalizeController(DAC960_Controller_T *);
-static int DAC960_Finalize(NotifierBlock_T *, unsigned long, void *);
 static void DAC960_V1_QueueReadWriteCommand(DAC960_Command_T *);
-static void DAC960_V2_QueueReadWriteCommand(DAC960_Command_T *);
-static void DAC960_RequestFunction(RequestQueue_T *);
-static void DAC960_BA_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_LP_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_LA_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_PG_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_PD_InterruptHandler(int, void *, Registers_T *);
+static void DAC960_V2_QueueReadWriteCommand(DAC960_Command_T *); 
+static void DAC960_RequestFunction(struct request_queue *);
+static irqreturn_t DAC960_BA_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_LP_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_LA_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_PG_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_PD_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_P_InterruptHandler(int, void *, struct pt_regs *);
 static void DAC960_V1_QueueMonitoringCommand(DAC960_Command_T *);
 static void DAC960_V2_QueueMonitoringCommand(DAC960_Command_T *);
 static void DAC960_MonitoringTimerFunction(unsigned long);
-static int DAC960_Open(Inode_T *, File_T *);
-static int DAC960_Release(Inode_T *, File_T *);
-static int DAC960_IOCTL(Inode_T *, File_T *, unsigned int, unsigned long);
-static int DAC960_UserIOCTL(Inode_T *, File_T *, unsigned int, unsigned long);
 static void DAC960_Message(DAC960_MessageLevel_T, unsigned char *,
 			   DAC960_Controller_T *, ...);
-static void DAC960_CreateProcEntries(void);
-static void DAC960_DestroyProcEntries(void);
-
-
-/*
-  Export the Kernel Mode IOCTL interface.
-*/
-
-EXPORT_SYMBOL(DAC960_KernelIOCTL);
-
+static void DAC960_CreateProcEntries(DAC960_Controller_T *);
+static void DAC960_DestroyProcEntries(DAC960_Controller_T *);
 
 #endif /* DAC960_DriverVersion */

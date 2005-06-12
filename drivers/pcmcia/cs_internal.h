@@ -1,19 +1,15 @@
 /*
- * cs_internal.h 1.54 2000/10/26 20:10:55
+ * cs_internal.h
  *
- * The contents of this file are subject to the Mozilla Public License
- * Version 1.1 (the "License"); you may not use this file except in
- * compliance with the License. You may obtain a copy of the License
- * at http://www.mozilla.org/MPL/
- *
- * Software distributed under the License is distributed on an "AS IS"
- * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
- * the License for the specific language governing rights and
- * limitations under the License. 
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * The initial developer of the original code is David A. Hinds
  * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
- *  are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
+ * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
+ *
+ * (C) 1999		David A. Hinds
  */
 
 #ifndef _LINUX_CS_INTERNAL_H
@@ -21,38 +17,8 @@
 
 #include <linux/config.h>
 
-typedef struct erase_busy_t {
-    eraseq_entry_t	*erase;
-    client_handle_t	client;
-    struct timer_list	timeout;
-    struct erase_busy_t	*prev, *next;
-} erase_busy_t;
-
-#define ERASEQ_MAGIC	0xFA67
-typedef struct eraseq_t {
-    u_short		eraseq_magic;
-    client_handle_t	handle;
-    int			count;
-    eraseq_entry_t	*entry;
-} eraseq_t;
-
 #define CLIENT_MAGIC 	0x51E6
-typedef struct client_t {
-    u_short		client_magic;
-    socket_t		Socket;
-    u_char		Function;
-    dev_info_t		dev_info;
-    u_int		Attributes;
-    u_int		state;
-    event_t		EventMask, PendingEvents;
-    int (*event_handler)(event_t event, int priority,
-			 event_callback_args_t *);
-    event_callback_args_t event_callback_args;
-    struct client_t 	*next;
-    u_int		mtd_count;
-    wait_queue_head_t	mtd_req;
-    erase_busy_t	erase_busy;
-} client_t;
+typedef struct client_t client_t;
 
 /* Flags in client state */
 #define CLIENT_CONFIG_LOCKED	0x0001
@@ -62,23 +28,6 @@ typedef struct client_t {
 #define CLIENT_STALE		0x0010
 #define CLIENT_WIN_REQ(i)	(0x20<<(i))
 #define CLIENT_CARDBUS		0x8000
-
-typedef struct io_window_t {
-    u_int		Attributes;
-    ioaddr_t		BasePort, NumPorts;
-    ioaddr_t		InUse, Config;
-} io_window_t;
-
-#define WINDOW_MAGIC	0xB35C
-typedef struct window_t {
-    u_short		magic;
-    u_short		index;
-    client_handle_t	handle;
-    struct socket_info_t *sock;
-    u_long		base;
-    u_long		size;
-    pccard_mem_map	ctl;
-} window_t;
 
 #define REGION_MAGIC	0xE3C9
 typedef struct region_t {
@@ -108,58 +57,13 @@ typedef struct config_t {
     } irq;
 } config_t;
 
-/* Maximum number of IO windows per socket */
-#define MAX_IO_WIN 2
-
-/* Maximum number of memory windows per socket */
-#define MAX_WIN 4
-
-/* The size of the CIS cache */
-#define MAX_CIS_TABLE	64
-#define MAX_CIS_DATA	512
-
-typedef struct socket_info_t {
-    spinlock_t			lock;
-    struct pccard_operations *	ss_entry;
-    u_int			sock;
-    socket_state_t		socket;
-    socket_cap_t		cap;
-    u_int			state;
-    u_short			functions;
-    u_short			lock_count;
-    client_handle_t		clients;
-    u_int			real_clients;
-    client_handle_t		reset_handle;
-    pccard_mem_map		cis_mem;
-    u_char			*cis_virt;
-    config_t			*config;
-#ifdef CONFIG_CARDBUS
-    struct resource *		cb_cis_res;
-    u_char			*cb_cis_virt;
-    struct cb_config_t		*cb_config;
-#endif
-    struct {
-	u_int			AssignedIRQ;
-	u_int			Config;
-    } irq;
-    io_window_t			io[MAX_IO_WIN];
-    window_t			win[MAX_WIN];
-    region_t			*c_region, *a_region;
-    erase_busy_t		erase_busy;
-    int				cis_used;
-    struct {
-	u_int			addr;
-	u_short			len;
-	u_short			attr;
-    }				cis_table[MAX_CIS_TABLE];
-    char			cis_cache[MAX_CIS_DATA];
-    u_int			fake_cis_len;
-    char			*fake_cis;
-#ifdef CONFIG_PROC_FS
-    struct proc_dir_entry	*proc;
-#endif
-    int				use_bus_pm;
-} socket_info_t;
+struct cis_cache_entry {
+	struct list_head	node;
+	unsigned int		addr;
+	unsigned int		len;
+	unsigned int		attr;
+	unsigned char		cache[0];
+};
 
 /* Flags in config state */
 #define CONFIG_LOCKED		0x01
@@ -168,22 +72,40 @@ typedef struct socket_info_t {
 
 /* Flags in socket state */
 #define SOCKET_PRESENT		0x0008
-#define SOCKET_SETUP_PENDING	0x0010
-#define SOCKET_SHUTDOWN_PENDING	0x0020
-#define SOCKET_RESET_PENDING	0x0040
+#define SOCKET_INUSE		0x0010
 #define SOCKET_SUSPEND		0x0080
 #define SOCKET_WIN_REQ(i)	(0x0100<<(i))
-#define SOCKET_IO_REQ(i)	(0x1000<<(i))
 #define SOCKET_REGION_INFO	0x4000
 #define SOCKET_CARDBUS		0x8000
+#define SOCKET_CARDBUS_CONFIG	0x10000
+
+static inline int cs_socket_get(struct pcmcia_socket *skt)
+{
+	int ret;
+
+	WARN_ON(skt->state & SOCKET_INUSE);
+
+	ret = try_module_get(skt->owner);
+	if (ret)
+		skt->state |= SOCKET_INUSE;
+	return ret;
+}
+
+static inline void cs_socket_put(struct pcmcia_socket *skt)
+{
+	if (skt->state & SOCKET_INUSE) {
+		skt->state &= ~SOCKET_INUSE;
+		module_put(skt->owner);
+	}
+}
 
 #define CHECK_HANDLE(h) \
     (((h) == NULL) || ((h)->client_magic != CLIENT_MAGIC))
 
 #define CHECK_SOCKET(s) \
-    (((s) >= sockets) || (socket_table[s]->ss_entry == NULL))
+    (((s) >= sockets) || (socket_table[s]->ops == NULL))
 
-#define SOCKET(h) (socket_table[(h)->Socket])
+#define SOCKET(h) (h->Socket)
 #define CONFIG(h) (&SOCKET(h)->config[(h)->Function])
 
 #define CHECK_REGION(r) \
@@ -196,75 +118,67 @@ typedef struct socket_info_t {
     ((h)->event_handler((e), (p), &(h)->event_callback_args))
 
 /* In cardbus.c */
-int cb_alloc(socket_info_t *s);
-void cb_free(socket_info_t *s);
-int cb_config(socket_info_t *s);
-void cb_release(socket_info_t *s);
-void cb_enable(socket_info_t *s);
-void cb_disable(socket_info_t *s);
-void read_cb_mem(socket_info_t *s, u_char fn, int space,
-		 u_int addr, u_int len, void *ptr);
-void cb_release_cis_mem(socket_info_t *s);
+int cb_alloc(struct pcmcia_socket *s);
+void cb_free(struct pcmcia_socket *s);
+int read_cb_mem(struct pcmcia_socket *s, int space, u_int addr, u_int len, void *ptr);
 
 /* In cistpl.c */
-void read_cis_mem(socket_info_t *s, int attr,
-		  u_int addr, u_int len, void *ptr);
-void write_cis_mem(socket_info_t *s, int attr,
+int read_cis_mem(struct pcmcia_socket *s, int attr,
+		 u_int addr, u_int len, void *ptr);
+void write_cis_mem(struct pcmcia_socket *s, int attr,
 		   u_int addr, u_int len, void *ptr);
-void release_cis_mem(socket_info_t *s);
-int verify_cis_cache(socket_info_t *s);
-void preload_cis_cache(socket_info_t *s);
-int get_first_tuple(client_handle_t handle, tuple_t *tuple);
-int get_next_tuple(client_handle_t handle, tuple_t *tuple);
-int get_tuple_data(client_handle_t handle, tuple_t *tuple);
-int parse_tuple(client_handle_t handle, tuple_t *tuple, cisparse_t *parse);
-int validate_cis(client_handle_t handle, cisinfo_t *info);
-int replace_cis(client_handle_t handle, cisdump_t *cis);
-int read_tuple(client_handle_t handle, cisdata_t code, void *parse);
-
-/* In bulkmem.c */
-void retry_erase_list(struct erase_busy_t *list, u_int cause);
-int get_first_region(client_handle_t handle, region_info_t *rgn);
-int get_next_region(client_handle_t handle, region_info_t *rgn);
-int register_mtd(client_handle_t handle, mtd_reg_t *reg);
-int register_erase_queue(client_handle_t *handle, eraseq_hdr_t *header);
-int deregister_erase_queue(eraseq_handle_t eraseq);
-int check_erase_queue(eraseq_handle_t eraseq);
-int open_memory(client_handle_t *handle, open_mem_t *open);
-int close_memory(memory_handle_t handle);
-int read_memory(memory_handle_t handle, mem_op_t *req, caddr_t buf);
-int write_memory(memory_handle_t handle, mem_op_t *req, caddr_t buf);
-int copy_memory(memory_handle_t handle, copy_op_t *req);
+void release_cis_mem(struct pcmcia_socket *s);
+void destroy_cis_cache(struct pcmcia_socket *s);
+int verify_cis_cache(struct pcmcia_socket *s);
+int pccard_read_tuple(struct pcmcia_socket *s, unsigned int function, cisdata_t code, void *parse);
 
 /* In rsrc_mgr */
-void validate_mem(int (*is_valid)(u_long), int (*do_cksum)(u_long),
-		  int force_low);
-int find_io_region(ioaddr_t *base, ioaddr_t num, ioaddr_t align,
-		   char *name);
-int find_mem_region(u_long *base, u_long num, u_long align,
-		    int force_low, char *name);
-int try_irq(u_int Attributes, int irq, int specific);
-void undo_irq(u_int Attributes, int irq);
+void pcmcia_validate_mem(struct pcmcia_socket *s);
+struct resource *find_io_region(unsigned long base, int num, unsigned long align,
+		   struct pcmcia_socket *s);
+int adjust_io_region(struct resource *res, unsigned long r_start,
+		     unsigned long r_end, struct pcmcia_socket *s);
+struct resource *find_mem_region(u_long base, u_long num, u_long align,
+		    int low, struct pcmcia_socket *s);
 int adjust_resource_info(client_handle_t handle, adjust_t *adj);
-void release_resource_db(void);
-int proc_read_io(char *buf, char **start, off_t pos,
-		 int count, int *eof, void *data);
-int proc_read_mem(char *buf, char **start, off_t pos,
-		  int count, int *eof, void *data);
+void release_resource_db(struct pcmcia_socket *s);
 
-#define MAX_SOCK 8
-extern socket_t sockets;
-extern socket_info_t *socket_table[MAX_SOCK];
+/* In socket_sysfs.c */
+extern struct class_interface pccard_sysfs_interface;
 
-#ifdef CONFIG_PROC_FS
-extern struct proc_dir_entry *proc_pccard;
-#endif
+/* In cs.c */
+extern struct rw_semaphore pcmcia_socket_list_rwsem;
+extern struct list_head pcmcia_socket_list;
+int pcmcia_get_window(struct pcmcia_socket *s, window_handle_t *handle, int idx, win_req_t *req);
+int pccard_get_configuration_info(struct pcmcia_socket *s, unsigned int function, config_info_t *config);
+int pccard_reset_card(struct pcmcia_socket *skt);
+int pccard_get_status(struct pcmcia_socket *s, unsigned int function, cs_status_t *status);
+int pccard_access_configuration_register(struct pcmcia_socket *s, unsigned int function, conf_reg_t *reg);
 
-#ifdef PCMCIA_DEBUG
-extern int pc_debug;
-#define DEBUG(n, args...) do { if (pc_debug>(n)) printk(KERN_DEBUG args); } while (0)
+
+struct pcmcia_callback{
+	struct module	*owner;
+	int		(*event) (struct pcmcia_socket *s, event_t event, int priority);
+};
+
+int pccard_register_pcmcia(struct pcmcia_socket *s, struct pcmcia_callback *c);
+
+#define cs_socket_name(skt)	((skt)->dev.class_id)
+
+#ifdef DEBUG
+extern int cs_debug_level(int);
+
+#define cs_dbg(skt, lvl, fmt, arg...) do {		\
+	if (cs_debug_level(lvl))			\
+		printk(KERN_DEBUG "cs: %s: " fmt, 	\
+		       cs_socket_name(skt) , ## arg);	\
+} while (0)
+
 #else
-#define DEBUG(n, args...) do { } while (0)
+#define cs_dbg(skt, lvl, fmt, arg...) do { } while (0)
 #endif
+
+#define cs_err(skt, fmt, arg...) \
+	printk(KERN_ERR "cs: %s: " fmt, (skt)->dev.class_id , ## arg)
 
 #endif /* _LINUX_CS_INTERNAL_H */

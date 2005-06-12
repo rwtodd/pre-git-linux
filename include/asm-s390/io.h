@@ -19,7 +19,7 @@
 #define IO_SPACE_LIMIT 0xffffffff
 
 #define __io_virt(x)            ((void *)(PAGE_OFFSET | (unsigned long)(x)))
-#define __io_phys(x)            ((unsigned long)(x) & ~PAGE_OFFSET)
+
 /*
  * Change virtual addresses to physical addresses and vv.
  * These are pretty trivial
@@ -27,11 +27,18 @@
 extern inline unsigned long virt_to_phys(volatile void * address)
 {
 	unsigned long real_address;
-	__asm__ ("   lra    %0,0(0,%1)\n"
+	__asm__ (
+#ifndef __s390x__
+		 "   lra    %0,0(%1)\n"
                  "   jz     0f\n"
                  "   sr     %0,%0\n"
+#else /* __s390x__ */
+		 "   lrag   %0,0(%1)\n"
+                 "   jz     0f\n"
+                 "   slgr   %0,%0\n"
+#endif /* __s390x__ */
                  "0:"
-                 : "=a" (real_address) : "a" (address) );
+                 : "=a" (real_address) : "a" (address) : "cc" );
         return real_address;
 }
 
@@ -39,6 +46,11 @@ extern inline void * phys_to_virt(unsigned long address)
 {
         return __io_virt(address);
 }
+
+/*
+ * Change "struct page" to physical address.
+ */
+#define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
 
 extern void * __ioremap(unsigned long offset, unsigned long size, unsigned long flags);
 
@@ -75,6 +87,10 @@ extern void iounmap(void *addr);
 #define readw(addr) (*(volatile unsigned short *) __io_virt(addr))
 #define readl(addr) (*(volatile unsigned int *) __io_virt(addr))
 
+#define readb_relaxed(addr) readb(addr)
+#define readw_relaxed(addr) readw(addr)
+#define readl_relaxed(addr) readl(addr)
+
 #define writeb(b,addr) (*(volatile unsigned char *) __io_virt(addr) = (b))
 #define writew(b,addr) (*(volatile unsigned short *) __io_virt(addr) = (b))
 #define writel(b,addr) (*(volatile unsigned int *) __io_virt(addr) = (b))
@@ -88,6 +104,8 @@ extern void iounmap(void *addr);
 
 #define outb(x,addr) ((void) writeb(x,addr))
 #define outb_p(x,addr) outb(x,addr)
+
+#define mmiowb()
 
 #endif /* __KERNEL__ */
 

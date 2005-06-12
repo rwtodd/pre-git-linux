@@ -17,7 +17,7 @@
  *
  * 	This routine is called when a particular tty device is closed.
  *
- * int (*write)(struct tty_struct * tty, int from_user,
+ * int (*write)(struct tty_struct * tty,
  * 		 const unsigned char *buf, int count);
  *
  * 	This routine is called by the kernel to write a series of
@@ -116,38 +116,15 @@
  */
 
 #include <linux/fs.h>
+#include <linux/list.h>
+#include <linux/cdev.h>
 
-struct tty_driver {
-	int	magic;		/* magic number for this structure */
-	const char	*driver_name;
-	const char	*name;
-	int	name_base;	/* offset of printed name */
-	short	major;		/* major device number */
-	short	minor_start;	/* start of minor device number*/
-	short	num;		/* number of devices */
-	short	type;		/* type of tty driver */
-	short	subtype;	/* subtype of tty driver */
-	struct termios init_termios; /* Initial termios */
-	int	flags;		/* tty driver flags */
-	int	*refcount;	/* for loadable tty drivers */
-	struct proc_dir_entry *proc_entry; /* /proc fs entry */
-	struct tty_driver *other; /* only used for the PTY driver */
+struct tty_struct;
 
-	/*
-	 * Pointer to the tty data structures
-	 */
-	struct tty_struct **table;
-	struct termios **termios;
-	struct termios **termios_locked;
-	void *driver_state;	/* only used for the PTY driver */
-	
-	/*
-	 * Interface routines from the upper tty layer to the tty
-	 * driver.
-	 */
+struct tty_operations {
 	int  (*open)(struct tty_struct * tty, struct file * filp);
 	void (*close)(struct tty_struct * tty, struct file * filp);
-	int  (*write)(struct tty_struct * tty, int from_user,
+	int  (*write)(struct tty_struct * tty,
 		      const unsigned char *buf, int count);
 	void (*put_char)(struct tty_struct *tty, unsigned char ch);
 	void (*flush_chars)(struct tty_struct *tty);
@@ -168,15 +145,82 @@ struct tty_driver {
 	void (*send_xchar)(struct tty_struct *tty, char ch);
 	int (*read_proc)(char *page, char **start, off_t off,
 			  int count, int *eof, void *data);
-	int (*write_proc)(struct file *file, const char *buffer,
+	int (*write_proc)(struct file *file, const char __user *buffer,
 			  unsigned long count, void *data);
+	int (*tiocmget)(struct tty_struct *tty, struct file *file);
+	int (*tiocmset)(struct tty_struct *tty, struct file *file,
+			unsigned int set, unsigned int clear);
+};
+
+struct tty_driver {
+	int	magic;		/* magic number for this structure */
+	struct cdev cdev;
+	struct module	*owner;
+	const char	*driver_name;
+	const char	*devfs_name;
+	const char	*name;
+	int	name_base;	/* offset of printed name */
+	int	major;		/* major device number */
+	int	minor_start;	/* start of minor device number */
+	int	minor_num;	/* number of *possible* devices */
+	int	num;		/* number of devices allocated */
+	short	type;		/* type of tty driver */
+	short	subtype;	/* subtype of tty driver */
+	struct termios init_termios; /* Initial termios */
+	int	flags;		/* tty driver flags */
+	int	refcount;	/* for loadable tty drivers */
+	struct proc_dir_entry *proc_entry; /* /proc fs entry */
+	struct tty_driver *other; /* only used for the PTY driver */
 
 	/*
-	 * linked list pointers
+	 * Pointer to the tty data structures
 	 */
-	struct tty_driver *next;
-	struct tty_driver *prev;
+	struct tty_struct **ttys;
+	struct termios **termios;
+	struct termios **termios_locked;
+	void *driver_state;	/* only used for the PTY driver */
+	
+	/*
+	 * Interface routines from the upper tty layer to the tty
+	 * driver.	Will be replaced with struct tty_operations.
+	 */
+	int  (*open)(struct tty_struct * tty, struct file * filp);
+	void (*close)(struct tty_struct * tty, struct file * filp);
+	int  (*write)(struct tty_struct * tty,
+		      const unsigned char *buf, int count);
+	void (*put_char)(struct tty_struct *tty, unsigned char ch);
+	void (*flush_chars)(struct tty_struct *tty);
+	int  (*write_room)(struct tty_struct *tty);
+	int  (*chars_in_buffer)(struct tty_struct *tty);
+	int  (*ioctl)(struct tty_struct *tty, struct file * file,
+		    unsigned int cmd, unsigned long arg);
+	void (*set_termios)(struct tty_struct *tty, struct termios * old);
+	void (*throttle)(struct tty_struct * tty);
+	void (*unthrottle)(struct tty_struct * tty);
+	void (*stop)(struct tty_struct *tty);
+	void (*start)(struct tty_struct *tty);
+	void (*hangup)(struct tty_struct *tty);
+	void (*break_ctl)(struct tty_struct *tty, int state);
+	void (*flush_buffer)(struct tty_struct *tty);
+	void (*set_ldisc)(struct tty_struct *tty);
+	void (*wait_until_sent)(struct tty_struct *tty, int timeout);
+	void (*send_xchar)(struct tty_struct *tty, char ch);
+	int (*read_proc)(char *page, char **start, off_t off,
+			  int count, int *eof, void *data);
+	int (*write_proc)(struct file *file, const char __user *buffer,
+			  unsigned long count, void *data);
+	int (*tiocmget)(struct tty_struct *tty, struct file *file);
+	int (*tiocmset)(struct tty_struct *tty, struct file *file,
+			unsigned int set, unsigned int clear);
+
+	struct list_head tty_drivers;
 };
+
+extern struct list_head tty_drivers;
+
+struct tty_driver *alloc_tty_driver(int lines);
+void put_tty_driver(struct tty_driver *driver);
+void tty_set_operations(struct tty_driver *driver, struct tty_operations *op);
 
 /* tty driver magic number */
 #define TTY_DRIVER_MAGIC		0x5402
@@ -201,11 +245,15 @@ struct tty_driver {
  * TTY_DRIVER_NO_DEVFS --- if set, do not create devfs entries. This
  *	is only used by tty_register_driver().
  *
+ * TTY_DRIVER_DEVPTS_MEM -- don't use the standard arrays, instead
+ *	use dynamic memory keyed through the devpts filesystem.  This
+ *	is only applicable to the pty driver.
  */
 #define TTY_DRIVER_INSTALLED		0x0001
 #define TTY_DRIVER_RESET_TERMIOS	0x0002
 #define TTY_DRIVER_REAL_RAW		0x0004
 #define TTY_DRIVER_NO_DEVFS		0x0008
+#define TTY_DRIVER_DEVPTS_MEM		0x0010
 
 /* tty driver types */
 #define TTY_DRIVER_TYPE_SYSTEM		0x0001
@@ -227,6 +275,5 @@ struct tty_driver {
 
 /* serial subtype definitions */
 #define SERIAL_TYPE_NORMAL	1
-#define SERIAL_TYPE_CALLOUT	2
 
 #endif /* #ifdef _LINUX_TTY_DRIVER_H */

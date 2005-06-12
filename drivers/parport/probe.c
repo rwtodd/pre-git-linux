@@ -5,8 +5,10 @@
  *             Philip Blundell <Philip.Blundell@pobox.com>
  */
 
+#include <linux/module.h>
 #include <linux/parport.h>
 #include <linux/ctype.h>
+#include <linux/string.h>
 #include <asm/uaccess.h>
 
 static struct {
@@ -62,7 +64,7 @@ static void parse_data(struct parport *port, int device, char *str)
 	struct parport_device_info *info = &port->probe_info[device + 1];
 
 	if (!txt) {
-		printk("%s probe: memory squeeze\n", port->name);
+		printk(KERN_WARNING "%s probe: memory squeeze\n", port->name);
 		return;
 	}
 	strcpy(txt, str);
@@ -75,8 +77,9 @@ static void parse_data(struct parport *port, int device, char *str)
 			char *u;
 			*(sep++) = 0;
 			/* Get rid of trailing blanks */
-			u = strchr (sep, ' ');
-			if (u) *u = '\0';
+			u = sep + strlen (sep) - 1;
+			while (u >= p && *u == ' ')
+				*u-- = '\0';
 			u = p;
 			while (*u) {
 				*u = toupper(*u);
@@ -161,8 +164,16 @@ ssize_t parport_device_id (int devnum, char *buffer, size_t len)
 		if (retval != 2) goto end_id;
 
 		idlen = (length[0] << 8) + length[1] - 2;
-		if (idlen < len)
+		/*
+		 * Check if the caller-allocated buffer is large enough
+		 * otherwise bail out or there will be an at least off by one.
+		 */
+		if (idlen + 1 < len)
 			len = idlen;
+		else {
+			retval = -EINVAL;
+			goto out;
+		}
 		retval = parport_read (dev->port, buffer, len);
 
 		if (retval != len)
@@ -202,11 +213,12 @@ ssize_t parport_device_id (int devnum, char *buffer, size_t len)
 		buffer[len] = '\0';
 		parport_negotiate (dev->port, IEEE1284_MODE_COMPAT);
 	}
-	parport_release (dev);
 
 	if (retval > 2)
 		parse_data (dev->port, dev->daisy, buffer);
 
+out:
+	parport_release (dev);
 	parport_close (dev);
 	return retval;
 }

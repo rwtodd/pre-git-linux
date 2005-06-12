@@ -7,7 +7,7 @@
 *******************************************************************************
       
       This software may be used and distributed according to the terms
-      of the GNU Public License (GPL), incorporated herein by reference.
+      of the GNU General Public License (GPL), incorporated herein by reference.
       Drivers based on this skeleton fall under the GPL and must retain
       the authorship (implicit copyright) notice.
 
@@ -67,8 +67,6 @@
 #define IF_IADBG_DESC           0x01000000        //
 #define IF_IADBG_SUNI_STAT      0x02000000        // suni statistics
 #define IF_IADBG_RESET          0x04000000        
-
-extern	unsigned int	IADebugFlag;
 
 #define IF_IADBG(f) if (IADebugFlag & (f))
 
@@ -141,7 +139,7 @@ typedef struct {
         int len;
         u32 maddr;
         int status;
-        void *buf;
+        void __user *buf;
 } IA_CMDBUF, *PIA_CMDBUF;
 
 /* cmds */
@@ -200,7 +198,13 @@ struct cpcs_trailer
 	u_short length;  
 	u_int	crc32;  
 };  
-  
+
+struct cpcs_trailer_desc
+{
+	struct cpcs_trailer *cpcs;
+	dma_addr_t dma_addr;
+};
+
 struct ia_vcc 
 { 
 	int rxing;	 
@@ -272,6 +276,7 @@ struct ext_vc
 #define DLE_ENTRIES 256  
 #define DMA_INT_ENABLE 0x0002	/* use for both Tx and Rx */  
 #define TX_DLE_PSI 0x0001  
+#define DLE_TOTAL_SIZE (sizeof(struct dle)*DLE_ENTRIES)
   
 /* Descriptor List Entries (DLE) */  
 struct dle 
@@ -801,7 +806,6 @@ typedef struct {
 } r_vc_abr_entry;   
 
 #define MRM 3
-#define MIN(x,y)	((x) < (y)) ? (x) : (y)
 
 typedef struct srv_cls_param {
         u32 class_type;         /* CBR/VBR/ABR/UBR; use the enum above */
@@ -992,35 +996,30 @@ typedef struct _SUNI_STATS_
 
 typedef struct iadev_t {  
 	/*-----base pointers into (i)chipSAR+ address space */   
-	u32 *phy;			/* base pointer into phy(SUNI) */  
-	u32 *dma;			/* base pointer into DMA control   
+	u32 __iomem *phy;		/* base pointer into phy(SUNI) */  
+	u32 __iomem *dma;		/* base pointer into DMA control   
 						registers */  
-	u32 *reg;			/* base pointer to SAR registers  
+	u32 __iomem *reg;		/* base pointer to SAR registers  
 					   - Bus Interface Control Regs */  
-	u32 *seg_reg;			/* base pointer to segmentation engine  
+	u32 __iomem *seg_reg;		/* base pointer to segmentation engine  
 						internal registers */  
-	u32 *reass_reg;			/* base pointer to reassemble engine  
+	u32 __iomem *reass_reg;		/* base pointer to reassemble engine  
 						internal registers */  
-	u32 *ram;			/* base pointer to SAR RAM */  
-	unsigned int seg_ram;  
-	unsigned int reass_ram;  
+	u32 __iomem *ram;		/* base pointer to SAR RAM */  
+	void __iomem *seg_ram;  
+	void __iomem *reass_ram;  
 	struct dle_q tx_dle_q;  
 	struct free_desc_q *tx_free_desc_qhead;  
 	struct sk_buff_head tx_dma_q, tx_backlog;  
         spinlock_t            tx_lock;
         IARTN_Q               tx_return_q;
         u32                   close_pending;
-#if LINUX_VERSION_CODE >= 0x20303
         wait_queue_head_t    close_wait;
         wait_queue_head_t    timeout_wait;
-#else
-        struct wait_queue     *close_wait;
-        struct wait_queue     *timeout_wait;
-#endif
-	caddr_t *tx_buf;  
+	struct cpcs_trailer_desc *tx_buf;
         u16 num_tx_desc, tx_buf_sz, rate_limit;
         u32 tx_cell_cnt, tx_pkt_cnt;
-        u32 MAIN_VC_TABLE_ADDR, EXT_VC_TABLE_ADDR, ABR_SCHED_TABLE_ADDR;
+        void __iomem *MAIN_VC_TABLE_ADDR, *EXT_VC_TABLE_ADDR, *ABR_SCHED_TABLE_ADDR;
 	struct dle_q rx_dle_q;  
 	struct free_desc_q *rx_free_desc_qhead;  
 	struct sk_buff_head rx_dma_q;  
@@ -1028,13 +1027,13 @@ typedef struct iadev_t {
 	struct atm_vcc **rx_open;	/* list of all open VCs */  
         u16 num_rx_desc, rx_buf_sz, rxing;
         u32 rx_pkt_ram, rx_tmp_cnt, rx_tmp_jif;
-        u32 RX_DESC_BASE_ADDR;
+        void __iomem *RX_DESC_BASE_ADDR;
         u32 drop_rxpkt, drop_rxcell, rx_cell_cnt, rx_pkt_cnt;
 	struct atm_dev *next_board;	/* other iphase devices */  
 	struct pci_dev *pci;  
 	int mem;  
-	unsigned long base_diff;	/* virtual - real base address */  
-	unsigned int real_base, base;	/* real and virtual base address */  
+	unsigned int real_base;	/* real and virtual base address */  
+	void __iomem *base;
 	unsigned int pci_map_size;	/*pci map size of board */  
 	unsigned char irq;  
 	unsigned char bus;  
@@ -1063,7 +1062,9 @@ typedef struct iadev_t {
         struct desc_tbl_t *desc_tbl;
         u_short host_tcq_wr;
         struct testTable_t **testTable;
-} IADEV;  
+	dma_addr_t tx_dle_dma;
+	dma_addr_t rx_dle_dma;
+} IADEV;
   
   
 #define INPH_IA_DEV(d) ((IADEV *) (d)->dev_data)  
@@ -1125,8 +1126,6 @@ typedef struct {
 #define FE_DS3_PHY      0x0080          /* DS3 */
 #define FE_E3_PHY       0x0090          /* E3 */
 		     
-extern void ia_mb25_init (IADEV *);
-
 /*********************** SUNI_PM7345 PHY DEFINE HERE *********************/
 typedef struct _suni_pm7345_t
 {
@@ -1324,8 +1323,6 @@ typedef struct _suni_pm7345_t
 #define SUNI_DS3_COCAI  0x04            /* Corr. HCS errors detected    */
 #define SUNI_DS3_FOVRI  0x02            /* FIFO overrun                 */
 #define SUNI_DS3_FUDRI  0x01            /* FIFO underrun                */
-
-extern void ia_suni_pm7345_init (IADEV *iadev);
 
 ///////////////////SUNI_PM7345 PHY DEFINE END /////////////////////////////
 

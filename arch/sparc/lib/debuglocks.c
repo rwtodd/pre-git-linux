@@ -1,4 +1,4 @@
-/* $Id: debuglocks.c,v 1.10 1999/09/10 10:40:36 davem Exp $
+/* $Id: debuglocks.c,v 1.11 2001/09/20 00:35:31 davem Exp $
  * debuglocks.c: Debugging versions of SMP locking primitives.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -12,8 +12,7 @@
 #include <asm/psr.h>
 #include <asm/system.h>
 
-/* To enable this code, just define SPIN_LOCK_DEBUG in asm/spinlock.h */
-#ifdef SPIN_LOCK_DEBUG
+#ifdef CONFIG_SMP
 
 /* Some notes on how these debugging routines work.  When a lock is acquired
  * an extra debugging member lock->owner_pc is set to the caller of the lock
@@ -29,11 +28,9 @@
 static inline void show(char *str, spinlock_t *lock, unsigned long caller)
 {
 	int cpu = smp_processor_id();
-	extern spinlock_t console_lock;
 
-	if (lock != &console_lock)
-		printk("%s(%p) CPU#%d stuck at %08lx, owner PC(%08lx):CPU(%lx)\n",str,
-			lock, cpu, caller, lock->owner_pc & ~3, lock->owner_pc & 3);
+	printk("%s(%p) CPU#%d stuck at %08lx, owner PC(%08lx):CPU(%lx)\n",str,
+		lock, cpu, caller, lock->owner_pc & ~3, lock->owner_pc & 3);
 }
 
 static inline void show_read(char *str, rwlock_t *lock, unsigned long caller)
@@ -202,4 +199,4 @@ void _do_write_unlock(rwlock_t *rw)
 	rw->lock = 0;
 }
 
-#endif /* SPIN_LOCK_DEBUG */
+#endif /* SMP */

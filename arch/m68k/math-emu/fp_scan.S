@@ -17,7 +17,7 @@
  *    written permission.
  *
  * ALTERNATIVELY, this product may be distributed under the terms of
- * the GNU Public License, in which case the provisions of the GPL are
+ * the GNU General Public License, in which case the provisions of the GPL are
  * required INSTEAD OF the above restrictions.  (This clause is
  * necessary due to a potential bad interaction between the GPL and
  * the restrictions contained in a BSD-style copyright.)
@@ -74,13 +74,13 @@ fp_scan:
 | first two instruction words are kept in %d2
 	getuser.l (%a0)+,%d2,fp_err_ua1,%a0
 	fp_put_pc %a0
-fp_decode_cond:				| seperate conditional instr
+fp_decode_cond:				| separate conditional instr
 	fp_decode_cond_instr_type
 
 	.long	fp_decode_move, fp_fscc
 	.long	fp_fbccw, fp_fbccl
 
-fp_decode_move:				| seperate move instr
+fp_decode_move:				| separate move instr
 	fp_decode_move_instr_type
 
 	.long	fp_fgen_fp, fp_ill
@@ -133,10 +133,10 @@ fp_getsource:
 	| decode addressing mode for source
 	fp_decode_addr_mode
 
-	.long 	fp_data, fp_ill
-	.long 	fp_indirect, fp_postinc
-	.long 	fp_predecr, fp_disp16
-	.long 	fp_extmode0, fp_extmode1
+	.long	fp_data, fp_ill
+	.long	fp_indirect, fp_postinc
+	.long	fp_predecr, fp_disp16
+	.long	fp_extmode0, fp_extmode1
 
 	| addressing mode: data register direct
 fp_data:

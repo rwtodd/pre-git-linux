@@ -5,9 +5,19 @@
  *               highlevel or lowlevel code
  *
  * Copyright (C) 1999, 2000 Andreas E. Bombe
+ *                     2002 Manfred Weihs <weihs@ict.tuwien.ac.at>
  *
  * This code is licensed under the GPL.  See the file COPYING in the root
  * directory of the kernel sources for details.
+ *
+ *
+ * Contributions:
+ *
+ * Manfred Weihs <weihs@ict.tuwien.ac.at>
+ *        loopback functionality in hpsb_send_packet
+ *        allow highlevel drivers to disable automatic response generation
+ *              and to generate responses themselves (deferred)
+ *
  */
 
 #include <linux/config.h>
@@ -17,7 +27,13 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <asm/bitops.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/bitops.h>
+#include <linux/kdev_t.h>
+#include <linux/skbuff.h>
+#include <linux/suspend.h>
+
 #include <asm/byteorder.h>
 #include <asm/semaphore.h>
 
@@ -28,29 +44,64 @@
 #include "highlevel.h"
 #include "ieee1394_transactions.h"
 #include "csr.h"
-#include "guid.h"
+#include "nodemgr.h"
+#include "dma.h"
+#include "iso.h"
+#include "config_roms.h"
 
+/*
+ * Disable the nodemgr detection and config rom reading functionality.
+ */
+static int disable_nodemgr = 0;
+module_param(disable_nodemgr, int, 0444);
+MODULE_PARM_DESC(disable_nodemgr, "Disable nodemgr functionality.");
 
-atomic_t hpsb_generation = ATOMIC_INIT(0);
+/* We are GPL, so treat us special */
+MODULE_LICENSE("GPL");
 
+/* Some globals used */
+const char *hpsb_speedto_str[] = { "S100", "S200", "S400", "S800", "S1600", "S3200" };
 
+#ifdef CONFIG_IEEE1394_VERBOSEDEBUG
 static void dump_packet(const char *text, quadlet_t *data, int size)
 {
-        int i;
+	int i;
 
-        size /= 4;
-        size = (size > 4 ? 4 : size);
+	size /= 4;
+	size = (size > 4 ? 4 : size);
 
-        printk(KERN_DEBUG "ieee1394: %s", text);
-        for (i = 0; i < size; i++) {
-                printk(" %8.8x", data[i]);
-        }
-        printk("\n");
+	printk(KERN_DEBUG "ieee1394: %s", text);
+	for (i = 0; i < size; i++)
+		printk(" %08x", data[i]);
+	printk("\n");
 }
+#else
+#define dump_packet(x,y,z)
+#endif
+
+static void queue_packet_complete(struct hpsb_packet *packet);
 
 
 /**
- * alloc_hpsb_packet - allocate new packet structure
+ * hpsb_set_packet_complete_task - set the task that runs when a packet
+ * completes. You cannot call this more than once on a single packet
+ * before it is sent.
+ *
+ * @packet: the packet whose completion we want the task added to
+ * @routine: function to call
+ * @data: data (if any) to pass to the above function
+ */
+void hpsb_set_packet_complete_task(struct hpsb_packet *packet,
+				   void (*routine)(void *), void *data)
+{
+	WARN_ON(packet->complete_routine != NULL);
+	packet->complete_routine = routine;
+	packet->complete_data = data;
+	return;
+}
+
+/**
+ * hpsb_alloc_packet - allocate new packet structure
  * @data_size: size of the data block to be allocated
  *
  * This function allocates, initializes and returns a new &struct hpsb_packet.
@@ -69,72 +120,56 @@ static void dump_packet(const char *text, quadlet_t *data, int size)
  * Return value: A pointer to a &struct hpsb_packet or NULL on allocation
  * failure.
  */
-struct hpsb_packet *alloc_hpsb_packet(size_t data_size)
+struct hpsb_packet *hpsb_alloc_packet(size_t data_size)
 {
-        struct hpsb_packet *packet = NULL;
-        void *header = NULL, *data = NULL;
-        int kmflags = in_interrupt() ? GFP_ATOMIC : GFP_KERNEL;
+	struct hpsb_packet *packet = NULL;
+	struct sk_buff *skb;
 
-        packet = kmalloc(sizeof(struct hpsb_packet), kmflags);
-        header = kmalloc(5 * 4, kmflags);
-        if (header == NULL || packet == NULL) {
-                kfree(header);
-                kfree(packet);
-                return NULL;
-        }
+	data_size = ((data_size + 3) & ~3);
 
-        memset(packet, 0, sizeof(struct hpsb_packet));
-        packet->header = header;
+	skb = alloc_skb(data_size + sizeof(*packet), GFP_ATOMIC);
+	if (skb == NULL)
+		return NULL;
 
-        if (data_size) {
-                data = kmalloc(data_size + 8, kmflags);
-                if (data == NULL) {
-                        kfree(header);
-                        kfree(packet);
-                        return NULL;
-                }
+	memset(skb->data, 0, data_size + sizeof(*packet));
 
-                packet->data = data;
-                packet->data_size = data_size;
-        }
+	packet = (struct hpsb_packet *)skb->data;
+	packet->skb = skb;
 
-        INIT_LIST_HEAD(&packet->list);
-        sema_init(&packet->state_change, 0);
-        packet->state = unused;
-        packet->generation = get_hpsb_generation();
-        packet->data_be = 1;
+	packet->header = packet->embedded_header;
+	packet->state = hpsb_unused;
+	packet->generation = -1;
+	INIT_LIST_HEAD(&packet->driver_list);
+	atomic_set(&packet->refcnt, 1);
 
-        return packet;
+	if (data_size) {
+		packet->data = (quadlet_t *)(skb->data + sizeof(*packet));
+		packet->data_size = data_size;
+	}
+
+	return packet;
 }
 
 
 /**
- * free_hpsb_packet - free packet and data associated with it
+ * hpsb_free_packet - free packet and data associated with it
  * @packet: packet to free (is NULL safe)
  *
- * This function will free packet->data, packet->header and finally the packet
- * itself.
+ * This function will free packet->data and finally the packet itself.
  */
-void free_hpsb_packet(struct hpsb_packet *packet)
+void hpsb_free_packet(struct hpsb_packet *packet)
 {
-        if (packet == NULL) {
-                return;
-        }
-
-        kfree(packet->data);
-        kfree(packet->header);
-        kfree(packet);
+	if (packet && atomic_dec_and_test(&packet->refcnt)) {
+		BUG_ON(!list_empty(&packet->driver_list));
+		kfree_skb(packet->skb);
+	}
 }
 
 
-int hpsb_reset_bus(struct hpsb_host *host)
+int hpsb_reset_bus(struct hpsb_host *host, int type)
 {
-        if (!host->initialized) {
-                return 1;
-        }
-
-        if (!hpsb_bus_reset(host)) {
-                host->template->devctl(host, RESET_BUS, 0);
+        if (!host->in_bus_reset) {
+                host->driver->devctl(host, RESET_BUS, type);
                 return 0;
         } else {
                 return 1;
@@ -145,15 +180,18 @@ int hpsb_reset_bus(struct hpsb_host *host)
 int hpsb_bus_reset(struct hpsb_host *host)
 {
         if (host->in_bus_reset) {
-                HPSB_NOTICE(__FUNCTION__ 
-                            " called while bus reset already in progress");
+                HPSB_NOTICE("%s called while bus reset already in progress",
+			    __FUNCTION__);
                 return 1;
         }
 
         abort_requests(host);
         host->in_bus_reset = 1;
         host->irm_id = -1;
+	host->is_irm = 0;
         host->busmgr_id = -1;
+	host->is_busmgr = 0;
+	host->is_cycmst = 0;
         host->node_count = 0;
         host->selfid_count = 0;
 
@@ -165,32 +203,36 @@ int hpsb_bus_reset(struct hpsb_host *host)
  * Verify num_of_selfids SelfIDs and return number of nodes.  Return zero in
  * case verification failed.
  */
-static int check_selfids(struct hpsb_host *host, unsigned int num_of_selfids)
+static int check_selfids(struct hpsb_host *host)
 {
         int nodeid = -1;
-        int rest_of_selfids = num_of_selfids;
+        int rest_of_selfids = host->selfid_count;
         struct selfid *sid = (struct selfid *)host->topology_map;
         struct ext_selfid *esid;
         int esid_seq = 23;
+
+	host->nodes_active = 0;
 
         while (rest_of_selfids--) {
                 if (!sid->extended) {
                         nodeid++;
                         esid_seq = 0;
-                        
+
                         if (sid->phy_id != nodeid) {
                                 HPSB_INFO("SelfIDs failed monotony check with "
                                           "%d", sid->phy_id);
                                 return 0;
                         }
-                        
-                        if (sid->contender && sid->link_active) {
-                                host->irm_id = LOCAL_BUS | sid->phy_id;
-                        }
+
+			if (sid->link_active) {
+				host->nodes_active++;
+				if (sid->contender)
+					host->irm_id = LOCAL_BUS | sid->phy_id;
+			}
                 } else {
                         esid = (struct ext_selfid *)sid;
 
-                        if ((esid->phy_id != nodeid) 
+                        if ((esid->phy_id != nodeid)
                             || (esid->seq_nr != esid_seq)) {
                                 HPSB_INFO("SelfIDs failed monotony check with "
                                           "%d/%d", esid->phy_id, esid->seq_nr);
@@ -200,33 +242,34 @@ static int check_selfids(struct hpsb_host *host, unsigned int num_of_selfids)
                 }
                 sid++;
         }
-        
+
         esid = (struct ext_selfid *)(sid - 1);
         while (esid->extended) {
                 if ((esid->porta == 0x2) || (esid->portb == 0x2)
                     || (esid->portc == 0x2) || (esid->portd == 0x2)
                     || (esid->porte == 0x2) || (esid->portf == 0x2)
                     || (esid->portg == 0x2) || (esid->porth == 0x2)) {
-                                HPSB_INFO("SelfIDs failed root check on "
-                                          "extended SelfID");
-                                return 0;
+			HPSB_INFO("SelfIDs failed root check on "
+				  "extended SelfID");
+			return 0;
                 }
                 esid--;
         }
 
         sid = (struct selfid *)esid;
         if ((sid->port0 == 0x2) || (sid->port1 == 0x2) || (sid->port2 == 0x2)) {
-                        HPSB_INFO("SelfIDs failed root check");
-                        return 0;
+		HPSB_INFO("SelfIDs failed root check");
+		return 0;
         }
 
-        return nodeid + 1;
+	host->node_count = nodeid + 1;
+        return 1;
 }
 
 static void build_speed_map(struct hpsb_host *host, int nodecount)
 {
-        char speedcap[nodecount];
-        char cldcnt[nodecount];
+	u8 speedcap[nodecount];
+	u8 cldcnt[nodecount];
         u8 *map = host->speed_map;
         struct selfid *sid;
         struct ext_selfid *esid;
@@ -234,7 +277,7 @@ static void build_speed_map(struct hpsb_host *host, int nodecount)
 
         for (i = 0; i < (nodecount * 64); i += 64) {
                 for (j = 0; j < nodecount; j++) {
-                        map[i+j] = SPEED_400;
+                        map[i+j] = IEEE1394_SPEED_MAX;
                 }
         }
 
@@ -268,7 +311,7 @@ static void build_speed_map(struct hpsb_host *host, int nodecount)
         }
 
         /* set self mapping */
-        for (i = nodecount - 1; i; i--) {
+        for (i = 0; i < nodecount; i++) {
                 map[64*i + i] = speedcap[i];
         }
 
@@ -277,7 +320,7 @@ static void build_speed_map(struct hpsb_host *host, int nodecount)
         for (i = 1; i < nodecount; i++) {
                 for (j = cldcnt[i], n = i - 1; j > 0; j--) {
                         cldcnt[i] += cldcnt[n];
-                        speedcap[n] = MIN(speedcap[n], speedcap[i]);
+                        speedcap[n] = min(speedcap[n], speedcap[i]);
                         n -= cldcnt[n] + 1;
                 }
         }
@@ -286,94 +329,156 @@ static void build_speed_map(struct hpsb_host *host, int nodecount)
                 for (i = n - cldcnt[n]; i <= n; i++) {
                         for (j = 0; j < (n - cldcnt[n]); j++) {
                                 map[j*64 + i] = map[i*64 + j] =
-                                        MIN(map[i*64 + j], speedcap[n]);
+                                        min(map[i*64 + j], speedcap[n]);
                         }
                         for (j = n + 1; j < nodecount; j++) {
                                 map[j*64 + i] = map[i*64 + j] =
-                                        MIN(map[i*64 + j], speedcap[n]);
+                                        min(map[i*64 + j], speedcap[n]);
                         }
                 }
         }
 }
 
+
 void hpsb_selfid_received(struct hpsb_host *host, quadlet_t sid)
 {
         if (host->in_bus_reset) {
-                HPSB_DEBUG("including selfid 0x%x", sid);
+                HPSB_VERBOSE("Including SelfID 0x%x", sid);
                 host->topology_map[host->selfid_count++] = sid;
         } else {
-                /* FIXME - info on which host */
-                HPSB_NOTICE("spurious selfid packet (0x%8.8x) received", sid);
+                HPSB_NOTICE("Spurious SelfID packet (0x%08x) received from bus %d",
+			    sid, NODEID_TO_BUS(host->node_id));
         }
 }
 
 void hpsb_selfid_complete(struct hpsb_host *host, int phyid, int isroot)
 {
-        host->node_id = 0xffc0 | phyid;
-        host->in_bus_reset = 0;
+	if (!host->in_bus_reset)
+		HPSB_NOTICE("SelfID completion called outside of bus reset!");
+
+        host->node_id = LOCAL_BUS | phyid;
         host->is_root = isroot;
 
-        host->node_count = check_selfids(host, host->selfid_count);
-        if (!host->node_count) {
+        if (!check_selfids(host)) {
                 if (host->reset_retries++ < 20) {
                         /* selfid stage did not complete without error */
-                        HPSB_NOTICE("error in SelfID stage - resetting");
-                        hpsb_reset_bus(host);
+                        HPSB_NOTICE("Error in SelfID stage, resetting");
+			host->in_bus_reset = 0;
+			/* this should work from ohci1394 now... */
+                        hpsb_reset_bus(host, LONG_RESET);
                         return;
                 } else {
-                        HPSB_NOTICE("stopping out-of-control reset loop");
-                        HPSB_NOTICE("warning - topology map and speed map will "
-                                    "therefore not be valid");
+                        HPSB_NOTICE("Stopping out-of-control reset loop");
+                        HPSB_NOTICE("Warning - topology map and speed map will not be valid");
+			host->reset_retries = 0;
                 }
         } else {
+		host->reset_retries = 0;
                 build_speed_map(host, host->node_count);
         }
+
+	HPSB_VERBOSE("selfid_complete called with successful SelfID stage "
+		     "... irm_id: 0x%X node_id: 0x%X",host->irm_id,host->node_id);
 
         /* irm_id is kept up to date by check_selfids() */
         if (host->irm_id == host->node_id) {
                 host->is_irm = 1;
-                host->is_busmgr = 1;
-                host->busmgr_id = host->node_id;
-                host->csr.bus_manager_id = host->node_id;
+        } else {
+                host->is_busmgr = 0;
+                host->is_irm = 0;
         }
 
-        host->reset_retries = 0;
-        inc_hpsb_generation();
-        if (isroot) host->template->devctl(host, ACT_CYCLE_MASTER, 1);
+        if (isroot) {
+		host->driver->devctl(host, ACT_CYCLE_MASTER, 1);
+		host->is_cycmst = 1;
+	}
+	atomic_inc(&host->generation);
+	host->in_bus_reset = 0;
         highlevel_host_reset(host);
 }
 
 
-void hpsb_packet_sent(struct hpsb_host *host, struct hpsb_packet *packet, 
+void hpsb_packet_sent(struct hpsb_host *host, struct hpsb_packet *packet,
                       int ackcode)
 {
-        unsigned long flags;
+	unsigned long flags;
 
-        packet->ack_code = ackcode;
+	spin_lock_irqsave(&host->pending_packet_queue.lock, flags);
 
-        if (packet->no_waiter) {
-                /* must not have a tlabel allocated */
-                free_hpsb_packet(packet);
-                return;
-        }
+	packet->ack_code = ackcode;
 
-        if (ackcode != ACK_PENDING || !packet->expect_response) {
-                packet->state = complete;
-                up(&packet->state_change);
-                up(&packet->state_change);
-                run_task_queue(&packet->complete_tq);
-                return;
-        }
+	if (packet->no_waiter || packet->state == hpsb_complete) {
+		/* if packet->no_waiter, must not have a tlabel allocated */
+		spin_unlock_irqrestore(&host->pending_packet_queue.lock, flags);
+		hpsb_free_packet(packet);
+		return;
+	}
 
-        packet->state = pending;
-        packet->sendtime = jiffies;
+	atomic_dec(&packet->refcnt);	/* drop HC's reference */
+	/* here the packet must be on the host->pending_packet_queue */
 
-        spin_lock_irqsave(&host->pending_pkt_lock, flags);
-        list_add_tail(&packet->list, &host->pending_packets);
-        spin_unlock_irqrestore(&host->pending_pkt_lock, flags);
+	if (ackcode != ACK_PENDING || !packet->expect_response) {
+		packet->state = hpsb_complete;
+		__skb_unlink(packet->skb, &host->pending_packet_queue);
+		spin_unlock_irqrestore(&host->pending_packet_queue.lock, flags);
+		queue_packet_complete(packet);
+		return;
+	}
 
-        up(&packet->state_change);
-        queue_task(&host->timeout_tq, &tq_timer);
+	packet->state = hpsb_pending;
+	packet->sendtime = jiffies;
+
+	spin_unlock_irqrestore(&host->pending_packet_queue.lock, flags);
+
+	mod_timer(&host->timeout, jiffies + host->timeout_interval);
+}
+
+/**
+ * hpsb_send_phy_config - transmit a PHY configuration packet on the bus
+ * @host: host that PHY config packet gets sent through
+ * @rootid: root whose force_root bit should get set (-1 = don't set force_root)
+ * @gapcnt: gap count value to set (-1 = don't set gap count)
+ *
+ * This function sends a PHY config packet on the bus through the specified host.
+ *
+ * Return value: 0 for success or error number otherwise.
+ */
+int hpsb_send_phy_config(struct hpsb_host *host, int rootid, int gapcnt)
+{
+	struct hpsb_packet *packet;
+	int retval = 0;
+
+	if (rootid >= ALL_NODES || rootid < -1 || gapcnt > 0x3f || gapcnt < -1 ||
+	   (rootid == -1 && gapcnt == -1)) {
+		HPSB_DEBUG("Invalid Parameter: rootid = %d   gapcnt = %d",
+			   rootid, gapcnt);
+		return -EINVAL;
+	}
+
+	packet = hpsb_alloc_packet(0);
+	if (!packet)
+		return -ENOMEM;
+
+	packet->host = host;
+	packet->header_size = 8;
+	packet->data_size = 0;
+	packet->expect_response = 0;
+	packet->no_waiter = 0;
+	packet->type = hpsb_raw;
+	packet->header[0] = 0;
+	if (rootid != -1)
+		packet->header[0] |= rootid << 24 | 1 << 23;
+	if (gapcnt != -1)
+		packet->header[0] |= gapcnt << 16 | 1 << 22;
+
+	packet->header[1] = ~packet->header[0];
+
+	packet->generation = get_hpsb_generation(host);
+
+	retval = hpsb_send_packet_and_wait(packet);
+	hpsb_free_packet(packet);
+
+	return retval;
 }
 
 /**
@@ -381,30 +486,67 @@ void hpsb_packet_sent(struct hpsb_host *host, struct hpsb_packet *packet,
  * @packet: packet to send
  *
  * The packet is sent through the host specified in the packet->host field.
- * Before sending, the packet's transmit speed is automatically determined using
- * the local speed map when it is an async, non-broadcast packet.
+ * Before sending, the packet's transmit speed is automatically determined
+ * using the local speed map when it is an async, non-broadcast packet.
  *
  * Possibilities for failure are that host is either not initialized, in bus
  * reset, the packet's generation number doesn't match the current generation
  * number or the host reports a transmit error.
  *
- * Return value: False (0) on failure, true (1) otherwise.
+ * Return value: 0 on success, negative errno on failure.
  */
 int hpsb_send_packet(struct hpsb_packet *packet)
 {
-        struct hpsb_host *host = packet->host;
+	struct hpsb_host *host = packet->host;
 
-        if (!host->initialized || host->in_bus_reset 
-            || (packet->generation != get_hpsb_generation())) {
+        if (host->is_shutdown)
+		return -EINVAL;
+	if (host->in_bus_reset ||
+	    (packet->generation != get_hpsb_generation(host)))
+                return -EAGAIN;
+
+        packet->state = hpsb_queued;
+
+	/* This just seems silly to me */
+	WARN_ON(packet->no_waiter && packet->expect_response);
+
+	if (!packet->no_waiter || packet->expect_response) {
+		atomic_inc(&packet->refcnt);
+		skb_queue_tail(&host->pending_packet_queue, packet->skb);
+	}
+
+        if (packet->node_id == host->node_id) {
+		/* it is a local request, so handle it locally */
+
+                quadlet_t *data;
+                size_t size = packet->data_size + packet->header_size;
+
+                data = kmalloc(size, GFP_ATOMIC);
+                if (!data) {
+                        HPSB_ERR("unable to allocate memory for concatenating header and data");
+                        return -ENOMEM;
+                }
+
+                memcpy(data, packet->header, packet->header_size);
+
+                if (packet->data_size)
+			memcpy(((u8*)data) + packet->header_size, packet->data, packet->data_size);
+
+                dump_packet("send packet local:", packet->header,
+                            packet->header_size);
+
+                hpsb_packet_sent(host, packet, packet->expect_response ? ACK_PENDING : ACK_COMPLETE);
+                hpsb_packet_received(host, data, size, 0);
+
+                kfree(data);
+
                 return 0;
         }
 
-        packet->state = queued;
-
-        if (packet->type == async && packet->node_id != ALL_NODES) {
+        if (packet->type == hpsb_async && packet->node_id != ALL_NODES) {
                 packet->speed_code =
-                        host->speed_map[(host->node_id & NODE_MASK) * 64
-                                       + (packet->node_id & NODE_MASK)];
+                        host->speed_map[NODEID_TO_NODE(host->node_id) * 64
+                                       + NODEID_TO_NODE(packet->node_id)];
         }
 
 #ifdef CONFIG_IEEE1394_VERBOSEDEBUG
@@ -423,137 +565,211 @@ int hpsb_send_packet(struct hpsb_packet *packet)
         }
 #endif
 
-        return host->template->transmit_packet(host, packet);
+        return host->driver->transmit_packet(host, packet);
+}
+
+/* We could just use complete() directly as the packet complete
+ * callback, but this is more typesafe, in the sense that we get a
+ * compiler error if the prototype for complete() changes. */
+
+static void complete_packet(void *data)
+{
+	complete((struct completion *) data);
+}
+
+int hpsb_send_packet_and_wait(struct hpsb_packet *packet)
+{
+	struct completion done;
+	int retval;
+
+	init_completion(&done);
+	hpsb_set_packet_complete_task(packet, complete_packet, &done);
+	retval = hpsb_send_packet(packet);
+	if (retval == 0)
+		wait_for_completion(&done);
+
+	return retval;
 }
 
 static void send_packet_nocare(struct hpsb_packet *packet)
 {
-        if (!hpsb_send_packet(packet)) {
-                free_hpsb_packet(packet);
+        if (hpsb_send_packet(packet) < 0) {
+                hpsb_free_packet(packet);
         }
 }
 
 
-void handle_packet_response(struct hpsb_host *host, int tcode, quadlet_t *data,
-                            size_t size)
+static void handle_packet_response(struct hpsb_host *host, int tcode,
+				   quadlet_t *data, size_t size)
 {
         struct hpsb_packet *packet = NULL;
-        struct list_head *lh;
+	struct sk_buff *skb;
         int tcode_match = 0;
         int tlabel;
         unsigned long flags;
 
         tlabel = (data[0] >> 10) & 0x3f;
 
-        spin_lock_irqsave(&host->pending_pkt_lock, flags);
+	spin_lock_irqsave(&host->pending_packet_queue.lock, flags);
 
-        lh = host->pending_packets.next;
-        while (lh != &host->pending_packets) {
-                packet = list_entry(lh, struct hpsb_packet, list);
+	skb_queue_walk(&host->pending_packet_queue, skb) {
+		packet = (struct hpsb_packet *)skb->data;
                 if ((packet->tlabel == tlabel)
                     && (packet->node_id == (data[1] >> 16))){
                         break;
                 }
-                lh = lh->next;
+
+		packet = NULL;
         }
 
-        if (lh == &host->pending_packets) {
-                HPSB_INFO("unsolicited response packet received - np");
+	if (packet == NULL) {
+                HPSB_DEBUG("unsolicited response packet received - no tlabel match");
                 dump_packet("contents:", data, 16);
-                spin_unlock_irqrestore(&host->pending_pkt_lock, flags);
+		spin_unlock_irqrestore(&host->pending_packet_queue.lock, flags);
                 return;
         }
 
         switch (packet->tcode) {
         case TCODE_WRITEQ:
         case TCODE_WRITEB:
-                if (tcode == TCODE_WRITE_RESPONSE) tcode_match = 1;
+                if (tcode != TCODE_WRITE_RESPONSE)
+			break;
+		tcode_match = 1;
+		memcpy(packet->header, data, 12);
                 break;
         case TCODE_READQ:
-                if (tcode == TCODE_READQ_RESPONSE) tcode_match = 1;
+                if (tcode != TCODE_READQ_RESPONSE)
+			break;
+		tcode_match = 1;
+		memcpy(packet->header, data, 16);
                 break;
         case TCODE_READB:
-                if (tcode == TCODE_READB_RESPONSE) tcode_match = 1;
+                if (tcode != TCODE_READB_RESPONSE)
+			break;
+		tcode_match = 1;
+		BUG_ON(packet->skb->len - sizeof(*packet) < size - 16);
+		memcpy(packet->header, data, 16);
+		memcpy(packet->data, data + 4, size - 16);
                 break;
         case TCODE_LOCK_REQUEST:
-                if (tcode == TCODE_LOCK_RESPONSE) tcode_match = 1;
+                if (tcode != TCODE_LOCK_RESPONSE)
+			break;
+		tcode_match = 1;
+		size = min((size - 16), (size_t)8);
+		BUG_ON(packet->skb->len - sizeof(*packet) < size);
+		memcpy(packet->header, data, 16);
+		memcpy(packet->data, data + 4, size);
                 break;
         }
 
-        if (!tcode_match || (packet->tlabel != tlabel)
-            || (packet->node_id != (data[1] >> 16))) {
-                HPSB_INFO("unsolicited response packet received");
+        if (!tcode_match) {
+		spin_unlock_irqrestore(&host->pending_packet_queue.lock, flags);
+                HPSB_INFO("unsolicited response packet received - tcode mismatch");
                 dump_packet("contents:", data, 16);
-
-                spin_unlock_irqrestore(&host->pending_pkt_lock, flags);
                 return;
         }
 
-        list_del(&packet->list);
+	__skb_unlink(skb, skb->list);
 
-        spin_unlock_irqrestore(&host->pending_pkt_lock, flags);
+	if (packet->state == hpsb_queued) {
+		packet->sendtime = jiffies;
+		packet->ack_code = ACK_PENDING;
+	}
 
-        /* FIXME - update size fields? */
-        switch (tcode) {
-        case TCODE_WRITE_RESPONSE:
-                memcpy(packet->header, data, 12);
-                break;
-        case TCODE_READQ_RESPONSE:
-                memcpy(packet->header, data, 16);
-                break;
-        case TCODE_READB_RESPONSE:
-                memcpy(packet->header, data, 16);
-                memcpy(packet->data, data + 4, size - 16);
-                break;
-        case TCODE_LOCK_RESPONSE:
-                memcpy(packet->header, data, 16);
-                memcpy(packet->data, data + 4, (size - 16) > 8 ? 8 : size - 16);
-                break;
-        }
+	packet->state = hpsb_complete;
+	spin_unlock_irqrestore(&host->pending_packet_queue.lock, flags);
 
-        packet->state = complete;
-        up(&packet->state_change);
-        run_task_queue(&packet->complete_tq);
+	queue_packet_complete(packet);
 }
 
 
-struct hpsb_packet *create_reply_packet(struct hpsb_host *host, quadlet_t *data,
-                                        size_t dsize)
+static struct hpsb_packet *create_reply_packet(struct hpsb_host *host,
+					       quadlet_t *data, size_t dsize)
 {
         struct hpsb_packet *p;
 
-        dsize += (dsize % 4 ? 4 - (dsize % 4) : 0);
-
-        p = alloc_hpsb_packet(dsize);
-        if (p == NULL) {
+        p = hpsb_alloc_packet(dsize);
+        if (unlikely(p == NULL)) {
                 /* FIXME - send data_error response */
                 return NULL;
         }
 
-        p->type = async;
-        p->state = unused;
+        p->type = hpsb_async;
+        p->state = hpsb_unused;
         p->host = host;
         p->node_id = data[1] >> 16;
         p->tlabel = (data[0] >> 10) & 0x3f;
         p->no_waiter = 1;
 
-        if (dsize % 4) {
-                p->data[dsize / 4] = 0;
-        }
+	p->generation = get_hpsb_generation(host);
+
+	if (dsize % 4)
+		p->data[dsize / 4] = 0;
 
         return p;
+}
+
+#define PREP_ASYNC_HEAD_RCODE(tc) \
+	packet->tcode = tc; \
+	packet->header[0] = (packet->node_id << 16) | (packet->tlabel << 10) \
+		| (1 << 8) | (tc << 4); \
+	packet->header[1] = (packet->host->node_id << 16) | (rcode << 12); \
+	packet->header[2] = 0
+
+static void fill_async_readquad_resp(struct hpsb_packet *packet, int rcode,
+                              quadlet_t data)
+{
+	PREP_ASYNC_HEAD_RCODE(TCODE_READQ_RESPONSE);
+	packet->header[3] = data;
+	packet->header_size = 16;
+	packet->data_size = 0;
+}
+
+static void fill_async_readblock_resp(struct hpsb_packet *packet, int rcode,
+                               int length)
+{
+	if (rcode != RCODE_COMPLETE)
+		length = 0;
+
+	PREP_ASYNC_HEAD_RCODE(TCODE_READB_RESPONSE);
+	packet->header[3] = length << 16;
+	packet->header_size = 16;
+	packet->data_size = length + (length % 4 ? 4 - (length % 4) : 0);
+}
+
+static void fill_async_write_resp(struct hpsb_packet *packet, int rcode)
+{
+	PREP_ASYNC_HEAD_RCODE(TCODE_WRITE_RESPONSE);
+	packet->header[2] = 0;
+	packet->header_size = 12;
+	packet->data_size = 0;
+}
+
+static void fill_async_lock_resp(struct hpsb_packet *packet, int rcode, int extcode,
+                          int length)
+{
+	if (rcode != RCODE_COMPLETE)
+		length = 0;
+
+	PREP_ASYNC_HEAD_RCODE(TCODE_LOCK_RESPONSE);
+	packet->header[3] = (length << 16) | extcode;
+	packet->header_size = 16;
+	packet->data_size = length;
 }
 
 #define PREP_REPLY_PACKET(length) \
                 packet = create_reply_packet(host, data, length); \
                 if (packet == NULL) break
 
-void handle_incoming_packet(struct hpsb_host *host, int tcode, quadlet_t *data,
-                            size_t size, int write_acked)
+static void handle_incoming_packet(struct hpsb_host *host, int tcode,
+				   quadlet_t *data, size_t size, int write_acked)
 {
         struct hpsb_packet *packet;
         int length, rcode, extcode;
-        int source = data[1] >> 16;
+        quadlet_t buffer;
+        nodeid_t source = data[1] >> 16;
+        nodeid_t dest = data[0] >> 16;
+        u16 flags = (u16) data[0];
         u64 addr;
 
         /* big FIXME - no error checking is done for an out of bounds length */
@@ -561,10 +777,12 @@ void handle_incoming_packet(struct hpsb_host *host, int tcode, quadlet_t *data,
         switch (tcode) {
         case TCODE_WRITEQ:
                 addr = (((u64)(data[1] & 0xffff)) << 32) | data[2];
-                rcode = highlevel_write(host, source, data+3, addr, 4);
+                rcode = highlevel_write(host, source, dest, data+3,
+					addr, 4, flags);
 
                 if (!write_acked
-                    && ((data[0] >> 16) & NODE_MASK) != NODE_MASK) {
+                    && (NODEID_TO_NODE(data[0] >> 16) != NODE_MASK)
+                    && (rcode >= 0)) {
                         /* not a broadcast write, reply */
                         PREP_REPLY_PACKET(0);
                         fill_async_write_resp(packet, rcode);
@@ -574,11 +792,12 @@ void handle_incoming_packet(struct hpsb_host *host, int tcode, quadlet_t *data,
 
         case TCODE_WRITEB:
                 addr = (((u64)(data[1] & 0xffff)) << 32) | data[2];
-                rcode = highlevel_write(host, source, data+4, addr,
-                                        data[3]>>16);
+                rcode = highlevel_write(host, source, dest, data+4,
+					addr, data[3]>>16, flags);
 
                 if (!write_acked
-                    && ((data[0] >> 16) & NODE_MASK) != NODE_MASK) {
+                    && (NODEID_TO_NODE(data[0] >> 16) != NODE_MASK)
+                    && (rcode >= 0)) {
                         /* not a broadcast write, reply */
                         PREP_REPLY_PACKET(0);
                         fill_async_write_resp(packet, rcode);
@@ -587,12 +806,14 @@ void handle_incoming_packet(struct hpsb_host *host, int tcode, quadlet_t *data,
                 break;
 
         case TCODE_READQ:
-                PREP_REPLY_PACKET(0);
-
                 addr = (((u64)(data[1] & 0xffff)) << 32) | data[2];
-                rcode = highlevel_read(host, source, data, addr, 4);
-                fill_async_readquad_resp(packet, rcode, *data);
-                send_packet_nocare(packet);
+                rcode = highlevel_read(host, source, &buffer, addr, 4, flags);
+
+                if (rcode >= 0) {
+                        PREP_REPLY_PACKET(0);
+                        fill_async_readquad_resp(packet, rcode, buffer);
+                        send_packet_nocare(packet);
+                }
                 break;
 
         case TCODE_READB:
@@ -601,9 +822,14 @@ void handle_incoming_packet(struct hpsb_host *host, int tcode, quadlet_t *data,
 
                 addr = (((u64)(data[1] & 0xffff)) << 32) | data[2];
                 rcode = highlevel_read(host, source, packet->data, addr,
-                                       length);
-                fill_async_readblock_resp(packet, rcode, length);
-                send_packet_nocare(packet);
+                                       length, flags);
+
+                if (rcode >= 0) {
+                        fill_async_readblock_resp(packet, rcode, length);
+                        send_packet_nocare(packet);
+                } else {
+                        hpsb_free_packet(packet);
+                }
                 break;
 
         case TCODE_LOCK_REQUEST:
@@ -621,22 +847,22 @@ void handle_incoming_packet(struct hpsb_host *host, int tcode, quadlet_t *data,
                 switch (length) {
                 case 4:
                         rcode = highlevel_lock(host, source, packet->data, addr,
-                                               data[4], 0, extcode);
+                                               data[4], 0, extcode,flags);
                         fill_async_lock_resp(packet, rcode, extcode, 4);
                         break;
                 case 8:
-                        if ((extcode != EXTCODE_FETCH_ADD) 
+                        if ((extcode != EXTCODE_FETCH_ADD)
                             && (extcode != EXTCODE_LITTLE_ADD)) {
                                 rcode = highlevel_lock(host, source,
                                                        packet->data, addr,
-                                                       data[5], data[4], 
-                                                       extcode);
+                                                       data[5], data[4],
+                                                       extcode, flags);
                                 fill_async_lock_resp(packet, rcode, extcode, 4);
                         } else {
                                 rcode = highlevel_lock64(host, source,
                                              (octlet_t *)packet->data, addr,
                                              *(octlet_t *)(data + 4), 0ULL,
-                                             extcode);
+                                             extcode, flags);
                                 fill_async_lock_resp(packet, rcode, extcode, 8);
                         }
                         break;
@@ -644,16 +870,21 @@ void handle_incoming_packet(struct hpsb_host *host, int tcode, quadlet_t *data,
                         rcode = highlevel_lock64(host, source,
                                                  (octlet_t *)packet->data, addr,
                                                  *(octlet_t *)(data + 6),
-                                                 *(octlet_t *)(data + 4), 
-                                                 extcode);
+                                                 *(octlet_t *)(data + 4),
+                                                 extcode, flags);
                         fill_async_lock_resp(packet, rcode, extcode, 8);
                         break;
                 default:
-                        fill_async_lock_resp(packet, RCODE_TYPE_ERROR,
+                        rcode = RCODE_TYPE_ERROR;
+                        fill_async_lock_resp(packet, rcode,
                                              extcode, 0);
                 }
 
-                send_packet_nocare(packet);
+                if (rcode >= 0) {
+                        send_packet_nocare(packet);
+                } else {
+                        hpsb_free_packet(packet);
+                }
                 break;
         }
 
@@ -671,9 +902,7 @@ void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size,
                 return;
         }
 
-#ifdef CONFIG_IEEE1394_VERBOSEDEBUG
         dump_packet("received packet:", data, size);
-#endif
 
         tcode = (data[0] >> 4) & 0xf;
 
@@ -703,7 +932,7 @@ void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size,
                 break;
 
         default:
-                HPSB_NOTICE("received packet with bogus transaction code %d", 
+                HPSB_NOTICE("received packet with bogus transaction code %d",
                             tcode);
                 break;
         }
@@ -712,95 +941,383 @@ void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size,
 
 void abort_requests(struct hpsb_host *host)
 {
-        unsigned long flags;
-        struct hpsb_packet *packet;
-        struct list_head *lh;
-        LIST_HEAD(llist);
+	struct hpsb_packet *packet;
+	struct sk_buff *skb;
 
-        host->template->devctl(host, CANCEL_REQUESTS, 0);
+	host->driver->devctl(host, CANCEL_REQUESTS, 0);
 
-        spin_lock_irqsave(&host->pending_pkt_lock, flags);
-        list_splice(&host->pending_packets, &llist);
-        INIT_LIST_HEAD(&host->pending_packets);
-        spin_unlock_irqrestore(&host->pending_pkt_lock, flags);
+	while ((skb = skb_dequeue(&host->pending_packet_queue)) != NULL) {
+		packet = (struct hpsb_packet *)skb->data;
 
-        lh = llist.next;
-
-        while (lh != &llist) {
-                packet = list_entry(lh, struct hpsb_packet, list);
-                lh = lh->next;
-                packet->state = complete;
-                packet->ack_code = ACKX_ABORTED;
-                up(&packet->state_change);
-                run_task_queue(&packet->complete_tq);
-        }
+		packet->state = hpsb_complete;
+		packet->ack_code = ACKX_ABORTED;
+		queue_packet_complete(packet);
+	}
 }
 
-void abort_timedouts(struct hpsb_host *host)
+void abort_timedouts(unsigned long __opaque)
 {
-        unsigned long flags;
-        struct hpsb_packet *packet;
-        unsigned long expire;
-        struct list_head *lh;
-        LIST_HEAD(expiredlist);
+	struct hpsb_host *host = (struct hpsb_host *)__opaque;
+	unsigned long flags;
+	struct hpsb_packet *packet;
+	struct sk_buff *skb;
+	unsigned long expire;
 
-        spin_lock_irqsave(&host->csr.lock, flags);
-        expire = (host->csr.split_timeout_hi * 8000 
-                  + (host->csr.split_timeout_lo >> 19))
-                * HZ / 8000;
-        /* Avoid shortening of timeout due to rounding errors: */
-        expire++;
-        spin_unlock_irqrestore(&host->csr.lock, flags);
+	spin_lock_irqsave(&host->csr.lock, flags);
+	expire = host->csr.expire;
+	spin_unlock_irqrestore(&host->csr.lock, flags);
 
+	/* Hold the lock around this, since we aren't dequeuing all
+	 * packets, just ones we need. */
+	spin_lock_irqsave(&host->pending_packet_queue.lock, flags);
 
-        spin_lock_irqsave(&host->pending_pkt_lock, flags);
-        lh = host->pending_packets.next;
+	while (!skb_queue_empty(&host->pending_packet_queue)) {
+		skb = skb_peek(&host->pending_packet_queue);
 
-        while (lh != &host->pending_packets) {
-                packet = list_entry(lh, struct hpsb_packet, list);
-                lh = lh->next;
-                if (time_before(packet->sendtime + expire, jiffies)) {
-                        list_del(&packet->list);
-                        list_add(&packet->list, &expiredlist);
-                }
-        }
+		packet = (struct hpsb_packet *)skb->data;
 
-        if (!list_empty(&host->pending_packets)) {
-                queue_task(&host->timeout_tq, &tq_timer);
-        }
-        spin_unlock_irqrestore(&host->pending_pkt_lock, flags);
+		if (time_before(packet->sendtime + expire, jiffies)) {
+			__skb_unlink(skb, skb->list);
+			packet->state = hpsb_complete;
+			packet->ack_code = ACKX_TIMEOUT;
+			queue_packet_complete(packet);
+		} else {
+			/* Since packets are added to the tail, the oldest
+			 * ones are first, always. When we get to one that
+			 * isn't timed out, the rest aren't either. */
+			break;
+		}
+	}
 
-        lh = expiredlist.next;
-        while (lh != &expiredlist) {
-                packet = list_entry(lh, struct hpsb_packet, list);
-                lh = lh->next;
-                packet->state = complete;
-                packet->ack_code = ACKX_TIMEOUT;
-                up(&packet->state_change);
-                run_task_queue(&packet->complete_tq);
-        }
+	if (!skb_queue_empty(&host->pending_packet_queue))
+		mod_timer(&host->timeout, jiffies + host->timeout_interval);
+
+	spin_unlock_irqrestore(&host->pending_packet_queue.lock, flags);
 }
 
 
-#ifndef MODULE
+/* Kernel thread and vars, which handles packets that are completed. Only
+ * packets that have a "complete" function are sent here. This way, the
+ * completion is run out of kernel context, and doesn't block the rest of
+ * the stack. */
+static int khpsbpkt_pid = -1, khpsbpkt_kill;
+static DECLARE_COMPLETION(khpsbpkt_complete);
+struct sk_buff_head hpsbpkt_queue;
+static DECLARE_MUTEX_LOCKED(khpsbpkt_sig);
 
-void __init ieee1394_init(void)
+
+static void queue_packet_complete(struct hpsb_packet *packet)
 {
-        register_builtin_lowlevels();
-        init_hpsb_highlevel();
-        init_csr();
-        init_ieee1394_guid();
+	if (packet->no_waiter) {
+		hpsb_free_packet(packet);
+		return;
+	}
+	if (packet->complete_routine != NULL) {
+		skb_queue_tail(&hpsbpkt_queue, packet->skb);
+
+		/* Signal the kernel thread to handle this */
+		up(&khpsbpkt_sig);
+	}
+	return;
 }
 
-#else
-
-int init_module(void)
+static int hpsbpkt_thread(void *__hi)
 {
-        init_hpsb_highlevel();
-        init_csr();
-        init_ieee1394_guid();
+	struct sk_buff *skb;
+	struct hpsb_packet *packet;
+	void (*complete_routine)(void*);
+	void *complete_data;
 
-        return 0;
+	daemonize("khpsbpkt");
+
+	while (!down_interruptible(&khpsbpkt_sig)) {
+		if (khpsbpkt_kill)
+			break;
+
+		if (current->flags & PF_FREEZE) {
+			refrigerator(0);
+			continue;
+		}
+
+		while ((skb = skb_dequeue(&hpsbpkt_queue)) != NULL) {
+			packet = (struct hpsb_packet *)skb->data;
+
+			complete_routine = packet->complete_routine;
+			complete_data = packet->complete_data;
+
+			packet->complete_routine = packet->complete_data = NULL;
+
+			complete_routine(complete_data);
+		}
+	}
+
+	complete_and_exit(&khpsbpkt_complete, 0);
 }
 
-#endif
+
+static int __init ieee1394_init(void)
+{
+	int i, ret;
+
+	skb_queue_head_init(&hpsbpkt_queue);
+
+	/* non-fatal error */
+	if (hpsb_init_config_roms()) {
+		HPSB_ERR("Failed to initialize some config rom entries.\n");
+		HPSB_ERR("Some features may not be available\n");
+	}
+
+	khpsbpkt_pid = kernel_thread(hpsbpkt_thread, NULL, CLONE_KERNEL);
+	if (khpsbpkt_pid < 0) {
+		HPSB_ERR("Failed to start hpsbpkt thread!\n");
+		ret = -ENOMEM;
+		goto exit_cleanup_config_roms;
+	}
+
+	if (register_chrdev_region(IEEE1394_CORE_DEV, 256, "ieee1394")) {
+		HPSB_ERR("unable to register character device major %d!\n", IEEE1394_MAJOR);
+		ret = -ENODEV;
+		goto exit_release_kernel_thread;
+	}
+
+	/* actually this is a non-fatal error */
+	ret = devfs_mk_dir("ieee1394");
+	if (ret < 0) {
+		HPSB_ERR("unable to make devfs dir for device major %d!\n", IEEE1394_MAJOR);
+		goto release_chrdev;
+	}
+
+	ret = bus_register(&ieee1394_bus_type);
+	if (ret < 0) {
+		HPSB_INFO("bus register failed");
+		goto release_devfs;
+	}
+
+	for (i = 0; fw_bus_attrs[i]; i++) {
+		ret = bus_create_file(&ieee1394_bus_type, fw_bus_attrs[i]);
+		if (ret < 0) {
+			while (i >= 0) {
+				bus_remove_file(&ieee1394_bus_type,
+						fw_bus_attrs[i--]);
+			}
+			bus_unregister(&ieee1394_bus_type);
+			goto release_devfs;
+		}
+	}
+
+	ret = class_register(&hpsb_host_class);
+	if (ret < 0)
+		goto release_all_bus;
+
+	ret = init_csr();
+	if (ret) {
+		HPSB_INFO("init csr failed");
+		ret = -ENOMEM;
+		goto release_class;
+	}
+
+	if (disable_nodemgr) {
+		HPSB_INFO("nodemgr functionality disabled");
+		return 0;
+	}
+
+	ret = init_ieee1394_nodemgr();
+	if (ret < 0) {
+		HPSB_INFO("init nodemgr failed");
+		goto cleanup_csr;
+	}
+
+	return 0;
+
+cleanup_csr:
+	cleanup_csr();
+release_class:
+	class_unregister(&hpsb_host_class);
+release_all_bus:
+	for (i = 0; fw_bus_attrs[i]; i++)
+		bus_remove_file(&ieee1394_bus_type, fw_bus_attrs[i]);
+	bus_unregister(&ieee1394_bus_type);
+release_devfs:
+	devfs_remove("ieee1394");
+release_chrdev:
+	unregister_chrdev_region(IEEE1394_CORE_DEV, 256);
+exit_release_kernel_thread:
+	if (khpsbpkt_pid >= 0) {
+		kill_proc(khpsbpkt_pid, SIGTERM, 1);
+		wait_for_completion(&khpsbpkt_complete);
+	}
+exit_cleanup_config_roms:
+	hpsb_cleanup_config_roms();
+	return ret;
+}
+
+static void __exit ieee1394_cleanup(void)
+{
+	int i;
+
+	if (!disable_nodemgr)
+		cleanup_ieee1394_nodemgr();
+
+	cleanup_csr();
+
+	class_unregister(&hpsb_host_class);
+	for (i = 0; fw_bus_attrs[i]; i++)
+		bus_remove_file(&ieee1394_bus_type, fw_bus_attrs[i]);
+	bus_unregister(&ieee1394_bus_type);
+
+	if (khpsbpkt_pid >= 0) {
+		khpsbpkt_kill = 1;
+		mb();
+		up(&khpsbpkt_sig);
+		wait_for_completion(&khpsbpkt_complete);
+	}
+
+	hpsb_cleanup_config_roms();
+
+	unregister_chrdev_region(IEEE1394_CORE_DEV, 256);
+	devfs_remove("ieee1394");
+}
+
+module_init(ieee1394_init);
+module_exit(ieee1394_cleanup);
+
+/* Exported symbols */
+
+/** hosts.c **/
+EXPORT_SYMBOL(hpsb_alloc_host);
+EXPORT_SYMBOL(hpsb_add_host);
+EXPORT_SYMBOL(hpsb_remove_host);
+EXPORT_SYMBOL(hpsb_update_config_rom_image);
+
+/** ieee1394_core.c **/
+EXPORT_SYMBOL(hpsb_speedto_str);
+EXPORT_SYMBOL(hpsb_set_packet_complete_task);
+EXPORT_SYMBOL(hpsb_alloc_packet);
+EXPORT_SYMBOL(hpsb_free_packet);
+EXPORT_SYMBOL(hpsb_send_phy_config);
+EXPORT_SYMBOL(hpsb_send_packet);
+EXPORT_SYMBOL(hpsb_send_packet_and_wait);
+EXPORT_SYMBOL(hpsb_reset_bus);
+EXPORT_SYMBOL(hpsb_bus_reset);
+EXPORT_SYMBOL(hpsb_selfid_received);
+EXPORT_SYMBOL(hpsb_selfid_complete);
+EXPORT_SYMBOL(hpsb_packet_sent);
+EXPORT_SYMBOL(hpsb_packet_received);
+
+/** ieee1394_transactions.c **/
+EXPORT_SYMBOL(hpsb_get_tlabel);
+EXPORT_SYMBOL(hpsb_free_tlabel);
+EXPORT_SYMBOL(hpsb_make_readpacket);
+EXPORT_SYMBOL(hpsb_make_writepacket);
+EXPORT_SYMBOL(hpsb_make_streampacket);
+EXPORT_SYMBOL(hpsb_make_lockpacket);
+EXPORT_SYMBOL(hpsb_make_lock64packet);
+EXPORT_SYMBOL(hpsb_make_phypacket);
+EXPORT_SYMBOL(hpsb_make_isopacket);
+EXPORT_SYMBOL(hpsb_read);
+EXPORT_SYMBOL(hpsb_write);
+EXPORT_SYMBOL(hpsb_lock);
+EXPORT_SYMBOL(hpsb_lock64);
+EXPORT_SYMBOL(hpsb_send_gasp);
+EXPORT_SYMBOL(hpsb_packet_success);
+
+/** highlevel.c **/
+EXPORT_SYMBOL(hpsb_register_highlevel);
+EXPORT_SYMBOL(hpsb_unregister_highlevel);
+EXPORT_SYMBOL(hpsb_register_addrspace);
+EXPORT_SYMBOL(hpsb_unregister_addrspace);
+EXPORT_SYMBOL(hpsb_allocate_and_register_addrspace);
+EXPORT_SYMBOL(hpsb_listen_channel);
+EXPORT_SYMBOL(hpsb_unlisten_channel);
+EXPORT_SYMBOL(hpsb_get_hostinfo);
+EXPORT_SYMBOL(hpsb_get_host_bykey);
+EXPORT_SYMBOL(hpsb_create_hostinfo);
+EXPORT_SYMBOL(hpsb_destroy_hostinfo);
+EXPORT_SYMBOL(hpsb_set_hostinfo_key);
+EXPORT_SYMBOL(hpsb_get_hostinfo_key);
+EXPORT_SYMBOL(hpsb_get_hostinfo_bykey);
+EXPORT_SYMBOL(hpsb_set_hostinfo);
+EXPORT_SYMBOL(highlevel_read);
+EXPORT_SYMBOL(highlevel_write);
+EXPORT_SYMBOL(highlevel_lock);
+EXPORT_SYMBOL(highlevel_lock64);
+EXPORT_SYMBOL(highlevel_add_host);
+EXPORT_SYMBOL(highlevel_remove_host);
+EXPORT_SYMBOL(highlevel_host_reset);
+
+/** nodemgr.c **/
+EXPORT_SYMBOL(hpsb_guid_get_entry);
+EXPORT_SYMBOL(hpsb_nodeid_get_entry);
+EXPORT_SYMBOL(hpsb_node_fill_packet);
+EXPORT_SYMBOL(hpsb_node_read);
+EXPORT_SYMBOL(hpsb_node_write);
+EXPORT_SYMBOL(hpsb_node_lock);
+EXPORT_SYMBOL(hpsb_register_protocol);
+EXPORT_SYMBOL(hpsb_unregister_protocol);
+EXPORT_SYMBOL(ieee1394_bus_type);
+EXPORT_SYMBOL(nodemgr_for_each_host);
+
+/** csr.c **/
+EXPORT_SYMBOL(hpsb_update_config_rom);
+
+/** dma.c **/
+EXPORT_SYMBOL(dma_prog_region_init);
+EXPORT_SYMBOL(dma_prog_region_alloc);
+EXPORT_SYMBOL(dma_prog_region_free);
+EXPORT_SYMBOL(dma_region_init);
+EXPORT_SYMBOL(dma_region_alloc);
+EXPORT_SYMBOL(dma_region_free);
+EXPORT_SYMBOL(dma_region_sync_for_cpu);
+EXPORT_SYMBOL(dma_region_sync_for_device);
+EXPORT_SYMBOL(dma_region_mmap);
+EXPORT_SYMBOL(dma_region_offset_to_bus);
+
+/** iso.c **/
+EXPORT_SYMBOL(hpsb_iso_xmit_init);
+EXPORT_SYMBOL(hpsb_iso_recv_init);
+EXPORT_SYMBOL(hpsb_iso_xmit_start);
+EXPORT_SYMBOL(hpsb_iso_recv_start);
+EXPORT_SYMBOL(hpsb_iso_recv_listen_channel);
+EXPORT_SYMBOL(hpsb_iso_recv_unlisten_channel);
+EXPORT_SYMBOL(hpsb_iso_recv_set_channel_mask);
+EXPORT_SYMBOL(hpsb_iso_stop);
+EXPORT_SYMBOL(hpsb_iso_shutdown);
+EXPORT_SYMBOL(hpsb_iso_xmit_queue_packet);
+EXPORT_SYMBOL(hpsb_iso_xmit_sync);
+EXPORT_SYMBOL(hpsb_iso_recv_release_packets);
+EXPORT_SYMBOL(hpsb_iso_n_ready);
+EXPORT_SYMBOL(hpsb_iso_packet_sent);
+EXPORT_SYMBOL(hpsb_iso_packet_received);
+EXPORT_SYMBOL(hpsb_iso_wake);
+EXPORT_SYMBOL(hpsb_iso_recv_flush);
+
+/** csr1212.c **/
+EXPORT_SYMBOL(csr1212_create_csr);
+EXPORT_SYMBOL(csr1212_init_local_csr);
+EXPORT_SYMBOL(csr1212_new_immediate);
+EXPORT_SYMBOL(csr1212_new_leaf);
+EXPORT_SYMBOL(csr1212_new_csr_offset);
+EXPORT_SYMBOL(csr1212_new_directory);
+EXPORT_SYMBOL(csr1212_associate_keyval);
+EXPORT_SYMBOL(csr1212_attach_keyval_to_directory);
+EXPORT_SYMBOL(csr1212_new_extended_immediate);
+EXPORT_SYMBOL(csr1212_new_extended_leaf);
+EXPORT_SYMBOL(csr1212_new_descriptor_leaf);
+EXPORT_SYMBOL(csr1212_new_textual_descriptor_leaf);
+EXPORT_SYMBOL(csr1212_new_string_descriptor_leaf);
+EXPORT_SYMBOL(csr1212_new_icon_descriptor_leaf);
+EXPORT_SYMBOL(csr1212_new_modifiable_descriptor_leaf);
+EXPORT_SYMBOL(csr1212_new_keyword_leaf);
+EXPORT_SYMBOL(csr1212_detach_keyval_from_directory);
+EXPORT_SYMBOL(csr1212_disassociate_keyval);
+EXPORT_SYMBOL(csr1212_release_keyval);
+EXPORT_SYMBOL(csr1212_destroy_csr);
+EXPORT_SYMBOL(csr1212_read);
+EXPORT_SYMBOL(csr1212_generate_positions);
+EXPORT_SYMBOL(csr1212_generate_layout_order);
+EXPORT_SYMBOL(csr1212_fill_cache);
+EXPORT_SYMBOL(csr1212_generate_csr_image);
+EXPORT_SYMBOL(csr1212_parse_keyval);
+EXPORT_SYMBOL(csr1212_parse_csr);
+EXPORT_SYMBOL(_csr1212_read_keyval);
+EXPORT_SYMBOL(_csr1212_destroy_keyval);

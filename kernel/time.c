@@ -22,13 +22,21 @@
  *	"A Kernel Model for Precision Timekeeping" by Dave Mills
  *	Allow time_constant larger than MAXTC(6) for NTP v4 (MAXTC == 10)
  *	(Even though the technical memorandum forbids it)
+ * 2004-07-14	 Christoph Lameter
+ *	Added getnstimeofday to allow the posix timer functions to return
+ *	with nanosecond accuracy
  */
 
-#include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/timex.h>
+#include <linux/errno.h>
 #include <linux/smp_lock.h>
+#include <linux/syscalls.h>
+#include <linux/security.h>
+#include <linux/fs.h>
 
 #include <asm/uaccess.h>
+#include <asm/unistd.h>
 
 /* 
  * The timezone where the local system is located.  Used as a default by some
@@ -36,45 +44,24 @@
  */
 struct timezone sys_tz;
 
-static void do_normal_gettime(struct timeval * tm)
-{
-        *tm=xtime;
-}
+EXPORT_SYMBOL(sys_tz);
 
-void (*do_get_fast_time)(struct timeval *) = do_normal_gettime;
-
-/*
- * Generic way to access 'xtime' (the current time of day).
- * This can be changed if the platform provides a more accurate (and fast!) 
- * version.
- */
-
-void get_fast_time(struct timeval * t)
-{
-	do_get_fast_time(t);
-}
-
-/* The xtime_lock is not only serializing the xtime read/writes but it's also
-   serializing all accesses to the global NTP variables now. */
-extern rwlock_t xtime_lock;
-
-#if !defined(__alpha__) && !defined(__ia64__)
+#ifdef __ARCH_WANT_SYS_TIME
 
 /*
  * sys_time() can be implemented in user-level using
  * sys_gettimeofday().  Is this for backwards compatibility?  If so,
  * why not move it into the appropriate arch directory (for those
  * architectures that need it).
- *
- * XXX This function is NOT 64-bit clean!
  */
-asmlinkage long sys_time(int * tloc)
+asmlinkage long sys_time(time_t __user * tloc)
 {
-	int i;
+	time_t i;
+	struct timeval tv;
 
-	/* SMP: This is fairly trivial. We grab CURRENT_TIME and 
-	   stuff it to user space. No side effects */
-	i = CURRENT_TIME;
+	do_gettimeofday(&tv);
+	i = tv.tv_sec;
+
 	if (tloc) {
 		if (put_user(i,tloc))
 			i = -EFAULT;
@@ -89,36 +76,35 @@ asmlinkage long sys_time(int * tloc)
  * architectures that need it).
  */
  
-asmlinkage long sys_stime(int * tptr)
+asmlinkage long sys_stime(time_t __user *tptr)
 {
-	int value;
+	struct timespec tv;
+	int err;
 
-	if (!capable(CAP_SYS_TIME))
-		return -EPERM;
-	if (get_user(value, tptr))
+	if (get_user(tv.tv_sec, tptr))
 		return -EFAULT;
-	write_lock_irq(&xtime_lock);
-	xtime.tv_sec = value;
-	xtime.tv_usec = 0;
-	time_adjust = 0;	/* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
-	write_unlock_irq(&xtime_lock);
+
+	tv.tv_nsec = 0;
+
+	err = security_settime(&tv, NULL);
+	if (err)
+		return err;
+
+	do_settimeofday(&tv);
 	return 0;
 }
 
-#endif
+#endif /* __ARCH_WANT_SYS_TIME */
 
-asmlinkage long sys_gettimeofday(struct timeval *tv, struct timezone *tz)
+asmlinkage long sys_gettimeofday(struct timeval __user *tv, struct timezone __user *tz)
 {
-	if (tv) {
+	if (likely(tv != NULL)) {
 		struct timeval ktv;
 		do_gettimeofday(&ktv);
 		if (copy_to_user(tv, &ktv, sizeof(ktv)))
 			return -EFAULT;
 	}
-	if (tz) {
+	if (unlikely(tz != NULL)) {
 		if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
 			return -EFAULT;
 	}
@@ -143,9 +129,12 @@ asmlinkage long sys_gettimeofday(struct timeval *tv, struct timezone *tz)
  */
 inline static void warp_clock(void)
 {
-	write_lock_irq(&xtime_lock);
+	write_seqlock_irq(&xtime_lock);
+	wall_to_monotonic.tv_sec -= sys_tz.tz_minuteswest * 60;
 	xtime.tv_sec += sys_tz.tz_minuteswest * 60;
-	write_unlock_irq(&xtime_lock);
+	time_interpolator_reset();
+	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
 }
 
 /*
@@ -159,13 +148,15 @@ inline static void warp_clock(void)
  * various programs will get confused when the clock gets warped.
  */
 
-int do_sys_settimeofday(struct timeval *tv, struct timezone *tz)
+int do_sys_settimeofday(struct timespec *tv, struct timezone *tz)
 {
 	static int firsttime = 1;
+	int error = 0;
 
-	if (!capable(CAP_SYS_TIME))
-		return -EPERM;
-		
+	error = security_settime(tv, tz);
+	if (error)
+		return error;
+
 	if (tz) {
 		/* SMP safe, global irq locking makes it work. */
 		sys_tz = *tz;
@@ -180,26 +171,30 @@ int do_sys_settimeofday(struct timeval *tv, struct timezone *tz)
 		/* SMP safe, again the code in arch/foo/time.c should
 		 * globally block out interrupts when it runs.
 		 */
-		do_settimeofday(tv);
+		return do_settimeofday(tv);
 	}
 	return 0;
 }
 
-asmlinkage long sys_settimeofday(struct timeval *tv, struct timezone *tz)
+asmlinkage long sys_settimeofday(struct timeval __user *tv,
+				struct timezone __user *tz)
 {
-	struct timeval	new_tv;
+	struct timeval user_tv;
+	struct timespec	new_ts;
 	struct timezone new_tz;
 
 	if (tv) {
-		if (copy_from_user(&new_tv, tv, sizeof(*tv)))
+		if (copy_from_user(&user_tv, tv, sizeof(*tv)))
 			return -EFAULT;
+		new_ts.tv_sec = user_tv.tv_sec;
+		new_ts.tv_nsec = user_tv.tv_usec * NSEC_PER_USEC;
 	}
 	if (tz) {
 		if (copy_from_user(&new_tz, tz, sizeof(*tz)))
 			return -EFAULT;
 	}
 
-	return do_sys_settimeofday(tv ? &new_tv : NULL, tz ? &new_tz : NULL);
+	return do_sys_settimeofday(tv ? &new_ts : NULL, tz ? &new_tz : NULL);
 }
 
 long pps_offset;		/* pps time offset (us) */
@@ -234,6 +229,11 @@ int do_adjtimex(struct timex *txc)
 		
 	/* Now we validate the data before disabling interrupts */
 
+	if ((txc->modes & ADJ_OFFSET_SINGLESHOT) == ADJ_OFFSET_SINGLESHOT)
+	  /* singleshot must not be used with any other mode bits */
+		if (txc->modes != ADJ_OFFSET_SINGLESHOT)
+			return -EINVAL;
+
 	if (txc->modes != ADJ_OFFSET_SINGLESHOT && (txc->modes & ADJ_OFFSET))
 	  /* adjustment Offset limited to +- .512 seconds */
 		if (txc->offset <= - MAXPHASE || txc->offset >= MAXPHASE )
@@ -241,14 +241,15 @@ int do_adjtimex(struct timex *txc)
 
 	/* if the quartz is off by more than 10% something is VERY wrong ! */
 	if (txc->modes & ADJ_TICK)
-		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ)
+		if (txc->tick <  900000/USER_HZ ||
+		    txc->tick > 1100000/USER_HZ)
 			return -EINVAL;
 
-	write_lock_irq(&xtime_lock);
+	write_seqlock_irq(&xtime_lock);
 	result = time_state;	/* mostly `TIME_OK' */
 
 	/* Save for later - semantics of adjtime is to return old value */
-	save_adjust = time_adjust;
+	save_adjust = time_next_adjust ? time_next_adjust : time_adjust;
 
 #if 0	/* STA_CLOCKERR is never set yet */
 	time_status &= ~STA_CLOCKERR;		/* reset STA_CLOCKERR */
@@ -295,7 +296,8 @@ int do_adjtimex(struct timex *txc)
 	    if (txc->modes & ADJ_OFFSET) {	/* values checked earlier */
 		if (txc->modes == ADJ_OFFSET_SINGLESHOT) {
 		    /* adjtime() is independent from ntp_adjtime() */
-		    time_adjust = txc->offset;
+		    if ((time_next_adjust = txc->offset) == 0)
+			 time_adjust = 0;
 		}
 		else if ( time_status & (STA_PLL | STA_PPSTIME) ) {
 		    ltemp = (time_status & (STA_PPSTIME | STA_PPSSIGNAL)) ==
@@ -354,13 +356,8 @@ int do_adjtimex(struct timex *txc)
 		} /* STA_PLL || STA_PPSTIME */
 	    } /* txc->modes & ADJ_OFFSET */
 	    if (txc->modes & ADJ_TICK) {
-		/* if the quartz is off by more than 10% something is
-		   VERY wrong ! */
-		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ) {
-		    result = -EINVAL;
-		    goto leave;
-		}
-		tick = txc->tick;
+		tick_usec = txc->tick;
+		tick_nsec = TICK_USEC_TO_NSEC(tick_usec);
 	    }
 	} /* txc->modes */
 leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
@@ -390,7 +387,7 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->constant	   = time_constant;
 	txc->precision	   = time_precision;
 	txc->tolerance	   = time_tolerance;
-	txc->tick	   = tick;
+	txc->tick	   = tick_usec;
 	txc->ppsfreq	   = pps_freq;
 	txc->jitter	   = pps_jitter >> PPS_AVG;
 	txc->shift	   = pps_shift;
@@ -399,12 +396,12 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->calcnt	   = pps_calcnt;
 	txc->errcnt	   = pps_errcnt;
 	txc->stbcnt	   = pps_stbcnt;
-	write_unlock_irq(&xtime_lock);
+	write_sequnlock_irq(&xtime_lock);
 	do_gettimeofday(&txc->time);
 	return(result);
 }
 
-asmlinkage long sys_adjtimex(struct timex *txc_p)
+asmlinkage long sys_adjtimex(struct timex __user *txc_p)
 {
 	struct timex txc;		/* Local copy of parameter */
 	int ret;
@@ -418,3 +415,174 @@ asmlinkage long sys_adjtimex(struct timex *txc_p)
 	ret = do_adjtimex(&txc);
 	return copy_to_user(txc_p, &txc, sizeof(struct timex)) ? -EFAULT : ret;
 }
+
+inline struct timespec current_kernel_time(void)
+{
+        struct timespec now;
+        unsigned long seq;
+
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		
+		now = xtime;
+	} while (read_seqretry(&xtime_lock, seq));
+
+	return now; 
+}
+
+EXPORT_SYMBOL(current_kernel_time);
+
+/**
+ * current_fs_time - Return FS time
+ * @sb: Superblock.
+ *
+ * Return the current time truncated to the time granuality supported by
+ * the fs.
+ */
+struct timespec current_fs_time(struct super_block *sb)
+{
+	struct timespec now = current_kernel_time();
+	return timespec_trunc(now, sb->s_time_gran);
+}
+EXPORT_SYMBOL(current_fs_time);
+
+/**
+ * timespec_trunc - Truncate timespec to a granuality
+ * @t: Timespec
+ * @gran: Granuality in ns.
+ *
+ * Truncate a timespec to a granuality. gran must be smaller than a second.
+ * Always rounds down.
+ *
+ * This function should be only used for timestamps returned by
+ * current_kernel_time() or CURRENT_TIME, not with do_gettimeofday() because
+ * it doesn't handle the better resolution of the later.
+ */
+struct timespec timespec_trunc(struct timespec t, unsigned gran)
+{
+	/*
+	 * Division is pretty slow so avoid it for common cases.
+	 * Currently current_kernel_time() never returns better than
+	 * jiffies resolution. Exploit that.
+	 */
+	if (gran <= jiffies_to_usecs(1) * 1000) {
+		/* nothing */
+	} else if (gran == 1000000000) {
+		t.tv_nsec = 0;
+	} else {
+		t.tv_nsec -= t.tv_nsec % gran;
+	}
+	return t;
+}
+EXPORT_SYMBOL(timespec_trunc);
+
+#ifdef CONFIG_TIME_INTERPOLATION
+void getnstimeofday (struct timespec *tv)
+{
+	unsigned long seq,sec,nsec;
+
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		sec = xtime.tv_sec;
+		nsec = xtime.tv_nsec+time_interpolator_get_offset();
+	} while (unlikely(read_seqretry(&xtime_lock, seq)));
+
+	while (unlikely(nsec >= NSEC_PER_SEC)) {
+		nsec -= NSEC_PER_SEC;
+		++sec;
+	}
+	tv->tv_sec = sec;
+	tv->tv_nsec = nsec;
+}
+
+int do_settimeofday (struct timespec *tv)
+{
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
+	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+		return -EINVAL;
+
+	write_seqlock_irq(&xtime_lock);
+	{
+		/*
+		 * This is revolting. We need to set "xtime" correctly. However, the value
+		 * in this location is the value at the most recent update of wall time.
+		 * Discover what correction gettimeofday would have done, and then undo
+		 * it!
+		 */
+		nsec -= time_interpolator_get_offset();
+
+		wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+		wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
+
+		set_normalized_timespec(&xtime, sec, nsec);
+		set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
+		time_adjust = 0;		/* stop active adjtime() */
+		time_status |= STA_UNSYNC;
+		time_maxerror = NTP_PHASE_LIMIT;
+		time_esterror = NTP_PHASE_LIMIT;
+		time_interpolator_reset();
+	}
+	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
+	return 0;
+}
+
+void do_gettimeofday (struct timeval *tv)
+{
+	unsigned long seq, nsec, usec, sec, offset;
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		offset = time_interpolator_get_offset();
+		sec = xtime.tv_sec;
+		nsec = xtime.tv_nsec;
+	} while (unlikely(read_seqretry(&xtime_lock, seq)));
+
+	usec = (nsec + offset) / 1000;
+
+	while (unlikely(usec >= USEC_PER_SEC)) {
+		usec -= USEC_PER_SEC;
+		++sec;
+	}
+
+	tv->tv_sec = sec;
+	tv->tv_usec = usec;
+}
+
+EXPORT_SYMBOL(do_gettimeofday);
+
+
+#else
+/*
+ * Simulate gettimeofday using do_gettimeofday which only allows a timeval
+ * and therefore only yields usec accuracy
+ */
+void getnstimeofday(struct timespec *tv)
+{
+	struct timeval x;
+
+	do_gettimeofday(&x);
+	tv->tv_sec = x.tv_sec;
+	tv->tv_nsec = x.tv_usec * NSEC_PER_USEC;
+}
+#endif
+
+#if (BITS_PER_LONG < 64)
+u64 get_jiffies_64(void)
+{
+	unsigned long seq;
+	u64 ret;
+
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		ret = jiffies_64;
+	} while (read_seqretry(&xtime_lock, seq));
+	return ret;
+}
+
+EXPORT_SYMBOL(get_jiffies_64);
+#endif
+
+EXPORT_SYMBOL(jiffies);

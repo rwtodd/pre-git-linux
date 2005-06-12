@@ -12,7 +12,7 @@
 #include <linux/config.h>
 
 #include <linux/timer.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 
 /*
  * Enable RPC debugging/profiling.
@@ -35,6 +35,7 @@
 #define RPCDBG_SVCSOCK		0x0100
 #define RPCDBG_SVCDSP		0x0200
 #define RPCDBG_MISC		0x0400
+#define RPCDBG_CACHE		0x0800
 #define RPCDBG_ALL		0x7fff
 
 #ifdef __KERNEL__
@@ -53,10 +54,11 @@ extern unsigned int		nlm_debug;
 
 #undef ifdebug
 #ifdef RPC_DEBUG			
-# define ifdebug(fac)		if (rpc_debug & RPCDBG_##fac)
+# define ifdebug(fac)		if (unlikely(rpc_debug & RPCDBG_##fac))
 # define dfprintk(fac, args...)	do { ifdebug(fac) printk(args); } while(0)
 # define RPC_IFDEBUG(x)		x
 #else
+# define ifdebug(fac)		if (0)
 # define dfprintk(fac, args...)	do ; while (0)
 # define RPC_IFDEBUG(x)
 #endif
@@ -90,6 +92,8 @@ enum {
 	CTL_NFSDEBUG,
 	CTL_NFSDDEBUG,
 	CTL_NLMDEBUG,
+	CTL_SLOTTABLE_UDP,
+	CTL_SLOTTABLE_TCP,
 };
 
 #endif /* _LINUX_SUNRPC_DEBUG_H_ */

@@ -17,6 +17,8 @@
 #ifndef _LINUX_ICMP_H
 #define	_LINUX_ICMP_H
 
+#include <linux/types.h>
+
 #define ICMP_ECHOREPLY		0	/* Echo Reply			*/
 #define ICMP_DEST_UNREACH	3	/* Destination Unreachable	*/
 #define ICMP_SOURCE_QUENCH	4	/* Source Quench		*/
@@ -79,30 +81,6 @@ struct icmphdr {
 	} frag;
   } un;
 };
-
-#ifdef __KERNEL__
-
-#include <linux/ip.h>
-
-/*
- *	Build xmit assembly blocks
- */
-
-struct icmp_bxm
-{
-	void *data_ptr;
-	int data_len;
-	struct icmphdr icmph;
-	unsigned long csum;
-	struct ip_options replyopts;
-	unsigned char  optbuf[40];
-};
-
-struct sk_buff;
-
-extern void icmp_reply(struct icmp_bxm *, struct sk_buff *);
-
-#endif
 
 /*
  *	constants for (set|get)sockopt

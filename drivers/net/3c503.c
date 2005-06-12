@@ -4,12 +4,14 @@
 
     Copyright 1993 United States Government as represented by the
     Director, National Security Agency.  This software may be used and
-    distributed according to the terms of the GNU Public License,
+    distributed according to the terms of the GNU General Public License,
     incorporated herein by reference.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-       Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
 
     This driver should work with the 3c503 and 3c503/16.  It should be used
     in shared memory mode for best performance, although it may also work
@@ -27,23 +29,29 @@
     Paul Gortmaker	: add support for the 2nd 8kB of RAM on 16 bit cards.
     Paul Gortmaker	: multiple card support for module users.
     rjohnson@analogic.com : Fix up PIO interface for efficient operation.
+    Jeff Garzik		: ethtool support
 
 */
 
-static const char *version =
-    "3c503.c:v1.10 9/23/93  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
+#define DRV_NAME	"3c503"
+#define DRV_VERSION	"1.10a"
+#define DRV_RELDATE	"11/17/2001"
+
+
+static const char version[] =
+    DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE "  Donald Becker (becker@scyld.com)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/init.h>
+#include <linux/ethtool.h>
 
+#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/byteorder.h>
@@ -52,9 +60,8 @@ static const char *version =
 #include "3c503.h"
 #define WRD_COUNT 4
 
-int el2_probe(struct net_device *dev);
-int el2_pio_probe(struct net_device *dev);
-int el2_probe1(struct net_device *dev, int ioaddr);
+static int el2_pio_probe(struct net_device *dev);
+static int el2_probe1(struct net_device *dev, int ioaddr);
 
 /* A zero-terminated list of I/O addresses to be probed in PIO mode. */
 static unsigned int netcard_portlist[] __initdata =
@@ -72,6 +79,7 @@ static void el2_block_input(struct net_device *dev, int count, struct sk_buff *s
 			   int ring_offset);
 static void el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			 int ring_page);
+static struct ethtool_ops netdev_ethtool_ops;
 
 
 /* This routine probes for a memory-mapped 3c503 board by looking for
@@ -81,11 +89,11 @@ static void el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
    If the ethercard isn't found there is an optional probe for
    ethercard jumpered to programmed-I/O mode.
    */
-int __init 
-el2_probe(struct net_device *dev)
+static int __init do_el2_probe(struct net_device *dev)
 {
     int *addr, addrs[] = { 0xddffe, 0xd9ffe, 0xcdffe, 0xc9ffe, 0};
     int base_addr = dev->base_addr;
+    int irq = dev->irq;
 
     SET_MODULE_OWNER(dev);
     
@@ -95,16 +103,13 @@ el2_probe(struct net_device *dev)
 	return -ENXIO;
 
     for (addr = addrs; *addr; addr++) {
-	int i;
-	unsigned int base_bits = isa_readb(*addr);
-	/* Find first set bit. */
-	for(i = 7; i >= 0; i--, base_bits >>= 1)
-	    if (base_bits & 0x1)
-		break;
-	if (base_bits != 1)
+	unsigned base_bits = isa_readb(*addr);
+	int i = ffs(base_bits) - 1;
+	if (i == -1 || base_bits != (1 << i))
 	    continue;
 	if (el2_probe1(dev, netcard_portlist[i]) == 0)
 	    return 0;
+	dev->irq = irq;
     }
 #if ! defined(no_probe_nonshared_memory)
     return el2_pio_probe(dev);
@@ -115,42 +120,83 @@ el2_probe(struct net_device *dev)
 
 /*  Try all of the locations that aren't obviously empty.  This touches
     a lot of locations, and is much riskier than the code above. */
-int __init 
+static int __init 
 el2_pio_probe(struct net_device *dev)
 {
     int i;
-    int base_addr = dev ? dev->base_addr : 0;
+    int base_addr = dev->base_addr;
+    int irq = dev->irq;
 
     if (base_addr > 0x1ff)	/* Check a single specified location. */
 	return el2_probe1(dev, base_addr);
     else if (base_addr != 0)	/* Don't probe at all. */
 	return -ENXIO;
 
-    for (i = 0; netcard_portlist[i]; i++)
+    for (i = 0; netcard_portlist[i]; i++) {
 	if (el2_probe1(dev, netcard_portlist[i]) == 0)
 	    return 0;
+	dev->irq = irq;
+    }
 
     return -ENODEV;
 }
 
+static void cleanup_card(struct net_device *dev)
+{
+	/* NB: el2_close() handles free_irq */
+	release_region(dev->base_addr, EL2_IO_EXTENT);
+}
+
+#ifndef MODULE
+struct net_device * __init el2_probe(int unit)
+{
+	struct net_device *dev = alloc_ei_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_el2_probe(dev);
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	cleanup_card(dev);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
+
 /* Probe for the Etherlink II card at I/O port base IOADDR,
    returning non-zero on success.  If found, set the station
    address and memory parameters in DEVICE. */
-int __init 
+static int __init 
 el2_probe1(struct net_device *dev, int ioaddr)
 {
     int i, iobase_reg, membase_reg, saved_406, wordlength, retval;
     static unsigned version_printed;
     unsigned long vendor_id;
 
-    if (!request_region(ioaddr, EL2_IO_EXTENT, dev->name))
+    if (!request_region(ioaddr, EL2_IO_EXTENT, DRV_NAME))
 	return -EBUSY;
+
+    if (!request_region(ioaddr + 0x400, 8, DRV_NAME)) {
+	retval = -EBUSY;
+	goto out;
+    }
 
     /* Reset and/or avoid any lurking NE2000 */
     if (inb(ioaddr + 0x408) == 0xff) {
     	mdelay(1);
 	retval = -ENODEV;
-	goto out;
+	goto out1;
     }
 
     /* We verify that it's a 3C503 board by checking the first three octets
@@ -161,7 +207,7 @@ el2_probe1(struct net_device *dev, int ioaddr)
     if (   (iobase_reg  & (iobase_reg - 1))
 	|| (membase_reg & (membase_reg - 1))) {
 	retval = -ENODEV;
-	goto out;
+	goto out1;
     }
     saved_406 = inb_p(ioaddr + 0x406);
     outb_p(ECNTRL_RESET|ECNTRL_THIN, ioaddr + 0x406); /* Reset it... */
@@ -174,19 +220,13 @@ el2_probe1(struct net_device *dev, int ioaddr)
 	/* Restore the register we frobbed. */
 	outb(saved_406, ioaddr + 0x406);
 	retval = -ENODEV;
-	goto out;
+	goto out1;
     }
 
     if (ei_debug  &&  version_printed++ == 0)
 	printk(version);
 
     dev->base_addr = ioaddr;
-    /* Allocate dev->priv and fill in 8390 specific dev fields. */
-    if (ethdev_init(dev)) {
-	printk ("3c503: unable to allocate memory for dev->priv.\n");
-	retval = -ENOMEM;
-	goto out;
-    }
 
     printk("%s: 3c503 at i/o base %#3x, node ", dev->name, ioaddr);
 
@@ -250,13 +290,14 @@ el2_probe1(struct net_device *dev, int ioaddr)
 	}
 #endif  /* EL2MEMTEST */
 
-	dev->mem_end = dev->rmem_end = dev->mem_start + EL2_MEMSIZE;
+	if (dev->mem_start)
+		dev->mem_end = ei_status.rmem_end = dev->mem_start + EL2_MEMSIZE;
 
 	if (wordlength) {	/* No Tx pages to skip over to get to Rx */
-		dev->rmem_start = dev->mem_start;
+		ei_status.rmem_start = dev->mem_start;
 		ei_status.name = "3c503/16";
 	} else {
-		dev->rmem_start = TX_PAGES*256 + dev->mem_start;
+		ei_status.rmem_start = TX_PAGES*256 + dev->mem_start;
 		ei_status.name = "3c503";
 	}
     }
@@ -297,6 +338,10 @@ el2_probe1(struct net_device *dev, int ioaddr)
 
     dev->open = &el2_open;
     dev->stop = &el2_close;
+    dev->ethtool_ops = &netdev_ethtool_ops;
+#ifdef CONFIG_NET_POLL_CONTROLLER
+    dev->poll_controller = ei_poll;
+#endif
 
     if (dev->mem_start)
 	printk("%s: %s - %dkB RAM, 8kB shared mem window at %#6lx-%#6lx.\n",
@@ -310,7 +355,10 @@ el2_probe1(struct net_device *dev, int ioaddr)
 	printk("\n%s: %s, %dkB RAM, using programmed I/O (REJUMPER for SHARED MEMORY).\n",
 	       dev->name, ei_status.name, (wordlength+1)<<3);
     }
+    release_region(ioaddr + 0x400, 8);
     return 0;
+out1:
+    release_region(ioaddr + 0x400, 8);
 out:
     release_region(ioaddr, EL2_IO_EXTENT);
     return retval;
@@ -498,6 +546,7 @@ el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_pag
 
     if (dev->mem_start) {       /* Use the shared memory. */
 	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	hdr->count = le16_to_cpu(hdr->count);
 	return;
     }
 
@@ -535,7 +584,7 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
     unsigned short int *buf;
     unsigned short word;
 
-    int end_of_ring = dev->rmem_end;
+    int end_of_ring = ei_status.rmem_end;
 
     /* Maybe enable shared memory just be to be safe... nahh.*/
     if (dev->mem_start) {	/* Use the shared memory. */
@@ -545,7 +594,7 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
 	    int semi_count = end_of_ring - (dev->mem_start + ring_offset);
 	    isa_memcpy_fromio(skb->data, dev->mem_start + ring_offset, semi_count);
 	    count -= semi_count;
-	    isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+	    isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
 		isa_eth_io_copy_and_sum(skb, dev->mem_start + ring_offset, count, 0);
@@ -603,44 +652,69 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
     outb_p(ei_status.interface_num == 0 ? ECNTRL_THIN : ECNTRL_AUI, E33G_CNTRL);
     return;
 }
+
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
+
 #ifdef MODULE
 #define MAX_EL2_CARDS	4	/* Max number of EL2 cards per module */
 
-static struct net_device dev_el2[MAX_EL2_CARDS];
+static struct net_device *dev_el2[MAX_EL2_CARDS];
 static int io[MAX_EL2_CARDS];
 static int irq[MAX_EL2_CARDS];
 static int xcvr[MAX_EL2_CARDS];	/* choose int. or ext. xcvr */
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
-MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(xcvr, int, NULL, 0);
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
+MODULE_PARM_DESC(xcvr, "transceiver(s) (0=internal, 1=external)");
+MODULE_DESCRIPTION("3Com ISA EtherLink II, II/16 (3c503, 3c503/16) driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
 int
 init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_EL2_CARDS; this_dev++) {
-		struct net_device *dev = &dev_el2[this_dev];
-		dev->irq = irq[this_dev];
-		dev->base_addr = io[this_dev];
-		dev->mem_end = xcvr[this_dev];	/* low 4bits = xcvr sel. */
-		dev->init = el2_probe;
 		if (io[this_dev] == 0)  {
 			if (this_dev != 0) break; /* only autoprobe 1st one */
 			printk(KERN_NOTICE "3c503.c: Presently autoprobing (not recommended) for a single card.\n");
 		}
-		if (register_netdev(dev) != 0) {
-			printk(KERN_WARNING "3c503.c: No 3c503 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) {	/* Got at least one. */
-				return 0;
+		dev = alloc_ei_netdev();
+		if (!dev)
+			break;
+		dev->irq = irq[this_dev];
+		dev->base_addr = io[this_dev];
+		dev->mem_end = xcvr[this_dev];	/* low 4bits = xcvr sel. */
+		if (do_el2_probe(dev) == 0) {
+			if (register_netdev(dev) == 0) {
+				dev_el2[found++] = dev;
+				continue;
 			}
-			return -ENXIO;
+			cleanup_card(dev);
 		}
-		found++;
+		free_netdev(dev);
+		printk(KERN_WARNING "3c503.c: No 3c503 card found (i/o = 0x%x).\n", io[this_dev]);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	return -ENXIO;
 }
 
 void
@@ -649,22 +723,12 @@ cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_EL2_CARDS; this_dev++) {
-		struct net_device *dev = &dev_el2[this_dev];
-		if (dev->priv != NULL) {
-			void *priv = dev->priv;
-			/* NB: el2_close() handles free_irq */
-			release_region(dev->base_addr, EL2_IO_EXTENT);
+		struct net_device *dev = dev_el2[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-			kfree(priv);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  version-control: t
- *  kept-new-versions: 5
- *  c-indent-level: 4
- * End:
- */

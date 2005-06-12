@@ -1,3 +1,26 @@
+/* 
+ *    kmap/page table map and unmap support routines
+ *
+ *    Copyright 1999,2000 Hewlett-Packard Company
+ *    Copyright 2000 John Marvin <jsm at hp.com>
+ *    Copyright 2000 Grant Grundler <grundler at parisc-linux.org>
+ *    Copyright 2000 Philipp Rumpf <prumpf@tux.org>
+ *
+ *
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
 /*
 ** Stolen mostly from arch/parisc/kernel/pci-dma.c
 */
@@ -7,7 +30,7 @@
 #include <linux/string.h>
 #include <linux/pci.h>
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
@@ -128,11 +151,11 @@ kernel_set_cachemode(unsigned long vaddr, unsigned long size, int what)
 	switch (what) {
 	case IOMAP_FULL_CACHING:
 		iterate_pages(vaddr, size, set_cached, 0);
-		flush_tlb_range(&init_mm, vaddr, size);
+		flush_tlb_range(NULL, vaddr, size);
 		break;
 	case IOMAP_NOCACHE_SER:
 		iterate_pages(vaddr, size, set_uncached, 0);
-		flush_tlb_range(&init_mm, vaddr, size);
+		flush_tlb_range(NULL, vaddr, size);
 		break;
 	default:
 		printk(KERN_CRIT

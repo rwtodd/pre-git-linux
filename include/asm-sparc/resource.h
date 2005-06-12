@@ -19,11 +19,14 @@
 #define RLIMIT_RSS	5		/* max resident set size */
 #define RLIMIT_NOFILE	6		/* max number of open files */
 #define RLIMIT_NPROC	7		/* max number of processes */
-#define RLIMIT_MEMLOCK  8               /* max locked-in-memory address space */
-#define RLIMIT_AS       9               /* address space limit */
+#define RLIMIT_MEMLOCK	8		/* max locked-in-memory address space */
+#define RLIMIT_AS	9		/* address space limit */
 #define RLIMIT_LOCKS	10		/* maximum file locks held */
+#define RLIMIT_SIGPENDING 11		/* max number of pending signals */
+#define RLIMIT_MSGQUEUE 12		/* maximum bytes in POSIX mqueues */
 
-#define RLIM_NLIMITS	11
+#define RLIM_NLIMITS	13
+#define __ARCH_RLIMIT_ORDER
 
 /*
  * SuS says limits have to be unsigned.
@@ -32,21 +35,6 @@
  */
 #define RLIM_INFINITY	0x7fffffff
 
-#ifdef __KERNEL__
-#define INIT_RLIMITS			\
-{					\
-    {RLIM_INFINITY, RLIM_INFINITY},	\
-    {RLIM_INFINITY, RLIM_INFINITY},	\
-    {RLIM_INFINITY, RLIM_INFINITY},	\
-    {_STK_LIM, RLIM_INFINITY},		\
-    {       0, RLIM_INFINITY},		\
-    {RLIM_INFINITY, RLIM_INFINITY},	\
-    {INR_OPEN, INR_OPEN}, {0, 0},	\
-    {RLIM_INFINITY, RLIM_INFINITY},	\
-    {RLIM_INFINITY, RLIM_INFINITY},	\
-    {RLIM_INFINITY, RLIM_INFINITY}	\
-}
-
-#endif /* __KERNEL__ */
+#include <asm-generic/resource.h>
 
 #endif /* !(_SPARC_RESOURCE_H) */

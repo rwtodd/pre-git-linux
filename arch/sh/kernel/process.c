@@ -1,4 +1,4 @@
-/* $Id: process.c,v 1.33 2000/03/25 00:06:15 gniibe Exp $
+/* $Id: process.c,v 1.28 2004/05/05 16:54:23 lethal Exp $
  *
  *  linux/arch/sh/kernel/process.c
  *
@@ -11,38 +11,29 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#define __KERNEL_SYSCALLS__
-#include <stdarg.h>
-
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
-#include <linux/stddef.h>
-#include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/vmalloc.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/interrupt.h>
+#include <linux/module.h>
 #include <linux/unistd.h>
-#include <linux/delay.h>
-#include <linux/reboot.h>
-#include <linux/init.h>
+#include <linux/mm.h>
+#include <linux/elfcore.h>
+#include <linux/slab.h>
+#include <linux/a.out.h>
+#include <linux/ptrace.h>
+#include <linux/platform.h>
+#include <linux/kallsyms.h>
 
-#include <asm/uaccess.h>
-#include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/processor.h>
+#include <asm/uaccess.h>
 #include <asm/mmu_context.h>
 #include <asm/elf.h>
-
-#include <linux/irq.h>
+#if defined(CONFIG_SH_HS7751RVOIP)
+#include <asm/hs7751rvoip/hs7751rvoip.h>
+#elif defined(CONFIG_SH_RTS7751R2D)
+#include <asm/rts7751r2d/rts7751r2d.h>
+#endif
 
 static int hlt_counter=0;
+
+int ubc_usercnt = 0;
 
 #define HARD_IDLE_TIMEOUT (HZ / 3)
 
@@ -51,50 +42,90 @@ void disable_hlt(void)
 	hlt_counter++;
 }
 
+EXPORT_SYMBOL(disable_hlt);
+
 void enable_hlt(void)
 {
 	hlt_counter--;
 }
 
-/*
- * The idle loop on a uniprocessor i386..
- */ 
-void cpu_idle(void *unused)
+EXPORT_SYMBOL(enable_hlt);
+
+void default_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	init_idle();
-	current->nice = 20;
-	current->counter = -100;
-
 	while (1) {
-		while (!current->need_resched) {
-			if (hlt_counter)
-				continue;
-			__sti();
-			asm volatile("sleep" : : : "memory");
+		if (hlt_counter) {
+			while (1)
+				if (need_resched())
+					break;
+		} else {
+			while (!need_resched())
+				cpu_sleep();
 		}
+
 		schedule();
-		check_pgt_cache();
 	}
 }
 
-void machine_restart(char * __unused)
-{ /* Need to set MMU_TTB?? */
+void cpu_idle(void)
+{
+	default_idle();
 }
+
+void machine_restart(char * __unused)
+{
+	/* SR.BL=1 and invoke address error to let CPU reset (manual reset) */
+	asm volatile("ldc %0, sr\n\t"
+		     "mov.l @%1, %0" : : "r" (0x10000000), "r" (0x80000001));
+}
+
+EXPORT_SYMBOL(machine_restart);
 
 void machine_halt(void)
 {
+#if defined(CONFIG_SH_HS7751RVOIP)
+	unsigned short value;
+
+	value = ctrl_inw(PA_OUTPORTR);
+	ctrl_outw((value & 0xffdf), PA_OUTPORTR);
+#elif defined(CONFIG_SH_RTS7751R2D)
+	ctrl_outw(0x0001, PA_POWOFF);
+#endif
+	while (1)
+		cpu_sleep();
 }
+
+EXPORT_SYMBOL(machine_halt);
 
 void machine_power_off(void)
 {
+#if defined(CONFIG_SH_HS7751RVOIP)
+	unsigned short value;
+
+	value = ctrl_inw(PA_OUTPORTR);
+	ctrl_outw((value & 0xffdf), PA_OUTPORTR);
+#elif defined(CONFIG_SH_RTS7751R2D)
+	ctrl_outw(0x0001, PA_POWOFF);
+#endif
 }
+
+EXPORT_SYMBOL(machine_power_off);
 
 void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
-	printk("PC  : %08lx SP  : %08lx SR  : %08lx TEA : %08lx\n",
-	       regs->pc, regs->regs[15], regs->sr, ctrl_inl(MMU_TEA));
+	printk("Pid : %d, Comm: %20s\n", current->pid, current->comm);
+	print_symbol("PC is at %s\n", regs->pc);
+	printk("PC  : %08lx SP  : %08lx SR  : %08lx ",
+	       regs->pc, regs->regs[15], regs->sr);
+#ifdef CONFIG_MMU
+	printk("TEA : %08x    ", ctrl_inl(MMU_TEA));
+#else
+	printk("                  ");
+#endif
+	printk("%s\n", print_tainted());
+
 	printk("R0  : %08lx R1  : %08lx R2  : %08lx R3  : %08lx\n",
 	       regs->regs[0],regs->regs[1],
 	       regs->regs[2],regs->regs[3]);
@@ -109,17 +140,16 @@ void show_regs(struct pt_regs * regs)
 	       regs->regs[14]);
 	printk("MACH: %08lx MACL: %08lx GBR : %08lx PR  : %08lx\n",
 	       regs->mach, regs->macl, regs->gbr, regs->pr);
-}
 
-struct task_struct * alloc_task_struct(void)
-{
-	/* Get two pages */
-	return (struct task_struct *) __get_free_pages(GFP_KERNEL,1);
-}
+	/*
+	 * If we're in kernel mode, dump the stack too..
+	 */
+	if (!user_mode(regs)) {
+		extern void show_task(unsigned long *sp);
+		unsigned long sp = regs->regs[15];
 
-void free_task_struct(struct task_struct *p)
-{
-	free_pages((unsigned long) p, 1);
+		show_task((unsigned long *)sp);
+	}
 }
 
 /*
@@ -129,34 +159,31 @@ void free_task_struct(struct task_struct *p)
 /*
  * This is the mechanism for creating a new kernel thread.
  *
- * NOTE! Only a kernel-only process(ie the swapper or direct descendants
- * who haven't done an "execve()") should use this: it will work within
- * a system call from a "real" process, but the process memory space will
- * not be free'd until both the parent and the child have exited.
  */
+extern void kernel_thread_helper(void);
+__asm__(".align 5\n"
+	"kernel_thread_helper:\n\t"
+	"jsr	@r5\n\t"
+	" nop\n\t"
+	"mov.l	1f, r1\n\t"
+	"jsr	@r1\n\t"
+	" mov	r0, r4\n\t"
+	".align 2\n\t"
+	"1:.long do_exit");
+
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {	/* Don't use this in BL=1(cli).  Or else, CPU resets! */
-	register unsigned long __sc0 __asm__ ("r0");
-	register unsigned long __sc3 __asm__ ("r3") = __NR_clone;
-	register unsigned long __sc4 __asm__ ("r4") = (long) flags | CLONE_VM;
-	register unsigned long __sc5 __asm__ ("r5") = 0;
-	register unsigned long __sc8 __asm__ ("r8") = (long) arg;
-	register unsigned long __sc9 __asm__ ("r9") = (long) fn;
+	struct pt_regs regs;
 
-	__asm__("trapa	#0x12\n\t" 	/* Linux/SH system call */
-		"tst	#0xff, $r0\n\t"	/* child or parent? */
-		"bf	1f\n\t"		/* parent - jump */
-		"jsr	@$r9\n\t"	/* call fn */
-		" mov	$r8, $r4\n\t"	/* push argument */
-		"mov	$r0, $r4\n\t"	/* return value to arg of exit */
-		"mov	%1, $r3\n\t"	/* exit */
-		"trapa	#0x11\n"
-		"1:"
-		: "=z" (__sc0)
-		: "i" (__NR_exit), "r" (__sc3), "r" (__sc4), "r" (__sc5), 
-		  "r" (__sc8), "r" (__sc9)
-		: "memory", "t");
-	return __sc0;
+	memset(&regs, 0, sizeof(regs));
+	regs.regs[4] = (unsigned long) arg;
+	regs.regs[5] = (unsigned long) fn;
+
+	regs.pc = (unsigned long) kernel_thread_helper;
+	regs.sr = (1 << 30);
+
+	/* Ok, create the new process.. */
+	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
 }
 
 /*
@@ -164,20 +191,24 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
  */
 void exit_thread(void)
 {
-	/* Nothing to do. */
+	if (current->thread.ubc_pc) {
+		current->thread.ubc_pc = 0;
+		ubc_usercnt -= 1;
+	}
 }
 
 void flush_thread(void)
 {
-#if defined(__sh3__)
-	/* do nothing */
-	/* Possibly, set clear debug registers */
-#elif defined(__SH4__)
+#if defined(CONFIG_SH_FPU)
 	struct task_struct *tsk = current;
+	struct pt_regs *regs = (struct pt_regs *)
+				((unsigned long)tsk->thread_info
+				 + THREAD_SIZE - sizeof(struct pt_regs)
+				 - sizeof(unsigned long));
 
 	/* Forget lazy FPU state */
-	clear_fpu(tsk);
-	tsk->used_math = 0;
+	clear_fpu(tsk, regs);
+	clear_used_math();
 #endif
 }
 
@@ -189,24 +220,58 @@ void release_thread(struct task_struct *dead_task)
 /* Fill in the fpu structure for a core dump.. */
 int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 {
-#if defined(__SH4__)
-	int fpvalid;
+	int fpvalid = 0;
+
+#if defined(CONFIG_SH_FPU)
 	struct task_struct *tsk = current;
 
-	fpvalid = tsk->used_math;
+	fpvalid = !!tsk_used_math(tsk);
 	if (fpvalid) {
-		unsigned long flags;
-
-		save_and_cli(flags);
-		unlazy_fpu(tsk);
-		restore_flags(flags);
+		unlazy_fpu(tsk, regs);
 		memcpy(fpu, &tsk->thread.fpu.hard, sizeof(*fpu));
 	}
+#endif
 
 	return fpvalid;
-#else
-	return 0; /* Task didn't use the fpu at all. */
+}
+
+/* 
+ * Capture the user space registers if the task is not running (in user space)
+ */
+int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
+{
+	struct pt_regs ptregs;
+	
+	ptregs = *(struct pt_regs *)
+		((unsigned long)tsk->thread_info + THREAD_SIZE
+		 - sizeof(struct pt_regs)
+#ifdef CONFIG_SH_DSP
+		 - sizeof(struct pt_dspregs)
 #endif
+		 - sizeof(unsigned long));
+	elf_core_copy_regs(regs, &ptregs);
+
+	return 1;
+}
+
+int
+dump_task_fpu (struct task_struct *tsk, elf_fpregset_t *fpu)
+{
+	int fpvalid = 0;
+
+#if defined(CONFIG_SH_FPU)
+	fpvalid = !!tsk_used_math(tsk);
+	if (fpvalid) {
+		struct pt_regs *regs = (struct pt_regs *)
+					((unsigned long)tsk->thread_info
+					 + THREAD_SIZE - sizeof(struct pt_regs)
+					 - sizeof(unsigned long));
+		unlazy_fpu(tsk, regs);
+		memcpy(fpu, &tsk->thread.fpu.hard, sizeof(*fpu));
+	}
+#endif
+
+	return fpvalid;
 }
 
 asmlinkage void ret_from_fork(void);
@@ -216,32 +281,36 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 		struct task_struct *p, struct pt_regs *regs)
 {
 	struct pt_regs *childregs;
-#if defined(__SH4__)
+#if defined(CONFIG_SH_FPU)
 	struct task_struct *tsk = current;
 
-	if (tsk != &init_task) {
-		unsigned long flags;
-
-		save_and_cli(flags);
-		unlazy_fpu(tsk);
-		restore_flags(flags);
-		p->thread.fpu = current->thread.fpu;
-		p->used_math = tsk->used_math;
-	}
+	unlazy_fpu(tsk, regs);
+	p->thread.fpu = tsk->thread.fpu;
+	copy_to_stopped_child_used_math(p);
 #endif
-	childregs = ((struct pt_regs *)(THREAD_SIZE + (unsigned long) p)) - 1;
+
+	childregs = ((struct pt_regs *)
+		(THREAD_SIZE + (unsigned long) p->thread_info)
+#ifdef CONFIG_SH_DSP
+		- sizeof(struct pt_dspregs)
+#endif
+		- sizeof(unsigned long)) - 1;
 	*childregs = *regs;
 
 	if (user_mode(regs)) {
 		childregs->regs[15] = usp;
 	} else {
-		childregs->regs[15] = (unsigned long)p+2*PAGE_SIZE;
+		childregs->regs[15] = (unsigned long)p->thread_info + THREAD_SIZE;
+	}
+        if (clone_flags & CLONE_SETTLS) {
+		childregs->gbr = childregs->regs[0];
 	}
 	childregs->regs[0] = 0; /* Set return value for child */
-	childregs->sr |= SR_FD; /* Invalidate FPU flag */
 
 	p->thread.sp = (unsigned long) childregs;
 	p->thread.pc = (unsigned long) ret_from_fork;
+
+	p->thread.ubc_pc = 0;
 
 	return 0;
 }
@@ -266,44 +335,112 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 	dump->u_fpvalid = dump_fpu(regs, &dump->fpu);
 }
 
+/* Tracing by user break controller.  */
+static void
+ubc_set_tracing(int asid, unsigned long pc)
+{
+	ctrl_outl(pc, UBC_BARA);
+
+	/* We don't have any ASID settings for the SH-2! */
+	if (cpu_data->type != CPU_SH7604)
+		ctrl_outb(asid, UBC_BASRA);
+
+	ctrl_outl(0, UBC_BAMRA);
+
+	if (cpu_data->type == CPU_SH7729) {
+		ctrl_outw(BBR_INST | BBR_READ | BBR_CPU, UBC_BBRA);
+		ctrl_outl(BRCR_PCBA | BRCR_PCTE, UBC_BRCR);
+	} else {
+		ctrl_outw(BBR_INST | BBR_READ, UBC_BBRA);
+		ctrl_outw(BRCR_PCBA, UBC_BRCR);
+	}
+}
+
 /*
  *	switch_to(x,y) should switch tasks from x to y.
  *
  */
-void __switch_to(struct task_struct *prev, struct task_struct *next)
+struct task_struct *__switch_to(struct task_struct *prev, struct task_struct *next)
 {
-#if defined(__SH4__)
-	if (prev != &init_task) {
-		unsigned long flags;
+#if defined(CONFIG_SH_FPU)
+	struct pt_regs *regs = (struct pt_regs *)
+				((unsigned long)prev->thread_info
+				 + THREAD_SIZE - sizeof(struct pt_regs)
+				 - sizeof(unsigned long));
+	unlazy_fpu(prev, regs);
+#endif
 
-		save_and_cli(flags);
-		unlazy_fpu(prev);
-		restore_flags(flags);
+#ifdef CONFIG_PREEMPT
+	{
+		unsigned long flags;
+		struct pt_regs *regs;
+
+		local_irq_save(flags);
+		regs = (struct pt_regs *)
+			((unsigned long)prev->thread_info
+			 + THREAD_SIZE - sizeof(struct pt_regs)
+#ifdef CONFIG_SH_DSP
+			 - sizeof(struct pt_dspregs)
+#endif
+			 - sizeof(unsigned long));
+		if (user_mode(regs) && regs->regs[15] >= 0xc0000000) {
+			int offset = (int)regs->regs[15];
+
+			/* Reset stack pointer: clear critical region mark */
+			regs->regs[15] = regs->regs[1];
+			if (regs->pc < regs->regs[0])
+				/* Go to rewind point */
+				regs->pc = regs->regs[0] + offset;
+		}
+		local_irq_restore(flags);
 	}
 #endif
+
 	/*
 	 * Restore the kernel mode register
 	 *   	k7 (r7_bank1)
 	 */
-	asm volatile("ldc	%0, $r7_bank"
+	asm volatile("ldc	%0, r7_bank"
 		     : /* no output */
-		     :"r" (next));
+		     : "r" (next->thread_info));
+
+#ifdef CONFIG_MMU
+	/* If no tasks are using the UBC, we're done */
+	if (ubc_usercnt == 0)
+		/* If no tasks are using the UBC, we're done */;
+	else if (next->thread.ubc_pc && next->mm) {
+		ubc_set_tracing(next->mm->context & MMU_CONTEXT_ASID_MASK,
+				next->thread.ubc_pc);
+	} else {
+		ctrl_outw(0, UBC_BBRA);
+		ctrl_outw(0, UBC_BBRB);
+	}
+#endif
+
+	return prev;
 }
 
 asmlinkage int sys_fork(unsigned long r4, unsigned long r5,
 			unsigned long r6, unsigned long r7,
 			struct pt_regs regs)
 {
-	return do_fork(SIGCHLD, regs.regs[15], &regs, 0);
+#ifdef CONFIG_MMU
+	return do_fork(SIGCHLD, regs.regs[15], &regs, 0, NULL, NULL);
+#else
+	/* fork almost works, enough to trick you into looking elsewhere :-( */
+	return -EINVAL;
+#endif
 }
 
 asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
-			 unsigned long r6, unsigned long r7,
+			 unsigned long parent_tidptr,
+			 unsigned long child_tidptr,
 			 struct pt_regs regs)
 {
 	if (!newsp)
 		newsp = regs.regs[15];
-	return do_fork(clone_flags, newsp, &regs, 0);
+	return do_fork(clone_flags, newsp, &regs, 0,
+			(int __user *)parent_tidptr, (int __user *)child_tidptr);
 }
 
 /*
@@ -320,7 +457,8 @@ asmlinkage int sys_vfork(unsigned long r4, unsigned long r5,
 			 unsigned long r6, unsigned long r7,
 			 struct pt_regs regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.regs[15], &regs, 0);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.regs[15], &regs,
+		       0, NULL, NULL);
 }
 
 /*
@@ -333,26 +471,24 @@ asmlinkage int sys_execve(char *ufilename, char **uargv,
 	int error;
 	char *filename;
 
-	filename = getname(ufilename);
+	filename = getname((char __user *)ufilename);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
 
-	error = do_execve(filename, uargv, uenvp, &regs);
-	if (error == 0)
+	error = do_execve(filename,
+			  (char __user * __user *)uargv,
+			  (char __user * __user *)uenvp,
+			  &regs);
+	if (error == 0) {
+		task_lock(current);
 		current->ptrace &= ~PT_DTRACE;
+		task_unlock(current);
+	}
 	putname(filename);
 out:
 	return error;
 }
-
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
 
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -365,23 +501,12 @@ unsigned long get_wchan(struct task_struct *p)
 	/*
 	 * The same comment as on the Alpha applies here, too ...
 	 */
-	pc = thread_saved_pc(&p->thread);
-	if (pc >= (unsigned long) interruptible_sleep_on && pc < (unsigned long) add_timer) {
+	pc = thread_saved_pc(p);
+	if (in_sched_functions(pc)) {
 		schedule_frame = ((unsigned long *)(long)p->thread.sp)[1];
 		return (unsigned long)((unsigned long *)schedule_frame)[1];
 	}
 	return pc;
-}
-
-asmlinkage void print_syscall(int x)
-{
-	unsigned long flags, sr;
-	asm("stc	$sr, %0": "=r" (sr));
-	save_and_cli(flags);
-	printk("%c: %c %c, %c: SYSCALL\n", (x&63)+32,
-	       (current->flags&PF_USEDFPU)?'C':' ',
-	       (init_task.flags&PF_USEDFPU)?'K':' ', (sr&SR_FD)?' ':'F');
-	restore_flags(flags);
 }
 
 asmlinkage void break_point_trap(unsigned long r4, unsigned long r5,
@@ -391,6 +516,8 @@ asmlinkage void break_point_trap(unsigned long r4, unsigned long r5,
 	/* Clear tracing.  */
 	ctrl_outw(0, UBC_BBRA);
 	ctrl_outw(0, UBC_BBRB);
+	current->thread.ubc_pc = 0;
+	ubc_usercnt -= 1;
 
 	force_sig(SIGTRAP, current);
 }

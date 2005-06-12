@@ -80,18 +80,17 @@ static char *version =
 #include <linux/module.h>
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/bitops.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/errno.h>
@@ -111,8 +110,6 @@ static char *version =
 #undef READ
 #undef WRITE
 
-extern struct net_device *init_etherdev(struct net_device *dev, int sizeof_private);
-
 /* use 0 for production, 1 for verification, >2 for debug
  */
 #ifndef NET_DEBUG
@@ -123,6 +120,8 @@ extern struct net_device *init_etherdev(struct net_device *dev, int sizeof_priva
  */
 unsigned int pamsnet_debug = NET_DEBUG;
 MODULE_PARM(pamsnet_debug, "i");
+MODULE_PARM_DESC(pamsnet_debug, "pamsnet debug enable (0-1)");
+MODULE_LICENSE("GPL");
 
 static unsigned int pamsnet_min_poll_time = 2;
 
@@ -157,8 +156,6 @@ static int	send_1_5 (int lun, unsigned char *command, int dma);
 static int	get_status (void);
 static int	calc_received (void *start_address);
 
-extern int pamsnet_probe(struct net_device *dev);
-
 static int pamsnet_open(struct net_device *dev);
 static int pamsnet_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void pamsnet_poll_rx(struct net_device *);
@@ -166,9 +163,9 @@ static int pamsnet_close(struct net_device *dev);
 static struct net_device_stats *net_get_stats(struct net_device *dev);
 static void pamsnet_tick(unsigned long);
 
-static void pamsnet_intr(int irq, void *data, struct pt_regs *fp);
+static irqreturn_t pamsnet_intr(int irq, void *data, struct pt_regs *fp);
 
-static struct timer_list pamsnet_timer = { function: amsnet_tick };
+static struct timer_list pamsnet_timer = TIMER_INITIALIZER(pamsnet_tick, 0, 0);
 
 #define STRAM_ADDR(a)	(((a) & 0xff000000) == 0)
 
@@ -487,19 +484,19 @@ static HADDR
 	    !acsi_wait_for_IRQ(TIMEOUTDMA) ||
 	    get_status())
 		goto bad;
-	ret = phys_to_virt(&(((DMAHWADDR *)buffer)->hwaddr));
+	ret = phys_to_virt((unsigned long)&(((DMAHWADDR *)buffer)->hwaddr));
 	dma_cache_maintenance((unsigned long)buffer, 512, 0);
 bad:
 	return (ret);
 }
 
-static void
+static irqreturn_t
 pamsnet_intr(irq, data, fp)
 	int irq;
 	void *data;
 	struct pt_regs *fp;
 {
-	return;
+	return IRQ_HANDLED;
 }
 
 /* receivepkt() loads a packet to a given buffer and returns its length */
@@ -561,24 +558,30 @@ bad:
 /* Check for a network adaptor of this type, and return '0' if one exists.
  */
 
-int __init 
-pamsnet_probe (dev)
-	struct net_device *dev;
+struct net_device * __init pamsnet_probe (int unit)
 {
+	struct net_device *dev;
 	int i;
 	HADDR *hwaddr;
+	int err;
 
 	unsigned char station_addr[6];
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	/* avoid "Probing for..." printed 4 times - the driver is supporting only one adapter now! */
-	static int no_more_found = 0;
+	static int no_more_found;
 
 	if (no_more_found)
-		return -ENODEV;
-
-	SET_MODULE_OWNER(dev);
-
+		return ERR_PTR(-ENODEV);
 	no_more_found = 1;
+
+	dev = alloc_etherdev(sizeof(struct net_local));
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+	}
+	SET_MODULE_OWNER(dev);
 
 	printk("Probing for PAM's Net/GK Adapter...\n");
 
@@ -617,11 +620,12 @@ pamsnet_probe (dev)
 	ENABLE_IRQ();
 	stdma_release();
 
-	if (lance_target < 0)
+	if (lance_target < 0) {
 		printk("No PAM's Net/GK found.\n");
+		free_netdev(dev);
+		return ERR_PTR(-ENODEV);
+	}
 
-	if ((dev == NULL) || (lance_target < 0))
-		return -ENODEV;
 	if (pamsnet_debug > 0 && version_printed++ == 0)
 		printk(version);
 
@@ -631,10 +635,6 @@ pamsnet_probe (dev)
 		station_addr[3], station_addr[4], station_addr[5]);
 
 	/* Initialize the device structure. */
-	if (dev->priv == NULL)
-		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	memset(dev->priv, 0, sizeof(struct net_local));
-
 	dev->open		= pamsnet_open;
 	dev->stop		= pamsnet_close;
 	dev->hard_start_xmit	= pamsnet_send_packet;
@@ -650,9 +650,12 @@ pamsnet_probe (dev)
 #endif
 		dev->dev_addr[i]  = station_addr[i];
 	}
-	ether_setup(dev);
+	err = register_netdev(dev);
+	if (!err)
+		return dev;
 
-	return(0);
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
 
 /* Open/initialize the board.  This is called (in the current kernel)
@@ -664,7 +667,7 @@ pamsnet_probe (dev)
  */
 static int
 pamsnet_open(struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (pamsnet_debug > 0)
 		printk("pamsnet_open\n");
@@ -693,17 +696,16 @@ pamsnet_open(struct net_device *dev) {
 
 static int
 pamsnet_send_packet(struct sk_buff *skb, struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	unsigned long flags;
 
 	/* Block a timer-based transmit from overlapping.  This could better be
 	 * done with atomic_swap(1, dev->tbusy), but set_bit() works as well.
 	 */
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	if (stdma_islocked()) {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		lp->stats.tx_errors++;
 	}
 	else {
@@ -714,7 +716,7 @@ pamsnet_send_packet(struct sk_buff *skb, struct net_device *dev) {
 		stdma_lock(pamsnet_intr, NULL);
 		DISABLE_IRQ();
 
-		restore_flags(flags);
+		local_irq_restore(flags);
 		if( !STRAM_ADDR(buf+length-1) ) {
 			memcpy(nic_packet->buffer, skb->data, length);
 			buf = (unsigned long)phys_nic_packet;
@@ -740,26 +742,25 @@ pamsnet_send_packet(struct sk_buff *skb, struct net_device *dev) {
  */
 static void
 pamsnet_poll_rx(struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int boguscount;
 	int pkt_len;
 	struct sk_buff *skb;
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	/* ++roman: Take care at locking the ST-DMA... This must be done with ints
 	 * off, since otherwise an int could slip in between the question and the
 	 * locking itself, and then we'd go to sleep... And locking itself is
 	 * necessary to keep the floppy_change timer from working with ST-DMA
 	 * registers. */
 	if (stdma_islocked()) {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return;
 	}
 	stdma_lock(pamsnet_intr, NULL);
 	DISABLE_IRQ();
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	boguscount = testpkt(lance_target);
 	if( lp->poll_time < MAX_POLL_TIME ) lp->poll_time++;
@@ -794,6 +795,7 @@ pamsnet_poll_rx(struct net_device *dev) {
 			 */
 			memcpy(skb->data, nic_packet->buffer, pkt_len);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 			lp->stats.rx_bytes+=pkt_len;
 		}
@@ -815,7 +817,7 @@ pamsnet_poll_rx(struct net_device *dev) {
 static void
 pamsnet_tick(unsigned long data) {
 	struct net_device	 *dev = (struct net_device *)data;
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if( pamsnet_debug > 0 && (lp->open_time++ & 7) == 8 )
 		printk("pamsnet_tick: %ld\n", lp->open_time);
@@ -830,7 +832,7 @@ pamsnet_tick(unsigned long data) {
  */
 static int
 pamsnet_close(struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (pamsnet_debug > 0)
 		printk("pamsnet_close, open_time=%ld\n", lp->open_time);
@@ -857,32 +859,27 @@ pamsnet_close(struct net_device *dev) {
  */
 static struct net_device_stats *net_get_stats(struct net_device *dev) 
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	return &lp->stats;
 }
 
 
 #ifdef MODULE
 
-static struct net_device pam_dev;
+static struct net_device *pam_dev;
 
-int
-init_module(void) {
-	int err;
-
-	pam_dev.init = pamsnet_probe;
-	if ((err = register_netdev(&pam_dev))) {
-		if (err == -EEXIST)  {
-			printk("PAM's Net/GK: devices already present. Module not loaded.\n");
-		}
-		return err;
-	}
+int init_module(void)
+{
+	pam_dev = pamsnet_probe(-1);
+	if (IS_ERR(pam_dev))
+		return PTR_ERR(pam_dev);
 	return 0;
 }
 
-void
-cleanup_module(void) {
-	unregister_netdev(&pam_dev);
+void cleanup_module(void)
+{
+	unregister_netdev(pam_dev);
+	free_netdev(pam_dev);
 }
 
 #endif /* MODULE */

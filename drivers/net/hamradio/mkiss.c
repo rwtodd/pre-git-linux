@@ -22,13 +22,15 @@
  *	Matthias (DG2FEF)       Added support for FlexNet CRC (on special request)
  *                              Fixed bug in ax25_close(): dev_lock_wait() was
  *                              called twice, causing a deadlock.
+ *	Jeroen (PE1RXQ)		Removed old MKISS_MAGIC stuff and calls to
+ *				MOD_*_USE_COUNT
+ *				Remove cli() and fix rtnl lock usage.
  */
 
 #include <linux/config.h>
 #include <linux/module.h>
 #include <asm/system.h>
-#include <asm/segment.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <asm/uaccess.h>
 #include <linux/string.h>
 #include <linux/mm.h>
@@ -54,16 +56,7 @@
 #include <linux/tcp.h>
 #endif
 
-static const char banner[] __initdata = KERN_INFO "mkiss: AX.25 Multikiss, Hans Albas PE1AYX\n";
-
-#define NR_MKISS 4
-#define MKISS_SERIAL_TYPE_NORMAL 1
-
-struct mkiss_channel {
-	int magic;		/* magic word */
-	int init;		/* channel exists? */
-	struct tty_struct *tty; /* link to tty control structure */
-};
+static char banner[] __initdata = KERN_INFO "mkiss: AX.25 Multikiss, Hans Albas PE1AYX\n";
 
 typedef struct ax25_ctrl {
 	struct ax_disp ctrl;	/* 				*/
@@ -153,7 +146,7 @@ static int check_crc_flex(unsigned char *cp, int size)
 /* Find a free channel, and link in this `tty' line. */
 static inline struct ax_disp *ax_alloc(void)
 {
-	ax25_ctrl_t *axp;
+	ax25_ctrl_t *axp=NULL;
 	int i;
 
 	for (i = 0; i < ax25_maxdev; i++) {
@@ -175,17 +168,17 @@ static inline struct ax_disp *ax_alloc(void)
 	/* If no channels are available, allocate one */
 	if (axp == NULL && (ax25_ctrls[i] = kmalloc(sizeof(ax25_ctrl_t), GFP_KERNEL)) != NULL) {
 		axp = ax25_ctrls[i];
-		memset(axp, 0, sizeof(ax25_ctrl_t));
-
-		/* Initialize channel control data */
-		set_bit(AXF_INUSE, &axp->ctrl.flags);
-		sprintf(axp->dev.name, "ax%d", i++);
-		axp->ctrl.tty      = NULL;
-		axp->dev.base_addr = i;
-		axp->dev.priv      = (void *)&axp->ctrl;
-		axp->dev.next      = NULL;
-		axp->dev.init      = ax25_init;
 	}
+	memset(axp, 0, sizeof(ax25_ctrl_t));
+
+	/* Initialize channel control data */
+	set_bit(AXF_INUSE, &axp->ctrl.flags);
+	sprintf(axp->dev.name, "ax%d", i++);
+	axp->ctrl.tty      = NULL;
+	axp->dev.base_addr = i;
+	axp->dev.priv      = (void *)&axp->ctrl;
+	axp->dev.next      = NULL;
+	axp->dev.init      = ax25_init;
 
 	if (axp != NULL) {
 		/*
@@ -228,7 +221,6 @@ static void ax_changedmtu(struct ax_disp *ax)
 	struct net_device *dev = ax->dev;
 	unsigned char *xbuff, *rbuff, *oxbuff, *orbuff;
 	int len;
-	unsigned long flags;
 
 	len = dev->mtu * 2;
 
@@ -254,8 +246,7 @@ static void ax_changedmtu(struct ax_disp *ax)
 		return;
 	}
 
-	save_flags(flags);
-	cli();
+	spin_lock_bh(&ax->buflock);
 
 	oxbuff    = ax->xbuff;
 	ax->xbuff = xbuff;
@@ -286,7 +277,7 @@ static void ax_changedmtu(struct ax_disp *ax)
 	ax->mtu      = dev->mtu + 73;
 	ax->buffsize = len;
 
-	restore_flags(flags);
+	spin_unlock_bh(&ax->buflock);
 
 	if (oxbuff != NULL)
 		kfree(oxbuff);
@@ -311,27 +302,27 @@ static inline void ax_unlock(struct ax_disp *ax)
 /* Send one completely decapsulated AX.25 packet to the AX.25 layer. */
 static void ax_bump(struct ax_disp *ax)
 {
-	struct ax_disp *tmp_ax;
 	struct sk_buff *skb;
-	struct mkiss_channel *mkiss;
 	int count;
 
-        tmp_ax = ax;
-
+	spin_lock_bh(&ax->buflock);
 	if (ax->rbuff[0] > 0x0f) {
-		if (ax->mkiss != NULL) {
-			mkiss= ax->mkiss->tty->driver_data;
-			if (mkiss->magic == MKISS_DRIVER_MAGIC)
-				tmp_ax = ax->mkiss;
-		} else if (ax->rbuff[0] & 0x20) {
+		if (ax->rbuff[0] & 0x20) {
 		        ax->crcmode = CRC_MODE_FLEX;
 			if (check_crc_flex(ax->rbuff, ax->rcount) < 0) {
 			        ax->rx_errors++;
 				return;
 			}
 			ax->rcount -= 2;
+                        /* dl9sau bugfix: the trailling two bytes flexnet crc
+                         * will not be passed to the kernel. thus we have
+                         * to correct the kissparm signature, because it
+                         * indicates a crc but there's none
+			 */
+                        *ax->rbuff &= ~0x20;
 		}
  	}
+	spin_unlock_bh(&ax->buflock);
 
 	count = ax->rcount;
 
@@ -341,12 +332,16 @@ static void ax_bump(struct ax_disp *ax)
 		return;
 	}
 
-	skb->dev      = tmp_ax->dev;
+	skb->dev      = ax->dev;
+	spin_lock_bh(&ax->buflock);
 	memcpy(skb_put(skb,count), ax->rbuff, count);
+	spin_unlock_bh(&ax->buflock);
 	skb->mac.raw  = skb->data;
 	skb->protocol = htons(ETH_P_AX25);
 	netif_rx(skb);
-	tmp_ax->rx_packets++;
+	ax->dev->last_rx = jiffies;
+	ax->rx_packets++;
+	ax->rx_bytes+=count;
 }
 
 /* Encapsulate one AX.25 packet and stuff into a TTY queue. */
@@ -354,7 +349,6 @@ static void ax_encaps(struct ax_disp *ax, unsigned char *icp, int len)
 {
 	unsigned char *p;
 	int actual, count;
-	struct mkiss_channel *mkiss = ax->tty->driver_data;
 
 	if (ax->mtu != ax->dev->mtu + 73)	/* Someone has been ifconfigging */
 		ax_changedmtu(ax);
@@ -369,35 +363,30 @@ static void ax_encaps(struct ax_disp *ax, unsigned char *icp, int len)
 
 	p = icp;
 
-	if (mkiss->magic  != MKISS_DRIVER_MAGIC) {
-	        switch (ax->crcmode) {
-		         unsigned short crc;
+	spin_lock_bh(&ax->buflock);
+        switch (ax->crcmode) {
+	         unsigned short crc;
 
-		case CRC_MODE_FLEX:
-		         *p |= 0x20;
-		         crc = calc_crc_flex(p, len);
-			 count = kiss_esc_crc(p, (unsigned char *)ax->xbuff, crc, len+2);
-			 break;
+	case CRC_MODE_FLEX:
+	         *p |= 0x20;
+	         crc = calc_crc_flex(p, len);
+		 count = kiss_esc_crc(p, (unsigned char *)ax->xbuff, crc, len+2);
+		 break;
 
-		default:
-		         count = kiss_esc(p, (unsigned char *)ax->xbuff, len);
-			 break;
-		}
-		ax->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
-		actual = ax->tty->driver.write(ax->tty, 0, ax->xbuff, count);
-		ax->tx_packets++;
-		ax->dev->trans_start = jiffies;
-		ax->xleft = count - actual;
-		ax->xhead = ax->xbuff + actual;
-	} else {
-		count = kiss_esc(p, (unsigned char *) ax->mkiss->xbuff, len);
-		ax->mkiss->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
-		actual = ax->mkiss->tty->driver.write(ax->mkiss->tty, 0, ax->mkiss->xbuff, count);
-		ax->tx_packets++;
-		ax->mkiss->dev->trans_start = jiffies;
-		ax->mkiss->xleft = count - actual;
-		ax->mkiss->xhead = ax->mkiss->xbuff + actual;
+	default:
+	         count = kiss_esc(p, (unsigned char *)ax->xbuff, len);
+		 break;
 	}
+	
+	ax->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
+	actual = ax->tty->driver->write(ax->tty, ax->xbuff, count);
+	ax->tx_packets++;
+	ax->tx_bytes+=actual;
+	ax->dev->trans_start = jiffies;
+	ax->xleft = count - actual;
+	ax->xhead = ax->xbuff + actual;
+
+	spin_unlock_bh(&ax->buflock);
 }
 
 /*
@@ -408,7 +397,6 @@ static void ax25_write_wakeup(struct tty_struct *tty)
 {
 	int actual;
 	struct ax_disp *ax = (struct ax_disp *) tty->disc_data;
-	struct mkiss_channel *mkiss;
 
 	/* First make sure we're connected. */
 	if (ax == NULL || ax->magic != AX25_MAGIC || !netif_running(ax->dev))
@@ -419,17 +407,11 @@ static void ax25_write_wakeup(struct tty_struct *tty)
 		 */
 		tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
 
-		if (ax->mkiss != NULL) {
-			mkiss= ax->mkiss->tty->driver_data;
-			if (mkiss->magic  == MKISS_DRIVER_MAGIC)
-				ax_unlock(ax->mkiss);
-	        }
-
 		netif_wake_queue(ax->dev);
 		return;
 	}
 
-	actual = tty->driver.write(tty, 0, ax->xhead, ax->xleft);
+	actual = tty->driver->write(tty, ax->xhead, ax->xleft);
 	ax->xleft -= actual;
 	ax->xhead += actual;
 }
@@ -438,31 +420,11 @@ static void ax25_write_wakeup(struct tty_struct *tty)
 static int ax_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ax_disp *ax = (struct ax_disp *) dev->priv;
-	struct mkiss_channel *mkiss = ax->tty->driver_data;
-	struct ax_disp *tmp_ax;
-
-	tmp_ax = NULL;
-
-	if (mkiss->magic  == MKISS_DRIVER_MAGIC) {
-		if (skb->data[0] < 0x10)
-			skb->data[0] = skb->data[0] + 0x10;
-		tmp_ax = ax->mkiss;
-	}
 
 	if (!netif_running(dev))  {
 		printk(KERN_ERR "mkiss: %s: xmit call when iface is down\n", dev->name);
 		return 1;
 	}
-
-	if (tmp_ax != NULL)
-		if (netif_queue_stopped(tmp_ax->dev))
-			return 1;
-
-	if (tmp_ax != NULL)
-		if (netif_queue_stopped(dev)) {
-			printk(KERN_ERR "mkiss: dev busy while serial dev is free\n");
-			ax_unlock(ax);
-	        }
 
 	if (netif_queue_stopped(dev)) {
 		/*
@@ -475,7 +437,7 @@ static int ax_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 
 		printk(KERN_ERR "mkiss: %s: transmit timed out, %s?\n", dev->name,
-		       (ax->tty->driver.chars_in_buffer(ax->tty) || ax->xleft) ?
+		       (ax->tty->driver->chars_in_buffer(ax->tty) || ax->xleft) ?
 		       "bad line quality" : "driver error");
 
 		ax->xleft = 0;
@@ -486,8 +448,6 @@ static int ax_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* We were not busy, so we are now... :-) */
 	if (skb != NULL) {
 		ax_lock(ax);
-		if (tmp_ax != NULL)
-			ax_lock(tmp_ax);
 		ax_encaps(ax, skb->data, skb->len);
 		kfree_skb(skb);
 	}
@@ -558,6 +518,8 @@ static int ax_open(struct net_device *dev)
 
 	ax->flags   &= (1 << AXF_INUSE);      /* Clear ESCAPE & ERROR flags */
 
+	spin_lock_init(&ax->buflock);
+
 	netif_start_queue(dev);
 	return 0;
 
@@ -625,9 +587,7 @@ static void ax25_receive_buf(struct tty_struct *tty, const unsigned char *cp, ch
 static int ax25_open(struct tty_struct *tty)
 {
 	struct ax_disp *ax = (struct ax_disp *) tty->disc_data;
-	struct ax_disp *tmp_ax;
-	struct mkiss_channel *mkiss;
-	int err, cnt;
+	int err;
 
 	/* First make sure we're not already connected. */
 	if (ax && ax->magic == AX25_MAGIC)
@@ -640,13 +600,8 @@ static int ax25_open(struct tty_struct *tty)
 	ax->tty = tty;
 	tty->disc_data = ax;
 
-	ax->mkiss = NULL;
-	tmp_ax    = NULL;
-
-	if (tty->driver.flush_buffer)
-		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	if (tty->driver->flush_buffer)
+		tty->driver->flush_buffer(tty);
 
 	/* Restore default settings */
 	ax->dev->type = ARPHRD_AX25;
@@ -654,29 +609,6 @@ static int ax25_open(struct tty_struct *tty)
 	/* Perform the low-level AX25 initialization. */
 	if ((err = ax_open(ax->dev)))
 		return err;
-
-	mkiss = ax->tty->driver_data;
-
-	if (mkiss->magic  == MKISS_DRIVER_MAGIC) {
-		for (cnt = 1; cnt < ax25_maxdev; cnt++) {
-			if (ax25_ctrls[cnt]) {
-				if (netif_running(&ax25_ctrls[cnt]->dev)) {
-					if (ax == &ax25_ctrls[cnt]->ctrl) {
-						cnt--;
-						tmp_ax = &ax25_ctrls[cnt]->ctrl;
-						break;
-					}
-				}
-			}
-		}
-	}
-
-	if (tmp_ax != NULL) {
-		ax->mkiss     = tmp_ax;
-		tmp_ax->mkiss = ax;
-	}
-
-	MOD_INC_USE_COUNT;
 
 	/* Done.  We have linked the TTY line to a channel. */
 	return ax->dev->base_addr;
@@ -692,11 +624,10 @@ static void ax25_close(struct tty_struct *tty)
 
 	unregister_netdev(ax->dev);
 
-	tty->disc_data = 0;
+	tty->disc_data = NULL;
 	ax->tty        = NULL;
 
 	ax_free(ax);
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -709,6 +640,8 @@ static struct net_device_stats *ax_get_stats(struct net_device *dev)
 
 	stats.rx_packets     = ax->rx_packets;
 	stats.tx_packets     = ax->tx_packets;
+	stats.rx_bytes	     = ax->rx_bytes;
+	stats.tx_bytes       = ax->tx_bytes;
 	stats.rx_dropped     = ax->rx_dropped;
 	stats.tx_dropped     = ax->tx_dropped;
 	stats.tx_errors      = ax->tx_errors;
@@ -824,19 +757,22 @@ static void kiss_unesc(struct ax_disp *ax, unsigned char s)
 			break;
 	}
 
+	spin_lock_bh(&ax->buflock);
 	if (!test_bit(AXF_ERROR, &ax->flags)) {
 		if (ax->rcount < ax->buffsize) {
 			ax->rbuff[ax->rcount++] = s;
+			spin_unlock_bh(&ax->buflock);
 			return;
 		}
 
 		ax->rx_over_errors++;
 		set_bit(AXF_ERROR, &ax->flags);
 	}
+	spin_unlock_bh(&ax->buflock);
 }
 
 
-static int ax_set_mac_address(struct net_device *dev, void *addr)
+static int ax_set_mac_address(struct net_device *dev, void __user *addr)
 {
 	if (copy_from_user(dev->dev_addr, addr, AX25_ADDR_LEN))
 		return -EFAULT;
@@ -854,7 +790,7 @@ static int ax_set_dev_mac_address(struct net_device *dev, void *addr)
 
 
 /* Perform I/O control on an active ax25 channel. */
-static int ax25_disp_ioctl(struct tty_struct *tty, void *file, int cmd, void *arg)
+static int ax25_disp_ioctl(struct tty_struct *tty, void *file, int cmd, void __user *arg)
 {
 	struct ax_disp *ax = (struct ax_disp *) tty->disc_data;
 	unsigned int tmp;
@@ -870,10 +806,10 @@ static int ax25_disp_ioctl(struct tty_struct *tty, void *file, int cmd, void *ar
 			return 0;
 
 		case SIOCGIFENCAP:
-			return put_user(4, (int *)arg);
+			return put_user(4, (int __user *)arg);
 
 		case SIOCSIFENCAP:
-			if (get_user(tmp, (int *)arg))
+			if (get_user(tmp, (int __user *)arg))
 				return -EFAULT;
 			ax->mode = tmp;
 			ax->dev->addr_len        = AX25_ADDR_LEN;	  /* sizeof an AX.25 addr */
@@ -935,10 +871,8 @@ static int ax25_init(struct net_device *dev)
 	memcpy(dev->broadcast, ax25_bcast, AX25_ADDR_LEN);
 	memcpy(dev->dev_addr,  ax25_test,  AX25_ADDR_LEN);
 
-	dev_init_buffers(dev);
-
 	/* New-style flags. */
-	dev->flags      = 0;
+	dev->flags      = IFF_BROADCAST | IFF_MULTICAST;
 
 	return 0;
 }
@@ -1010,7 +944,8 @@ MODULE_AUTHOR("Hans Albas PE1AYX <hans@esrac.ele.tue.nl>");
 MODULE_DESCRIPTION("KISS driver for AX.25 over TTYs");
 MODULE_PARM(ax25_maxdev, "i");
 MODULE_PARM_DESC(ax25_maxdev, "number of MKISS devices");
-
+MODULE_LICENSE("GPL");
+MODULE_ALIAS_LDISC(N_AX25);
 module_init(mkiss_init_driver);
 module_exit(mkiss_exit_driver);
 

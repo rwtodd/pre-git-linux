@@ -2,15 +2,7 @@
 # Makefile for all Linux ACPI interpreter subdirectories
 #
 
-O_TARGET := ../$(shell basename `pwd`).o
-
-obj-$(CONFIG_ACPI) := $(patsubst %.c,%.o,$(wildcard *.c))
-
-EXTRA_CFLAGS += -I../include
+obj-y := tbconvrt.o  tbget.o     tbrsdt.o   tbxface.o  \
+	 tbgetall.o  tbinstal.o  tbutils.o  tbxfroot.o
 
 EXTRA_CFLAGS += $(ACPI_CFLAGS)
-
-include $(TOPDIR)/Rules.make
-
-clean:
-	$(RM) *.o 

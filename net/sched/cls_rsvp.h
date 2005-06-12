@@ -95,9 +95,7 @@ struct rsvp_filter
 	u8			tunnelhdr;
 
 	struct tcf_result	res;
-#ifdef CONFIG_NET_CLS_POLICE
-	struct tcf_police	*police;
-#endif
+	struct tcf_exts		exts;
 
 	u32			handle;
 	struct rsvp_session	*sess;
@@ -120,18 +118,20 @@ static __inline__ unsigned hash_src(u32 *src)
 	return h & 0xF;
 }
 
-#ifdef CONFIG_NET_CLS_POLICE
-#define RSVP_POLICE() \
-if (f->police) { \
-	int pol_res = tcf_police(skb, f->police); \
-	if (pol_res < 0) continue; \
-	if (pol_res) return pol_res; \
+static struct tcf_ext_map rsvp_ext_map = {
+	.police = TCA_RSVP_POLICE,
+	.action = TCA_RSVP_ACT
+};
+
+#define RSVP_APPLY_RESULT()				\
+{							\
+	int r = tcf_exts_exec(skb, &f->exts, res);	\
+	if (r < 0)					\
+		continue;				\
+	else if (r > 0)					\
+		return r;				\
 }
-#else
-#define RSVP_POLICE()
-#endif
-
-
+	
 static int rsvp_classify(struct sk_buff *skb, struct tcf_proto *tp,
 			 struct tcf_result *res)
 {
@@ -147,11 +147,6 @@ static int rsvp_classify(struct sk_buff *skb, struct tcf_proto *tp,
 	struct ipv6hdr *nhptr = skb->nh.ipv6h;
 #else
 	struct iphdr *nhptr = skb->nh.iph;
-#endif
-
-#if !defined( __i386__) && !defined(__mc68000__)
-	if ((unsigned long)nhptr & 3)
-		return -1;
 #endif
 
 restart:
@@ -194,8 +189,7 @@ restart:
 #endif
 				    ) {
 					*res = f->res;
-
-					RSVP_POLICE();
+					RSVP_APPLY_RESULT();
 
 matched:
 					if (f->tunnelhdr == 0)
@@ -210,7 +204,7 @@ matched:
 			/* And wildcard bucket... */
 			for (f = s->ht[16]; f; f = f->next) {
 				*res = f->res;
-				RSVP_POLICE();
+				RSVP_APPLY_RESULT();
 				goto matched;
 			}
 			return -1;
@@ -247,15 +241,21 @@ static int rsvp_init(struct tcf_proto *tp)
 {
 	struct rsvp_head *data;
 
-	MOD_INC_USE_COUNT;
 	data = kmalloc(sizeof(struct rsvp_head), GFP_KERNEL);
 	if (data) {
 		memset(data, 0, sizeof(struct rsvp_head));
 		tp->root = data;
 		return 0;
 	}
-	MOD_DEC_USE_COUNT;
 	return -ENOBUFS;
+}
+
+static inline void
+rsvp_delete_filter(struct tcf_proto *tp, struct rsvp_filter *f)
+{
+	tcf_unbind_filter(tp, &f->res);
+	tcf_exts_destroy(tp, &f->exts);
+	kfree(f);
 }
 
 static void rsvp_destroy(struct tcf_proto *tp)
@@ -279,22 +279,14 @@ static void rsvp_destroy(struct tcf_proto *tp)
 				struct rsvp_filter *f;
 
 				while ((f = s->ht[h2]) != NULL) {
-					unsigned long cl;
-
 					s->ht[h2] = f->next;
-					if ((cl = __cls_set_class(&f->res.class, 0)) != 0)
-						tp->q->ops->cl_ops->unbind_tcf(tp->q, cl);
-#ifdef CONFIG_NET_CLS_POLICE
-					tcf_police_release(f->police);
-#endif
-					kfree(f);
+					rsvp_delete_filter(tp, f);
 				}
 			}
 			kfree(s);
 		}
 	}
 	kfree(data);
-	MOD_DEC_USE_COUNT;
 }
 
 static int rsvp_delete(struct tcf_proto *tp, unsigned long arg)
@@ -307,21 +299,10 @@ static int rsvp_delete(struct tcf_proto *tp, unsigned long arg)
 
 	for (fp = &s->ht[(h>>8)&0xFF]; *fp; fp = &(*fp)->next) {
 		if (*fp == f) {
-			unsigned long cl;
-
-
 			tcf_tree_lock(tp);
 			*fp = f->next;
 			tcf_tree_unlock(tp);
-
-			if ((cl = cls_set_class(tp, &f->res.class, 0)) != 0)
-				tp->q->ops->cl_ops->unbind_tcf(tp->q, cl);
-
-#ifdef CONFIG_NET_CLS_POLICE
-			tcf_police_release(f->police);
-#endif
-
-			kfree(f);
+			rsvp_delete_filter(tp, f);
 
 			/* Strip tree */
 
@@ -429,6 +410,7 @@ static int rsvp_change(struct tcf_proto *tp, unsigned long base,
 	struct tc_rsvp_pinfo *pinfo = NULL;
 	struct rtattr *opt = tca[TCA_OPTIONS-1];
 	struct rtattr *tb[TCA_RSVP_MAX];
+	struct tcf_exts e;
 	unsigned h1, h2;
 	u32 *dst;
 	int err;
@@ -436,45 +418,38 @@ static int rsvp_change(struct tcf_proto *tp, unsigned long base,
 	if (opt == NULL)
 		return handle ? -EINVAL : 0;
 
-	if (rtattr_parse(tb, TCA_RSVP_MAX, RTA_DATA(opt), RTA_PAYLOAD(opt)) < 0)
+	if (rtattr_parse_nested(tb, TCA_RSVP_MAX, opt) < 0)
 		return -EINVAL;
+
+	err = tcf_exts_validate(tp, tb, tca[TCA_RATE-1], &e, &rsvp_ext_map);
+	if (err < 0)
+		return err;
 
 	if ((f = (struct rsvp_filter*)*arg) != NULL) {
 		/* Node exists: adjust only classid */
 
 		if (f->handle != handle && handle)
-			return -EINVAL;
+			goto errout2;
 		if (tb[TCA_RSVP_CLASSID-1]) {
-			unsigned long cl;
-
 			f->res.classid = *(u32*)RTA_DATA(tb[TCA_RSVP_CLASSID-1]);
-			cl = cls_set_class(tp, &f->res.class, tp->q->ops->cl_ops->bind_tcf(tp->q, base, f->res.classid));
-			if (cl)
-				tp->q->ops->cl_ops->unbind_tcf(tp->q, cl);
+			tcf_bind_filter(tp, &f->res, base);
 		}
-#ifdef CONFIG_NET_CLS_POLICE
-		if (tb[TCA_RSVP_POLICE-1]) {
-			struct tcf_police *police = tcf_police_locate(tb[TCA_RSVP_POLICE-1], tca[TCA_RATE-1]);
 
-			tcf_tree_lock(tp);
-			police = xchg(&f->police, police);
-			tcf_tree_unlock(tp);
-
-			tcf_police_release(police);
-		}
-#endif
+		tcf_exts_change(tp, &f->exts, &e);
 		return 0;
 	}
 
 	/* Now more serious part... */
+	err = -EINVAL;
 	if (handle)
-		return -EINVAL;
+		goto errout2;
 	if (tb[TCA_RSVP_DST-1] == NULL)
-		return -EINVAL;
+		goto errout2;
 
+	err = -ENOBUFS;
 	f = kmalloc(sizeof(struct rsvp_filter), GFP_KERNEL);
 	if (f == NULL)
-		return -ENOBUFS;
+		goto errout2;
 
 	memset(f, 0, sizeof(*f));
 	h2 = 16;
@@ -523,7 +498,7 @@ static int rsvp_change(struct tcf_proto *tp, unsigned long base,
 
 	for (sp = &data->ht[h1]; (s=*sp) != NULL; sp = &s->next) {
 		if (dst[RSVP_DST_LEN-1] == s->dst[RSVP_DST_LEN-1] &&
-		    pinfo->protocol == s->protocol &&
+		    pinfo && pinfo->protocol == s->protocol &&
 		    memcmp(&pinfo->dpi, &s->dpi, sizeof(s->dpi)) == 0
 #if RSVP_DST_LEN == 4
 		    && dst[0] == s->dst[0]
@@ -539,11 +514,9 @@ insert:
 
 			f->sess = s;
 			if (f->tunnelhdr == 0)
-				cls_set_class(tp, &f->res.class, tp->q->ops->cl_ops->bind_tcf(tp->q, base, f->res.classid));
-#ifdef CONFIG_NET_CLS_POLICE
-			if (tb[TCA_RSVP_POLICE-1])
-				f->police = tcf_police_locate(tb[TCA_RSVP_POLICE-1], tca[TCA_RATE-1]);
-#endif
+				tcf_bind_filter(tp, &f->res, base);
+
+			tcf_exts_change(tp, &f->exts, &e);
 
 			for (fp = &s->ht[h2]; *fp; fp = &(*fp)->next)
 				if (((*fp)->spi.mask&f->spi.mask) != f->spi.mask)
@@ -565,9 +538,12 @@ insert:
 		goto errout;
 	memset(s, 0, sizeof(*s));
 	memcpy(s->dst, dst, sizeof(s->dst));
-	s->dpi = pinfo->dpi;
-	s->protocol = pinfo->protocol;
-	s->tunnelid = pinfo->tunnelid;
+
+	if (pinfo) {
+		s->dpi = pinfo->dpi;
+		s->protocol = pinfo->protocol;
+		s->tunnelid = pinfo->tunnelid;
+	}
 	for (sp = &data->ht[h1]; *sp; sp = &(*sp)->next) {
 		if (((*sp)->dpi.mask&s->dpi.mask) != s->dpi.mask)
 			break;
@@ -581,6 +557,8 @@ insert:
 errout:
 	if (f)
 		kfree(f);
+errout2:
+	tcf_exts_destroy(tp, &e);
 	return err;
 }
 
@@ -606,7 +584,7 @@ static void rsvp_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 					}
 					if (arg->fn(tp, (unsigned long)f, arg) < 0) {
 						arg->stop = 1;
-						break;
+						return;
 					}
 					arg->count++;
 				}
@@ -615,7 +593,6 @@ static void rsvp_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 	}
 }
 
-#ifdef CONFIG_RTNETLINK
 static int rsvp_dump(struct tcf_proto *tp, unsigned long fh,
 		     struct sk_buff *skb, struct tcmsg *t)
 {
@@ -646,61 +623,45 @@ static int rsvp_dump(struct tcf_proto *tp, unsigned long fh,
 		RTA_PUT(skb, TCA_RSVP_CLASSID, 4, &f->res.classid);
 	if (((f->handle>>8)&0xFF) != 16)
 		RTA_PUT(skb, TCA_RSVP_SRC, sizeof(f->src), f->src);
-#ifdef CONFIG_NET_CLS_POLICE
-	if (f->police) {
-		struct rtattr * p_rta = (struct rtattr*)skb->tail;
 
-		RTA_PUT(skb, TCA_RSVP_POLICE, 0, NULL);
-
-		if (tcf_police_dump(skb, f->police) < 0)
-			goto rtattr_failure;
-
-		p_rta->rta_len = skb->tail - (u8*)p_rta;
-	}
-#endif
+	if (tcf_exts_dump(skb, &f->exts, &rsvp_ext_map) < 0)
+		goto rtattr_failure;
 
 	rta->rta_len = skb->tail - b;
-#ifdef CONFIG_NET_CLS_POLICE
-	if (f->police) {
-		if (qdisc_copy_stats(skb, &f->police->stats))
-			goto rtattr_failure;
-	}
-#endif
+
+	if (tcf_exts_dump_stats(skb, &f->exts, &rsvp_ext_map) < 0)
+		goto rtattr_failure;
 	return skb->len;
 
 rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
-struct tcf_proto_ops RSVP_OPS = {
-	NULL,
-	RSVP_ID,
-	rsvp_classify,
-	rsvp_init,
-	rsvp_destroy,
-
-	rsvp_get,
-	rsvp_put,
-	rsvp_change,
-	rsvp_delete,
-	rsvp_walk,
-#ifdef CONFIG_RTNETLINK
-	rsvp_dump
-#else
-	NULL
-#endif
+static struct tcf_proto_ops RSVP_OPS = {
+	.next		=	NULL,
+	.kind		=	RSVP_ID,
+	.classify	=	rsvp_classify,
+	.init		=	rsvp_init,
+	.destroy	=	rsvp_destroy,
+	.get		=	rsvp_get,
+	.put		=	rsvp_put,
+	.change		=	rsvp_change,
+	.delete		=	rsvp_delete,
+	.walk		=	rsvp_walk,
+	.dump		=	rsvp_dump,
+	.owner		=	THIS_MODULE,
 };
 
-#ifdef MODULE
-int init_module(void)
+static int __init init_rsvp(void)
 {
 	return register_tcf_proto_ops(&RSVP_OPS);
 }
 
-void cleanup_module(void) 
+static void __exit exit_rsvp(void) 
 {
 	unregister_tcf_proto_ops(&RSVP_OPS);
 }
-#endif
+
+module_init(init_rsvp)
+module_exit(exit_rsvp)

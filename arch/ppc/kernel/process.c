@@ -1,7 +1,5 @@
 /*
- * $Id: process.c,v 1.97 1999/09/14 19:07:42 cort Exp $
- *
- *  linux/arch/ppc/kernel/process.c
+ *  arch/ppc/kernel/process.c
  *
  *  Derived from "arch/i386/kernel/process.c"
  *    Copyright (C) 1995  Linus Torvalds
@@ -9,7 +7,7 @@
  *  Updated and modified by Cort Dougan (cort@cs.nmt.edu) and
  *  Paul Mackerras (paulus@cs.anu.edu.au)
  *
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
  *  This program is free software; you can redistribute it and/or
@@ -29,10 +27,16 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/elf.h>
 #include <linux/init.h>
+#include <linux/prctl.h>
+#include <linux/init_task.h>
+#include <linux/module.h>
+#include <linux/kallsyms.h>
+#include <linux/mqueue.h>
+#include <linux/hardirq.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -42,27 +46,34 @@
 #include <asm/mmu.h>
 #include <asm/prom.h>
 
-int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpregs);
 extern unsigned long _get_SP(void);
 
 struct task_struct *last_task_used_math = NULL;
 struct task_struct *last_task_used_altivec = NULL;
-static struct vm_area_struct init_mmap = INIT_MMAP;
+struct task_struct *last_task_used_spe = NULL;
+
 static struct fs_struct init_fs = INIT_FS;
 static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
+static struct signal_struct init_signals = INIT_SIGNALS(init_signals);
+static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
 struct mm_struct init_mm = INIT_MM(init_mm);
-/* this is 16-byte aligned because it has a stack in it */
-union task_union __attribute((aligned(16))) init_task_union = {
-	INIT_TASK(init_task_union.task)
-};
+EXPORT_SYMBOL(init_mm);
+
+/* this is 8kB-aligned so we can get to the thread_info struct
+   at the base of it from the stack pointer with 1 integer instruction. */
+union thread_union init_thread_union
+	__attribute__((__section__(".data.init_task"))) =
+{ INIT_THREAD_INFO(init_task) };
+
+/* initial task structure */
+struct task_struct init_task = INIT_TASK(init_task);
+EXPORT_SYMBOL(init_task);
+
 /* only used to get secondary processor up */
 struct task_struct *current_set[NR_CPUS] = {&init_task, };
-char *sysmap = NULL; 
-unsigned long sysmap_size = 0;
 
-#undef SHOW_TASK_SWITCHES 1
-#undef CHECK_STACK 1
+#undef SHOW_TASK_SWITCHES
+#undef CHECK_STACK
 
 #if defined(CHECK_STACK)
 unsigned long
@@ -74,7 +85,7 @@ kernel_stack_top(struct task_struct *tsk)
 unsigned long
 task_top(struct task_struct *tsk)
 {
-	return ((unsigned long)tsk) + sizeof(struct task_struct);
+	return ((unsigned long)tsk) + sizeof(struct thread_info);
 }
 
 /* check to make sure the kernel stack is healthy */
@@ -84,7 +95,7 @@ int check_stack(struct task_struct *tsk)
 	unsigned long tsk_top = task_top(tsk);
 	int ret = 0;
 
-#if 0	
+#if 0
 	/* check thread magic */
 	if ( tsk->thread.magic != THREAD_MAGIC )
 	{
@@ -95,7 +106,7 @@ int check_stack(struct task_struct *tsk)
 
 	if ( !tsk )
 		printk("check_stack(): tsk bad tsk %p\n",tsk);
-	
+
 	/* check if stored ksp is bad */
 	if ( (tsk->thread.ksp > stack_top) || (tsk->thread.ksp < tsk_top) )
 	{
@@ -105,7 +116,7 @@ int check_stack(struct task_struct *tsk)
 		       tsk_top, tsk->thread.ksp, stack_top);
 		ret |= 2;
 	}
-	
+
 	/* check if stack ptr RIGHT NOW is bad */
 	if ( (tsk == current) && ((_get_SP() > stack_top ) || (_get_SP() < tsk_top)) )
 	{
@@ -116,7 +127,7 @@ int check_stack(struct task_struct *tsk)
 		ret |= 4;
 	}
 
-#if 0	
+#if 0
 	/* check amount of free stack */
 	for ( i = (unsigned long *)task_top(tsk) ; i < kernel_stack_top(tsk) ; i++ )
 	{
@@ -151,9 +162,11 @@ dump_altivec(struct pt_regs *regs, elf_vrregset_t *vrregs)
 	return 1;
 }
 
-void 
+void
 enable_kernel_altivec(void)
 {
+	WARN_ON(preemptible());
+
 #ifdef CONFIG_SMP
 	if (current->thread.regs && (current->thread.regs->msr & MSR_VEC))
 		giveup_altivec(current);
@@ -162,13 +175,43 @@ enable_kernel_altivec(void)
 #else
 	giveup_altivec(last_task_used_altivec);
 #endif /* __SMP __ */
-	printk("MSR_VEC in enable_altivec_kernel\n");
 }
+EXPORT_SYMBOL(enable_kernel_altivec);
 #endif /* CONFIG_ALTIVEC */
+
+#ifdef CONFIG_SPE
+int
+dump_spe(struct pt_regs *regs, elf_vrregset_t *evrregs)
+{
+	if (regs->msr & MSR_SPE)
+		giveup_spe(current);
+	/* We copy u32 evr[32] + u64 acc + u32 spefscr -> 35 */
+	memcpy(evrregs, &current->thread.evr[0], sizeof(u32) * 35);
+	return 1;
+}
+
+void
+enable_kernel_spe(void)
+{
+	WARN_ON(preemptible());
+
+#ifdef CONFIG_SMP
+	if (current->thread.regs && (current->thread.regs->msr & MSR_SPE))
+		giveup_spe(current);
+	else
+		giveup_spe(NULL);	/* just enable SPE for kernel - force */
+#else
+	giveup_spe(last_task_used_spe);
+#endif /* __SMP __ */
+}
+EXPORT_SYMBOL(enable_kernel_spe);
+#endif /* CONFIG_SPE */
 
 void
 enable_kernel_fp(void)
 {
+	WARN_ON(preemptible());
+
 #ifdef CONFIG_SMP
 	if (current->thread.regs && (current->thread.regs->msr & MSR_FP))
 		giveup_fpu(current);
@@ -178,114 +221,136 @@ enable_kernel_fp(void)
 	giveup_fpu(last_task_used_math);
 #endif /* CONFIG_SMP */
 }
+EXPORT_SYMBOL(enable_kernel_fp);
 
 int
-dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpregs)
+dump_task_fpu(struct task_struct *tsk, elf_fpregset_t *fpregs)
 {
-	if (regs->msr & MSR_FP)
-		giveup_fpu(current);
-	memcpy(fpregs, &current->thread.fpr[0], sizeof(*fpregs));
+	preempt_disable();
+	if (tsk->thread.regs && (tsk->thread.regs->msr & MSR_FP))
+		giveup_fpu(tsk);
+	preempt_enable();
+	memcpy(fpregs, &tsk->thread.fpr[0], sizeof(*fpregs));
 	return 1;
 }
 
-void
-_switch_to(struct task_struct *prev, struct task_struct *new,
-	  struct task_struct **last)
+struct task_struct *__switch_to(struct task_struct *prev,
+	struct task_struct *new)
 {
 	struct thread_struct *new_thread, *old_thread;
 	unsigned long s;
-	
-	__save_flags(s);
-	__cli();
-#if CHECK_STACK
+	struct task_struct *last;
+
+	local_irq_save(s);
+#ifdef CHECK_STACK
 	check_stack(prev);
 	check_stack(new);
 #endif
 
-#ifdef SHOW_TASK_SWITCHES
-	printk("%s/%d -> %s/%d NIP %08lx cpu %d root %x/%x\n",
-	       prev->comm,prev->pid,
-	       new->comm,new->pid,new->thread.regs->nip,new->processor,
-	       new->fs->root,prev->fs->root);
-#endif
 #ifdef CONFIG_SMP
 	/* avoid complexity of lazy save/restore of fpu
 	 * by just saving it every time we switch out if
 	 * this task used the fpu during the last quantum.
-	 * 
+	 *
 	 * If it tries to use the fpu again, it'll trap and
 	 * reload its fp regs.  So we don't have to do a restore
 	 * every switch, just a save.
 	 *  -- Cort
 	 */
-	if ( prev->thread.regs && (prev->thread.regs->msr & MSR_FP) )
+	if (prev->thread.regs && (prev->thread.regs->msr & MSR_FP))
 		giveup_fpu(prev);
-#ifdef CONFIG_ALTIVEC	
+#ifdef CONFIG_ALTIVEC
 	/*
-	 * If the previous thread 1) has some altivec regs it wants saved
-	 * (has bits in vrsave set) and 2) used altivec in the last quantum
+	 * If the previous thread used altivec in the last quantum
 	 * (thus changing altivec regs) then save them.
+	 * We used to check the VRSAVE register but not all apps
+	 * set it, so we don't rely on it now (and in fact we need
+	 * to save & restore VSCR even if VRSAVE == 0).  -- paulus
 	 *
 	 * On SMP we always save/restore altivec regs just to avoid the
 	 * complexity of changing processors.
 	 *  -- Cort
 	 */
-	if ( (prev->thread.regs && (prev->thread.regs->msr & MSR_VEC)) &&
-	     prev->thread.vrsave )
+	if ((prev->thread.regs && (prev->thread.regs->msr & MSR_VEC)))
 		giveup_altivec(prev);
-#endif /* CONFIG_ALTIVEC */	
-	current_set[smp_processor_id()] = new;
+#endif /* CONFIG_ALTIVEC */
+#ifdef CONFIG_SPE
+	/*
+	 * If the previous thread used spe in the last quantum
+	 * (thus changing spe regs) then save them.
+	 *
+	 * On SMP we always save/restore spe regs just to avoid the
+	 * complexity of changing processors.
+	 */
+	if ((prev->thread.regs && (prev->thread.regs->msr & MSR_SPE)))
+		giveup_spe(prev);
+#endif /* CONFIG_SPE */
 #endif /* CONFIG_SMP */
+
 	/* Avoid the trap.  On smp this this never happens since
 	 * we don't set last_task_used_altivec -- Cort
 	 */
-	if ( last_task_used_altivec == new )
+	if (new->thread.regs && last_task_used_altivec == new)
 		new->thread.regs->msr |= MSR_VEC;
+#ifdef CONFIG_SPE
+	/* Avoid the trap.  On smp this this never happens since
+	 * we don't set last_task_used_spe
+	 */
+	if (new->thread.regs && last_task_used_spe == new)
+		new->thread.regs->msr |= MSR_SPE;
+#endif /* CONFIG_SPE */
 	new_thread = &new->thread;
 	old_thread = &current->thread;
-	*last = _switch(old_thread, new_thread);
-	__restore_flags(s);
+	last = _switch(old_thread, new_thread);
+	local_irq_restore(s);
+	return last;
 }
 
 void show_regs(struct pt_regs * regs)
 {
-	int i;
+	int i, trap;
 
-	printk("NIP: %08lX XER: %08lX LR: %08lX REGS: %p TRAP: %04lx\n",
-	       regs->nip, regs->xer, regs->link, regs,regs->trap);
+	printk("NIP: %08lX LR: %08lX SP: %08lX REGS: %p TRAP: %04lx    %s\n",
+	       regs->nip, regs->link, regs->gpr[1], regs, regs->trap,
+	       print_tainted());
 	printk("MSR: %08lx EE: %01x PR: %01x FP: %01x ME: %01x IR/DR: %01x%01x\n",
 	       regs->msr, regs->msr&MSR_EE ? 1 : 0, regs->msr&MSR_PR ? 1 : 0,
 	       regs->msr & MSR_FP ? 1 : 0,regs->msr&MSR_ME ? 1 : 0,
 	       regs->msr&MSR_IR ? 1 : 0,
 	       regs->msr&MSR_DR ? 1 : 0);
-	printk("TASK = %p[%d] '%s' ",
-	       current, current->pid, current->comm);
+	trap = TRAP(regs);
+	if (trap == 0x300 || trap == 0x600)
+		printk("DAR: %08lX, DSISR: %08lX\n", regs->dar, regs->dsisr);
+	printk("TASK = %p[%d] '%s' THREAD: %p\n",
+	       current, current->pid, current->comm, current->thread_info);
 	printk("Last syscall: %ld ", current->thread.last_syscall);
-	printk("\nlast math %p last altivec %p", last_task_used_math,
-	       last_task_used_altivec);
-	
+
 #ifdef CONFIG_SMP
-	printk(" CPU: %d", current->processor);
+	printk(" CPU: %d", smp_processor_id());
 #endif /* CONFIG_SMP */
-	
-	printk("\n");
-	for (i = 0;  i < 32;  i++)
-	{
+
+	for (i = 0;  i < 32;  i++) {
 		long r;
 		if ((i % 8) == 0)
-		{
-			printk("GPR%02d: ", i);
-		}
-
-		if ( __get_user(r, &(regs->gpr[i])) )
-		    goto out;
+			printk("\n" KERN_INFO "GPR%02d: ", i);
+		if (__get_user(r, &regs->gpr[i]))
+			break;
 		printk("%08lX ", r);
-		if ((i % 8) == 7)
-		{
-			printk("\n");
-		}
+		if (i == 12 && !FULL_REGS(regs))
+			break;
 	}
-out:
+	printk("\n");
+#ifdef CONFIG_KALLSYMS
+	/*
+	 * Lookup NIP late so we have the best change of getting the
+	 * above info out without failing
+	 */
+	printk("NIP [%08lx] ", regs->nip);
+	print_symbol("%s\n", regs->nip);
+	printk("LR [%08lx] ", regs->link);
+	print_symbol("%s\n", regs->link);
+#endif
+	show_stack(current, (unsigned long *) regs->gpr[1]);
 }
 
 void exit_thread(void)
@@ -294,6 +359,10 @@ void exit_thread(void)
 		last_task_used_math = NULL;
 	if (last_task_used_altivec == current)
 		last_task_used_altivec = NULL;
+#ifdef CONFIG_SPE
+	if (last_task_used_spe == current)
+		last_task_used_spe = NULL;
+#endif
 }
 
 void flush_thread(void)
@@ -302,6 +371,10 @@ void flush_thread(void)
 		last_task_used_math = NULL;
 	if (last_task_used_altivec == current)
 		last_task_used_altivec = NULL;
+#ifdef CONFIG_SPE
+	if (last_task_used_spe == current)
+		last_task_used_spe = NULL;
+#endif
 }
 
 void
@@ -310,107 +383,79 @@ release_thread(struct task_struct *t)
 }
 
 /*
+ * This gets called before we allocate a new thread and copy
+ * the current task into it.
+ */
+void prepare_to_copy(struct task_struct *tsk)
+{
+	struct pt_regs *regs = tsk->thread.regs;
+
+	if (regs == NULL)
+		return;
+	preempt_disable();
+	if (regs->msr & MSR_FP)
+		giveup_fpu(current);
+#ifdef CONFIG_ALTIVEC
+	if (regs->msr & MSR_VEC)
+		giveup_altivec(current);
+#endif /* CONFIG_ALTIVEC */
+#ifdef CONFIG_SPE
+	if (regs->msr & MSR_SPE)
+		giveup_spe(current);
+#endif /* CONFIG_SPE */
+	preempt_enable();
+}
+
+/*
  * Copy a thread..
  */
 int
 copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	    unsigned long unused,
-	    struct task_struct * p, struct pt_regs * regs)
+	    struct task_struct *p, struct pt_regs *regs)
 {
-	unsigned long msr;
-	struct pt_regs * childregs, *kregs;
+	struct pt_regs *childregs, *kregs;
 	extern void ret_from_fork(void);
-	
+	unsigned long sp = (unsigned long)p->thread_info + THREAD_SIZE;
+	unsigned long childframe;
+
+	CHECK_FULL_REGS(regs);
 	/* Copy registers */
-	childregs = ((struct pt_regs *)
-		     ((unsigned long)p + sizeof(union task_union)
-		      - STACK_FRAME_OVERHEAD)) - 2;
+	sp -= sizeof(struct pt_regs);
+	childregs = (struct pt_regs *) sp;
 	*childregs = *regs;
-	if ((childregs->msr & MSR_PR) == 0)
-		childregs->gpr[2] = (unsigned long) p;	/* `current' in new task */
-	childregs->gpr[3] = 0;  /* Result from fork() */
-	p->thread.regs = childregs;
-	p->thread.ksp = (unsigned long) childregs - STACK_FRAME_OVERHEAD;
-	p->thread.ksp -= sizeof(struct pt_regs ) + STACK_FRAME_OVERHEAD;
-	kregs = (struct pt_regs *)(p->thread.ksp + STACK_FRAME_OVERHEAD);
-	kregs->nip = (unsigned long)ret_from_fork;
-	asm volatile("mfmsr %0" : "=r" (msr):);
-	kregs->msr = msr;
-	kregs->gpr[1] = (unsigned long)childregs - STACK_FRAME_OVERHEAD;
-	kregs->gpr[2] = (unsigned long)p;
-	
-	if (usp >= (unsigned long) regs) {
-		/* Stack is in kernel space - must adjust */
-		childregs->gpr[1] = (unsigned long)(childregs + 1);
+	if ((childregs->msr & MSR_PR) == 0) {
+		/* for kernel thread, set `current' and stackptr in new task */
+		childregs->gpr[1] = sp + sizeof(struct pt_regs);
+		childregs->gpr[2] = (unsigned long) p;
+		p->thread.regs = NULL;	/* no user register state */
 	} else {
-		/* Provided stack is in user space */
 		childregs->gpr[1] = usp;
+		p->thread.regs = childregs;
+		if (clone_flags & CLONE_SETTLS)
+			childregs->gpr[2] = childregs->gpr[6];
 	}
+	childregs->gpr[3] = 0;  /* Result from fork() */
+	sp -= STACK_FRAME_OVERHEAD;
+	childframe = sp;
+
+	/*
+	 * The way this works is that at some point in the future
+	 * some task will call _switch to switch to the new task.
+	 * That will pop off the stack frame created below and start
+	 * the new task running at ret_from_fork.  The new task will
+	 * do some house keeping and then return from the fork or clone
+	 * system call, using the stack frame created above.
+	 */
+	sp -= sizeof(struct pt_regs);
+	kregs = (struct pt_regs *) sp;
+	sp -= STACK_FRAME_OVERHEAD;
+	p->thread.ksp = sp;
+	kregs->nip = (unsigned long)ret_from_fork;
+
 	p->thread.last_syscall = -1;
-	  
-	/*
-	 * copy fpu info - assume lazy fpu switch now always
-	 *  -- Cort
-	 */
-	if (regs->msr & MSR_FP)
-		giveup_fpu(current);
-	memcpy(&p->thread.fpr, &current->thread.fpr, sizeof(p->thread.fpr));
-	p->thread.fpscr = current->thread.fpscr;
-	childregs->msr &= ~MSR_FP;
-
-#ifdef CONFIG_ALTIVEC
-	/*
-	 * copy altiVec info - assume lazy altiVec switch
-	 * - kumar
-	 */
-	if (regs->msr & MSR_VEC)
-		giveup_altivec(current);
-
-	memcpy(&p->thread.vr, &current->thread.vr, sizeof(p->thread.vr));
-	p->thread.vscr = current->thread.vscr;
-	childregs->msr &= ~MSR_VEC;
-#endif /* CONFIG_ALTIVEC */
 
 	return 0;
-}
-
-/*
- * XXX ld.so expects the auxiliary table to start on
- * a 16-byte boundary, so we have to find it and
- * move it up. :-(
- */
-static inline void shove_aux_table(unsigned long sp)
-{
-	int argc;
-	char *p;
-	unsigned long e;
-	unsigned long aux_start, offset;
-
-	if (__get_user(argc, (int *)sp))
-		return;
-	sp += sizeof(int) + (argc + 1) * sizeof(char *);
-	/* skip over the environment pointers */
-	do {
-		if (__get_user(p, (char **)sp))
-			return;
-		sp += sizeof(char *);
-	} while (p != NULL);
-	aux_start = sp;
-	/* skip to the end of the auxiliary table */
-	do {
-		if (__get_user(e, (unsigned long *)sp))
-			return;
-		sp += 2 * sizeof(unsigned long);
-	} while (e != AT_NULL);
-	offset = ((aux_start + 15) & ~15) - aux_start;
-	if (offset != 0) {
-		do {
-			sp -= sizeof(unsigned long);
-			if (__get_user(e, (unsigned long *)sp)
-			    || __put_user(e, (unsigned long *)(sp + offset)))
-				return;
-		} while (sp > aux_start);
-	}
 }
 
 /*
@@ -419,58 +464,112 @@ static inline void shove_aux_table(unsigned long sp)
 void start_thread(struct pt_regs *regs, unsigned long nip, unsigned long sp)
 {
 	set_fs(USER_DS);
+	memset(regs->gpr, 0, sizeof(regs->gpr));
+	regs->ctr = 0;
+	regs->link = 0;
+	regs->xer = 0;
+	regs->ccr = 0;
+	regs->mq = 0;
 	regs->nip = nip;
 	regs->gpr[1] = sp;
 	regs->msr = MSR_USER;
-	shove_aux_table(sp);
 	if (last_task_used_math == current)
-		last_task_used_math = 0;
+		last_task_used_math = NULL;
 	if (last_task_used_altivec == current)
-		last_task_used_altivec = 0;
+		last_task_used_altivec = NULL;
+#ifdef CONFIG_SPE
+	if (last_task_used_spe == current)
+		last_task_used_spe = NULL;
+#endif
+	memset(current->thread.fpr, 0, sizeof(current->thread.fpr));
 	current->thread.fpscr = 0;
+#ifdef CONFIG_ALTIVEC
+	memset(current->thread.vr, 0, sizeof(current->thread.vr));
+	memset(&current->thread.vscr, 0, sizeof(current->thread.vscr));
+	current->thread.vrsave = 0;
+	current->thread.used_vr = 0;
+#endif /* CONFIG_ALTIVEC */
+#ifdef CONFIG_SPE
+	memset(current->thread.evr, 0, sizeof(current->thread.evr));
+	current->thread.acc = 0;
+	current->thread.spefscr = 0;
+	current->thread.used_spe = 0;
+#endif /* CONFIG_SPE */
 }
 
-int sys_clone(int p1, int p2, int p3, int p4, int p5, int p6,
+#define PR_FP_ALL_EXCEPT (PR_FP_EXC_DIV | PR_FP_EXC_OVF | PR_FP_EXC_UND \
+		| PR_FP_EXC_RES | PR_FP_EXC_INV)
+
+int set_fpexc_mode(struct task_struct *tsk, unsigned int val)
+{
+	struct pt_regs *regs = tsk->thread.regs;
+
+	/* This is a bit hairy.  If we are an SPE enabled  processor
+	 * (have embedded fp) we store the IEEE exception enable flags in
+	 * fpexc_mode.  fpexc_mode is also used for setting FP exception
+	 * mode (asyn, precise, disabled) for 'Classic' FP. */
+	if (val & PR_FP_EXC_SW_ENABLE) {
+#ifdef CONFIG_SPE
+		tsk->thread.fpexc_mode = val &
+			(PR_FP_EXC_SW_ENABLE | PR_FP_ALL_EXCEPT);
+#else
+		return -EINVAL;
+#endif
+	} else {
+		/* on a CONFIG_SPE this does not hurt us.  The bits that
+		 * __pack_fe01 use do not overlap with bits used for
+		 * PR_FP_EXC_SW_ENABLE.  Additionally, the MSR[FE0,FE1] bits
+		 * on CONFIG_SPE implementations are reserved so writing to
+		 * them does not change anything */
+		if (val > PR_FP_EXC_PRECISE)
+			return -EINVAL;
+		tsk->thread.fpexc_mode = __pack_fe01(val);
+		if (regs != NULL && (regs->msr & MSR_FP) != 0)
+			regs->msr = (regs->msr & ~(MSR_FE0|MSR_FE1))
+				| tsk->thread.fpexc_mode;
+	}
+	return 0;
+}
+
+int get_fpexc_mode(struct task_struct *tsk, unsigned long adr)
+{
+	unsigned int val;
+
+	if (tsk->thread.fpexc_mode & PR_FP_EXC_SW_ENABLE)
+#ifdef CONFIG_SPE
+		val = tsk->thread.fpexc_mode;
+#else
+		return -EINVAL;
+#endif
+	else
+		val = __unpack_fe01(tsk->thread.fpexc_mode);
+	return put_user(val, (unsigned int __user *) adr);
+}
+
+int sys_clone(unsigned long clone_flags, unsigned long usp,
+	      int __user *parent_tidp, void __user *child_threadptr,
+	      int __user *child_tidp, int p6,
 	      struct pt_regs *regs)
 {
-	unsigned long clone_flags = p1;
-	int res;
-	lock_kernel();
-	res = do_fork(clone_flags, regs->gpr[1], regs, 0);
-#ifdef CONFIG_SMP
-	/* When we clone the idle task we keep the same pid but
-	 * the return value of 0 for both causes problems.
-	 * -- Cort
-	 */
-	if ((current->pid == 0) && (current == &init_task))
-		res = 1;
-#endif /* CONFIG_SMP */
-	unlock_kernel();
-	return res;
+	CHECK_FULL_REGS(regs);
+	if (usp == 0)
+		usp = regs->gpr[1];	/* stack pointer for child */
+ 	return do_fork(clone_flags, usp, regs, 0, parent_tidp, child_tidp);
 }
 
 int sys_fork(int p1, int p2, int p3, int p4, int p5, int p6,
 	     struct pt_regs *regs)
 {
-
-	int res;
-	
-	res = do_fork(SIGCHLD, regs->gpr[1], regs, 0);
-#ifdef CONFIG_SMP
-	/* When we clone the idle task we keep the same pid but
-	 * the return value of 0 for both causes problems.
-	 * -- Cort
-	 */
-	if ((current->pid == 0) && (current == &init_task))
-		res = 1;
-#endif /* CONFIG_SMP */
-	return res;
+	CHECK_FULL_REGS(regs);
+	return do_fork(SIGCHLD, regs->gpr[1], regs, 0, NULL, NULL);
 }
 
 int sys_vfork(int p1, int p2, int p3, int p4, int p5, int p6,
 	      struct pt_regs *regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->gpr[1], regs, 0);
+	CHECK_FULL_REGS(regs);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->gpr[1],
+			regs, 0, NULL, NULL);
 }
 
 int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
@@ -480,42 +579,94 @@ int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
 	int error;
 	char * filename;
 
-	filename = getname((char *) a0);
+	filename = getname((char __user *) a0);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
+	preempt_disable();
 	if (regs->msr & MSR_FP)
 		giveup_fpu(current);
 #ifdef CONFIG_ALTIVEC
 	if (regs->msr & MSR_VEC)
 		giveup_altivec(current);
-#endif /* CONFIG_ALTIVEC */ 
-	error = do_execve(filename, (char **) a1, (char **) a2, regs);
-	if (error == 0)
+#endif /* CONFIG_ALTIVEC */
+#ifdef CONFIG_SPE
+	if (regs->msr & MSR_SPE)
+		giveup_spe(current);
+#endif /* CONFIG_SPE */
+	preempt_enable();
+	error = do_execve(filename, (char __user *__user *) a1,
+			  (char __user *__user *) a2, regs);
+	if (error == 0) {
+		task_lock(current);
 		current->ptrace &= ~PT_DTRACE;
+		task_unlock(current);
+	}
 	putname(filename);
 out:
 	return error;
 }
 
-void
-print_backtrace(unsigned long *sp)
+void dump_stack(void)
 {
-	int cnt = 0;
-	unsigned long i;
+	show_stack(current, NULL);
+}
 
-	printk("Call backtrace: ");
-	while (sp) {
-		if (__get_user( i, &sp[1] ))
-			break;
-		if (cnt++ % 7 == 0)
-			printk("\n");
-		printk("%08lX ", i);
-		if (cnt > 32) break;
-		if (__get_user(sp, (unsigned long **)sp))
-			break;
+EXPORT_SYMBOL(dump_stack);
+
+void show_stack(struct task_struct *tsk, unsigned long *stack)
+{
+	unsigned long sp, stack_top, prev_sp, ret;
+	int count = 0;
+	unsigned long next_exc = 0;
+	struct pt_regs *regs;
+	extern char ret_from_except, ret_from_except_full, ret_from_syscall;
+
+	sp = (unsigned long) stack;
+	if (tsk == NULL)
+		tsk = current;
+	if (sp == 0) {
+		if (tsk == current)
+			asm("mr %0,1" : "=r" (sp));
+		else
+			sp = tsk->thread.ksp;
 	}
-	printk("\n");
+
+	prev_sp = (unsigned long) (tsk->thread_info + 1);
+	stack_top = (unsigned long) tsk->thread_info + THREAD_SIZE;
+	while (count < 16 && sp > prev_sp && sp < stack_top && (sp & 3) == 0) {
+		if (count == 0) {
+			printk("Call trace:");
+#ifdef CONFIG_KALLSYMS
+			printk("\n");
+#endif
+		} else {
+			if (next_exc) {
+				ret = next_exc;
+				next_exc = 0;
+			} else
+				ret = *(unsigned long *)(sp + 4);
+			printk(" [%08lx] ", ret);
+#ifdef CONFIG_KALLSYMS
+			print_symbol("%s", ret);
+			printk("\n");
+#endif
+			if (ret == (unsigned long) &ret_from_except
+			    || ret == (unsigned long) &ret_from_except_full
+			    || ret == (unsigned long) &ret_from_syscall) {
+				/* sp + 16 points to an exception frame */
+				regs = (struct pt_regs *) (sp + 16);
+				if (sp + 16 + sizeof(*regs) <= stack_top)
+					next_exc = regs->nip;
+			}
+		}
+		++count;
+		sp = *(unsigned long *)sp;
+	}
+#ifndef CONFIG_KALLSYMS
+	if (count > 0)
+		printk("\n");
+#endif
 }
 
 #if 0
@@ -564,7 +715,7 @@ void __init ll_puts(const char *s)
 		return;
 	}
 
-#if 0	
+#if 0
 	if ( have_of )
 	{
 		prom_print(s);
@@ -591,7 +742,7 @@ void __init ll_puts(const char *s)
 				y = 0;
 			}
 		} else {
-			vidmem [ ( x + cols * y ) * 2 ] = c; 
+			vidmem [ ( x + cols * y ) * 2 ] = c;
 			if ( ++x >= cols ) {
 				x = 0;
 				if ( ++y >= lines ) {
@@ -608,18 +759,10 @@ void __init ll_puts(const char *s)
 }
 #endif
 
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched    ((unsigned long) scheduling_functions_start_here)
-#define last_sched     ((unsigned long) scheduling_functions_end_here)
-
 unsigned long get_wchan(struct task_struct *p)
 {
 	unsigned long ip, sp;
-	unsigned long stack_page = (unsigned long) p;
+	unsigned long stack_page = (unsigned long) p->thread_info;
 	int count = 0;
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
@@ -630,7 +773,7 @@ unsigned long get_wchan(struct task_struct *p)
 			return 0;
 		if (count > 0) {
 			ip = *(unsigned long *)(sp + 4);
-			if (ip < first_sched || ip >= last_sched)
+			if (!in_sched_functions(ip))
 				return ip;
 		}
 	} while (count++ < 16);

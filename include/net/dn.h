@@ -44,9 +44,22 @@ struct dn_scp                                   /* Session Control Port */
 #define DN_SEND         2
 #define DN_DONTSEND     1
 #define DN_NOCHANGE     0
+	unsigned short		flowrem_dat;
+	unsigned short		flowrem_oth;
+	unsigned short		flowloc_dat;
+	unsigned short		flowloc_oth;
+	unsigned char		services_rem;
+	unsigned char		services_loc;
+	unsigned char		info_rem;
+	unsigned char		info_loc;
+
+	unsigned short		segsize_rem;
+	unsigned short		segsize_loc;
+
+	unsigned char		nonagle;
+	unsigned char		multi_ireq;
 	unsigned char		accept_mode;
-	unsigned short          mss;
-	unsigned long		seg_size; /* Running total of current segment */
+	unsigned long		seg_total; /* Running total of current segment */
 
 	struct optdata_dn     conndata_in;
 	struct optdata_dn     conndata_out;
@@ -80,7 +93,8 @@ struct dn_scp                                   /* Session Control Port */
 	 *               multipliers.
 	 */
 #define NSP_MIN_WINDOW 1
-#define NSP_MAX_WINDOW 512
+#define NSP_MAX_WINDOW (0x07fe)
+	unsigned long max_window;
 	unsigned long snd_window;
 #define NSP_INITIAL_SRTT (HZ)
 	unsigned long nsp_srtt;
@@ -116,7 +130,10 @@ struct dn_scp                                   /* Session Control Port */
 	struct timer_list delack_timer;
 	int delack_pending;
 	void (*delack_fxn)(struct sock *sk);
+
 };
+
+#define DN_SK(__sk) ((struct dn_scp *)(__sk)->sk_protinfo)
 
 /*
  * src,dst : Source and Destination DECnet addresses
@@ -128,7 +145,7 @@ struct dn_scp                                   /* Session Control Port */
  * segsize : Size of segment
  * segnum : Number, for data, otherdata and linkservice
  * xmit_count : Number of times we've transmitted this skb
- * stamp : Time stamp of first transmission, used in RTT calculations
+ * stamp : Time stamp of most recent transmission, used in RTT calculations
  * iif: Input interface number
  *
  * As a general policy, this structure keeps all addresses in network
@@ -136,6 +153,7 @@ struct dn_scp                                   /* Session Control Port */
  * and src_port are in network order. All else is in host order.
  * 
  */
+#define DN_SKB_CB(skb) ((struct dn_skb_cb *)(skb)->cb)
 struct dn_skb_cb {
 	unsigned short dst;
 	unsigned short src;
@@ -153,17 +171,17 @@ struct dn_skb_cb {
 	int iif;
 };
 
-static __inline__ dn_address dn_eth2dn(unsigned char *ethaddr)
+static inline dn_address dn_eth2dn(unsigned char *ethaddr)
 {
 	return ethaddr[4] | (ethaddr[5] << 8);
 }
 
-static __inline__ dn_address dn_saddr2dn(struct sockaddr_dn *saddr)
+static inline dn_address dn_saddr2dn(struct sockaddr_dn *saddr)
 {
 	return *(dn_address *)saddr->sdn_nodeaddr;
 }
 
-static __inline__ void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
+static inline void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
 {
 	ethaddr[0] = 0xAA;
 	ethaddr[1] = 0x00;
@@ -172,6 +190,19 @@ static __inline__ void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
 	ethaddr[4] = (unsigned char)(addr & 0xff);
 	ethaddr[5] = (unsigned char)(addr >> 8);
 }
+
+static inline void dn_sk_ports_copy(struct flowi *fl, struct dn_scp *scp)
+{
+	fl->uli_u.dnports.sport = scp->addrloc;
+	fl->uli_u.dnports.dport = scp->addrrem;
+	fl->uli_u.dnports.objnum = scp->addr.sdn_objnum;
+	if (fl->uli_u.dnports.objnum == 0) {
+		fl->uli_u.dnports.objnamel = scp->addr.sdn_objnamel;
+		memcpy(fl->uli_u.dnports.objname, scp->addr.sdn_objname, 16);
+	}
+}
+
+extern unsigned dn_mss_from_pmtu(struct net_device *dev, int mtu);
 
 #define DN_MENUVER_ACC 0x01
 #define DN_MENUVER_USR 0x02
@@ -189,15 +220,13 @@ extern int dn_username2sockaddr(unsigned char *data, int len, struct sockaddr_dn
 
 extern void dn_start_slow_timer(struct sock *sk);
 extern void dn_stop_slow_timer(struct sock *sk);
-extern void dn_start_fast_timer(struct sock *sk);
-extern void dn_stop_fast_timer(struct sock *sk);
 
 extern dn_address decnet_address;
-extern unsigned char decnet_ether_address[6];
 extern int decnet_debug_level;
 extern int decnet_time_wait;
 extern int decnet_dn_count;
 extern int decnet_di_count;
 extern int decnet_dr_count;
+extern int decnet_no_fc_max_cwnd;
 
 #endif /* _NET_DN_H */

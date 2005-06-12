@@ -7,7 +7,7 @@
 #include <asm/segment.h>
 #include <asm/entry.h>
 
-#define prepare_to_switch()	do { } while(0)
+#ifdef __KERNEL__
 
 /*
  * switch_to(n) should switch tasks to task ptr, first checking that
@@ -32,46 +32,44 @@
  * 02/17/96 - Jes Sorensen (jds@kom.auc.dk)
  *
  * Changed 96/09/19 by Andreas Schwab
- * pass prev in a0, next in a1, offset of tss in d1, and whether
- * the mm structures are shared in d2 (to avoid atc flushing).
+ * pass prev in a0, next in a1
  */
 asmlinkage void resume(void);
-#define switch_to(prev,next,last) { \
+#define switch_to(prev,next,last) do { \
   register void *_prev __asm__ ("a0") = (prev); \
   register void *_next __asm__ ("a1") = (next); \
   register void *_last __asm__ ("d1"); \
-  __asm__ __volatile__("jbsr " SYMBOL_NAME_STR(resume) \
-		       : "=d" (_last) : "a" (_prev), "a" (_next) \
-		       : "d0", "d1", "d2", "d3", "d4", "d5", "a0", "a1"); \
+  __asm__ __volatile__("jbsr resume" \
+		       : "=a" (_prev), "=a" (_next), "=d" (_last) \
+		       : "0" (_prev), "1" (_next) \
+		       : "d0", "d2", "d3", "d4", "d5"); \
   (last) = _last; \
-}
+} while (0)
 
 
 /* interrupt control.. */
 #if 0
-#define __sti() asm volatile ("andiw %0,%%sr": : "i" (ALLOWINT) : "memory")
+#define local_irq_enable() asm volatile ("andiw %0,%%sr": : "i" (ALLOWINT) : "memory")
 #else
-#include <asm/hardirq.h>
-#define __sti() ({								\
-	if (!local_irq_count(smp_processor_id()))				\
+#include <linux/hardirq.h>
+#define local_irq_enable() ({							\
+	if (MACH_IS_Q40 || !hardirq_count())					\
 		asm volatile ("andiw %0,%%sr": : "i" (ALLOWINT) : "memory");	\
 })
 #endif
-#define __cli() asm volatile ("oriw  #0x0700,%%sr": : : "memory")
-#define __save_flags(x) asm volatile ("movew %%sr,%0":"=d" (x) : : "memory")
-#define __restore_flags(x) asm volatile ("movew %0,%%sr": :"d" (x) : "memory")
+#define local_irq_disable() asm volatile ("oriw  #0x0700,%%sr": : : "memory")
+#define local_save_flags(x) asm volatile ("movew %%sr,%0":"=d" (x) : : "memory")
+#define local_irq_restore(x) asm volatile ("movew %0,%%sr": :"d" (x) : "memory")
+
+static inline int irqs_disabled(void)
+{
+	unsigned long flags;
+	local_save_flags(flags);
+	return flags & ~ALLOWINT;
+}
 
 /* For spinlocks etc */
-#define local_irq_save(x)	({ __save_flags(x); __cli(); })
-#define local_irq_restore(x)	__restore_flags(x)
-#define local_irq_disable()	__cli()
-#define local_irq_enable()	__sti()
-
-#define cli()			__cli()
-#define sti()			__sti()
-#define save_flags(x)		__save_flags(x)
-#define restore_flags(x)	__restore_flags(x)
-#define save_and_cli(flags)   do { save_flags(flags); cli(); } while(0)
+#define local_irq_save(x)	({ local_save_flags(x); local_irq_disable(); })
 
 /*
  * Force strict CPU ordering.
@@ -81,12 +79,14 @@ asmlinkage void resume(void);
 #define mb()		barrier()
 #define rmb()		barrier()
 #define wmb()		barrier()
+#define read_barrier_depends()	do { } while(0)
 #define set_mb(var, value)    do { xchg(&var, value); } while (0)
 #define set_wmb(var, value)    do { var = value; wmb(); } while (0)
 
 #define smp_mb()	barrier()
 #define smp_rmb()	barrier()
 #define smp_wmb()	barrier()
+#define smp_read_barrier_depends()	do { } while(0)
 
 
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
@@ -98,33 +98,32 @@ struct __xchg_dummy { unsigned long a[100]; };
 #ifndef CONFIG_RMW_INSNS
 static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
 {
-  unsigned long tmp, flags;
+	unsigned long flags, tmp;
 
-  save_flags(flags);
-  cli();
+	local_irq_save(flags);
 
-  switch (size) {
-  case 1:
-    __asm__ __volatile__
-    ("moveb %2,%0\n\t"
-     "moveb %1,%2"
-    : "=&d" (tmp) : "d" (x), "m" (*__xg(ptr)) : "memory");
-    break;
-  case 2:
-    __asm__ __volatile__
-    ("movew %2,%0\n\t"
-     "movew %1,%2"
-    : "=&d" (tmp) : "d" (x), "m" (*__xg(ptr)) : "memory");
-    break;
-  case 4:
-    __asm__ __volatile__
-    ("movel %2,%0\n\t"
-     "movel %1,%2"
-    : "=&d" (tmp) : "d" (x), "m" (*__xg(ptr)) : "memory");
-    break;
-  }
-  restore_flags(flags);
-  return tmp;
+	switch (size) {
+	case 1:
+		tmp = *(u8 *)ptr;
+		*(u8 *)ptr = x;
+		x = tmp;
+		break;
+	case 2:
+		tmp = *(u16 *)ptr;
+		*(u16 *)ptr = x;
+		x = tmp;
+		break;
+	case 4:
+		tmp = *(u32 *)ptr;
+		*(u32 *)ptr = x;
+		x = tmp;
+		break;
+	default:
+		BUG();
+	}
+
+	local_irq_restore(flags);
+	return x;
 }
 #else
 static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
@@ -158,5 +157,43 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 	return x;
 }
 #endif
+
+/*
+ * Atomic compare and exchange.  Compare OLD with MEM, if identical,
+ * store NEW in MEM.  Return the initial value in MEM.  Success is
+ * indicated by comparing RETURN with OLD.
+ */
+#ifdef CONFIG_RMW_INSNS
+#define __HAVE_ARCH_CMPXCHG	1
+
+static inline unsigned long __cmpxchg(volatile void *p, unsigned long old,
+				      unsigned long new, int size)
+{
+	switch (size) {
+	case 1:
+		__asm__ __volatile__ ("casb %0,%2,%1"
+				      : "=d" (old), "=m" (*(char *)p)
+				      : "d" (new), "0" (old), "m" (*(char *)p));
+		break;
+	case 2:
+		__asm__ __volatile__ ("casw %0,%2,%1"
+				      : "=d" (old), "=m" (*(short *)p)
+				      : "d" (new), "0" (old), "m" (*(short *)p));
+		break;
+	case 4:
+		__asm__ __volatile__ ("casl %0,%2,%1"
+				      : "=d" (old), "=m" (*(int *)p)
+				      : "d" (new), "0" (old), "m" (*(int *)p));
+		break;
+	}
+	return old;
+}
+
+#define cmpxchg(ptr,o,n)\
+	((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),\
+					(unsigned long)(n),sizeof(*(ptr))))
+#endif
+
+#endif /* __KERNEL__ */
 
 #endif /* _M68K_SYSTEM_H */

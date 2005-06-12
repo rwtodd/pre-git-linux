@@ -9,6 +9,8 @@
  * to achieve effects such as fast scrolling by changing the origin.
  */
 
+struct vt_struct;
+
 #define NPAR 16
 
 struct vc_data {
@@ -16,29 +18,36 @@ struct vc_data {
 	unsigned int	vc_cols;		/* [#] Console size */
 	unsigned int	vc_rows;
 	unsigned int	vc_size_row;		/* Bytes per row */
+	unsigned int	vc_scan_lines;		/* # of scan lines */
+	unsigned long	vc_origin;		/* [!] Start of real screen */
+	unsigned long	vc_scr_end;		/* [!] End of real screen */
+	unsigned long	vc_visible_origin;	/* [!] Top of visible window */
+	unsigned int	vc_top, vc_bottom;	/* Scrolling region */
 	const struct consw *vc_sw;
 	unsigned short	*vc_screenbuf;		/* In-memory character/attribute buffer */
 	unsigned int	vc_screenbuf_size;
+	/* attributes for all characters on screen */
 	unsigned char	vc_attr;		/* Current attributes */
 	unsigned char	vc_def_color;		/* Default colors */
 	unsigned char	vc_color;		/* Foreground & background */
 	unsigned char	vc_s_color;		/* Saved foreground & background */
 	unsigned char	vc_ulcolor;		/* Color for underline mode */
 	unsigned char	vc_halfcolor;		/* Color for half intensity mode */
+	/* cursor */
+	unsigned int	vc_cursor_type;
 	unsigned short	vc_complement_mask;	/* [#] Xor mask for mouse pointer */
-	unsigned short	vc_hi_font_mask;	/* [#] Attribute set for upper 256 chars of font or 0 if not supported */
-	unsigned short	vc_video_erase_char;	/* Background erase character */
 	unsigned short	vc_s_complement_mask;	/* Saved mouse pointer mask */
 	unsigned int	vc_x, vc_y;		/* Cursor position */
-	unsigned int	vc_top, vc_bottom;	/* Scrolling region */
+	unsigned int	vc_saved_x, vc_saved_y;
+	unsigned long	vc_pos;			/* Cursor address */
+	/* fonts */	
+	unsigned short	vc_hi_font_mask;	/* [#] Attribute set for upper 256 chars of font or 0 if not supported */
+	struct console_font vc_font;		/* Current VC font set */
+	unsigned short	vc_video_erase_char;	/* Background erase character */
+	/* VT terminal data */
 	unsigned int	vc_state;		/* Escape sequence parser state */
 	unsigned int	vc_npar,vc_par[NPAR];	/* Parameters of current escape sequence */
-	unsigned long	vc_origin;		/* [!] Start of real screen */
-	unsigned long	vc_scr_end;		/* [!] End of real screen */
-	unsigned long	vc_visible_origin;	/* [!] Top of visible window */
-	unsigned long	vc_pos;			/* Cursor address */
-	unsigned int	vc_saved_x;
-	unsigned int	vc_saved_y;
+	struct tty_struct *vc_tty;		/* TTY we are attached to */
 	/* mode flags */
 	unsigned int	vc_charset	: 1;	/* Character set G0 / G1 */
 	unsigned int	vc_s_charset	: 1;	/* Saved character set */
@@ -68,7 +77,7 @@ struct vc_data {
 	unsigned char	vc_utf		: 1;	/* Unicode UTF-8 encoding */
 	unsigned char	vc_utf_count;
 		 int	vc_utf_char;
-	unsigned int	vc_tab_stop[5];		/* Tab stops. 160 columns. */
+	unsigned int	vc_tab_stop[8];		/* Tab stops. 256 columns. */
 	unsigned char   vc_palette[16*3];       /* Colour palette for VGA+ */
 	unsigned short * vc_translate;
 	unsigned char 	vc_G0_charset;
@@ -77,10 +86,10 @@ struct vc_data {
 	unsigned char 	vc_saved_G1;
 	unsigned int	vc_bell_pitch;		/* Console bell pitch */
 	unsigned int	vc_bell_duration;	/* Console bell duration */
-	unsigned int	vc_cursor_type;
 	struct vc_data **vc_display_fg;		/* [!] Ptr to var holding fg console for this display */
 	unsigned long	vc_uni_pagedir;
 	unsigned long	*vc_uni_pagedir_loc;  /* [!] Location of uni_pagedir variable for this console */
+	struct vt_struct *vc_vt;
 	/* additional information is in vt_kern.h */
 };
 

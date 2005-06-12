@@ -1,23 +1,16 @@
-# $Id: Makefile,v 1.9 1999/04/07 18:45:23 harald Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995, 1998 by Ralf Baechle
+# Copyright (C) 1995, 1998, 2001, 2002 by Ralf Baechle
+# Copyright (C) 2004  Maciej W. Rozycki
 #
-
-.S.s:
-	$(CPP) $(CFLAGS) $< -o $*.s
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $*.o
-
-OBJS  = milo.o a.out.o
 
 #
 # Some DECstations need all possible sections of an ECOFF executable
 #
-ifdef CONFIG_DECSTATION
+ifdef CONFIG_MACH_DECSTATION
   E2EFLAGS = -a
 else
   E2EFLAGS =
@@ -27,45 +20,30 @@ endif
 # Drop some uninteresting sections in the kernel.
 # This is only relevant for ELF kernels but doesn't hurt a.out
 #
-drop-sections	= .reginfo .mdebug
+drop-sections	= .reginfo .mdebug .comment .note .pdr .options .MIPS.options
 strip-flags	= $(addprefix --remove-section=,$(drop-sections))
 
-all: vmlinux.ecoff addinitrd
+VMLINUX = vmlinux
 
-vmlinux.ecoff:	$(CONFIGURE) elf2ecoff $(TOPDIR)/vmlinux
-	./elf2ecoff $(TOPDIR)/vmlinux vmlinux.ecoff $(E2EFLAGS)
+all: vmlinux.ecoff vmlinux.srec addinitrd
 
-elf2ecoff: elf2ecoff.c
+vmlinux.ecoff: $(obj)/elf2ecoff $(VMLINUX)
+	$(obj)/elf2ecoff $(VMLINUX) vmlinux.ecoff $(E2EFLAGS)
+
+$(obj)/elf2ecoff: $(obj)/elf2ecoff.c
 	$(HOSTCC) -o $@ $^
 
-addinitrd: addinitrd.c
+vmlinux.srec: $(VMLINUX)
+	$(OBJCOPY) -S -O srec $(strip-flags) $(VMLINUX) $(obj)/vmlinux.srec
+
+$(obj)/addinitrd: $(obj)/addinitrd.c
 	$(HOSTCC) -o $@ $^
 
-# Don't build dependencies, this may die if $(CC) isn't gcc
-dep:
+archhelp:
+	@echo	'* vmlinux.ecoff	- ECOFF boot image'
+	@echo	'* vmlinux.srec		- SREC boot image'
 
-clean:
-	rm -f vmlinux.ecoff
-	rm -f zImage zImage.tmp mkboot
-
-mrproper:
-	rm -f vmlinux.ecoff
-	rm -f addinitrd
-	rm -f elf2ecoff
-
-zImage:	$(CONFIGURE) mkboot $(TOPDIR)/vmlinux
-	$(OBJCOPY) $(strip-flags) $(TOPDIR)/vmlinux zImage.tmp
-	./mkboot zImage.tmp zImage
-	rm -f zImage.tmp
-
-mkboot: mkboot.c
-	$(HOSTCC) -o $@ $^
-
-zdisk: 	zImage
-	cp $(TOPDIR)/vmlinux $(TOPDIR)/vm
-	$(STRIP) $(TOPDIR)/vm
-	gzip -9f $(TOPDIR)/vm
-
-dummy:
-
-include $(TOPDIR)/Rules.make
+clean-files += addinitrd \
+	       elf2ecoff \
+	       vmlinux.ecoff \
+	       vmlinux.srec

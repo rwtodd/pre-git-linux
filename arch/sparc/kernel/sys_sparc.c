@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.67 2000/11/30 08:37:31 anton Exp $
+/* $Id: sys_sparc.c,v 1.70 2001/04/14 01:12:02 davem Exp $
  * linux/arch/sparc/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -16,6 +16,7 @@
 #include <linux/msg.h>
 #include <linux/shm.h>
 #include <linux/stat.h>
+#include <linux/syscalls.h>
 #include <linux/mman.h>
 #include <linux/utsname.h>
 #include <linux/smp.h>
@@ -36,19 +37,28 @@ asmlinkage unsigned long sys_getpagesize(void)
 
 #define COLOUR_ALIGN(addr)      (((addr)+SHMLBA-1)&~(SHMLBA-1))
 
-unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
+unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags)
 {
 	struct vm_area_struct * vmm;
 
+	if (flags & MAP_FIXED) {
+		/* We do not accept a shared mapping if it would violate
+		 * cache aliasing constraints.
+		 */
+		if ((flags & MAP_SHARED) && (addr & (SHMLBA - 1)))
+			return -EINVAL;
+		return addr;
+	}
+
 	/* See asm-sparc/uaccess.h */
 	if (len > TASK_SIZE - PAGE_SIZE)
-		return 0;
+		return -ENOMEM;
 	if (ARCH_SUN4C_SUN4 && len > 0x20000000)
-		return 0;
+		return -ENOMEM;
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
-	if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+	if (flags & MAP_SHARED)
 		addr = COLOUR_ALIGN(addr);
 	else
 		addr = PAGE_ALIGN(addr);
@@ -60,16 +70,14 @@ unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
 			vmm = find_vma(current->mm, PAGE_OFFSET);
 		}
 		if (TASK_SIZE - PAGE_SIZE - len < addr)
-			return 0;
+			return -ENOMEM;
 		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
 		addr = vmm->vm_end;
-		if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+		if (flags & MAP_SHARED)
 			addr = COLOUR_ALIGN(addr);
 	}
 }
-
-extern asmlinkage unsigned long sys_brk(unsigned long brk);
 
 asmlinkage unsigned long sparc_brk(unsigned long brk)
 {
@@ -104,7 +112,7 @@ out:
  * This is really horribly ugly.
  */
 
-asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
+asmlinkage int sys_ipc (uint call, int first, int second, int third, void __user *ptr, long fifth)
 {
 	int version, err;
 
@@ -114,7 +122,10 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 	if (call <= SEMCTL)
 		switch (call) {
 		case SEMOP:
-			err = sys_semop (first, (struct sembuf *)ptr, second);
+			err = sys_semtimedop (first, (struct sembuf __user *)ptr, second, NULL);
+			goto out;
+		case SEMTIMEDOP:
+			err = sys_semtimedop (first, (struct sembuf __user *)ptr, second, (const struct timespec __user *) fifth);
 			goto out;
 		case SEMGET:
 			err = sys_semget (first, second, third);
@@ -125,19 +136,20 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 			if (!ptr)
 				goto out;
 			err = -EFAULT;
-			if(get_user(fourth.__pad, (void **)ptr))
+			if (get_user(fourth.__pad,
+				     (void __user * __user *)ptr))
 				goto out;
 			err = sys_semctl (first, second, third, fourth);
 			goto out;
 			}
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 	if (call <= MSGCTL) 
 		switch (call) {
 		case MSGSND:
-			err = sys_msgsnd (first, (struct msgbuf *) ptr, 
+			err = sys_msgsnd (first, (struct msgbuf __user *) ptr, 
 					  second, third);
 			goto out;
 		case MSGRCV:
@@ -148,23 +160,25 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 				if (!ptr)
 					goto out;
 				err = -EFAULT;
-				if(copy_from_user(&tmp,(struct ipc_kludge *) ptr, sizeof (tmp)))
+				if (copy_from_user(&tmp, (struct ipc_kludge __user *) ptr, sizeof (tmp)))
 					goto out;
 				err = sys_msgrcv (first, tmp.msgp, second, tmp.msgtyp, third);
 				goto out;
 				}
 			case 1: default:
-				err = sys_msgrcv (first, (struct msgbuf *) ptr, second, fifth, third);
+				err = sys_msgrcv (first,
+						  (struct msgbuf __user *) ptr,
+						  second, fifth, third);
 				goto out;
 			}
 		case MSGGET:
 			err = sys_msgget ((key_t) first, second);
 			goto out;
 		case MSGCTL:
-			err = sys_msgctl (first, second, (struct msqid_ds *) ptr);
+			err = sys_msgctl (first, second, (struct msqid_ds __user *) ptr);
 			goto out;
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 	if (call <= SHMCTL) 
@@ -173,34 +187,34 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 			switch (version) {
 			case 0: default: {
 				ulong raddr;
-				err = sys_shmat (first, (char *) ptr, second, &raddr);
+				err = do_shmat (first, (char __user *) ptr, second, &raddr);
 				if (err)
 					goto out;
 				err = -EFAULT;
-				if(put_user (raddr, (ulong *) third))
+				if (put_user (raddr, (ulong __user *) third))
 					goto out;
 				err = 0;
 				goto out;
 				}
 			case 1:	/* iBCS2 emulator entry point */
-				err = sys_shmat (first, (char *) ptr, second, (ulong *) third);
+				err = -EINVAL;
 				goto out;
 			}
 		case SHMDT: 
-			err = sys_shmdt ((char *)ptr);
+			err = sys_shmdt ((char __user *)ptr);
 			goto out;
 		case SHMGET:
 			err = sys_shmget (first, second, third);
 			goto out;
 		case SHMCTL:
-			err = sys_shmctl (first, second, (struct shmid_ds *) ptr);
+			err = sys_shmctl (first, second, (struct shmid_ds __user *) ptr);
 			goto out;
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 	else
-		err = -EINVAL;
+		err = -ENOSYS;
 out:
 	return err;
 }
@@ -233,14 +247,9 @@ static unsigned long do_mmap2(unsigned long addr, unsigned long len,
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
-	if (flags & MAP_SHARED)
-		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
-
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	retval = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up(&current->mm->mmap_sem);
-
-	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
+	up_write(&current->mm->mmap_sem);
 
 out_putf:
 	if (file)
@@ -265,6 +274,17 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 	return do_mmap2(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
 }
 
+long sparc_remap_file_pages(unsigned long start, unsigned long size,
+			   unsigned long prot, unsigned long pgoff,
+			   unsigned long flags)
+{
+	/* This works on an existing mmap so we don't need to validate
+	 * the range as that was done at the original mmap call.
+	 */
+	return sys_remap_file_pages(start, size, prot,
+				    (pgoff >> (PAGE_SHIFT - 12)), flags);
+}
+
 extern unsigned long do_mremap(unsigned long addr,
 	unsigned long old_len, unsigned long new_len,
 	unsigned long flags, unsigned long new_addr);
@@ -284,10 +304,7 @@ asmlinkage unsigned long sparc_mremap(unsigned long addr,
 	if (old_len > TASK_SIZE - PAGE_SIZE ||
 	    new_len > TASK_SIZE - PAGE_SIZE)
 		goto out;
-	down(&current->mm->mmap_sem);
-	vma = find_vma(current->mm, addr);
-	if (vma && (vma->vm_flags & VM_SHARED))
-		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
+	down_write(&current->mm->mmap_sem);
 	if (flags & MREMAP_FIXED) {
 		if (ARCH_SUN4C_SUN4 &&
 		    new_addr < 0xe0000000 &&
@@ -298,18 +315,31 @@ asmlinkage unsigned long sparc_mremap(unsigned long addr,
 	} else if ((ARCH_SUN4C_SUN4 && addr < 0xe0000000 &&
 		    addr + new_len > 0x20000000) ||
 		   addr + new_len > TASK_SIZE - PAGE_SIZE) {
+		unsigned long map_flags = 0;
+		struct file *file = NULL;
+
 		ret = -ENOMEM;
 		if (!(flags & MREMAP_MAYMOVE))
 			goto out_sem;
-		new_addr = get_unmapped_area (addr, new_len);
-		if (!new_addr)
+
+		vma = find_vma(current->mm, addr);
+		if (vma) {
+			if (vma->vm_flags & VM_SHARED)
+				map_flags |= MAP_SHARED;
+			file = vma->vm_file;
+		}
+
+		new_addr = get_unmapped_area(file, addr, new_len,
+				     vma ? vma->vm_pgoff : 0,
+				     map_flags);
+		ret = new_addr;
+		if (new_addr & ~PAGE_MASK)
 			goto out_sem;
 		flags |= MREMAP_FIXED;
 	}
 	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
 out_sem:
-	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 out:
 	return ret;       
 }
@@ -319,9 +349,11 @@ asmlinkage unsigned long
 c_sys_nis_syscall (struct pt_regs *regs)
 {
 	static int count = 0;
-	
-	if (count++ > 5) return -ENOSYS;
-	printk ("%s[%d]: Unimplemented SPARC system call %d\n", current->comm, current->pid, (int)regs->u_regs[1]);
+
+	if (count++ > 5)
+		return -ENOSYS;
+	printk ("%s[%d]: Unimplemented SPARC system call %d\n",
+		current->comm, current->pid, (int)regs->u_regs[1]);
 #ifdef DEBUG_UNIMP_SYSCALL	
 	show_regs (regs);
 #endif
@@ -342,7 +374,7 @@ sparc_breakpoint (struct pt_regs *regs)
 	info.si_signo = SIGTRAP;
 	info.si_errno = 0;
 	info.si_code = TRAP_BRKPT;
-	info.si_addr = (void *)regs->pc;
+	info.si_addr = (void __user *)regs->pc;
 	info.si_trapno = 0;
 	force_sig_info(SIGTRAP, &info, current);
 
@@ -353,8 +385,8 @@ sparc_breakpoint (struct pt_regs *regs)
 }
 
 asmlinkage int
-sparc_sigaction (int sig, const struct old_sigaction *act,
-		 struct old_sigaction *oact)
+sparc_sigaction (int sig, const struct old_sigaction __user *act,
+		 struct old_sigaction __user *oact)
 {
 	struct k_sigaction new_ka, old_ka;
 	int ret;
@@ -380,7 +412,7 @@ sparc_sigaction (int sig, const struct old_sigaction *act,
 	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
 
 	if (!ret && oact) {
-		/* In the clone() case we could copy half consistant
+		/* In the clone() case we could copy half consistent
 		 * state to the user, however this could sleep and
 		 * deadlock us if we held the signal lock on SMP.  So for
 		 * now I take the easy way out and do no locking.
@@ -396,9 +428,12 @@ sparc_sigaction (int sig, const struct old_sigaction *act,
 	return ret;
 }
 
-asmlinkage int
-sys_rt_sigaction(int sig, const struct sigaction *act, struct sigaction *oact,
-		 void *restorer, size_t sigsetsize)
+asmlinkage long
+sys_rt_sigaction(int sig,
+		 const struct sigaction __user *act,
+		 struct sigaction __user *oact,
+		 void __user *restorer,
+		 size_t sigsetsize)
 {
 	struct k_sigaction new_ka, old_ka;
 	int ret;
@@ -428,15 +463,7 @@ sys_rt_sigaction(int sig, const struct sigaction *act, struct sigaction *oact,
 	return ret;
 }
 
-/* Just in case some old old binary calls this. */
-asmlinkage int sys_pause(void)
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-	return -ERESTARTNOHAND;
-}
-
-asmlinkage int sys_getdomainname(char *name, int len)
+asmlinkage int sys_getdomainname(char __user *name, int len)
 {
  	int nlen;
  	int err = -EFAULT;
@@ -447,9 +474,9 @@ asmlinkage int sys_getdomainname(char *name, int len)
 
 	if (nlen < len)
 		len = nlen;
-	if(len > __NEW_UTS_LEN)
+	if (len > __NEW_UTS_LEN)
 		goto done;
-	if(copy_to_user(name, system_utsname.domainname, len))
+	if (copy_to_user(name, system_utsname.domainname, len))
 		goto done;
 	err = 0;
 done:

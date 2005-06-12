@@ -29,10 +29,10 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <asm/segment.h>
 #include <asm/system.h>
 #include <linux/ioctl.h>
 #include <linux/mtio.h>
+#include <linux/delay.h>
 
 #include <linux/ftape.h>
 #include <linux/qic117.h>
@@ -97,19 +97,12 @@ void ftape_sleep(unsigned int time)
 		timeout = ticks;
 		save_flags(flags);
 		sti();
-		set_current_state(TASK_INTERRUPTIBLE);
-		do {
-			/*  Mmm. Isn't current->blocked == 0xffffffff ?
-			 */
-			if (signal_pending(current)) {
-				TRACE(ft_t_err,
-				      "awoken by non-blocked signal :-(");
-				break;	/* exit on signal */
-			}
-			while (current->state != TASK_RUNNING) {
-				timeout = schedule_timeout(timeout);
-			}
-		} while (timeout);
+		msleep_interruptible(jiffies_to_msecs(timeout));
+		/*  Mmm. Isn't current->blocked == 0xffffffff ?
+		 */
+		if (signal_pending(current)) {
+			TRACE(ft_t_err, "awoken by non-blocked signal :-(");
+		}
 		restore_flags(flags);
 	}
 	TRACE_EXIT;
@@ -357,7 +350,7 @@ int ftape_command_wait(qic117_cmd_t command, unsigned int timeout, int *status)
 	return result;
 }
 
-int ftape_parameter_wait(unsigned int parm, unsigned int timeout, int *status)
+static int ftape_parameter_wait(unsigned int parm, unsigned int timeout, int *status)
 {
 	int result;
 
@@ -510,16 +503,6 @@ int ftape_report_error(unsigned int *error,
 	TRACE_EXIT 0;
 }
 
-int ftape_in_error_state(int status)
-{
-	TRACE_FUN(ft_t_any);
-
-	if ((status & QIC_STATUS_READY) && (status & QIC_STATUS_ERROR)) {
-		TRACE_ABORT(1, ft_t_warn, "warning: error status set!");
-	}
-	TRACE_EXIT 0;
-}
-
 int ftape_report_configuration(qic_model *model,
 			       unsigned int *rate,
 			       int *qic_std,
@@ -624,7 +607,7 @@ int ftape_report_configuration(qic_model *model,
 	TRACE_EXIT (result < 0) ? -EIO : 0;
 }
 
-int ftape_report_rom_version(int *version)
+static int ftape_report_rom_version(int *version)
 {
 
 	if (ftape_report_operation(version, QIC_REPORT_ROM_VERSION, 8) < 0) {
@@ -632,16 +615,6 @@ int ftape_report_rom_version(int *version)
 	} else {
 		return 0;
 	}
-}
-
-int ftape_report_signature(int *signature)
-{
-	int result;
-
-	result = ftape_command(28);
-	result = ftape_report_operation(signature, 9, 8);
-	result = ftape_command(30);
-	return (result < 0) ? -EIO : 0;
 }
 
 void ftape_report_vendor_id(unsigned int *id)

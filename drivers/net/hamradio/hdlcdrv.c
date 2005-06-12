@@ -43,16 +43,15 @@
 /*****************************************************************************/
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/if.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <asm/uaccess.h>
 
 #include <linux/netdevice.h>
@@ -67,6 +66,7 @@
 #include <linux/ip.h>
 #include <linux/udp.h>
 #include <linux/tcp.h>
+#include <linux/crc-ccitt.h>
 
 /* --------------------------------------------------------------------- */
 
@@ -95,60 +95,17 @@ static char ax25_nocall[AX25_ADDR_LEN] =
 #define PARAM_RETURN    255
 
 /* --------------------------------------------------------------------- */
-
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) > (b)) ? (a) : (b))
-
-/* --------------------------------------------------------------------- */
 /*
  * the CRC routines are stolen from WAMPES
  * by Dieter Deyke
  */
 
-static const unsigned short crc_ccitt_table[] = {
-	0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
-	0x8c48, 0x9dc1, 0xaf5a, 0xbed3, 0xca6c, 0xdbe5, 0xe97e, 0xf8f7,
-	0x1081, 0x0108, 0x3393, 0x221a, 0x56a5, 0x472c, 0x75b7, 0x643e,
-	0x9cc9, 0x8d40, 0xbfdb, 0xae52, 0xdaed, 0xcb64, 0xf9ff, 0xe876,
-	0x2102, 0x308b, 0x0210, 0x1399, 0x6726, 0x76af, 0x4434, 0x55bd,
-	0xad4a, 0xbcc3, 0x8e58, 0x9fd1, 0xeb6e, 0xfae7, 0xc87c, 0xd9f5,
-	0x3183, 0x200a, 0x1291, 0x0318, 0x77a7, 0x662e, 0x54b5, 0x453c,
-	0xbdcb, 0xac42, 0x9ed9, 0x8f50, 0xfbef, 0xea66, 0xd8fd, 0xc974,
-	0x4204, 0x538d, 0x6116, 0x709f, 0x0420, 0x15a9, 0x2732, 0x36bb,
-	0xce4c, 0xdfc5, 0xed5e, 0xfcd7, 0x8868, 0x99e1, 0xab7a, 0xbaf3,
-	0x5285, 0x430c, 0x7197, 0x601e, 0x14a1, 0x0528, 0x37b3, 0x263a,
-	0xdecd, 0xcf44, 0xfddf, 0xec56, 0x98e9, 0x8960, 0xbbfb, 0xaa72,
-	0x6306, 0x728f, 0x4014, 0x519d, 0x2522, 0x34ab, 0x0630, 0x17b9,
-	0xef4e, 0xfec7, 0xcc5c, 0xddd5, 0xa96a, 0xb8e3, 0x8a78, 0x9bf1,
-	0x7387, 0x620e, 0x5095, 0x411c, 0x35a3, 0x242a, 0x16b1, 0x0738,
-	0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70,
-	0x8408, 0x9581, 0xa71a, 0xb693, 0xc22c, 0xd3a5, 0xe13e, 0xf0b7,
-	0x0840, 0x19c9, 0x2b52, 0x3adb, 0x4e64, 0x5fed, 0x6d76, 0x7cff,
-	0x9489, 0x8500, 0xb79b, 0xa612, 0xd2ad, 0xc324, 0xf1bf, 0xe036,
-	0x18c1, 0x0948, 0x3bd3, 0x2a5a, 0x5ee5, 0x4f6c, 0x7df7, 0x6c7e,
-	0xa50a, 0xb483, 0x8618, 0x9791, 0xe32e, 0xf2a7, 0xc03c, 0xd1b5,
-	0x2942, 0x38cb, 0x0a50, 0x1bd9, 0x6f66, 0x7eef, 0x4c74, 0x5dfd,
-	0xb58b, 0xa402, 0x9699, 0x8710, 0xf3af, 0xe226, 0xd0bd, 0xc134,
-	0x39c3, 0x284a, 0x1ad1, 0x0b58, 0x7fe7, 0x6e6e, 0x5cf5, 0x4d7c,
-	0xc60c, 0xd785, 0xe51e, 0xf497, 0x8028, 0x91a1, 0xa33a, 0xb2b3,
-	0x4a44, 0x5bcd, 0x6956, 0x78df, 0x0c60, 0x1de9, 0x2f72, 0x3efb,
-	0xd68d, 0xc704, 0xf59f, 0xe416, 0x90a9, 0x8120, 0xb3bb, 0xa232,
-	0x5ac5, 0x4b4c, 0x79d7, 0x685e, 0x1ce1, 0x0d68, 0x3ff3, 0x2e7a,
-	0xe70e, 0xf687, 0xc41c, 0xd595, 0xa12a, 0xb0a3, 0x8238, 0x93b1,
-	0x6b46, 0x7acf, 0x4854, 0x59dd, 0x2d62, 0x3ceb, 0x0e70, 0x1ff9,
-	0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330,
-	0x7bc7, 0x6a4e, 0x58d5, 0x495c, 0x3de3, 0x2c6a, 0x1ef1, 0x0f78
-};
 
 /*---------------------------------------------------------------------------*/
 
 static inline void append_crc_ccitt(unsigned char *buffer, int len)
 {
- 	unsigned int crc = 0xffff;
-
-	for (;len>0;len--)
-		crc = (crc >> 8) ^ crc_ccitt_table[(crc ^ *buffer++) & 0xff];
-	crc ^= 0xffff;
+ 	unsigned int crc = crc_ccitt(0xffff, buffer, len) ^ 0xffff;
 	*buffer++ = crc;
 	*buffer++ = crc >> 8;
 }
@@ -157,11 +114,7 @@ static inline void append_crc_ccitt(unsigned char *buffer, int len)
 
 static inline int check_crc_ccitt(const unsigned char *buf, int cnt)
 {
-	unsigned int crc = 0xffff;
-
-	for (; cnt > 0; cnt--)
-		crc = (crc >> 8) ^ crc_ccitt_table[(crc ^ *buf++) & 0xff];
-	return (crc & 0xffff) == 0xf0b8;
+	return (crc_ccitt(0xffff, buf, cnt) & 0xffff) == 0xf0b8;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -228,6 +181,7 @@ static void hdlc_rx_flag(struct net_device *dev, struct hdlcdrv_state *s)
 	skb->protocol = htons(ETH_P_AX25);
 	skb->mac.raw = skb->data;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	s->stats.rx_packets++;
 }
 
@@ -558,6 +512,7 @@ static int hdlcdrv_open(struct net_device *dev)
 	/*
 	 * initialise some variables
 	 */
+	s->opened = 1;
 	s->hdlcrx.hbuf.rd = s->hdlcrx.hbuf.wr = 0;
 	s->hdlcrx.in_hdlc_rx = 0;
 	s->hdlcrx.rx_state = 0;
@@ -592,11 +547,14 @@ static int hdlcdrv_close(struct net_device *dev)
 		return -EINVAL;
 	s = (struct hdlcdrv_state *)dev->priv;
 
+	netif_stop_queue(dev);
+
 	if (s->ops && s->ops->close)
 		i = s->ops->close(dev);
 	if (s->skb)
 		dev_kfree_skb(s->skb);
 	s->skb = NULL;
+	s->opened = 0;
 	return i;
 }
 
@@ -733,25 +691,15 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 /* --------------------------------------------------------------------- */
 
 /*
- * Check for a network adaptor of this type, and return '0' if one exists.
- * If dev->base_addr == 0, probe all likely locations.
- * If dev->base_addr == 1, always return failure.
- * If dev->base_addr == 2, allocate space for the device and return success
- * (detachable devices only).
+ * Initialize fields in hdlcdrv
  */
-static int hdlcdrv_probe(struct net_device *dev)
+static void hdlcdrv_setup(struct net_device *dev)
 {
-	const struct hdlcdrv_channel_params dflt_ch_params = { 
+	static const struct hdlcdrv_channel_params dflt_ch_params = { 
 		20, 2, 10, 40, 0 
 	};
-	struct hdlcdrv_state *s;
+	struct hdlcdrv_state *s = dev->priv;
 
-	if (!dev)
-		return -ENXIO;
-	/*
-	 * not a real probe! only initialize data structures
-	 */
-	s = (struct hdlcdrv_state *)dev->priv;
 	/*
 	 * initialize the hdlcdrv_state struct
 	 */
@@ -791,7 +739,6 @@ static int hdlcdrv_probe(struct net_device *dev)
 	dev->get_stats = hdlcdrv_get_stats;
 
 	/* Fill in the fields of the device structure */
-	dev_init_buffers(dev);
 
 	s->skb = NULL;
 	
@@ -811,72 +758,60 @@ static int hdlcdrv_probe(struct net_device *dev)
 	memcpy(dev->broadcast, ax25_bcast, AX25_ADDR_LEN);
 	memcpy(dev->dev_addr, ax25_nocall, AX25_ADDR_LEN);
 	dev->tx_queue_len = 16;
-
-	/* New style flags */
-	dev->flags = 0;
-
-	return 0;
 }
 
 /* --------------------------------------------------------------------- */
-
-int hdlcdrv_register_hdlcdrv(struct net_device *dev, const struct hdlcdrv_ops *ops,
-			     unsigned int privsize, char *ifname,
-			     unsigned int baseaddr, unsigned int irq, 
-			     unsigned int dma) 
+struct net_device *hdlcdrv_register(const struct hdlcdrv_ops *ops,
+				    unsigned int privsize, const char *ifname,
+				    unsigned int baseaddr, unsigned int irq, 
+				    unsigned int dma) 
 {
+	struct net_device *dev;
 	struct hdlcdrv_state *s;
+	int err;
 
-	if (!dev || !ops)
-		return -EACCES;
+	BUG_ON(ops == NULL);
+
 	if (privsize < sizeof(struct hdlcdrv_state))
 		privsize = sizeof(struct hdlcdrv_state);
-	memset(dev, 0, sizeof(struct net_device));
-	if (!(s = dev->priv = kmalloc(privsize, GFP_KERNEL)))
-		return -ENOMEM;
+
+	dev = alloc_netdev(privsize, ifname, hdlcdrv_setup);
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
 	/*
 	 * initialize part of the hdlcdrv_state struct
 	 */
-	memset(s, 0, privsize);
+	s = dev->priv;
 	s->magic = HDLCDRV_MAGIC;
-	strncpy(dev->name, ifname, sizeof(dev->name));
 	s->ops = ops;
-	/*
-	 * initialize part of the device struct
-	 */
-	dev->if_port = 0;
-	dev->init = hdlcdrv_probe;
 	dev->base_addr = baseaddr;
 	dev->irq = irq;
 	dev->dma = dma;
-	if (register_netdev(dev)) {
+
+	err = register_netdev(dev);
+	if (err < 0) {
 		printk(KERN_WARNING "hdlcdrv: cannot register net "
 		       "device %s\n", dev->name);
-		kfree(dev->priv);
-		return -ENXIO;
+		free_netdev(dev);
+		dev = ERR_PTR(err);
 	}
-	MOD_INC_USE_COUNT;
-	return 0;
+	return dev;
 }
 
 /* --------------------------------------------------------------------- */
 
-int hdlcdrv_unregister_hdlcdrv(struct net_device *dev) 
+void hdlcdrv_unregister(struct net_device *dev) 
 {
-	struct hdlcdrv_state *s;
+	struct hdlcdrv_state *s = dev->priv;
 
-	if (!dev)
-		return -EINVAL;
-	if (!(s = (struct hdlcdrv_state *)dev->priv))
-		return -EINVAL;
-	if (s->magic != HDLCDRV_MAGIC)
-		return -EINVAL;
-	if (s->ops->close)
+	BUG_ON(s->magic != HDLCDRV_MAGIC);
+
+	if (s->opened && s->ops->close)
 		s->ops->close(dev);
 	unregister_netdev(dev);
-	kfree(s);
-	MOD_DEC_USE_COUNT;
-	return 0;
+	
+	free_netdev(dev);
 }
 
 /* --------------------------------------------------------------------- */
@@ -884,8 +819,8 @@ int hdlcdrv_unregister_hdlcdrv(struct net_device *dev)
 EXPORT_SYMBOL(hdlcdrv_receiver);
 EXPORT_SYMBOL(hdlcdrv_transmitter);
 EXPORT_SYMBOL(hdlcdrv_arbitrate);
-EXPORT_SYMBOL(hdlcdrv_register_hdlcdrv);
-EXPORT_SYMBOL(hdlcdrv_unregister_hdlcdrv);
+EXPORT_SYMBOL(hdlcdrv_register);
+EXPORT_SYMBOL(hdlcdrv_unregister);
 
 /* --------------------------------------------------------------------- */
 
@@ -907,6 +842,7 @@ static void __exit hdlcdrv_cleanup_driver(void)
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("Packet Radio network interface HDLC encoder/decoder");
+MODULE_LICENSE("GPL");
 module_init(hdlcdrv_init_driver);
 module_exit(hdlcdrv_cleanup_driver);
 

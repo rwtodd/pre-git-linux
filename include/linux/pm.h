@@ -25,44 +25,31 @@
 
 #include <linux/config.h>
 #include <linux/list.h>
+#include <asm/atomic.h>
 
 /*
- * Power management requests
+ * Power management requests... these are passed to pm_send_all() and friends.
+ *
+ * these functions are old and deprecated, see below.
  */
-enum
-{
-	PM_SUSPEND, /* enter D1-D3 */
-	PM_RESUME,  /* enter D0 */
+typedef int __bitwise pm_request_t;
 
-	/* enable wake-on */
-	PM_SET_WAKEUP,
+#define PM_SUSPEND	((__force pm_request_t) 1)	/* enter D1-D3 */
+#define PM_RESUME	((__force pm_request_t) 2)	/* enter D0 */
 
-	/* bus resource management */
-	PM_GET_RESOURCES,
-	PM_SET_RESOURCES,
-
-	/* base station management */
-	PM_EJECT,
-	PM_LOCK,
-};
-
-typedef int pm_request_t;
 
 /*
- * Device types
+ * Device types... these are passed to pm_register
  */
-enum
-{
-	PM_UNKNOWN_DEV = 0, /* generic */
-	PM_SYS_DEV,	    /* system device (fan, KB controller, ...) */
-	PM_PCI_DEV,	    /* PCI device */
-	PM_USB_DEV,	    /* USB device */
-	PM_SCSI_DEV,	    /* SCSI device */
-	PM_ISA_DEV,	    /* ISA device */
-	PM_MTD_DEV,	    /* Memory Technology Device */
-};
+typedef int __bitwise pm_dev_t;
 
-typedef int pm_dev_t;
+#define PM_UNKNOWN_DEV	((__force pm_dev_t) 0)	/* generic */
+#define PM_SYS_DEV	((__force pm_dev_t) 1)	/* system device (fan, KB controller, ...) */
+#define PM_PCI_DEV	((__force pm_dev_t) 2)	/* PCI device */
+#define PM_USB_DEV	((__force pm_dev_t) 3)	/* USB device */
+#define PM_SCSI_DEV	((__force pm_dev_t) 4)	/* SCSI device */
+#define PM_ISA_DEV	((__force pm_dev_t) 5)	/* ISA device */
+#define	PM_MTD_DEV	((__force pm_dev_t) 6)	/* Memory Technology Device */
 
 /*
  * System device hardware ID (PnP) values
@@ -101,8 +88,8 @@ struct pm_dev
 	void		*data;
 
 	unsigned long	 flags;
-	int		 state;
-	int		 prev_state;
+	unsigned long	 state;
+	unsigned long	 prev_state;
 
 	struct list_head entry;
 };
@@ -116,75 +103,140 @@ extern int pm_active;
 /*
  * Register a device with power management
  */
-struct pm_dev *pm_register(pm_dev_t type,
-			   unsigned long id,
-			   pm_callback callback);
+struct pm_dev __deprecated *pm_register(pm_dev_t type, unsigned long id, pm_callback callback);
 
 /*
  * Unregister a device with power management
  */
-void pm_unregister(struct pm_dev *dev);
+void __deprecated pm_unregister(struct pm_dev *dev);
 
 /*
  * Unregister all devices with matching callback
  */
-void pm_unregister_all(pm_callback callback);
+void __deprecated pm_unregister_all(pm_callback callback);
 
 /*
  * Send a request to a single device
  */
-int pm_send(struct pm_dev *dev, pm_request_t rqst, void *data);
+int __deprecated pm_send(struct pm_dev *dev, pm_request_t rqst, void *data);
 
 /*
  * Send a request to all devices
  */
-int pm_send_all(pm_request_t rqst, void *data);
-
-/*
- * Find a device
- */
-struct pm_dev *pm_find(pm_dev_t type, struct pm_dev *from);
-
-extern inline void pm_access(struct pm_dev *dev) {}
-extern inline void pm_dev_idle(struct pm_dev *dev) {}
+int __deprecated pm_send_all(pm_request_t rqst, void *data);
 
 #else /* CONFIG_PM */
 
 #define PM_IS_ACTIVE() 0
 
-extern inline struct pm_dev *pm_register(pm_dev_t type,
+static inline struct pm_dev *pm_register(pm_dev_t type,
 					 unsigned long id,
 					 pm_callback callback)
 {
-	return 0;
+	return NULL;
 }
 
-extern inline void pm_unregister(struct pm_dev *dev) {}
+static inline void pm_unregister(struct pm_dev *dev) {}
 
-extern inline void pm_unregister_all(pm_callback callback) {}
+static inline void pm_unregister_all(pm_callback callback) {}
 
-extern inline int pm_send(struct pm_dev *dev, pm_request_t rqst, void *data)
+static inline int pm_send(struct pm_dev *dev, pm_request_t rqst, void *data)
 {
 	return 0;
 }
 
-extern inline int pm_send_all(pm_request_t rqst, void *data)
+static inline int pm_send_all(pm_request_t rqst, void *data)
 {
 	return 0;
 }
-
-extern inline struct pm_dev *pm_find(pm_dev_t type, struct pm_dev *from)
-{
-	return 0;
-}
-
-extern inline void pm_access(struct pm_dev *dev) {}
-extern inline void pm_dev_idle(struct pm_dev *dev) {}
 
 #endif /* CONFIG_PM */
 
+/* Functions above this comment are list-based old-style power
+ * managment. Please avoid using them.  */
+
+/*
+ * Callbacks for platform drivers to implement.
+ */
 extern void (*pm_idle)(void);
 extern void (*pm_power_off)(void);
+
+typedef int __bitwise suspend_state_t;
+
+#define PM_SUSPEND_ON		((__force suspend_state_t) 0)
+#define PM_SUSPEND_STANDBY	((__force suspend_state_t) 1)
+#define PM_SUSPEND_MEM		((__force suspend_state_t) 3)
+#define PM_SUSPEND_DISK		((__force suspend_state_t) 4)
+#define PM_SUSPEND_MAX		((__force suspend_state_t) 5)
+
+typedef int __bitwise suspend_disk_method_t;
+
+#define	PM_DISK_FIRMWARE	((__force suspend_disk_method_t) 1)
+#define	PM_DISK_PLATFORM	((__force suspend_disk_method_t) 2)
+#define	PM_DISK_SHUTDOWN	((__force suspend_disk_method_t) 3)
+#define	PM_DISK_REBOOT		((__force suspend_disk_method_t) 4)
+#define	PM_DISK_MAX		((__force suspend_disk_method_t) 5)
+
+struct pm_ops {
+	suspend_disk_method_t pm_disk_mode;
+	int (*prepare)(suspend_state_t state);
+	int (*enter)(suspend_state_t state);
+	int (*finish)(suspend_state_t state);
+};
+
+extern void pm_set_ops(struct pm_ops *);
+
+extern int pm_suspend(suspend_state_t state);
+
+
+/*
+ * Device power management
+ */
+
+struct device;
+
+typedef u32 __bitwise pm_message_t;
+
+/*
+ * There are 4 important states driver can be in:
+ * ON     -- driver is working
+ * FREEZE -- stop operations and apply whatever policy is applicable to a suspended driver
+ *           of that class, freeze queues for block like IDE does, drop packets for
+ *           ethernet, etc... stop DMA engine too etc... so a consistent image can be
+ *           saved; but do not power any hardware down.
+ * SUSPEND - like FREEZE, but hardware is doing as much powersaving as possible. Roughly
+ *           pci D3.
+ *
+ * Unfortunately, current drivers only recognize numeric values 0 (ON) and 3 (SUSPEND).
+ * We'll need to fix the drivers. So yes, putting 3 to all diferent defines is intentional,
+ * and will go away as soon as drivers are fixed. Also note that typedef is neccessary,
+ * we'll probably want to switch to
+ *   typedef struct pm_message_t { int event; int flags; } pm_message_t
+ * or something similar soon.
+ */
+
+#define PMSG_FREEZE	((__force pm_message_t) 3)
+#define PMSG_SUSPEND	((__force pm_message_t) 3)
+#define PMSG_ON		((__force pm_message_t) 0)
+
+struct dev_pm_info {
+	pm_message_t		power_state;
+#ifdef	CONFIG_PM
+	pm_message_t		prev_state;
+	void			* saved_state;
+	atomic_t		pm_users;
+	struct device		* pm_parent;
+	struct list_head	entry;
+#endif
+};
+
+extern void device_pm_set_parent(struct device * dev, struct device * parent);
+
+extern int device_suspend(pm_message_t state);
+extern int device_power_down(pm_message_t state);
+extern void device_power_up(void);
+extern void device_resume(void);
+
 
 #endif /* __KERNEL__ */
 

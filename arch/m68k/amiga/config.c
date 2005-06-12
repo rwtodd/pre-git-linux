@@ -16,10 +16,13 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/kd.h>
 #include <linux/tty.h>
 #include <linux/console.h>
+#include <linux/rtc.h>
 #include <linux/init.h>
+#include <linux/vt_kern.h>
+#include <linux/delay.h>
+#include <linux/interrupt.h>
 #ifdef CONFIG_ZORRO
 #include <linux/zorro.h>
 #endif
@@ -31,7 +34,7 @@
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 #include <asm/irq.h>
-#include <asm/keyboard.h>
+#include <asm/rtc.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
 
@@ -44,41 +47,49 @@ unsigned char amiga_vblank;
 unsigned char amiga_psfreq;
 struct amiga_hw_present amiga_hw_present;
 
-static const char s_a500[] __initdata = "A500";
-static const char s_a500p[] __initdata = "A500+";
-static const char s_a600[] __initdata = "A600";
-static const char s_a1000[] __initdata = "A1000";
-static const char s_a1200[] __initdata = "A1200";
-static const char s_a2000[] __initdata = "A2000";
-static const char s_a2500[] __initdata = "A2500";
-static const char s_a3000[] __initdata = "A3000";
-static const char s_a3000t[] __initdata = "A3000T";
-static const char s_a3000p[] __initdata = "A3000+";
-static const char s_a4000[] __initdata = "A4000";
-static const char s_a4000t[] __initdata = "A4000T";
-static const char s_cdtv[] __initdata = "CDTV";
-static const char s_cd32[] __initdata = "CD32";
-static const char s_draco[] __initdata = "Draco";
-static const char *amiga_models[] __initdata = {
-    s_a500, s_a500p, s_a600, s_a1000, s_a1200, s_a2000, s_a2500, s_a3000,
-    s_a3000t, s_a3000p, s_a4000, s_a4000t, s_cdtv, s_cd32, s_draco,
+static char s_a500[] __initdata = "A500";
+static char s_a500p[] __initdata = "A500+";
+static char s_a600[] __initdata = "A600";
+static char s_a1000[] __initdata = "A1000";
+static char s_a1200[] __initdata = "A1200";
+static char s_a2000[] __initdata = "A2000";
+static char s_a2500[] __initdata = "A2500";
+static char s_a3000[] __initdata = "A3000";
+static char s_a3000t[] __initdata = "A3000T";
+static char s_a3000p[] __initdata = "A3000+";
+static char s_a4000[] __initdata = "A4000";
+static char s_a4000t[] __initdata = "A4000T";
+static char s_cdtv[] __initdata = "CDTV";
+static char s_cd32[] __initdata = "CD32";
+static char s_draco[] __initdata = "Draco";
+static char *amiga_models[] __initdata = {
+    [AMI_500-AMI_500]		= s_a500,
+    [AMI_500PLUS-AMI_500]	= s_a500p,
+    [AMI_600-AMI_500]		= s_a600,
+    [AMI_1000-AMI_500]		= s_a1000,
+    [AMI_1200-AMI_500]		= s_a1200,
+    [AMI_2000-AMI_500]		= s_a2000,
+    [AMI_2500-AMI_500]		= s_a2500,
+    [AMI_3000-AMI_500]		= s_a3000,
+    [AMI_3000T-AMI_500]		= s_a3000t,
+    [AMI_3000PLUS-AMI_500]	= s_a3000p,
+    [AMI_4000-AMI_500]		= s_a4000,
+    [AMI_4000T-AMI_500]		= s_a4000t,
+    [AMI_CDTV-AMI_500]		= s_cdtv,
+    [AMI_CD32-AMI_500]		= s_cd32,
+    [AMI_DRACO-AMI_500]		= s_draco,
 };
 
 static char amiga_model_name[13] = "Amiga ";
 
 extern char m68k_debug_device[];
 
-static void amiga_sched_init(void (*handler)(int, void *, struct pt_regs *));
-/* amiga specific keyboard functions */
-extern int amiga_keyb_init(void);
-extern int amiga_kbdrate (struct kbd_repeat *);
-extern int amiga_kbd_translate(unsigned char keycode, unsigned char *keycodep,
-			       char raw_mode);
+static void amiga_sched_init(irqreturn_t (*handler)(int, void *, struct pt_regs *));
 /* amiga specific irq functions */
 extern void amiga_init_IRQ (void);
-extern void (*amiga_default_handler[]) (int, void *, struct pt_regs *);
+extern irqreturn_t (*amiga_default_handler[]) (int, void *, struct pt_regs *);
 extern int amiga_request_irq (unsigned int irq,
-			      void (*handler)(int, void *, struct pt_regs *),
+			      irqreturn_t (*handler)(int, void *, struct pt_regs *),
                               unsigned long flags, const char *devname,
 			      void *dev_id);
 extern void amiga_free_irq (unsigned int irq, void *dev_id);
@@ -86,19 +97,18 @@ extern void amiga_enable_irq (unsigned int);
 extern void amiga_disable_irq (unsigned int);
 static void amiga_get_model(char *model);
 static int amiga_get_hardware_list(char *buffer);
-extern int amiga_get_irq_list (char *);
+extern int show_amiga_interrupts (struct seq_file *, void *);
 /* amiga specific timer functions */
 static unsigned long amiga_gettimeoffset (void);
-static void a3000_gettod (int *, int *, int *, int *, int *, int *);
-static void a2000_gettod (int *, int *, int *, int *, int *, int *);
-static int amiga_hwclk (int, struct hwclk_time *);
+static int a3000_hwclk (int, struct rtc_time *);
+static int a2000_hwclk (int, struct rtc_time *);
 static int amiga_set_clock_mmss (unsigned long);
+static unsigned int amiga_get_ss (void);
 extern void amiga_mksound( unsigned int count, unsigned int ticks );
 #ifdef CONFIG_AMIGA_FLOPPY
 extern void amiga_floppy_setup(char *, int *);
 #endif
 static void amiga_reset (void);
-static int amiga_wait_key (struct console *co);
 extern void amiga_init_sound(void);
 static void amiga_savekmsg_init(void);
 static void amiga_mem_console_write(struct console *co, const char *b,
@@ -111,25 +121,10 @@ static void amiga_heartbeat(int on);
 #endif
 
 static struct console amiga_console_driver = {
-	name:		"debug",
-	wait_key:	amiga_wait_key,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
+	.name =		"debug",
+	.flags =	CON_PRINTBUFFER,
+	.index =	-1,
 };
-
-#ifdef CONFIG_MAGIC_SYSRQ
-static char amiga_sysrq_xlate[128] =
-	"\0001234567890-=\\\000\000"					/* 0x00 - 0x0f */
-	"qwertyuiop[]\000123"							/* 0x10 - 0x1f */
-	"asdfghjkl;'\000\000456"						/* 0x20 - 0x2f */
-	"\000zxcvbnm,./\000+789"						/* 0x30 - 0x3f */
-	" \177\t\r\r\000\177\000\000\000-\000\000\000\000\000"	/* 0x40 - 0x4f */
-	"\000\201\202\203\204\205\206\207\210\211()/*+\000"	/* 0x50 - 0x5f */
-	"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"	/* 0x60 - 0x6f */
-	"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000";	/* 0x70 - 0x7f */
-#endif
-
-extern void (*kd_mksound)(unsigned int, unsigned int);
 
 
     /*
@@ -139,14 +134,22 @@ extern void (*kd_mksound)(unsigned int, unsigned int);
 static struct {
     struct resource _ciab, _ciaa, _custom, _kickstart;
 } mb_resources = {
-    _ciab:	{ "CIA B", 0x00bfd000, 0x00bfdfff },
-    _ciaa:	{ "CIA A", 0x00bfe000, 0x00bfefff },
-    _custom:	{ "Custom I/O", 0x00dff000, 0x00dfffff },
-    _kickstart:	{ "Kickstart ROM", 0x00f80000, 0x00ffffff }
+    ._ciab = {
+	.name = "CIA B", .start = 0x00bfd000, .end = 0x00bfdfff
+    },
+    ._ciaa = {
+	.name = "CIA A", .start = 0x00bfe000, .end = 0x00bfefff
+    },
+    ._custom = {
+	.name = "Custom I/O", .start = 0x00dff000, .end = 0x00dfffff
+    },
+    ._kickstart = {
+	.name = "Kickstart ROM", .start = 0x00f80000, .end = 0x00ffffff
+    }
 };
 
 static struct resource rtc_resource = {
-    NULL, 0x00dc0000, 0x00dcffff
+    .start = 0x00dc0000, .end = 0x00dcffff
 };
 
 static struct resource ram_resource[NUM_MEMINFO];
@@ -329,7 +332,7 @@ static void __init amiga_identify(void)
 
   case AMI_DRACO:
     panic("No support for Draco yet");
- 
+
   default:
     panic("Unknown Amiga Model");
   }
@@ -391,10 +394,6 @@ void __init config_amiga(void)
     request_resource(&iomem_resource, &((struct resource *)&mb_resources)[i]);
 
   mach_sched_init      = amiga_sched_init;
-  mach_keyb_init       = amiga_keyb_init;
-  mach_kbdrate         = amiga_kbdrate;
-  mach_kbd_translate   = amiga_kbd_translate;
-  SYSRQ_KEY            = 0xff;
   mach_init_IRQ        = amiga_init_IRQ;
   mach_default_handler = &amiga_default_handler;
   mach_request_irq     = amiga_request_irq;
@@ -403,15 +402,15 @@ void __init config_amiga(void)
   disable_irq          = amiga_disable_irq;
   mach_get_model       = amiga_get_model;
   mach_get_hardware_list = amiga_get_hardware_list;
-  mach_get_irq_list    = amiga_get_irq_list;
+  mach_get_irq_list    = show_amiga_interrupts;
   mach_gettimeoffset   = amiga_gettimeoffset;
   if (AMIGAHW_PRESENT(A3000_CLK)){
-    mach_gettod  = a3000_gettod;
+    mach_hwclk         = a3000_hwclk;
     rtc_resource.name = "A3000 RTC";
     request_resource(&iomem_resource, &rtc_resource);
   }
   else{ /* if (AMIGAHW_PRESENT(A2000_CLK)) */
-    mach_gettod  = a2000_gettod;
+    mach_hwclk         = a2000_hwclk;
     rtc_resource.name = "A2000 RTC";
     request_resource(&iomem_resource, &rtc_resource);
   }
@@ -426,8 +425,8 @@ void __init config_amiga(void)
 				      * system.                  /Jes
 				      */
 
-  mach_hwclk           = amiga_hwclk;
   mach_set_clock_mmss  = amiga_set_clock_mmss;
+  mach_get_ss          = amiga_get_ss;
 #ifdef CONFIG_AMIGA_FLOPPY
   mach_floppy_setup    = amiga_floppy_setup;
 #endif
@@ -435,13 +434,10 @@ void __init config_amiga(void)
 #ifdef CONFIG_DUMMY_CONSOLE
   conswitchp           = &dummy_con;
 #endif
-  kd_mksound           = amiga_mksound;
-#ifdef CONFIG_MAGIC_SYSRQ
-  mach_sysrq_key = 0x5f;	     /* HELP */
-  mach_sysrq_shift_state = 0x03; /* SHIFT+ALTGR */
-  mach_sysrq_shift_mask = 0xff;  /* all modifiers except CapsLock */
-  mach_sysrq_xlate = amiga_sysrq_xlate;
+#if defined(CONFIG_INPUT_M68K_BEEP) || defined(CONFIG_INPUT_M68K_BEEP_MODULE)
+  mach_beep            = amiga_mksound;
 #endif
+
 #ifdef CONFIG_HEARTBEAT
   mach_heartbeat = amiga_heartbeat;
 #endif
@@ -516,11 +512,11 @@ void __init config_amiga(void)
 
 static unsigned short jiffy_ticks;
 
-static void __init amiga_sched_init(void (*timer_routine)(int, void *,
+static void __init amiga_sched_init(irqreturn_t (*timer_routine)(int, void *,
 							  struct pt_regs *))
 {
 	static struct resource sched_res = {
-	    "timer", 0x00bfd400, 0x00bfd5ff,
+	    .name = "timer", .start = 0x00bfd400, .end = 0x00bfd5ff,
 	};
 	jiffy_ticks = (amiga_eclock+HZ/2)/HZ;
 
@@ -571,139 +567,103 @@ static unsigned long amiga_gettimeoffset (void)
 	return ticks + offset;
 }
 
-static void a3000_gettod (int *yearp, int *monp, int *dayp,
-			  int *hourp, int *minp, int *secp)
+static int a3000_hwclk(int op, struct rtc_time *t)
 {
-	volatile struct tod3000 *tod = TOD_3000;
+	tod_3000.cntrl1 = TOD3000_CNTRL1_HOLD;
 
-	tod->cntrl1 = TOD3000_CNTRL1_HOLD;
-
-	*secp  = tod->second1 * 10 + tod->second2;
-	*minp  = tod->minute1 * 10 + tod->minute2;
-	*hourp = tod->hour1   * 10 + tod->hour2;
-	*dayp  = tod->day1    * 10 + tod->day2;
-	*monp  = tod->month1  * 10 + tod->month2;
-	*yearp = tod->year1   * 10 + tod->year2;
-
-	tod->cntrl1 = TOD3000_CNTRL1_FREE;
-}
-
-static void a2000_gettod (int *yearp, int *monp, int *dayp,
-			  int *hourp, int *minp, int *secp)
-{
-	volatile struct tod2000 *tod = TOD_2000;
-
-	tod->cntrl1 = TOD2000_CNTRL1_HOLD;
-
-	while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
-		;
-
-	*secp  = tod->second1     * 10 + tod->second2;
-	*minp  = tod->minute1     * 10 + tod->minute2;
-	*hourp = (tod->hour1 & 3) * 10 + tod->hour2;
-	*dayp  = tod->day1        * 10 + tod->day2;
-	*monp  = tod->month1      * 10 + tod->month2;
-	*yearp = tod->year1       * 10 + tod->year2;
-
-	if (!(tod->cntrl3 & TOD2000_CNTRL3_24HMODE)){
-		if (!(tod->hour1 & TOD2000_HOUR1_PM) && *hourp == 12)
-			*hourp = 0;
-		else if ((tod->hour1 & TOD2000_HOUR1_PM) && *hourp != 12)
-			*hourp += 12;
+	if (!op) { /* read */
+		t->tm_sec  = tod_3000.second1 * 10 + tod_3000.second2;
+		t->tm_min  = tod_3000.minute1 * 10 + tod_3000.minute2;
+		t->tm_hour = tod_3000.hour1   * 10 + tod_3000.hour2;
+		t->tm_mday = tod_3000.day1    * 10 + tod_3000.day2;
+		t->tm_wday = tod_3000.weekday;
+		t->tm_mon  = tod_3000.month1  * 10 + tod_3000.month2 - 1;
+		t->tm_year = tod_3000.year1   * 10 + tod_3000.year2;
+		if (t->tm_year <= 69)
+			t->tm_year += 100;
+	} else {
+		tod_3000.second1 = t->tm_sec / 10;
+		tod_3000.second2 = t->tm_sec % 10;
+		tod_3000.minute1 = t->tm_min / 10;
+		tod_3000.minute2 = t->tm_min % 10;
+		tod_3000.hour1   = t->tm_hour / 10;
+		tod_3000.hour2   = t->tm_hour % 10;
+		tod_3000.day1    = t->tm_mday / 10;
+		tod_3000.day2    = t->tm_mday % 10;
+		if (t->tm_wday != -1)
+			tod_3000.weekday = t->tm_wday;
+		tod_3000.month1  = (t->tm_mon + 1) / 10;
+		tod_3000.month2  = (t->tm_mon + 1) % 10;
+		if (t->tm_year >= 100)
+			t->tm_year -= 100;
+		tod_3000.year1   = t->tm_year / 10;
+		tod_3000.year2   = t->tm_year % 10;
 	}
 
-	tod->cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+	tod_3000.cntrl1 = TOD3000_CNTRL1_FREE;
+
+	return 0;
 }
 
-static int amiga_hwclk(int op, struct hwclk_time *t)
+static int a2000_hwclk(int op, struct rtc_time *t)
 {
-	if (AMIGAHW_PRESENT(A3000_CLK)) {
-		volatile struct tod3000 *tod = TOD_3000;
+	int cnt = 5;
 
-		tod->cntrl1 = TOD3000_CNTRL1_HOLD;
+	tod_2000.cntrl1 = TOD2000_CNTRL1_HOLD;
 
-		if (!op) { /* read */
-			t->sec  = tod->second1 * 10 + tod->second2;
-			t->min  = tod->minute1 * 10 + tod->minute2;
-			t->hour = tod->hour1   * 10 + tod->hour2;
-			t->day  = tod->day1    * 10 + tod->day2;
-			t->wday = tod->weekday;
-			t->mon  = tod->month1  * 10 + tod->month2 - 1;
-			t->year = tod->year1   * 10 + tod->year2;
-			if (t->year <= 69)
-				t->year += 100;
-		} else {
-			tod->second1 = t->sec / 10;
-			tod->second2 = t->sec % 10;
-			tod->minute1 = t->min / 10;
-			tod->minute2 = t->min % 10;
-			tod->hour1   = t->hour / 10;
-			tod->hour2   = t->hour % 10;
-			tod->day1    = t->day / 10;
-			tod->day2    = t->day % 10;
-			if (t->wday != -1)
-				tod->weekday = t->wday;
-			tod->month1  = (t->mon + 1) / 10;
-			tod->month2  = (t->mon + 1) % 10;
-			if (t->year >= 100)
-				t->year -= 100;
-			tod->year1   = t->year / 10;
-			tod->year2   = t->year % 10;
-		}
-
-		tod->cntrl1 = TOD3000_CNTRL1_FREE;
-	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
-		volatile struct tod2000 *tod = TOD_2000;
-
-		tod->cntrl1 = TOD2000_CNTRL1_HOLD;
-	    
-		while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
-			;
-
-		if (!op) { /* read */
-			t->sec  = tod->second1     * 10 + tod->second2;
-			t->min  = tod->minute1     * 10 + tod->minute2;
-			t->hour = (tod->hour1 & 3) * 10 + tod->hour2;
-			t->day  = tod->day1        * 10 + tod->day2;
-			t->wday = tod->weekday;
-			t->mon  = tod->month1      * 10 + tod->month2 - 1;
-			t->year = tod->year1       * 10 + tod->year2;
-			if (t->year <= 69)
-				t->year += 100;
-
-			if (!(tod->cntrl3 & TOD2000_CNTRL3_24HMODE)){
-				if (!(tod->hour1 & TOD2000_HOUR1_PM) && t->hour == 12)
-					t->hour = 0;
-				else if ((tod->hour1 & TOD2000_HOUR1_PM) && t->hour != 12)
-					t->hour += 12;
-			}
-		} else {
-			tod->second1 = t->sec / 10;
-			tod->second2 = t->sec % 10;
-			tod->minute1 = t->min / 10;
-			tod->minute2 = t->min % 10;
-			if (tod->cntrl3 & TOD2000_CNTRL3_24HMODE)
-				tod->hour1 = t->hour / 10;
-			else if (t->hour >= 12)
-				tod->hour1 = TOD2000_HOUR1_PM +
-					(t->hour - 12) / 10;
-			else
-				tod->hour1 = t->hour / 10;
-			tod->hour2   = t->hour % 10;
-			tod->day1    = t->day / 10;
-			tod->day2    = t->day % 10;
-			if (t->wday != -1)
-				tod->weekday = t->wday;
-			tod->month1  = (t->mon + 1) / 10;
-			tod->month2  = (t->mon + 1) % 10;
-			if (t->year >= 100)
-				t->year -= 100;
-			tod->year1   = t->year / 10;
-			tod->year2   = t->year % 10;
-		}
-
-		tod->cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+	while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt--)
+	{
+	        tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+	        udelay(70);
+	        tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
 	}
+
+	if (!cnt)
+		printk(KERN_INFO "hwclk: timed out waiting for RTC (0x%x)\n", tod_2000.cntrl1);
+
+	if (!op) { /* read */
+		t->tm_sec  = tod_2000.second1     * 10 + tod_2000.second2;
+		t->tm_min  = tod_2000.minute1     * 10 + tod_2000.minute2;
+		t->tm_hour = (tod_2000.hour1 & 3) * 10 + tod_2000.hour2;
+		t->tm_mday = tod_2000.day1        * 10 + tod_2000.day2;
+		t->tm_wday = tod_2000.weekday;
+		t->tm_mon  = tod_2000.month1      * 10 + tod_2000.month2 - 1;
+		t->tm_year = tod_2000.year1       * 10 + tod_2000.year2;
+		if (t->tm_year <= 69)
+			t->tm_year += 100;
+
+		if (!(tod_2000.cntrl3 & TOD2000_CNTRL3_24HMODE)){
+			if (!(tod_2000.hour1 & TOD2000_HOUR1_PM) && t->tm_hour == 12)
+				t->tm_hour = 0;
+			else if ((tod_2000.hour1 & TOD2000_HOUR1_PM) && t->tm_hour != 12)
+				t->tm_hour += 12;
+		}
+	} else {
+		tod_2000.second1 = t->tm_sec / 10;
+		tod_2000.second2 = t->tm_sec % 10;
+		tod_2000.minute1 = t->tm_min / 10;
+		tod_2000.minute2 = t->tm_min % 10;
+		if (tod_2000.cntrl3 & TOD2000_CNTRL3_24HMODE)
+			tod_2000.hour1 = t->tm_hour / 10;
+		else if (t->tm_hour >= 12)
+			tod_2000.hour1 = TOD2000_HOUR1_PM +
+				(t->tm_hour - 12) / 10;
+		else
+			tod_2000.hour1 = t->tm_hour / 10;
+		tod_2000.hour2   = t->tm_hour % 10;
+		tod_2000.day1    = t->tm_mday / 10;
+		tod_2000.day2    = t->tm_mday % 10;
+		if (t->tm_wday != -1)
+			tod_2000.weekday = t->tm_wday;
+		tod_2000.month1  = (t->tm_mon + 1) / 10;
+		tod_2000.month2  = (t->tm_mon + 1) % 10;
+		if (t->tm_year >= 100)
+			t->tm_year -= 100;
+		tod_2000.year1   = t->tm_year / 10;
+		tod_2000.year2   = t->tm_year % 10;
+	}
+
+	tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
 
 	return 0;
 }
@@ -713,74 +673,52 @@ static int amiga_set_clock_mmss (unsigned long nowtime)
 	short real_seconds = nowtime % 60, real_minutes = (nowtime / 60) % 60;
 
 	if (AMIGAHW_PRESENT(A3000_CLK)) {
-		volatile struct tod3000 *tod = TOD_3000;
+		tod_3000.cntrl1 = TOD3000_CNTRL1_HOLD;
 
-		tod->cntrl1 = TOD3000_CNTRL1_HOLD;
+		tod_3000.second1 = real_seconds / 10;
+		tod_3000.second2 = real_seconds % 10;
+		tod_3000.minute1 = real_minutes / 10;
+		tod_3000.minute2 = real_minutes % 10;
 
-		tod->second1 = real_seconds / 10;
-		tod->second2 = real_seconds % 10;
-		tod->minute1 = real_minutes / 10;
-		tod->minute2 = real_minutes % 10;
-		
-		tod->cntrl1 = TOD3000_CNTRL1_FREE;
+		tod_3000.cntrl1 = TOD3000_CNTRL1_FREE;
 	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
-		volatile struct tod2000 *tod = TOD_2000;
+		int cnt = 5;
 
-		tod->cntrl1 = TOD2000_CNTRL1_HOLD;
-	    
-		while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
-			;
+		tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
 
-		tod->second1 = real_seconds / 10;
-		tod->second2 = real_seconds % 10;
-		tod->minute1 = real_minutes / 10;
-		tod->minute2 = real_minutes % 10;
+		while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt--)
+		{
+			tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+			udelay(70);
+			tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
+		}
 
-		tod->cntrl1 &= ~TOD2000_CNTRL1_HOLD;
+		if (!cnt)
+			printk(KERN_INFO "set_clock_mmss: timed out waiting for RTC (0x%x)\n", tod_2000.cntrl1);
+
+		tod_2000.second1 = real_seconds / 10;
+		tod_2000.second2 = real_seconds % 10;
+		tod_2000.minute1 = real_minutes / 10;
+		tod_2000.minute2 = real_minutes % 10;
+
+		tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
 	}
 
 	return 0;
 }
 
-static int amiga_wait_key (struct console *co)
+static unsigned int amiga_get_ss( void )
 {
-    int i;
+	unsigned int s;
 
-    while (1) {
-	while (ciaa.pra & 0x40);
-
-	/* debounce */
-	for (i = 0; i < 1000; i++);
-
-	if (!(ciaa.pra & 0x40))
-	    break;
-    }
-
-    /* wait for button up */
-    while (1) {
-	while (!(ciaa.pra & 0x40));
-
-	/* debounce */
-	for (i = 0; i < 1000; i++);
-
-	if (ciaa.pra & 0x40)
-	    break;
-    }
-    return 0;
-}
-
-void dbprintf(const char *fmt , ...)
-{
-	static char buf[1024];
-	va_list args;
-	extern void console_print (const char *str);
-	extern int vsprintf(char * buf, const char * fmt, va_list args);
-
-	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
-	va_end(args);
-
-	console_print (buf);
+	if (AMIGAHW_PRESENT(A3000_CLK)) {
+		tod_3000.cntrl1 = TOD3000_CNTRL1_HOLD;
+		s = tod_3000.second1 * 10 + tod_3000.second2;
+		tod_3000.cntrl1 = TOD3000_CNTRL1_FREE;
+	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
+		s = tod_2000.second1 * 10 + tod_2000.second2;
+	}
+	return s;
 }
 
 static NORET_TYPE void amiga_reset( void )
@@ -791,7 +729,7 @@ static void amiga_reset (void)
   unsigned long jmp_addr040 = virt_to_phys(&&jmp_addr_label040);
   unsigned long jmp_addr = virt_to_phys(&&jmp_addr_label);
 
-  cli();
+  local_irq_disable();
   if (CPU_IS_040_OR_060)
     /* Setup transparent translation registers for mapping
      * of 16 MB kernel segment before disabling translation
@@ -820,7 +758,7 @@ static void amiga_reset (void)
        : "a" (jmp_addr));
  jmp_addr_label040:
   /* disable translation on '040 now */
-  __asm__ __volatile__    
+  __asm__ __volatile__
     ("moveq #0,%/d0\n\t"
      ".chip 68040\n\t"
      "movec %%d0,%%tc\n\t"	/* disable MMU */
@@ -845,7 +783,7 @@ static void amiga_reset (void)
      "1:\n\t"
      "reset\n\t"
      "jmp   %/a0@" : /* Just that gcc scans it for % escapes */ );
-  
+
   for (;;);
 
 }
@@ -868,7 +806,7 @@ struct savekmsg {
     char data[0];
 };
 
-static struct savekmsg *savekmsg = NULL;
+static struct savekmsg *savekmsg;
 
 static void amiga_mem_console_write(struct console *co, const char *s,
 				    unsigned int count)
@@ -881,12 +819,12 @@ static void amiga_mem_console_write(struct console *co, const char *s,
 
 static void amiga_savekmsg_init(void)
 {
-    static struct resource debug_res = { "Debug" };
+    static struct resource debug_res = { .name = "Debug" };
 
     savekmsg = amiga_chip_alloc_res(SAVEKMSG_MAXMEM, &debug_res);
     savekmsg->magic1 = SAVEKMSG_MAGIC1;
     savekmsg->magic2 = SAVEKMSG_MAGIC2;
-    savekmsg->magicptr = virt_to_phys(savekmsg);
+    savekmsg->magicptr = ZTWO_PADDR(savekmsg);
     savekmsg->size = 0;
 }
 

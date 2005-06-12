@@ -4,24 +4,19 @@
 #include <linux/raid/md.h>
 
 struct dev_info {
-	kdev_t		dev;
-	unsigned long	size;
-	unsigned long	offset;
+	mdk_rdev_t	*rdev;
+	sector_t	size;
+	sector_t	offset;
 };
 
 typedef struct dev_info dev_info_t;
 
-struct linear_hash
-{
-	dev_info_t *dev0, *dev1;
-};
-
 struct linear_private_data
 {
-	struct linear_hash	*hash_table;
-	dev_info_t		disks[MD_SB_DISKS];
+	dev_info_t		**hash_table;
 	dev_info_t		*smallest;
 	int			nr_zones;
+	dev_info_t		disks[0];
 };
 
 

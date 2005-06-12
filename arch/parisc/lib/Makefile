@@ -1,13 +1,9 @@
 #
-# Makefile for parisc-specific library files..
+# Makefile for parisc-specific library files
 #
 
+lib-y	:= lusercopy.o bitops.o checksum.o io.o memset.o fixup.o memcpy.o
 
-L_TARGET = lib.a
-L_OBJS	= lusercopy.o bitops.o checksum.o
+obj-y	:= iomap.o
 
-
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
-
-include $(TOPDIR)/Rules.make
+lib-$(CONFIG_SMP) += debuglocks.o

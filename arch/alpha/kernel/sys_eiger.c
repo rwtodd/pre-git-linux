@@ -15,18 +15,19 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pci.h>
 #include <asm/pgtable.h>
 #include <asm/core_tsunami.h>
 #include <asm/hwrpb.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -80,13 +81,13 @@ eiger_end_irq(unsigned int irq)
 }
 
 static struct hw_interrupt_type eiger_irq_type = {
-	typename:	"EIGER",
-	startup:	eiger_startup_irq,
-	shutdown:	eiger_disable_irq,
-	enable:		eiger_enable_irq,
-	disable:	eiger_disable_irq,
-	ack:		eiger_disable_irq,
-	end:		eiger_end_irq,
+	.typename	= "EIGER",
+	.startup	= eiger_startup_irq,
+	.shutdown	= eiger_disable_irq,
+	.enable		= eiger_enable_irq,
+	.disable	= eiger_disable_irq,
+	.ack		= eiger_disable_irq,
+	.end		= eiger_end_irq,
 };
 
 static void
@@ -177,7 +178,7 @@ eiger_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 static u8 __init
 eiger_swizzle(struct pci_dev *dev, u8 *pinp)
 {
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	int slot, pin = *pinp;
 	int bridge_count = 0;
 
@@ -193,27 +194,20 @@ eiger_swizzle(struct pci_dev *dev, u8 *pinp)
 	   case 0x0f: bridge_count = 4; break; /* 4 */
 	};
 
-	/*  Check first for the built-in bridges on hose 0. */
-	if (hose->index == 0
-	    && PCI_SLOT(dev->bus->self->devfn) > 20-bridge_count) {
-		slot = PCI_SLOT(dev->devfn);
-	} else {
-		/* Must be a card-based bridge.  */
-		do {
-			/* Check for built-in bridges on hose 0. */
-			if (hose->index == 0
-			    && (PCI_SLOT(dev->bus->self->devfn)
-				> 20 - bridge_count)) {
-                  		slot = PCI_SLOT(dev->devfn);
-				break;
-			}
-			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
-
-			/* Move up the chain of bridges.  */
-			dev = dev->bus->self;
-			/* Slot of the next bridge.  */
+	slot = PCI_SLOT(dev->devfn);
+	while (dev->bus->self) {
+		/* Check for built-in bridges on hose 0. */
+		if (hose->index == 0
+		    && (PCI_SLOT(dev->bus->self->devfn)
+			> 20 - bridge_count)) {
 			slot = PCI_SLOT(dev->devfn);
-		} while (dev->bus->self);
+			break;
+		}
+		/* Must be a card-based bridge.  */
+		pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
+
+		/* Move up the chain of bridges.  */
+		dev = dev->bus->self;
 	}
 	*pinp = pin;
 	return slot;
@@ -224,25 +218,25 @@ eiger_swizzle(struct pci_dev *dev, u8 *pinp)
  */
 
 struct alpha_machine_vector eiger_mv __initmv = {
-	vector_name:		"Eiger",
+	.vector_name		= "Eiger",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TSUNAMI_IO,
-	DO_TSUNAMI_BUS,
-	machine_check:		tsunami_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= tsunami_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TSUNAMI_DAC_OFFSET,
 
-	nr_irqs:		128,
-	device_interrupt:	eiger_device_interrupt,
+	.nr_irqs		= 128,
+	.device_interrupt	= eiger_device_interrupt,
 
-	init_arch:		tsunami_init_arch,
-	init_irq:		eiger_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	kill_arch:		tsunami_kill_arch,
-	pci_map_irq:		eiger_map_irq,
-	pci_swizzle:		eiger_swizzle,
+	.init_arch		= tsunami_init_arch,
+	.init_irq		= eiger_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= tsunami_kill_arch,
+	.pci_map_irq		= eiger_map_irq,
+	.pci_swizzle		= eiger_swizzle,
 };
 ALIAS_MV(eiger)

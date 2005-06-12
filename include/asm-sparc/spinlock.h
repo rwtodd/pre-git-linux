@@ -12,18 +12,13 @@
 
 #include <asm/psr.h>
 
-/*
- * Define this to use the verbose/debugging versions in
- * arch/sparc/lib/debuglocks.c
- *
- * Be sure to make dep whenever changing this option.
- */
-#define SPIN_LOCK_DEBUG
-
-#ifdef SPIN_LOCK_DEBUG
+#ifdef CONFIG_DEBUG_SPINLOCK
 struct _spinlock_debug {
 	unsigned char lock;
 	unsigned long owner_pc;
+#ifdef CONFIG_PREEMPT
+	unsigned int break_lock;
+#endif
 };
 typedef struct _spinlock_debug spinlock_t;
 
@@ -36,14 +31,17 @@ extern void _do_spin_lock(spinlock_t *lock, char *str);
 extern int _spin_trylock(spinlock_t *lock);
 extern void _do_spin_unlock(spinlock_t *lock);
 
-#define spin_trylock(lp)	_spin_trylock(lp)
-#define spin_lock(lock)		_do_spin_lock(lock, "spin_lock")
-#define spin_unlock(lock)	_do_spin_unlock(lock)
+#define _raw_spin_trylock(lp)	_spin_trylock(lp)
+#define _raw_spin_lock(lock)	_do_spin_lock(lock, "spin_lock")
+#define _raw_spin_unlock(lock)	_do_spin_unlock(lock)
 
 struct _rwlock_debug {
 	volatile unsigned int lock;
 	unsigned long owner_pc;
 	unsigned long reader_pc[NR_CPUS];
+#ifdef CONFIG_PREEMPT
+	unsigned int break_lock;
+#endif
 };
 typedef struct _rwlock_debug rwlock_t;
 
@@ -56,38 +54,44 @@ extern void _do_read_unlock(rwlock_t *rw, char *str);
 extern void _do_write_lock(rwlock_t *rw, char *str);
 extern void _do_write_unlock(rwlock_t *rw);
 
-#define read_lock(lock)	\
+#define _raw_read_lock(lock)	\
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_read_lock(lock, "read_lock"); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#define read_unlock(lock) \
+#define _raw_read_unlock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_read_unlock(lock, "read_unlock"); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#define write_lock(lock) \
+#define _raw_write_lock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_write_lock(lock, "write_lock"); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#define write_unlock(lock) \
+#define _raw_write_unlock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_write_unlock(lock); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#else /* !SPIN_LOCK_DEBUG */
+#else /* !CONFIG_DEBUG_SPINLOCK */
 
-typedef unsigned char spinlock_t;
-#define SPIN_LOCK_UNLOCKED	0
+typedef struct {
+	unsigned char lock;
+#ifdef CONFIG_PREEMPT
+	unsigned int break_lock;
+#endif
+} spinlock_t;
+
+#define SPIN_LOCK_UNLOCKED	(spinlock_t) { 0 }
 
 #define spin_lock_init(lock)   (*((unsigned char *)(lock)) = 0)
 #define spin_is_locked(lock)    (*((volatile unsigned char *)(lock)) != 0)
@@ -97,25 +101,27 @@ do { \
 	barrier(); \
 } while(*((volatile unsigned char *)lock))
 
-extern __inline__ void spin_lock(spinlock_t *lock)
+extern __inline__ void _raw_spin_lock(spinlock_t *lock)
 {
-	__asm__ __volatile__("
-1:	ldstub	[%0], %%g2
-	orcc	%%g2, 0x0, %%g0
-	bne,a	2f
-	 ldub	[%0], %%g2
-	.subsection	2
-2:	orcc	%%g2, 0x0, %%g0
-	bne,a	2b
-	 ldub	[%0], %%g2
-	b,a	1b
-	.previous
-"	: /* no outputs */
+	__asm__ __volatile__(
+	"\n1:\n\t"
+	"ldstub	[%0], %%g2\n\t"
+	"orcc	%%g2, 0x0, %%g0\n\t"
+	"bne,a	2f\n\t"
+	" ldub	[%0], %%g2\n\t"
+	".subsection	2\n"
+	"2:\n\t"
+	"orcc	%%g2, 0x0, %%g0\n\t"
+	"bne,a	2b\n\t"
+	" ldub	[%0], %%g2\n\t"
+	"b,a	1b\n\t"
+	".previous\n"
+	: /* no outputs */
 	: "r" (lock)
 	: "g2", "memory", "cc");
 }
 
-extern __inline__ int spin_trylock(spinlock_t *lock)
+extern __inline__ int _raw_spin_trylock(spinlock_t *lock)
 {
 	unsigned int result;
 	__asm__ __volatile__("ldstub [%1], %0"
@@ -125,7 +131,7 @@ extern __inline__ int spin_trylock(spinlock_t *lock)
 	return (result == 0);
 }
 
-extern __inline__ void spin_unlock(spinlock_t *lock)
+extern __inline__ void _raw_spin_unlock(spinlock_t *lock)
 {
 	__asm__ __volatile__("stb %%g0, [%0]" : : "r" (lock) : "memory");
 }
@@ -142,7 +148,12 @@ extern __inline__ void spin_unlock(spinlock_t *lock)
  * XXX This might create some problems with my dual spinlock
  * XXX scheme, deadlocks etc. -DaveM
  */
-typedef struct { volatile unsigned int lock; } rwlock_t;
+typedef struct {
+	volatile unsigned int lock;
+#ifdef CONFIG_PREEMPT
+	unsigned int break_lock;
+#endif
+} rwlock_t;
 
 #define RW_LOCK_UNLOCKED (rwlock_t) { 0 }
 
@@ -167,58 +178,60 @@ extern __inline__ void _read_lock(rwlock_t *rw)
 {
 	register rwlock_t *lp asm("g1");
 	lp = rw;
-	__asm__ __volatile__("
-	mov	%%o7, %%g4
-	call	___rw_read_enter
-	 ldstub	[%%g1 + 3], %%g2
-"	: /* no outputs */
+	__asm__ __volatile__(
+	"mov	%%o7, %%g4\n\t"
+	"call	___rw_read_enter\n\t"
+	" ldstub	[%%g1 + 3], %%g2\n"
+	: /* no outputs */
 	: "r" (lp)
 	: "g2", "g4", "memory", "cc");
 }
 
-#define read_lock(lock) \
+#define _raw_read_lock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_read_lock(lock); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
 extern __inline__ void _read_unlock(rwlock_t *rw)
 {
 	register rwlock_t *lp asm("g1");
 	lp = rw;
-	__asm__ __volatile__("
-	mov	%%o7, %%g4
-	call	___rw_read_exit
-	 ldstub	[%%g1 + 3], %%g2
-"	: /* no outputs */
+	__asm__ __volatile__(
+	"mov	%%o7, %%g4\n\t"
+	"call	___rw_read_exit\n\t"
+	" ldstub	[%%g1 + 3], %%g2\n"
+	: /* no outputs */
 	: "r" (lp)
 	: "g2", "g4", "memory", "cc");
 }
 
-#define read_unlock(lock) \
+#define _raw_read_unlock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_read_unlock(lock); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-extern __inline__ void write_lock(rwlock_t *rw)
+extern __inline__ void _raw_write_lock(rwlock_t *rw)
 {
 	register rwlock_t *lp asm("g1");
 	lp = rw;
-	__asm__ __volatile__("
-	mov	%%o7, %%g4
-	call	___rw_write_enter
-	 ldstub	[%%g1 + 3], %%g2
-"	: /* no outputs */
+	__asm__ __volatile__(
+	"mov	%%o7, %%g4\n\t"
+	"call	___rw_write_enter\n\t"
+	" ldstub	[%%g1 + 3], %%g2\n"
+	: /* no outputs */
 	: "r" (lp)
 	: "g2", "g4", "memory", "cc");
 }
 
-#define write_unlock(rw)	do { (rw)->lock = 0; } while(0)
+#define _raw_write_unlock(rw)	do { (rw)->lock = 0; } while(0)
 
-#endif /* SPIN_LOCK_DEBUG */
+#endif /* CONFIG_DEBUG_SPINLOCK */
+
+#define _raw_spin_lock_flags(lock, flags) _raw_spin_lock(lock)
 
 #endif /* !(__ASSEMBLY__) */
 

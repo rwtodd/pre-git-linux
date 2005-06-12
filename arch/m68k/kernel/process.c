@@ -12,6 +12,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -20,10 +21,12 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/reboot.h>
+#include <linux/init_task.h>
+#include <linux/mqueue.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -33,40 +36,56 @@
 #include <asm/pgtable.h>
 
 /*
- * Initial task structure. Make this a per-architecture thing,
+ * Initial task/thread structure. Make this a per-architecture thing,
  * because different architectures tend to have different
  * alignment requirements and potentially different initial
  * setup.
  */
-static struct vm_area_struct init_mmap = INIT_MMAP;
 static struct fs_struct init_fs = INIT_FS;
 static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
+static struct signal_struct init_signals = INIT_SIGNALS(init_signals);
+static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
 struct mm_struct init_mm = INIT_MM(init_mm);
 
-union task_union init_task_union
-__attribute__((section("init_task"), aligned(KTHREAD_SIZE)))
-	= { task: INIT_TASK(init_task_union.task) };
+EXPORT_SYMBOL(init_mm);
+
+union thread_union init_thread_union
+__attribute__((section(".data.init_task"), aligned(THREAD_SIZE)))
+       = { INIT_THREAD_INFO(init_task) };
+
+/* initial task structure */
+struct task_struct init_task = INIT_TASK(init_task);
+
+EXPORT_SYMBOL(init_task);
 
 asmlinkage void ret_from_fork(void);
 
 
 /*
+ * Return saved PC from a blocked thread
+ */
+unsigned long thread_saved_pc(struct task_struct *tsk)
+{
+	struct switch_stack *sw = (struct switch_stack *)tsk->thread.ksp;
+	/* Check whether the thread is blocked in resume() */
+	if (in_sched_functions(sw->retpc))
+		return ((unsigned long *)sw->a6)[1];
+	else
+		return sw->retpc;
+}
+
+/*
  * The idle loop on an m68k..
  */
-static void default_idle(void)
+void default_idle(void)
 {
-	while(1) {
-		if (!current->need_resched)
+	if (!need_resched())
 #if defined(MACH_ATARI_ONLY) && !defined(CONFIG_HADES)
-			/* block out HSYNC on the atari (falcon) */
-			__asm__("stop #0x2200" : : : "cc");
+		/* block out HSYNC on the atari (falcon) */
+		__asm__("stop #0x2200" : : : "cc");
 #else
-			__asm__("stop #0x2000" : : : "cc");
+		__asm__("stop #0x2000" : : : "cc");
 #endif
-		schedule();
-		check_pgt_cache();
-	}
 }
 
 void (*idle)(void) = default_idle;
@@ -80,10 +99,11 @@ void (*idle)(void) = default_idle;
 void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	init_idle();
-	current->nice = 20;
-	current->counter = -100;
-	idle();
+	while (1) {
+		while (!need_resched())
+			idle();
+		schedule();
+	}
 }
 
 void machine_restart(char * __unused)
@@ -93,12 +113,16 @@ void machine_restart(char * __unused)
 	for (;;);
 }
 
+EXPORT_SYMBOL(machine_restart);
+
 void machine_halt(void)
 {
 	if (mach_halt)
 		mach_halt();
 	for (;;);
 }
+
+EXPORT_SYMBOL(machine_halt);
 
 void machine_power_off(void)
 {
@@ -107,11 +131,13 @@ void machine_power_off(void)
 	for (;;);
 }
 
+EXPORT_SYMBOL(machine_power_off);
+
 void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
-	printk("Format %02x  Vector: %04x  PC: %08lx  Status: %04x\n",
-	       regs->format, regs->vector, regs->pc, regs->sr);
+	printk("Format %02x  Vector: %04x  PC: %08lx  Status: %04x    %s\n",
+	       regs->format, regs->vector, regs->pc, regs->sr, print_tainted());
 	printk("ORIG_D0: %08lx  D0: %08lx  A2: %08lx  A1: %08lx\n",
 	       regs->orig_d0, regs->d0, regs->a2, regs->a1);
 	printk("A0: %08lx  D5: %08lx  D4: %08lx\n",
@@ -135,25 +161,28 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 
 	{
 	register long retval __asm__ ("d0");
-	register long clone_arg __asm__ ("d1") = flags | CLONE_VM;
+	register long clone_arg __asm__ ("d1") = flags | CLONE_VM | CLONE_UNTRACED;
 
+	retval = __NR_clone;
 	__asm__ __volatile__
 	  ("clrl %%d2\n\t"
 	   "trap #0\n\t"		/* Linux/m68k system call */
 	   "tstl %0\n\t"		/* child or parent */
 	   "jne 1f\n\t"			/* parent - jump */
 	   "lea %%sp@(%c7),%6\n\t"	/* reload current */
+	   "movel %6@,%6\n\t"
 	   "movel %3,%%sp@-\n\t"	/* push argument */
 	   "jsr %4@\n\t"		/* call fn */
 	   "movel %0,%%d1\n\t"		/* pass exit value */
-	   "movel %2,%0\n\t"		/* exit */
+	   "movel %2,%%d0\n\t"		/* exit */
 	   "trap #0\n"
 	   "1:"
-	   : "=d" (retval)
-	   : "0" (__NR_clone), "i" (__NR_exit),
+	   : "+d" (retval)
+	   : "i" (__NR_clone), "i" (__NR_exit),
 	     "r" (arg), "a" (fn), "d" (clone_arg), "r" (current),
-	     "i" (-KTHREAD_SIZE)
-	   : "d0", "d2");
+	     "i" (-THREAD_SIZE)
+	   : "d2");
+
 	pid = retval;
 	}
 
@@ -181,25 +210,30 @@ void flush_thread(void)
 
 asmlinkage int m68k_fork(struct pt_regs *regs)
 {
-	return do_fork(SIGCHLD, rdusp(), regs, 0);
+	return do_fork(SIGCHLD, rdusp(), regs, 0, NULL, NULL);
 }
 
 asmlinkage int m68k_vfork(struct pt_regs *regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0,
+		       NULL, NULL);
 }
 
 asmlinkage int m68k_clone(struct pt_regs *regs)
 {
 	unsigned long clone_flags;
 	unsigned long newsp;
+	int *parent_tidptr, *child_tidptr;
 
 	/* syscall2 puts clone_flags in d1 and usp in d2 */
 	clone_flags = regs->d1;
 	newsp = regs->d2;
+	parent_tidptr = (int *)regs->d3;
+	child_tidptr = (int *)regs->d4;
 	if (!newsp)
 		newsp = rdusp();
-	return do_fork(clone_flags, newsp, regs, 0);
+	return do_fork(clone_flags, newsp, regs, 0,
+		       parent_tidptr, child_tidptr);
 }
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
@@ -210,8 +244,8 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	struct switch_stack * childstack, *stack;
 	unsigned long stack_offset, *retp;
 
-	stack_offset = KTHREAD_SIZE - sizeof(struct pt_regs);
-	childregs = (struct pt_regs *) ((unsigned long) p + stack_offset);
+	stack_offset = THREAD_SIZE - sizeof(struct pt_regs);
+	childregs = (struct pt_regs *) ((unsigned long) (p->thread_info) + stack_offset);
 
 	*childregs = *regs;
 	childregs->d0 = 0;
@@ -348,14 +382,6 @@ out:
 	return error;
 }
 
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
-
 unsigned long get_wchan(struct task_struct *p)
 {
 	unsigned long fp, pc;
@@ -364,15 +390,14 @@ unsigned long get_wchan(struct task_struct *p)
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
-	stack_page = (unsigned long)p;
+	stack_page = (unsigned long)(p->thread_info);
 	fp = ((struct switch_stack *)p->thread.ksp)->a6;
 	do {
-		if (fp < stack_page+sizeof(struct task_struct) ||
+		if (fp < stack_page+sizeof(struct thread_info) ||
 		    fp >= 8184+stack_page)
 			return 0;
 		pc = ((unsigned long *)fp)[1];
-		/* FIXME: This depends on the order of these functions. */
-		if (pc < first_sched || pc >= last_sched)
+		if (!in_sched_functions(pc))
 			return pc;
 		fp = *(unsigned long *) fp;
 	} while (count++ < 16);

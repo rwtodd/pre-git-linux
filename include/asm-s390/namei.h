@@ -16,7 +16,6 @@
  * Look at asm-sparc/namei.h for details.
  */
 
-#define __prefix_lookup_dentry(name, lookup_flags) \
-        do {} while (0)
+#define __emul_prefix() NULL
 
 #endif /* __S390_NAMEI_H */

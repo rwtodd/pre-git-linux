@@ -21,7 +21,9 @@
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
+#include <linux/seq_file.h>
 #include <linux/module.h>
+#include <linux/initrd.h>
 
 #include <asm/bootinfo.h>
 #include <asm/setup.h>
@@ -33,14 +35,10 @@
 #endif
 #ifdef CONFIG_ATARI
 #include <asm/atarihw.h>
+#include <asm/atari_stram.h>
 #endif
-
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
-#endif
-
-#ifndef CONFIG_AMIGA
-#define dbprintf	printk
+#ifdef CONFIG_SUN3X
+#include <asm/dvma.h>
 #endif
 
 unsigned long m68k_machtype;
@@ -51,63 +49,57 @@ unsigned long m68k_mmutype;
 unsigned long vme_brdtype;
 #endif
 
-int m68k_is040or060 = 0;
+int m68k_is040or060;
 
 extern int end;
 extern unsigned long availmem;
 
-int m68k_num_memory = 0;
-int m68k_realnum_memory = 0;
+int m68k_num_memory;
+int m68k_realnum_memory;
 unsigned long m68k_memoffset;
 struct mem_info m68k_memory[NUM_MEMINFO];
 
-static struct mem_info m68k_ramdisk = { 0, 0 };
+static struct mem_info m68k_ramdisk;
 
 static char m68k_command_line[CL_SIZE];
-char saved_command_line[CL_SIZE];
 
 char m68k_debug_device[6] = "";
 
-void (*mach_sched_init) (void (*handler)(int, void *, struct pt_regs *)) __initdata = NULL;
-/* machine dependent keyboard functions */
-int (*mach_keyb_init) (void) __initdata = NULL;
-int (*mach_kbdrate) (struct kbd_repeat *) = NULL;
-void (*mach_kbd_leds) (unsigned int) = NULL;
-int (*mach_kbd_translate)(unsigned char scancode, unsigned char *keycode, char raw_mode) = NULL;
-unsigned int SYSRQ_KEY;
+void (*mach_sched_init) (irqreturn_t (*handler)(int, void *, struct pt_regs *)) __initdata = NULL;
 /* machine dependent irq functions */
 void (*mach_init_IRQ) (void) __initdata = NULL;
-void (*(*mach_default_handler)[]) (int, void *, struct pt_regs *) = NULL;
-void (*mach_get_model) (char *model) = NULL;
-int (*mach_get_hardware_list) (char *buffer) = NULL;
-int (*mach_get_irq_list) (char *) = NULL;
-void (*mach_process_int) (int, struct pt_regs *) = NULL;
+irqreturn_t (*(*mach_default_handler)[]) (int, void *, struct pt_regs *);
+void (*mach_get_model) (char *model);
+int (*mach_get_hardware_list) (char *buffer);
+int (*mach_get_irq_list) (struct seq_file *, void *);
+irqreturn_t (*mach_process_int) (int, struct pt_regs *);
 /* machine dependent timer functions */
 unsigned long (*mach_gettimeoffset) (void);
-void (*mach_gettod) (int*, int*, int*, int*, int*, int*);
-int (*mach_hwclk) (int, struct hwclk_time*) = NULL;
-int (*mach_set_clock_mmss) (unsigned long) = NULL;
+int (*mach_hwclk) (int, struct rtc_time*);
+int (*mach_set_clock_mmss) (unsigned long);
+unsigned int (*mach_get_ss)(void);
+int (*mach_get_rtc_pll)(struct rtc_pll_info *);
+int (*mach_set_rtc_pll)(struct rtc_pll_info *);
 void (*mach_reset)( void );
-void (*mach_halt)( void ) = NULL;
-void (*mach_power_off)( void ) = NULL;
+void (*mach_halt)( void );
+void (*mach_power_off)( void );
 long mach_max_dma_address = 0x00ffffff; /* default set to the lower 16MB */
-#if defined(CONFIG_AMIGA_FLOPPY) || defined(CONFIG_ATARI_FLOPPY) 
+#if defined(CONFIG_AMIGA_FLOPPY) || defined(CONFIG_ATARI_FLOPPY)
 void (*mach_floppy_setup) (char *, int *) __initdata = NULL;
-void (*mach_floppy_eject) (void) = NULL;
 #endif
 #ifdef CONFIG_HEARTBEAT
-void (*mach_heartbeat) (int) = NULL;
+void (*mach_heartbeat) (int);
 EXPORT_SYMBOL(mach_heartbeat);
 #endif
 #ifdef CONFIG_M68K_L2_CACHE
-void (*mach_l2_flush) (int) = NULL;
+void (*mach_l2_flush) (int);
 #endif
-
-#ifdef CONFIG_MAGIC_SYSRQ
-int mach_sysrq_key = -1;
-int mach_sysrq_shift_state = 0;
-int mach_sysrq_shift_mask = 0;
-char *mach_sysrq_xlate = NULL;
+#if defined(CONFIG_INPUT_M68K_BEEP) || defined(CONFIG_INPUT_M68K_BEEP_MODULE)
+void (*mach_beep)(unsigned int, unsigned int);
+#endif
+#if defined(CONFIG_ISA) && defined(MULTI_ISA)
+int isa_type;
+int isa_sex;
 #endif
 
 extern int amiga_parse_bootinfo(const struct bi_record *);
@@ -117,6 +109,7 @@ extern int q40_parse_bootinfo(const struct bi_record *);
 extern int bvme6000_parse_bootinfo(const struct bi_record *);
 extern int mvme16x_parse_bootinfo(const struct bi_record *);
 extern int mvme147_parse_bootinfo(const struct bi_record *);
+extern int hp300_parse_bootinfo(const struct bi_record *);
 
 extern void config_amiga(void);
 extern void config_atari(void);
@@ -141,7 +134,7 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
 {
     while (record->tag != BI_LAST) {
 	int unknown = 0;
-	const u_long *data = record->data;
+	const unsigned long *data = record->data;
 	switch (record->tag) {
 	    case BI_MACHTYPE:
 	    case BI_CPUTYPE:
@@ -150,7 +143,7 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
 		/* Already set up by head.S */
 		break;
 
- 	    case BI_MEMCHUNK:
+	    case BI_MEMCHUNK:
 		if (m68k_num_memory < NUM_MEMINFO) {
 		    m68k_memory[m68k_num_memory].addr = data[0];
 		    m68k_memory[m68k_num_memory].size = data[1];
@@ -165,8 +158,7 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
 		break;
 
 	    case BI_COMMAND_LINE:
-		strncpy(m68k_command_line, (const char *)data, CL_SIZE);
-		m68k_command_line[CL_SIZE-1] = '\0';
+		strlcpy(m68k_command_line, (const char *)data, sizeof(m68k_command_line));
 		break;
 
 	    default:
@@ -184,13 +176,15 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
 		    unknown = mvme16x_parse_bootinfo(record);
 		else if (MACH_IS_MVME147)
 		    unknown = mvme147_parse_bootinfo(record);
+		else if (MACH_IS_HP300)
+		    unknown = hp300_parse_bootinfo(record);
 		else
 		    unknown = 1;
 	}
 	if (unknown)
 	    printk("m68k_parse_bootinfo: unknown tag 0x%04x ignored\n",
 		   record->tag);
-	record = (struct bi_record *)((u_long)record+record->size);
+	record = (struct bi_record *)((unsigned long)record+record->size);
     }
 
     m68k_realnum_memory = m68k_num_memory;
@@ -232,7 +226,19 @@ void __init setup_arch(char **cmdline_p)
 		volatile int zero = 0;
 		asm __volatile__ ("frestore %0" : : "m" (zero));
 	}
-#endif	
+#endif
+
+	if (CPU_IS_060) {
+		u32 pcr;
+
+		asm (".chip 68060; movec %%pcr,%0; .chip 68k"
+		     : "=d" (pcr));
+		if (((pcr >> 8) & 0xff) <= 5) {
+			printk("Enabling workaround for errata I14\n");
+			asm (".chip 68060; movec %0,%%pcr; .chip 68k"
+			     : : "d" (pcr | 0x20));
+		}
+	}
 
 	init_mm.start_code = PAGE_OFFSET;
 	init_mm.end_code = (unsigned long) &_etext;
@@ -249,8 +255,7 @@ void __init setup_arch(char **cmdline_p)
 	for( p = *cmdline_p; p && *p; ) {
 	    i = 0;
 	    if (!strncmp( p, "debug=", 6 )) {
-		strncpy( m68k_debug_device, p+6, sizeof(m68k_debug_device)-1 );
-		m68k_debug_device[sizeof(m68k_debug_device)-1] = 0;
+		strlcpy( m68k_debug_device, p+6, sizeof(m68k_debug_device) );
 		if ((q = strchr( m68k_debug_device, ' ' ))) *q = 0;
 		i = 1;
 	    }
@@ -293,28 +298,28 @@ void __init setup_arch(char **cmdline_p)
 #endif
 #ifdef CONFIG_SUN3
 	    case MACH_SUN3:
-	    	config_sun3();
-	    	break;
+		config_sun3();
+		break;
 #endif
 #ifdef CONFIG_APOLLO
 	    case MACH_APOLLO:
-	    	config_apollo();
-	    	break;
+		config_apollo();
+		break;
 #endif
 #ifdef CONFIG_MVME147
 	    case MACH_MVME147:
-	    	config_mvme147();
-	    	break;
+		config_mvme147();
+		break;
 #endif
 #ifdef CONFIG_MVME16x
 	    case MACH_MVME16x:
-	    	config_mvme16x();
-	    	break;
+		config_mvme16x();
+		break;
 #endif
 #ifdef CONFIG_BVME6000
 	    case MACH_BVME6000:
-	    	config_bvme6000();
-	    	break;
+		config_bvme6000();
+		break;
 #endif
 #ifdef CONFIG_HP300
 	    case MACH_HP300:
@@ -338,7 +343,7 @@ void __init setup_arch(char **cmdline_p)
 #ifndef CONFIG_SUN3
 	startmem= m68k_memory[0].addr;
 	endmem = startmem + m68k_memory[0].size;
-	high_memory = PAGE_OFFSET;
+	high_memory = (void *)PAGE_OFFSET;
 	for (i = 0; i < m68k_num_memory; i++) {
 		m68k_memory[i].size &= MASK_256K;
 		if (m68k_memory[i].addr < startmem)
@@ -367,16 +372,43 @@ void __init setup_arch(char **cmdline_p)
 
 #ifdef CONFIG_ATARI
 	if (MACH_IS_ATARI)
-		atari_stram_reserve_pages(availmem);
+		atari_stram_reserve_pages((void *)availmem);
 #endif
+#ifdef CONFIG_SUN3X
+	if (MACH_IS_SUN3X) {
+		dvma_init();
+	}
+#endif
+
 #endif /* !CONFIG_SUN3 */
+
 	paging_init();
+
+/* set ISA defs early as possible */
+#if defined(CONFIG_ISA) && defined(MULTI_ISA)
+#if defined(CONFIG_Q40)
+	if (MACH_IS_Q40) {
+	    isa_type = Q40_ISA;
+	    isa_sex = 0;
+	}
+#elif defined(CONFIG_GG2)
+	if (MACH_IS_AMIGA && AMIGAHW_PRESENT(GG2_ISA)){
+	    isa_type = GG2_ISA;
+	    isa_sex = 0;
+	}
+#elif defined(CONFIG_AMIGA_PCMCIA)
+	if (MACH_IS_AMIGA && AMIGAHW_PRESENT(PCMCIA)){
+	    isa_type = AG_ISA;
+	    isa_sex = 1;
+	}
+#endif
+#endif
 }
 
-int get_cpuinfo(char * buffer)
+static int show_cpuinfo(struct seq_file *m, void *v)
 {
     const char *cpu, *mmu, *fpu;
-    u_long clockfreq, clockfactor;
+    unsigned long clockfreq, clockfactor;
 
 #define LOOP_CYCLES_68020	(8)
 #define LOOP_CYCLES_68030	(8)
@@ -434,7 +466,7 @@ int get_cpuinfo(char * buffer)
 
     clockfreq = loops_per_jiffy*HZ*clockfactor;
 
-    return(sprintf(buffer, "CPU:\t\t%s\n"
+    seq_printf(m, "CPU:\t\t%s\n"
 		   "MMU:\t\t%s\n"
 		   "FPU:\t\t%s\n"
 		   "Clocking:\t%lu.%1luMHz\n"
@@ -443,15 +475,34 @@ int get_cpuinfo(char * buffer)
 		   cpu, mmu, fpu,
 		   clockfreq/1000000,(clockfreq/100000)%10,
 		   loops_per_jiffy/(500000/HZ),(loops_per_jiffy/(5000/HZ))%100,
-		   loops_per_jiffy));
-
+		   loops_per_jiffy);
+    return 0;
 }
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	return *pos < 1 ? (void *)1 : NULL;
+}
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return NULL;
+}
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+struct seq_operations cpuinfo_op = {
+	.start =	c_start,
+	.next =		c_next,
+	.stop =		c_stop,
+	.show =		show_cpuinfo,
+};
 
 int get_hardware_list(char *buffer)
 {
     int len = 0;
     char model[80];
-    u_long mem;
+    unsigned long mem;
     int i;
 
     if (mach_get_model)
@@ -460,7 +511,6 @@ int get_hardware_list(char *buffer)
 	strcpy(model, "Unknown m68k");
 
     len += sprintf(buffer+len, "Model:\t\t%s\n", model);
-    len += get_cpuinfo(buffer+len);
     for (mem = 0, i = 0; i < m68k_num_memory; i++)
 	mem += m68k_memory[i].size;
     len += sprintf(buffer+len, "System Memory:\t%ldK\n", mem>>10);
@@ -479,26 +529,7 @@ void __init floppy_setup(char *str, int *ints)
 		mach_floppy_setup (str, ints);
 }
 
-void floppy_eject(void)
-{
-	if (mach_floppy_eject)
-		mach_floppy_eject();
-}
 #endif
-
-/* for "kbd-reset" cmdline param */
-void __init kbd_reset_setup(char *str, int *ints)
-{
-}
-
-void arch_gettod(int *year, int *mon, int *day, int *hour,
-		 int *min, int *sec)
-{
-	if (mach_gettod)
-		mach_gettod(year, mon, day, hour, min, sec);
-	else
-		*year = *mon = *day = *hour = *min = *sec = 0;
-}
 
 void check_bugs(void)
 {
@@ -508,10 +539,7 @@ void check_bugs(void)
 				"WHICH IS REQUIRED BY LINUX/M68K ***\n" );
 		printk( KERN_EMERG "Upgrade your hardware or join the FPU "
 				"emulation project\n" );
-		printk( KERN_EMERG "(see http://no-fpu.linux-m68k.org)\n" );
 		panic( "no FPU" );
 	}
-
-#endif /* CONFIG_SUN3 */
-
+#endif /* !CONFIG_M68KFPU_EMU */
 }

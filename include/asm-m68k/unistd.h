@@ -184,8 +184,8 @@
 #define __NR_rt_sigtimedwait	177
 #define __NR_rt_sigqueueinfo	178
 #define __NR_rt_sigsuspend	179
-#define __NR_pread		180
-#define __NR_pwrite		181
+#define __NR_pread64		180
+#define __NR_pwrite64		181
 #define __NR_lchown		182
 #define __NR_getcwd		183
 #define __NR_capget		184
@@ -221,9 +221,73 @@
 #define __NR_setgid32		214
 #define __NR_setfsuid32		215
 #define __NR_setfsgid32		216
+#define __NR_pivot_root		217
 #define __NR_getdents64		220
+#define __NR_gettid		221
+#define __NR_tkill		222
+#define __NR_setxattr		223
+#define __NR_lsetxattr		224
+#define __NR_fsetxattr		225
+#define __NR_getxattr		226
+#define __NR_lgetxattr		227
+#define __NR_fgetxattr		228
+#define __NR_listxattr		229
+#define __NR_llistxattr		230
+#define __NR_flistxattr		231
+#define __NR_removexattr	232
+#define __NR_lremovexattr	233
+#define __NR_fremovexattr	234
+#define __NR_futex		235
+#define __NR_sendfile64		236
+#define __NR_mincore		237
+#define __NR_madvise		238
+#define __NR_fcntl64		239
+#define __NR_readahead		240
+#define __NR_io_setup		241
+#define __NR_io_destroy		242
+#define __NR_io_getevents	243
+#define __NR_io_submit		244
+#define __NR_io_cancel		245
+#define __NR_fadvise64		246
+#define __NR_exit_group		247
+#define __NR_lookup_dcookie	248
+#define __NR_epoll_create	249
+#define __NR_epoll_ctl		250
+#define __NR_epoll_wait		251
+#define __NR_remap_file_pages	252
+#define __NR_set_tid_address	253
+#define __NR_timer_create	254
+#define __NR_timer_settime	255
+#define __NR_timer_gettime	256
+#define __NR_timer_getoverrun	257
+#define __NR_timer_delete	258
+#define __NR_clock_settime	259
+#define __NR_clock_gettime	260
+#define __NR_clock_getres	261
+#define __NR_clock_nanosleep	262
+#define __NR_statfs64		263
+#define __NR_fstatfs64		264
+#define __NR_tgkill		265
+#define __NR_utimes		266
+#define __NR_fadvise64_64	267
+#define __NR_mbind		268
+#define __NR_get_mempolicy	269
+#define __NR_set_mempolicy	270
+#define __NR_mq_open		271
+#define __NR_mq_unlink		272
+#define __NR_mq_timedsend	273
+#define __NR_mq_timedreceive	274
+#define __NR_mq_notify		275
+#define __NR_mq_getsetattr	276
+#define __NR_waitid		277
+#define __NR_vserver		278
+#define __NR_add_key		279
+#define __NR_request_key	280
+#define __NR_keyctl		281
 
-/* user-visible error numbers are in the range -1 - -122: see
+#define NR_syscalls		282
+
+/* user-visible error numbers are in the range -1 - -124: see
    <asm-m68k/errno.h> */
 
 #define __syscall_return(type, res) \
@@ -243,9 +307,7 @@ type name(void) \
 { \
 register long __res __asm__ ("%d0") = __NR_##name; \
 __asm__ __volatile__ ("trap  #0" \
-                      : "=g" (__res) \
-		      : "0" (__res) \
-		      : "%d0"); \
+                      : "+d" (__res) ); \
 __syscall_return(type,__res); \
 }
 
@@ -255,9 +317,8 @@ type name(atype a) \
 register long __res __asm__ ("%d0") = __NR_##name; \
 register long __a __asm__ ("%d1") = (long)(a); \
 __asm__ __volatile__ ("trap  #0" \
-		      : "=d" (__res) \
-		      : "0" (__res), "d" (__a) \
-		      : "%d0"); \
+		      : "+d" (__res) \
+		      : "d" (__a)  ); \
 __syscall_return(type,__res); \
 }
 
@@ -268,9 +329,9 @@ register long __res __asm__ ("%d0") = __NR_##name; \
 register long __a __asm__ ("%d1") = (long)(a); \
 register long __b __asm__ ("%d2") = (long)(b); \
 __asm__ __volatile__ ("trap  #0" \
-		      : "=d" (__res) \
-                      : "0" (__res), "d" (__a), "d" (__b) \
-		      : "%d0"); \
+		      : "+d" (__res) \
+                      : "d" (__a), "d" (__b) \
+		     ); \
 __syscall_return(type,__res); \
 }
 
@@ -282,10 +343,10 @@ register long __a __asm__ ("%d1") = (long)(a); \
 register long __b __asm__ ("%d2") = (long)(b); \
 register long __c __asm__ ("%d3") = (long)(c); \
 __asm__ __volatile__ ("trap  #0" \
-		      : "=d" (__res) \
-                      : "0" (__res), "d" (__a), "d" (__b), \
+		      : "+d" (__res) \
+                      : "d" (__a), "d" (__b), \
 			"d" (__c) \
-		      : "%d0"); \
+		     ); \
 __syscall_return(type,__res); \
 }
 
@@ -298,10 +359,10 @@ register long __b __asm__ ("%d2") = (long)(b); \
 register long __c __asm__ ("%d3") = (long)(c); \
 register long __d __asm__ ("%d4") = (long)(d); \
 __asm__ __volatile__ ("trap  #0" \
-                      : "=d" (__res) \
-                      : "0" (__res), "d" (__a), "d" (__b), \
+                      : "+d" (__res) \
+                      : "d" (__a), "d" (__b), \
 			"d" (__c), "d" (__d)  \
-		      : "%d0"); \
+		     ); \
 __syscall_return(type,__res); \
 }
 
@@ -315,14 +376,43 @@ register long __c __asm__ ("%d3") = (long)(c); \
 register long __d __asm__ ("%d4") = (long)(d); \
 register long __e __asm__ ("%d5") = (long)(e); \
 __asm__ __volatile__ ("trap  #0" \
-		      : "=d" (__res) \
-		      : "0" (__res), "d" (__a), "d" (__b), \
+		      : "+d" (__res) \
+		      : "d" (__a), "d" (__b), \
 			"d" (__c), "d" (__d), "d" (__e)  \
-                      : "%d0"); \
+                     ); \
 __syscall_return(type,__res); \
 }
 
+#ifdef __KERNEL__
+#define __ARCH_WANT_IPC_PARSE_VERSION
+#define __ARCH_WANT_OLD_READDIR
+#define __ARCH_WANT_OLD_STAT
+#define __ARCH_WANT_STAT64
+#define __ARCH_WANT_SYS_ALARM
+#define __ARCH_WANT_SYS_GETHOSTNAME
+#define __ARCH_WANT_SYS_PAUSE
+#define __ARCH_WANT_SYS_SGETMASK
+#define __ARCH_WANT_SYS_SIGNAL
+#define __ARCH_WANT_SYS_TIME
+#define __ARCH_WANT_SYS_UTIME
+#define __ARCH_WANT_SYS_WAITPID
+#define __ARCH_WANT_SYS_SOCKETCALL
+#define __ARCH_WANT_SYS_FADVISE64
+#define __ARCH_WANT_SYS_GETPGRP
+#define __ARCH_WANT_SYS_LLSEEK
+#define __ARCH_WANT_SYS_NICE
+#define __ARCH_WANT_SYS_OLD_GETRLIMIT
+#define __ARCH_WANT_SYS_OLDUMOUNT
+#define __ARCH_WANT_SYS_SIGPENDING
+#define __ARCH_WANT_SYS_SIGPROCMASK
+#define __ARCH_WANT_SYS_RT_SIGACTION
+#endif
+
 #ifdef __KERNEL_SYSCALLS__
+
+#include <linux/compiler.h>
+#include <linux/interrupt.h>
+#include <linux/types.h>
 
 /*
  * we need this inline - forking from kernel space will result
@@ -337,8 +427,6 @@ __syscall_return(type,__res); \
  * some others too.
  */
 #define __NR__exit __NR_exit
-static inline _syscall0(int,pause)
-static inline _syscall0(int,sync)
 static inline _syscall0(pid_t,setsid)
 static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
 static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
@@ -349,13 +437,29 @@ static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
 static inline _syscall1(int,close,int,fd)
 static inline _syscall1(int,_exit,int,exitcode)
 static inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-static inline _syscall1(int,delete_module,const char *,name)
 
-static inline pid_t wait(int * wait_stat)
-{
-	return waitpid(-1,wait_stat,0);
-}
+asmlinkage long sys_mmap2(
+			unsigned long addr, unsigned long len,
+			unsigned long prot, unsigned long flags,
+			unsigned long fd, unsigned long pgoff);
+asmlinkage int sys_execve(char *name, char **argv, char **envp);
+asmlinkage int sys_pipe(unsigned long *fildes);
+asmlinkage int sys_ptrace(long request, long pid, long addr, long data);
+struct pt_regs;
+struct sigaction;
+asmlinkage long sys_rt_sigaction(int sig,
+				const struct sigaction __user *act,
+				struct sigaction __user *oact,
+				size_t sigsetsize);
 
 #endif
+
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
+ * but it doesn't work on all toolchains, so we just do it by hand
+ */
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
 
 #endif /* _ASM_M68K_UNISTD_H_ */

@@ -1,7 +1,5 @@
 # This file is included by the global makefile so that you can add your own
-# architecture-specific flags and dependencies. Remember to do have actions
-# for "archclean" and "archdep" for cleaning up and making dependencies for
-# this architecture
+# architecture-specific flags and dependencies.
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
@@ -12,188 +10,130 @@
 # Rewritten by Cort Dougan and Paul Mackerras
 #
 
-KERNELLOAD	=0xc0000000
+# This must match PAGE_OFFSET in include/asm-ppc/page.h.
+KERNELLOAD	:= $(CONFIG_KERNEL_START)
 
-ifeq ($(shell uname -m),ppc)
-CHECKS		= checks
+HAS_BIARCH	:= $(call cc-option-yn, -m32)
+ifeq ($(HAS_BIARCH),y)
+AS		:= $(AS) -a32
+LD		:= $(LD) -m elf32ppc
+CC		:= $(CC) -m32
 endif
 
-ASFLAGS		=
-LINKFLAGS	= -T arch/ppc/vmlinux.lds -Ttext $(KERNELLOAD) -Bstatic
-CPPFLAGS	:= $(CPPFLAGS) -D__powerpc__
-CFLAGS		:= $(CFLAGS) -D__powerpc__ -fsigned-char \
-		-msoft-float -pipe -ffixed-r2 -Wno-uninitialized \
-		-mmultiple -mstring
+LDFLAGS_vmlinux	:= -Ttext $(KERNELLOAD) -Bstatic
+CPPFLAGS	+= -Iarch/$(ARCH)
+AFLAGS		+= -Iarch/$(ARCH)
+CFLAGS		+= -Iarch/$(ARCH) -msoft-float -pipe \
+		-ffixed-r2 -mmultiple
 CPP		= $(CC) -E $(CFLAGS)
 
-ifdef CONFIG_4xx
-CFLAGS := $(CFLAGS) -mcpu=403
+CHECKFLAGS	+= -D__powerpc__
+
+ifndef CONFIG_E500
+CFLAGS		+= -mstring
 endif
 
-ifdef CONFIG_8xx
-CFLAGS := $(CFLAGS) -mcpu=860 -I../8xx_io
-endif
+cpu-as-$(CONFIG_PPC64BRIDGE)	+= -Wa,-mppc64bridge
+cpu-as-$(CONFIG_4xx)		+= -Wa,-m405
+cpu-as-$(CONFIG_6xx)		+= -Wa,-maltivec
+cpu-as-$(CONFIG_POWER4)		+= -Wa,-maltivec
+cpu-as-$(CONFIG_E500)		+= -Wa,-me500
 
-ifdef CONFIG_PPC64BRIDGE
-CFLAGS := $(CFLAGS) -Wa,-mppc64bridge
-endif
+AFLAGS += $(cpu-as-y)
+CFLAGS += $(cpu-as-y)
 
-ifdef CONFIG_4xx
-  HEAD := arch/ppc/kernel/head_4xx.o
-else
-  ifdef CONFIG_8xx
-    HEAD := arch/ppc/kernel/head_8xx.o
-  else
-    HEAD := arch/ppc/kernel/head.o
-  endif
-endif
+# Default to the common case.
+KBUILD_DEFCONFIG := common_defconfig
 
-ARCH_SUBDIRS = arch/ppc/kernel arch/ppc/mm arch/ppc/lib
-SUBDIRS := $(SUBDIRS) $(ARCH_SUBDIRS)
-ARCHIVES := arch/ppc/kernel/kernel.o arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(ARCHIVES)
-CORE_FILES := arch/ppc/kernel/kernel.o arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(CORE_FILES)
+head-y				:= arch/ppc/kernel/head.o
+head-$(CONFIG_8xx)		:= arch/ppc/kernel/head_8xx.o
+head-$(CONFIG_4xx)		:= arch/ppc/kernel/head_4xx.o
+head-$(CONFIG_44x)		:= arch/ppc/kernel/head_44x.o
+head-$(CONFIG_E500)		:= arch/ppc/kernel/head_e500.o
 
-ifdef CONFIG_MATH_EMULATION
-SUBDIRS += arch/ppc/math-emu
-ARCHIVES += arch/ppc/math-emu/math-emu.o
-CORE_FILES += arch/ppc/math-emu/math-emu.o
-endif
+head-$(CONFIG_6xx)		+= arch/ppc/kernel/idle_6xx.o
+head-$(CONFIG_POWER4)		+= arch/ppc/kernel/idle_power4.o
 
-ifdef CONFIG_XMON
-SUBDIRS += arch/ppc/xmon
-CORE_FILES += arch/ppc/xmon/x.o
-endif
+core-y				+= arch/ppc/kernel/ arch/ppc/platforms/ \
+				   arch/ppc/mm/ arch/ppc/lib/ arch/ppc/syslib/
+core-$(CONFIG_4xx)		+= arch/ppc/platforms/4xx/
+core-$(CONFIG_85xx)		+= arch/ppc/platforms/85xx/
+core-$(CONFIG_MATH_EMULATION)	+= arch/ppc/math-emu/
+core-$(CONFIG_XMON)		+= arch/ppc/xmon/
+core-$(CONFIG_APUS)		+= arch/ppc/amiga/
+drivers-$(CONFIG_8xx)		+= arch/ppc/8xx_io/
+drivers-$(CONFIG_4xx)		+= arch/ppc/4xx_io/
+drivers-$(CONFIG_CPM2)		+= arch/ppc/8260_io/
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
-MAKECOFFBOOT = $(MAKE) -C arch/$(ARCH)/coffboot
-MAKECHRPBOOT = $(MAKE) -C arch/$(ARCH)/chrpboot
-MAKEMBXBOOT = $(MAKE) -C arch/$(ARCH)/mbxboot
-MAKETREEBOOT = $(MAKE) -C arch/$(ARCH)/treeboot
+drivers-$(CONFIG_OPROFILE)	+= arch/ppc/oprofile/
 
-ifdef CONFIG_8xx
-SUBDIRS += arch/ppc/8xx_io
-DRIVERS += arch/ppc/8xx_io/8xx_io.o
-endif
+BOOT_TARGETS = zImage zImage.initrd znetboot znetboot.initrd vmlinux.sm
 
-ifdef CONFIG_8260
-SUBDIRS += arch/ppc/8260_io
-DRIVERS += arch/ppc/8260_io/8260_io.o
-endif
+.PHONY: $(BOOT_TARGETS)
 
-ifdef CONFIG_APUS
-SUBDIRS += arch/ppc/amiga
-ARCHIVES += arch/ppc/amiga/amiga.o
-CORE_FILES += arch/ppc/amiga/amiga.o
-endif
+all: uImage zImage
 
-checks:
-	@$(MAKE) -C arch/$(ARCH)/kernel checks
+CPPFLAGS_vmlinux.lds	:= -Upowerpc
 
-BOOT_TARGETS = zImage znetboot.initrd zImage.initrd
+# All the instructions talk about "make bzImage".
+bzImage: zImage
 
-ifdef CONFIG_4xx
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKETREEBOOT) $@
-endif
+boot := arch/$(ARCH)/boot
 
-ifdef CONFIG_8xx
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEMBXBOOT) $@
-endif
+$(BOOT_TARGETS): vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
 
-ifdef CONFIG_6xx
-ifndef CONFIG_8260
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
+uImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot)/images $(boot)/images/$@
 
-znetboot: $(CHECKS) vmlinux
-ifdef CONFIG_ALL_PPC
-ifdef CONFIG_SMP
-	cp -f vmlinux /tftpboot/vmlinux.smp
-else
-	cp -f vmlinux /tftpboot/vmlinux
-endif
-endif
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-else
-# 8260 is custom 6xx
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEMBXBOOT) $@
-endif
-endif
-
-ifdef CONFIG_PPC64BRIDGE
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-
-znetboot: $(CHECKS) vmlinux
-	cp -f vmlinux /tftpboot/vmlinux.64
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-endif
-
-.PHONY: clean_config
-clean_config:
-	rm -f .config arch/ppc/defconfig
-
-gemini_config: clean_config
-	cp -f arch/ppc/configs/gemini_defconfig arch/ppc/defconfig
-
-pmac_config: clean_config
-	cp -f arch/ppc/configs/pmac_defconfig arch/ppc/defconfig
-
-prep_config: clean_config
-	cp -f arch/ppc/configs/prep_defconfig arch/ppc/defconfig
-
-chrp_config: clean_config
-	cp -f arch/ppc/configs/chrp_defconfig arch/ppc/defconfig
-
-common_config: clean_config
-	cp -f arch/ppc/configs/common_defconfig arch/ppc/defconfig
-
-mbx_config: clean_config
-	cp -f arch/ppc/configs/mbx_defconfig arch/ppc/defconfig
-
-apus_config: clean_config
-	cp -f arch/ppc/configs/apus_defconfig arch/ppc/defconfig
-
-oak_config: clean_config
-	cp -f arch/ppc/configs/oak_defconfig arch/ppc/defconfig
-
-walnut_config: clean_config
-	cp -f arch/ppc/configs/walnut_defconfig arch/ppc/defconfig
-
-rpxlite_config: clean_config
-	cp -f arch/ppc/configs/rpxlite_defconfig arch/ppc/defconfig
-
-rpxcllf_config: clean_config
-	cp -f arch/ppc/configs/rpxcllf_defconfig arch/ppc/defconfig
-
-bseip_config: clean_config
-	cp -f arch/ppc/configs/bseip_defconfig arch/ppc/defconfig
-
-est8260_config: clean_config
-	cp -f arch/ppc/configs/est8260_defconfig arch/ppc/defconfig
+define archhelp
+  @echo '* zImage          - Compressed kernel image (arch/$(ARCH)/boot/images/zImage.*)'
+  @echo '  uImage          - Create a bootable image for U-Boot / PPCBoot'
+  @echo '  install         - Install kernel using'
+  @echo '                    (your) ~/bin/installkernel or'
+  @echo '                    (distribution) /sbin/installkernel or'
+  @echo '                    install to $$(INSTALL_PATH) and run lilo'
+  @echo '  *_defconfig     - Select default config from arch/$(ARCH)/ppc/configs'
+endef
 
 archclean:
-	rm -f arch/ppc/kernel/{mk_defs,ppc_defs.h,find_name,checks}
-	@$(MAKECOFFBOOT) clean
-	@$(MAKEBOOT) clean
-	@$(MAKECHRPBOOT) clean
-	@$(MAKEMBXBOOT) clean
-	@$(MAKETREEBOOT) clean
+	$(Q)$(MAKE) $(clean)=arch/ppc/boot
 
-archmrproper:
+prepare: include/asm-$(ARCH)/offsets.h checkbin
 
-archdep:
-	$(MAKEBOOT) fastdep
-	$(MAKECHRPBOOT) fastdep
+arch/$(ARCH)/kernel/asm-offsets.s: include/asm include/linux/version.h \
+				   include/config/MARKER
+
+include/asm-$(ARCH)/offsets.h: arch/$(ARCH)/kernel/asm-offsets.s
+	$(call filechk,gen-asm-offsets)
+
+# Use the file '.tmp_gas_check' for binutils tests, as gas won't output
+# to stdout and these checks are run even on install targets.
+TOUT	:= .tmp_gas_check
+# Ensure this is binutils 2.12.1 (or 2.12.90.0.7) or later for altivec
+# instructions.
+AS_ALTIVEC	:= $(shell echo dssall | $(AS) -many -o $(TOUT) >/dev/null 2>&1 ; echo $$?)
+# gcc-3.4 and binutils-2.14 are a fatal combination.
+GCC_VERSION	:= $(call cc-version)
+BAD_GCC_AS	:= $(shell echo mftb 5 | $(AS) -mppc -many -o $(TOUT) >/dev/null 2>&1 && echo 0 || echo 1)
+
+checkbin:
+ifeq ($(GCC_VERSION)$(BAD_GCC_AS),03041)
+	@echo -n '*** ${VERSION}.${PATCHLEVEL} kernels no longer build '
+	@echo 'correctly with gcc-3.4 and your version of binutils.'
+	@echo '*** Please upgrade your binutils or downgrade your gcc'
+	@false
+endif
+ifneq ($(AS_ALTIVEC),0)
+	echo $(AS_ALTIVEC)
+	@echo -n '*** ${VERSION}.${PATCHLEVEL} kernels no longer build '
+	@echo 'correctly with old versions of binutils.'
+	@echo '*** Please upgrade your binutils to 2.12.1 or newer'
+	@false
+endif
+	@true
+
+CLEAN_FILES +=	include/asm-$(ARCH)/offsets.h \
+		arch/$(ARCH)/kernel/asm-offsets.s \
+		$(TOUT)
+

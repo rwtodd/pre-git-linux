@@ -14,13 +14,17 @@
  */
 
 #include <linux/vmalloc.h>
+#include <linux/mm.h>
 #include <asm/io.h>
 #include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
         unsigned long phys_addr, unsigned long flags)
 {
         unsigned long end;
+        unsigned long pfn;
 
         address &= ~PMD_MASK;
         end = address + size;
@@ -28,15 +32,15 @@ static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned l
                 end = PMD_SIZE;
 	if (address >= end)
 		BUG();
+        pfn = phys_addr >> PAGE_SHIFT;
         do {
                 if (!pte_none(*pte)) {
                         printk("remap_area_pte: page already exists\n");
 			BUG();
 		}
-                set_pte(pte, mk_pte_phys(phys_addr, __pgprot(_PAGE_PRESENT |
-                                        _PAGE_DIRTY | _PAGE_ACCESSED | flags)));
+                set_pte(pte, pfn_pte(pfn, __pgprot(flags)));
                 address += PAGE_SIZE;
-                phys_addr += PAGE_SIZE;
+                pfn++;
                 pte++;
         } while (address && (address < end));
 }
@@ -54,7 +58,7 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 	if (address >= end)
 		BUG();
 	do {
-		pte_t * pte = pte_alloc_kernel(pmd, address);
+		pte_t * pte = pte_alloc_kernel(&init_mm, pmd, address);
 		if (!pte)
 			return -ENOMEM;
 		remap_area_pte(pte, address, end - address, address + phys_addr, flags);
@@ -67,6 +71,7 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 static int remap_area_pages(unsigned long address, unsigned long phys_addr,
 				 unsigned long size, unsigned long flags)
 {
+	int error;
 	pgd_t * dir;
 	unsigned long end = address + size;
 
@@ -75,17 +80,21 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
 	flush_cache_all();
 	if (address >= end)
 		BUG();
+	spin_lock(&init_mm.page_table_lock);
 	do {
-		pmd_t *pmd = pmd_alloc_kernel(dir, address);
+		pmd_t *pmd;
+		pmd = pmd_alloc(&init_mm, dir, address);
+		error = -ENOMEM;
 		if (!pmd)
-			return -ENOMEM;
+			break;
 		if (remap_area_pmd(pmd, address, end - address,
 					 phys_addr + address, flags))
-			return -ENOMEM;
-		set_pgdir(address, *dir);
+			break;
+		error = 0;
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
 	} while (address && (address < end));
+	spin_unlock(&init_mm.page_table_lock);
 	flush_tlb_all();
 	return 0;
 }
@@ -115,7 +124,7 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	if (!area)
 		return NULL;
 	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
+	if (remap_area_pages((unsigned long) addr, phys_addr, size, flags)) {
 		vfree(addr);
 		return NULL;
 	}
@@ -125,5 +134,5 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 void iounmap(void *addr)
 {
 	if (addr > high_memory)
-		return vfree(addr);
+		vfree(addr);
 }

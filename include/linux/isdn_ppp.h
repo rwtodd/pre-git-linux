@@ -1,9 +1,17 @@
-/* -*- mode: c; c-basic-offset: 2 -*- */
+/* Linux ISDN subsystem, sync PPP, interface to ipppd
+ *
+ * Copyright 1994-1999  by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1995,96    Thinking Objects Software GmbH Wuerzburg
+ * Copyright 1995,96    by Michael Hipp (Michael.Hipp@student.uni-tuebingen.de)
+ * Copyright 2000-2002  by Kai Germaschewski (kai@germaschewski.name)
+ *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ */
 
 #ifndef _LINUX_ISDN_PPP_H
 #define _LINUX_ISDN_PPP_H
-
-#include <linux/config.h>
 
 #define CALLTYPE_INCOMING 0x1
 #define CALLTYPE_OUTGOING 0x2
@@ -44,13 +52,6 @@ struct pppcallinfo
 #define SC_LINK_DECOMP_DISCARD	0x40
 #define SC_LINK_COMP_DISCARD	0x80
 
-#define DECOMP_ERR_NOMEM	(-10)
-
-#define MP_END_FRAG    0x40
-#define MP_BEGIN_FRAG  0x80
-
-#define MP_MAX_QUEUE_LEN	16
-
 #define ISDN_PPP_COMP_MAX_OPTIONS 16
 
 #define IPPP_COMP_FLAG_XMIT 0x1
@@ -65,6 +66,20 @@ struct isdn_ppp_comp_data {
 
 #ifdef __KERNEL__
 
+
+#include <linux/config.h>
+
+#ifdef CONFIG_IPPP_FILTER
+#include <linux/filter.h>
+#endif
+
+#define DECOMP_ERR_NOMEM	(-10)
+
+#define MP_END_FRAG    0x40
+#define MP_BEGIN_FRAG  0x80
+
+#define MP_MAX_QUEUE_LEN	16
+
 /*
  * We need a way for the decompressor to influence the generation of CCP
  * Reset-Requests in a variety of ways. The decompressor is already returning
@@ -76,7 +91,7 @@ struct isdn_ppp_comp_data {
  *
  * We use this same struct for the reset entry of the compressor to commu-
  * nicate to its caller how to deal with sending of a Reset Ack. In this
- * case, expra is not used, but other options still apply (supressing
+ * case, expra is not used, but other options still apply (suppressing
  * sending with rsend, appending arbitrary data, etc).
  */
 
@@ -100,6 +115,7 @@ struct isdn_ppp_resetparams {
  */
 struct isdn_ppp_compressor {
   struct isdn_ppp_compressor *next, *prev;
+  struct module *owner;
   int num; /* CCP compression protocol number */
   
   void *(*alloc) (struct isdn_ppp_comp_data *);
@@ -195,6 +211,7 @@ struct ippp_ccp_reset {
 struct ippp_struct {
   struct ippp_struct *next_link;
   int state;
+  spinlock_t buflock;
   struct ippp_buf_queue rq[NUM_RCV_BUFFS]; /* packet queue for isdn_ppp_read() */
   struct ippp_buf_queue *first;  /* pointer to (current) first packet */
   struct ippp_buf_queue *last;   /* pointer to (current) last used packet in queue */
@@ -214,6 +231,11 @@ struct ippp_struct {
 #ifdef CONFIG_ISDN_PPP_VJ
   unsigned char *cbuf;
   struct slcompress *slcomp;
+#endif
+#ifdef CONFIG_IPPP_FILTER
+  struct sock_filter *pass_filter;	/* filter for packets to pass */
+  struct sock_filter *active_filter;	/* filter for pkts to reset idle */
+  unsigned pass_len, active_len;
 #endif
   unsigned long debug;
   struct isdn_ppp_compressor *compressor,*decompressor;

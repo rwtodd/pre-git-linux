@@ -12,6 +12,7 @@
 #include <linux/config.h>
 #include <linux/sched.h>  /* for jiffies */
 #include <linux/kernel.h>
+#include <linux/kallsyms.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -89,6 +90,7 @@ void instruction_dump (unsigned long *pc)
 
 void die_if_kernel(char *str, struct pt_regs *regs)
 {
+	static int die_counter;
 	int count = 0;
 
 	/* Amuse the user. */
@@ -98,7 +100,7 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 "              /_| \\__/ |_\\\n"
 "                 \\__U_/\n");
 
-	printk("%s(%d): %s\n", current->comm, current->pid, str);
+	printk("%s(%d): %s [#%d]\n", current->comm, current->pid, str, ++die_counter);
 	show_regs(regs);
 
 	__SAVE; __SAVE; __SAVE; __SAVE;
@@ -117,7 +119,8 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 		      count++ < 30				&&
                       (((unsigned long) rw) >= PAGE_OFFSET)	&&
 		      !(((unsigned long) rw) & 0x7)) {
-			printk("Caller[%08lx]\n", rw->ins[7]);
+			printk("Caller[%08lx]", rw->ins[7]);
+			print_symbol(": %s\n", rw->ins[7]);
 			rw = (struct reg_window *)rw->ins[6];
 		}
 	}
@@ -128,23 +131,23 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 	do_exit(SIGSEGV);
 }
 
-void do_hw_interrupt(unsigned long type, unsigned long psr, unsigned long pc)
+void do_hw_interrupt(struct pt_regs *regs, unsigned long type)
 {
 	siginfo_t info;
 
 	if(type < 0x80) {
 		/* Sun OS's puke from bad traps, Linux survives! */
 		printk("Unimplemented Sparc TRAP, type = %02lx\n", type);
-		die_if_kernel("Whee... Hello Mr. Penguin", current->thread.kregs);
+		die_if_kernel("Whee... Hello Mr. Penguin", regs);
 	}	
 
-	if(psr & PSR_PS)
-		die_if_kernel("Kernel bad trap", current->thread.kregs);
+	if(regs->psr & PSR_PS)
+		die_if_kernel("Kernel bad trap", regs);
 
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_ILLTRP;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)regs->pc;
 	info.si_trapno = type - 0x80;
 	force_sig_info(SIGILL, &info, current);
 }
@@ -152,6 +155,7 @@ void do_hw_interrupt(unsigned long type, unsigned long psr, unsigned long pc)
 void do_illegal_instruction(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 			    unsigned long psr)
 {
+	extern int do_user_muldiv (struct pt_regs *, unsigned long);
 	siginfo_t info;
 
 	if(psr & PSR_PS)
@@ -160,15 +164,13 @@ void do_illegal_instruction(struct pt_regs *regs, unsigned long pc, unsigned lon
 	printk("Ill instr. at pc=%08lx instruction is %08lx\n",
 	       regs->pc, *(unsigned long *)regs->pc);
 #endif
-	if (sparc_cpu_model == sun4c || sparc_cpu_model == sun4) {
-		extern int do_user_muldiv (struct pt_regs *, unsigned long);
-		if (!do_user_muldiv (regs, pc))
-			return;
-	}
+	if (!do_user_muldiv (regs, pc))
+		return;
+
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_ILLOPC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -183,7 +185,7 @@ void do_priv_instruction(struct pt_regs *regs, unsigned long pc, unsigned long n
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_PRVOPC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -244,21 +246,21 @@ void do_fpd_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 		       &fptask->thread.fpqueue[0], &fptask->thread.fpqdepth);
 	}
 	last_task_used_math = current;
-	if(current->used_math) {
+	if(used_math()) {
 		fpload(&current->thread.float_regs[0], &current->thread.fsr);
 	} else {
 		/* Set initial sane state. */
 		fpload(&init_fregs[0], &init_fsr);
-		current->used_math = 1;
+		set_used_math();
 	}
 #else
-	if(!current->used_math) {
+	if(!used_math()) {
 		fpload(&init_fregs[0], &init_fsr);
-		current->used_math = 1;
+		set_used_math();
 	} else {
 		fpload(&current->thread.float_regs[0], &current->thread.fsr);
 	}
-	current->flags |= PF_USEDFPU;
+	current_thread_info()->flags |= _TIF_USEDFPU;
 #endif
 }
 
@@ -272,7 +274,7 @@ extern int do_mathemu(struct pt_regs *, struct task_struct *);
 void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 		 unsigned long psr)
 {
-	static int calls = 0;
+	static int calls;
 	siginfo_t info;
 	unsigned long fsr;
 	int ret = 0;
@@ -289,7 +291,7 @@ void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 #ifndef CONFIG_SMP
 	if(!fpt) {
 #else
-        if(!(fpt->flags & PF_USEDFPU)) {
+        if(!(fpt->thread_info->flags & _TIF_USEDFPU)) {
 #endif
 		fpsave(&fake_regs[0], &fake_fsr, &fake_queue[0], &fake_depth);
 		regs->psr &= ~PSR_EF;
@@ -332,7 +334,7 @@ void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 	/* nope, better SIGFPE the offending process... */
 	       
 #ifdef CONFIG_SMP
-	fpt->flags &= ~PF_USEDFPU;
+	fpt->thread_info->flags &= ~_TIF_USEDFPU;
 #endif
 	if(psr & PSR_PS) {
 		/* The first fsr store/load we tried trapped,
@@ -352,7 +354,7 @@ void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 	fsr = fpt->thread.fsr;
 	info.si_signo = SIGFPE;
 	info.si_errno = 0;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	info.si_code = __SI_FAULT;
 	if ((fsr & 0x1c000) == (1 << 14)) {
@@ -386,7 +388,7 @@ void handle_tag_overflow(struct pt_regs *regs, unsigned long pc, unsigned long n
 	info.si_signo = SIGEMT;
 	info.si_errno = 0;
 	info.si_code = EMT_TAGOVF;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGEMT, &info, current);
 }
@@ -415,7 +417,7 @@ void handle_reg_access(struct pt_regs *regs, unsigned long pc, unsigned long npc
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_OBJERR;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	force_sig_info(SIGBUS, &info, current);
 }
@@ -428,7 +430,7 @@ void handle_cp_disabled(struct pt_regs *regs, unsigned long pc, unsigned long np
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_COPROC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -445,7 +447,7 @@ void handle_cp_exception(struct pt_regs *regs, unsigned long pc, unsigned long n
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_COPROC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -458,10 +460,18 @@ void handle_hw_divzero(struct pt_regs *regs, unsigned long pc, unsigned long npc
 	info.si_signo = SIGFPE;
 	info.si_errno = 0;
 	info.si_code = FPE_INTDIV;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGFPE, &info, current);
 }
+
+#ifdef CONFIG_DEBUG_BUGVERBOSE
+void do_BUG(const char *file, int line)
+{
+        // bust_spinlocks(1);   XXX Not in our original BUG()
+        printk("kernel BUG at %s:%d!\n", file, line);
+}
+#endif
 
 /* Since we have our mappings set up, on multiprocessors we can spin them
  * up here so that timer interrupts work during initialization.
@@ -475,6 +485,26 @@ int thiscpus_mid;
 
 void trap_init(void)
 {
+	extern void thread_info_offsets_are_bolixed_pete(void);
+
+	/* Force linker to barf if mismatched */
+	if (TI_UWINMASK    != offsetof(struct thread_info, uwinmask) ||
+	    TI_TASK        != offsetof(struct thread_info, task) ||
+	    TI_EXECDOMAIN  != offsetof(struct thread_info, exec_domain) ||
+	    TI_FLAGS       != offsetof(struct thread_info, flags) ||
+	    TI_CPU         != offsetof(struct thread_info, cpu) ||
+	    TI_PREEMPT     != offsetof(struct thread_info, preempt_count) ||
+	    TI_SOFTIRQ     != offsetof(struct thread_info, softirq_count) ||
+	    TI_HARDIRQ     != offsetof(struct thread_info, hardirq_count) ||
+	    TI_KSP         != offsetof(struct thread_info, ksp) ||
+	    TI_KPC         != offsetof(struct thread_info, kpc) ||
+	    TI_KPSR        != offsetof(struct thread_info, kpsr) ||
+	    TI_KWIM        != offsetof(struct thread_info, kwim) ||
+	    TI_REG_WINDOW  != offsetof(struct thread_info, reg_window) ||
+	    TI_RWIN_SPTRS  != offsetof(struct thread_info, rwbuf_stkptrs) ||
+	    TI_W_SAVED     != offsetof(struct thread_info, w_saved))
+		thread_info_offsets_are_bolixed_pete();
+
 	/* Attach to the address space of init_task. */
 	atomic_inc(&init_mm.mm_count);
 	current->active_mm = &init_mm;

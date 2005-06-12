@@ -1,111 +1,164 @@
 /*
  *  linux/include/asm-arm/atomic.h
  *
- *  Copyright (c) 1996 Russell King.
+ *  Copyright (C) 1996 Russell King.
+ *  Copyright (C) 2002 Deep Blue Solutions Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- *  Changelog:
- *   27-06-1996	RMK	Created
- *   13-04-1997	RMK	Made functions atomic!
- *   07-12-1997	RMK	Upgraded for v2.1.
- *   26-08-1998	PJB	Added #ifdef __KERNEL__
  */
 #ifndef __ASM_ARM_ATOMIC_H
 #define __ASM_ARM_ATOMIC_H
 
 #include <linux/config.h>
 
-#ifdef CONFIG_SMP
-#error SMP not supported
-#endif
-
-#ifdef CONFIG_ARCH_CO285
 typedef struct { volatile int counter; } atomic_t;
-#else
-typedef struct { int counter; } atomic_t;
-#endif
 
 #define ATOMIC_INIT(i)	{ (i) }
 
 #ifdef __KERNEL__
-#include <asm/proc/system.h>
 
 #define atomic_read(v)	((v)->counter)
+
+#if __LINUX_ARM_ARCH__ >= 6
+
+/*
+ * ARMv6 UP and SMP safe atomic ops.  We use load exclusive and
+ * store exclusive to ensure that these are atomic.  We may loop
+ * to ensure that the update happens.  Writing to 'v->counter'
+ * without using the following operations WILL break the atomic
+ * nature of these ops.
+ */
+static inline void atomic_set(atomic_t *v, int i)
+{
+	unsigned long tmp;
+
+	__asm__ __volatile__("@ atomic_set\n"
+"1:	ldrex	%0, [%1]\n"
+"	strex	%0, %2, [%1]\n"
+"	teq	%0, #0\n"
+"	bne	1b"
+	: "=&r" (tmp)
+	: "r" (&v->counter), "r" (i)
+	: "cc");
+}
+
+static inline int atomic_add_return(int i, atomic_t *v)
+{
+	unsigned long tmp;
+	int result;
+
+	__asm__ __volatile__("@ atomic_add_return\n"
+"1:	ldrex	%0, [%2]\n"
+"	add	%0, %0, %3\n"
+"	strex	%1, %0, [%2]\n"
+"	teq	%1, #0\n"
+"	bne	1b"
+	: "=&r" (result), "=&r" (tmp)
+	: "r" (&v->counter), "Ir" (i)
+	: "cc");
+
+	return result;
+}
+
+static inline int atomic_sub_return(int i, atomic_t *v)
+{
+	unsigned long tmp;
+	int result;
+
+	__asm__ __volatile__("@ atomic_sub_return\n"
+"1:	ldrex	%0, [%2]\n"
+"	sub	%0, %0, %3\n"
+"	strex	%1, %0, [%2]\n"
+"	teq	%1, #0\n"
+"	bne	1b"
+	: "=&r" (result), "=&r" (tmp)
+	: "r" (&v->counter), "Ir" (i)
+	: "cc");
+
+	return result;
+}
+
+static inline void atomic_clear_mask(unsigned long mask, unsigned long *addr)
+{
+	unsigned long tmp, tmp2;
+
+	__asm__ __volatile__("@ atomic_clear_mask\n"
+"1:	ldrex	%0, %2\n"
+"	bic	%0, %0, %3\n"
+"	strex	%1, %0, %2\n"
+"	teq	%1, #0\n"
+"	bne	1b"
+	: "=&r" (tmp), "=&r" (tmp2)
+	: "r" (addr), "Ir" (mask)
+	: "cc");
+}
+
+#else /* ARM_ARCH_6 */
+
+#include <asm/system.h>
+
+#ifdef CONFIG_SMP
+#error SMP not supported on pre-ARMv6 CPUs
+#endif
+
 #define atomic_set(v,i)	(((v)->counter) = (i))
 
-static __inline__ void atomic_add(int i, volatile atomic_t *v)
+static inline int atomic_add_return(int i, atomic_t *v)
 {
 	unsigned long flags;
+	int val;
 
-	__save_flags_cli(flags);
-	v->counter += i;
-	__restore_flags(flags);
+	local_irq_save(flags);
+	val = v->counter;
+	v->counter = val += i;
+	local_irq_restore(flags);
+
+	return val;
 }
 
-static __inline__ void atomic_sub(int i, volatile atomic_t *v)
+static inline int atomic_sub_return(int i, atomic_t *v)
 {
 	unsigned long flags;
+	int val;
 
-	__save_flags_cli(flags);
-	v->counter -= i;
-	__restore_flags(flags);
+	local_irq_save(flags);
+	val = v->counter;
+	v->counter = val -= i;
+	local_irq_restore(flags);
+
+	return val;
 }
 
-static __inline__ void atomic_inc(volatile atomic_t *v)
+static inline void atomic_clear_mask(unsigned long mask, unsigned long *addr)
 {
 	unsigned long flags;
 
-	__save_flags_cli(flags);
-	v->counter += 1;
-	__restore_flags(flags);
-}
-
-static __inline__ void atomic_dec(volatile atomic_t *v)
-{
-	unsigned long flags;
-
-	__save_flags_cli(flags);
-	v->counter -= 1;
-	__restore_flags(flags);
-}
-
-static __inline__ int atomic_dec_and_test(volatile atomic_t *v)
-{
-	unsigned long flags;
-	int result;
-
-	__save_flags_cli(flags);
-	v->counter -= 1;
-	result = (v->counter == 0);
-	__restore_flags(flags);
-
-	return result;
-}
-
-extern __inline__ int atomic_add_negative(int i, volatile atomic_t *v)
-{
-	unsigned long flags;
-	int result;
-
-	__save_flags_cli(flags);
-	v->counter += i;
-	result = (v->counter < 0);
-	__restore_flags(flags);
-
-	return result;
-}
-
-static __inline__ void atomic_clear_mask(unsigned long mask, unsigned long *addr)
-{
-	unsigned long flags;
-
-	__save_flags_cli(flags);
+	local_irq_save(flags);
 	*addr &= ~mask;
-	__restore_flags(flags);
+	local_irq_restore(flags);
 }
+
+#endif /* __LINUX_ARM_ARCH__ */
+
+#define atomic_add(i, v)	(void) atomic_add_return(i, v)
+#define atomic_inc(v)		(void) atomic_add_return(1, v)
+#define atomic_sub(i, v)	(void) atomic_sub_return(i, v)
+#define atomic_dec(v)		(void) atomic_sub_return(1, v)
+
+#define atomic_inc_and_test(v)	(atomic_add_return(1, v) == 0)
+#define atomic_dec_and_test(v)	(atomic_sub_return(1, v) == 0)
+#define atomic_inc_return(v)    (atomic_add_return(1, v))
+#define atomic_dec_return(v)    (atomic_sub_return(1, v))
+
+#define atomic_add_negative(i,v) (atomic_add_return(i, v) < 0)
+
+/* Atomic operations are already serializing on ARM */
+#define smp_mb__before_atomic_dec()	barrier()
+#define smp_mb__after_atomic_dec()	barrier()
+#define smp_mb__before_atomic_inc()	barrier()
+#define smp_mb__after_atomic_inc()	barrier()
 
 #endif
 #endif

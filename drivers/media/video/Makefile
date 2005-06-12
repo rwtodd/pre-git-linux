@@ -1,50 +1,32 @@
 #
-# Makefile for the kernel character device drivers.
-#
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now inherited from the
-# parent makes..
+# Makefile for the video capture/playback device drivers.
 #
 
-# Object file lists.
-
-obj-y		:=
-obj-m		:=
-obj-n		:=
-obj-		:=
-
-SUB_DIRS     := 
-MOD_SUB_DIRS := $(SUB_DIRS)
-ALL_SUB_DIRS := $(SUB_DIRS)
-
-O_TARGET := video.o
-
-# All of the (potential) objects that export symbols.
-# This list comes from 'grep -l EXPORT_SYMBOL *.[hc]'.
-
-export-objs     :=	i2c-old.o videodev.o bttv-if.o cpia.o
-
-list-multi	:=	bttv.o zoran.o
-bttv-objs	:=	bttv-driver.o bttv-cards.o bttv-if.o
+bttv-objs	:=	bttv-driver.o bttv-cards.o bttv-if.o \
+			bttv-risc.o bttv-vbi.o bttv-i2c.o bttv-gpio.o
 zoran-objs      :=	zr36120.o zr36120_i2c.o zr36120_mem.o
+zr36067-objs	:=	zoran_procfs.o zoran_device.o \
+			zoran_driver.o zoran_card.o
 
-obj-$(CONFIG_VIDEO_DEV) += videodev.o
+obj-$(CONFIG_VIDEO_DEV) += videodev.o v4l2-common.o v4l1-compat.o
 
-obj-$(CONFIG_BUS_I2C) += i2c-old.o
 obj-$(CONFIG_VIDEO_BT848) += bttv.o msp3400.o tvaudio.o \
-	tda7432.o tda9875.o tuner.o
+	tda7432.o tda9875.o ir-kbd-i2c.o ir-kbd-gpio.o
 obj-$(CONFIG_SOUND_TVMIXER) += tvmixer.o
 
-obj-$(CONFIG_VIDEO_ZR36120) += zoran.o i2c-old.o tuner.o saa7110.o saa7111.o saa7185.o 
-obj-$(CONFIG_I2C_PARPORT) += i2c-parport.o i2c-old.o
-obj-$(CONFIG_VIDEO_SAA5249) += saa5249.o i2c-old.o
+obj-$(CONFIG_VIDEO_ZR36120) += zoran.o
+obj-$(CONFIG_VIDEO_SAA5246A) += saa5246a.o
+obj-$(CONFIG_VIDEO_SAA5249) += saa5249.o
 obj-$(CONFIG_VIDEO_CQCAM) += c-qcam.o
 obj-$(CONFIG_VIDEO_BWQCAM) += bw-qcam.o
-obj-$(CONFIG_VIDEO_ZORAN) += buz.o i2c-old.o saa7110.o saa7111.o saa7185.o 
-obj-$(CONFIG_VIDEO_LML33) += bt856.o bt819.o
+obj-$(CONFIG_VIDEO_W9966) += w9966.o
+obj-$(CONFIG_VIDEO_ZORAN_BUZ) += saa7111.o saa7185.o zr36060.o
+obj-$(CONFIG_VIDEO_ZORAN_DC10) += saa7110.o adv7175.o zr36060.o
+obj-$(CONFIG_VIDEO_ZORAN_DC30) += adv7175.o vpx3220.o zr36050.o \
+	zr36016.o
+obj-$(CONFIG_VIDEO_ZORAN_LML33) += bt819.o bt856.o zr36060.o
+obj-$(CONFIG_VIDEO_ZORAN_LML33R10) += saa7114.o adv7170.o zr36060.o
+obj-$(CONFIG_VIDEO_ZORAN) += zr36067.o videocodec.o
 obj-$(CONFIG_VIDEO_PMS) += pms.o
 obj-$(CONFIG_VIDEO_PLANB) += planb.o
 obj-$(CONFIG_VIDEO_VINO) += vino.o
@@ -52,31 +34,22 @@ obj-$(CONFIG_VIDEO_STRADIS) += stradis.o
 obj-$(CONFIG_VIDEO_CPIA) += cpia.o
 obj-$(CONFIG_VIDEO_CPIA_PP) += cpia_pp.o
 obj-$(CONFIG_VIDEO_CPIA_USB) += cpia_usb.o
+obj-$(CONFIG_VIDEO_MEYE) += meye.o
+obj-$(CONFIG_VIDEO_SAA7134) += saa7134/
+obj-$(CONFIG_VIDEO_CX88) += cx88/
+obj-$(CONFIG_VIDEO_OVCAMCHIP) += ovcamchip/
+obj-$(CONFIG_VIDEO_MXB) += saa7111.o tuner.o tda9840.o tea6415c.o tea6420.o mxb.o
+obj-$(CONFIG_VIDEO_HEXIUM_ORION) += hexium_orion.o
+obj-$(CONFIG_VIDEO_HEXIUM_GEMINI) += hexium_gemini.o
+obj-$(CONFIG_VIDEO_DPC) += saa7111.o dpc7146.o
 obj-$(CONFIG_TUNER_3036) += tuner-3036.o
 
-# Extract lists of the multi-part drivers.
-# The 'int-*' lists are the intermediate files used to build the multi's.
+obj-$(CONFIG_VIDEO_TUNER) += tuner.o tda9887.o
+obj-$(CONFIG_VIDEO_BUF)   += video-buf.o
+obj-$(CONFIG_VIDEO_BUF_DVB) += video-buf-dvb.o
+obj-$(CONFIG_VIDEO_BTCX)  += btcx-risc.o
+obj-$(CONFIG_VIDEO_TVEEPROM) += tveeprom.o
 
-multi-y         := $(filter $(list-multi), $(obj-y))
-multi-m         := $(filter $(list-multi), $(obj-m))
-int-y           := $(sort $(foreach m, $(multi-y), $($(basename $(m))-objs)))
-int-m           := $(sort $(foreach m, $(multi-m), $($(basename $(m))-objs)))
+obj-$(CONFIG_VIDEO_M32R_AR_M64278) += arv.o
 
-# Files that are both resident and modular: remove from modular.
-
-obj-m           := $(filter-out $(obj-y), $(obj-m))
-int-m           := $(filter-out $(int-y), $(int-m))
-
-# Take multi-part drivers out of obj-y and put components in.
-
-obj-y           := $(filter-out $(list-multi), $(obj-y)) $(int-y)
-
-include $(TOPDIR)/Rules.make
-
-fastdep:
-
-zoran.o: zr36120.o zr36120_i2c.o zr36120_mem.o
-	$(LD) $(LD_RFLAG) -r -o $@ zr36120.o zr36120_i2c.o zr36120_mem.o
-
-bttv.o: $(bttv-objs)
-	$(LD) $(LD_RFLAG) -r -o $@ $(bttv-objs)
+EXTRA_CFLAGS += -I$(srctree)/drivers/media/dvb/dvb-core

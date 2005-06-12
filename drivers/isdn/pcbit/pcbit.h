@@ -1,18 +1,18 @@
 /*
+ * PCBIT-D device driver definitions
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        PCBIT-D device driver definitions
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 #ifndef PCBIT_H
 #define PCBIT_H
+
+#include <linux/workqueue.h>
 
 #define MAX_PCBIT_CARDS 4
 
@@ -45,13 +45,13 @@ struct msn_entry {
 struct pcbit_dev {
 	/* board */
 
-	volatile unsigned char* sh_mem;		/* RDP address	*/
+	volatile unsigned char __iomem *sh_mem;		/* RDP address	*/
 	unsigned long ph_mem;
 	unsigned int irq;
 	unsigned int id;
 	unsigned int interrupt;			/* set during interrupt 
 						   processing */
-	
+	spinlock_t lock;
 	/* isdn4linux */
 
 	struct msn_entry * msn_list;		/* ISDN address list */
@@ -74,13 +74,13 @@ struct pcbit_dev {
 
 	struct timer_list error_recover_timer;
 
-	struct tq_struct qdelivery;
+	struct work_struct qdelivery;
 
 	u_char w_busy;
 	u_char r_busy;
 
-	volatile unsigned char *readptr;
-	volatile unsigned char *writeptr;
+	volatile unsigned char __iomem *readptr;
+	volatile unsigned char __iomem *writeptr;
 
 	ushort loadptr;
 

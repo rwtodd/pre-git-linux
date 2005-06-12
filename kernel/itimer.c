@@ -9,44 +9,17 @@
 #include <linux/mm.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
+#include <linux/syscalls.h>
+#include <linux/time.h>
 
 #include <asm/uaccess.h>
 
-/*
- * change timeval to jiffies, trying to avoid the 
- * most obvious overflows..
- *
- * The tv_*sec values are signed, but nothing seems to 
- * indicate whether we really should use them as signed values
- * when doing itimers. POSIX doesn't mention this (but if
- * alarm() uses itimers without checking, we have to use unsigned
- * arithmetic).
- */
-static unsigned long tvtojiffies(struct timeval *value)
-{
-	unsigned long sec = (unsigned) value->tv_sec;
-	unsigned long usec = (unsigned) value->tv_usec;
-
-	if (sec > (ULONG_MAX / HZ))
-		return ULONG_MAX;
-	usec += 1000000 / HZ - 1;
-	usec /= 1000000 / HZ;
-	return HZ*sec+usec;
-}
-
-static void jiffiestotv(unsigned long jiffies, struct timeval *value)
-{
-	value->tv_usec = (jiffies % HZ) * (1000000 / HZ);
-	value->tv_sec = jiffies / HZ;
-}
-
 int do_getitimer(int which, struct itimerval *value)
 {
-	register unsigned long val, interval;
+	register unsigned long val;
 
 	switch (which) {
 	case ITIMER_REAL:
-		interval = current->it_real_incr;
 		val = 0;
 		/* 
 		 * FIXME! This needs to be atomic, in case the kernel timer happens!
@@ -58,25 +31,25 @@ int do_getitimer(int which, struct itimerval *value)
 			if ((long) val <= 0)
 				val = 1;
 		}
+		jiffies_to_timeval(val, &value->it_value);
+		jiffies_to_timeval(current->it_real_incr, &value->it_interval);
 		break;
 	case ITIMER_VIRTUAL:
-		val = current->it_virt_value;
-		interval = current->it_virt_incr;
+		cputime_to_timeval(current->it_virt_value, &value->it_value);
+		cputime_to_timeval(current->it_virt_incr, &value->it_interval);
 		break;
 	case ITIMER_PROF:
-		val = current->it_prof_value;
-		interval = current->it_prof_incr;
+		cputime_to_timeval(current->it_prof_value, &value->it_value);
+		cputime_to_timeval(current->it_prof_incr, &value->it_interval);
 		break;
 	default:
 		return(-EINVAL);
 	}
-	jiffiestotv(val, &value->it_value);
-	jiffiestotv(interval, &value->it_interval);
 	return 0;
 }
 
 /* SMP: Only we modify our itimer values. */
-asmlinkage long sys_getitimer(int which, struct itimerval *value)
+asmlinkage long sys_getitimer(int which, struct itimerval __user *value)
 {
 	int error = -EFAULT;
 	struct itimerval get_buffer;
@@ -95,7 +68,7 @@ void it_real_fn(unsigned long __data)
 	struct task_struct * p = (struct task_struct *) __data;
 	unsigned long interval;
 
-	send_sig(SIGALRM, p, 1);
+	send_group_sig_info(SIGALRM, SEND_SIG_PRIV, p);
 	interval = p->it_real_incr;
 	if (interval) {
 		if (interval > (unsigned long) LONG_MAX)
@@ -107,37 +80,43 @@ void it_real_fn(unsigned long __data)
 
 int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 {
-	register unsigned long i, j;
+	unsigned long expire;
+	cputime_t cputime;
 	int k;
 
-	i = tvtojiffies(&value->it_interval);
-	j = tvtojiffies(&value->it_value);
 	if (ovalue && (k = do_getitimer(which, ovalue)) < 0)
 		return k;
 	switch (which) {
 		case ITIMER_REAL:
 			del_timer_sync(&current->real_timer);
-			current->it_real_value = j;
-			current->it_real_incr = i;
-			if (!j)
+			expire = timeval_to_jiffies(&value->it_value);
+			current->it_real_value = expire;
+			current->it_real_incr =
+				timeval_to_jiffies(&value->it_interval);
+			if (!expire)
 				break;
-			if (j > (unsigned long) LONG_MAX)
-				j = LONG_MAX;
-			i = j + jiffies;
-			current->real_timer.expires = i;
+			if (expire > (unsigned long) LONG_MAX)
+				expire = LONG_MAX;
+			current->real_timer.expires = jiffies + expire;
 			add_timer(&current->real_timer);
 			break;
 		case ITIMER_VIRTUAL:
-			if (j)
-				j++;
-			current->it_virt_value = j;
-			current->it_virt_incr = i;
+			cputime = timeval_to_cputime(&value->it_value);
+			if (cputime_gt(cputime, cputime_zero))
+				cputime = cputime_add(cputime,
+						      jiffies_to_cputime(1));
+			current->it_virt_value = cputime;
+			cputime = timeval_to_cputime(&value->it_interval);
+			current->it_virt_incr = cputime;
 			break;
 		case ITIMER_PROF:
-			if (j)
-				j++;
-			current->it_prof_value = j;
-			current->it_prof_incr = i;
+			cputime = timeval_to_cputime(&value->it_value);
+			if (cputime_gt(cputime, cputime_zero))
+				cputime = cputime_add(cputime,
+						      jiffies_to_cputime(1));
+			current->it_prof_value = cputime;
+			cputime = timeval_to_cputime(&value->it_interval);
+			current->it_prof_incr = cputime;
 			break;
 		default:
 			return -EINVAL;
@@ -148,8 +127,9 @@ int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 /* SMP: Again, only we play with our itimers, and signals are SMP safe
  *      now so that is not an issue at all anymore.
  */
-asmlinkage long sys_setitimer(int which, struct itimerval *value,
-			      struct itimerval *ovalue)
+asmlinkage long sys_setitimer(int which,
+			      struct itimerval __user *value,
+			      struct itimerval __user *ovalue)
 {
 	struct itimerval set_buffer, get_buffer;
 	int error;
@@ -160,7 +140,7 @@ asmlinkage long sys_setitimer(int which, struct itimerval *value,
 	} else
 		memset((char *) &set_buffer, 0, sizeof(set_buffer));
 
-	error = do_setitimer(which, &set_buffer, ovalue ? &get_buffer : 0);
+	error = do_setitimer(which, &set_buffer, ovalue ? &get_buffer : NULL);
 	if (error || !ovalue)
 		return error;
 

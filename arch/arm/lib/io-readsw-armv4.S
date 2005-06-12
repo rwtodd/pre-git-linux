@@ -1,5 +1,5 @@
 /*
- *  linux/arch/arm/lib/io-readsb.S
+ *  linux/arch/arm/lib/io-readsw-armv4.S
  *
  *  Copyright (C) 1995-2000 Russell King
  *
@@ -9,26 +9,24 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <asm/hardware.h>
 
-.insw_bad_alignment:
-		adr	r0, .insw_bad_align_msg
-		mov	r2, lr
-		b	SYMBOL_NAME(panic)
-.insw_bad_align_msg:
-		.asciz	"insw: bad buffer alignment (0x%p, lr=0x%08lX)\n"
-		.align
+		.macro	pack, rd, hw1, hw2
+#ifndef __ARMEB__
+		orr	\rd, \hw1, \hw2, lsl #16
+#else
+		orr	\rd, \hw2, \hw1, lsl #16
+#endif
+		.endm
 
-.insw_align:	tst	r1, #1
-		bne	.insw_bad_alignment
+.insw_align:	movs	ip, r1, lsl #31
+		bne	.insw_noalign
+		ldrh	ip, [r0]
+		sub	r2, r2, #1
+		strh	ip, [r1], #2
 
-		ldrh	r3, [r0]
-		strh	r3, [r1], #2
-
-		subs	r2, r2, #1
-		RETINSTR(moveq, pc, lr)
-
-ENTRY(__arch_readsw)
+ENTRY(__raw_readsw)
+		teq	r2, #0
+		moveq	pc, lr
 		tst	r1, #3
 		bne	.insw_align
 
@@ -39,49 +37,94 @@ ENTRY(__arch_readsw)
 
 .insw_8_lp:	ldrh	r3, [r0]
 		ldrh	r4, [r0]
-		orr	r3, r3, r4, lsl #16
+		pack	r3, r3, r4
 
 		ldrh	r4, [r0]
 		ldrh	r5, [r0]
-		orr	r4, r4, r5, lsl #16
+		pack	r4, r4, r5
 
 		ldrh	r5, [r0]
-		ldrh	r6, [r0]
-		orr	r5, r5, r6, lsl #16
+		ldrh	ip, [r0]
+		pack	r5, r5, ip
 
 		ldrh	ip, [r0]
 		ldrh	lr, [r0]
-		orr	ip, ip, lr, lsl #16
+		pack	ip, ip, lr
 
-		stmia	r1!, {r3 - r5, ip}
 		subs	r2, r2, #8
+		stmia	r1!, {r3 - r5, ip}
 		bpl	.insw_8_lp
-		tst	r2, #7
-		LOADREGS(eqfd, sp!, {r4, r5, pc})
 
 .no_insw_8:	tst	r2, #4
 		beq	.no_insw_4
 
 		ldrh	r3, [r0]
 		ldrh	r4, [r0]
-		orr	r3, r3, r4, lsl #16
+		pack	r3, r3, r4
 
 		ldrh	r4, [r0]
 		ldrh	ip, [r0]
-		orr	r4, r4, ip, lsl #16
+		pack	r4, r4, ip
 
 		stmia	r1!, {r3, r4}
 
-.no_insw_4:	tst	r2, #2
-		beq	.no_insw_2
+.no_insw_4:	movs	r2, r2, lsl #31
+		bcc	.no_insw_2
 
 		ldrh	r3, [r0]
 		ldrh	ip, [r0]
-		orr	r3, r3, ip, lsl #16
-
+		pack	r3, r3, ip
 		str	r3, [r1], #4
 
-.no_insw_2:	tst	r2, #1
-		ldrneh	r3, [r0]
+.no_insw_2:	ldrneh	r3, [r0]
 		strneh	r3, [r1]
-		LOADREGS(fd, sp!, {r4, r5, pc})
+
+		ldmfd	sp!, {r4, r5, pc}
+
+#ifdef __ARMEB__
+#define _BE_ONLY_(code...)	code
+#define _LE_ONLY_(code...)
+#define push_hbyte0		lsr #8
+#define pull_hbyte1		lsl #24
+#else
+#define _BE_ONLY_(code...)
+#define _LE_ONLY_(code...) code
+#define push_hbyte0		lsl #24
+#define pull_hbyte1		lsr #8
+#endif
+
+.insw_noalign:	stmfd	sp!, {r4, lr}
+		ldrccb	ip, [r1, #-1]!
+		bcc	1f
+
+		ldrh	ip, [r0]
+		sub	r2, r2, #1
+   _BE_ONLY_(	mov	ip, ip, ror #8		)
+		strb	ip, [r1], #1
+   _LE_ONLY_(	mov	ip, ip, lsr #8		)
+   _BE_ONLY_(	mov	ip, ip, lsr #24		)
+
+1:		subs	r2, r2, #2
+		bmi	3f
+   _BE_ONLY_(	mov	ip, ip, lsl #24		)
+
+2:		ldrh	r3, [r0]
+		ldrh	r4, [r0]
+		subs	r2, r2, #2
+		orr	ip, ip, r3, lsl #8
+		orr	ip, ip, r4, push_hbyte0
+		str	ip, [r1], #4
+		mov	ip, r4, pull_hbyte1
+		bpl	2b
+
+   _BE_ONLY_(	mov	ip, ip, lsr #24		)
+
+3:		tst	r2, #1
+		strb	ip, [r1], #1
+		ldrneh	ip, [r0]
+   _BE_ONLY_(	movne	ip, ip, ror #8		)
+		strneb	ip, [r1], #1
+   _LE_ONLY_(	movne	ip, ip, lsr #8		)
+   _BE_ONLY_(	movne	ip, ip, lsr #24		)
+		strneb	ip, [r1]
+		ldmfd	sp!, {r4, pc}

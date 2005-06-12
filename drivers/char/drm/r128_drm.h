@@ -25,13 +25,12 @@
  * DEALINGS IN THE SOFTWARE.
  *
  * Authors:
- *    Kevin E. Martin <martin@valinux.com>
  *    Gareth Hughes <gareth@valinux.com>
- *
+ *    Kevin E. Martin <martin@valinux.com>
  */
 
-#ifndef _R128_DRM_H_
-#define _R128_DRM_H_
+#ifndef __R128_DRM_H__
+#define __R128_DRM_H__
 
 /* WARNING: If you change any of these defines, make sure to change the
  * defines in the X server file (r128_sarea.h)
@@ -69,20 +68,12 @@
 
 /* Vertex/indirect buffer size
  */
-#if 1
 #define R128_BUFFER_SIZE		16384
-#else
-#define R128_BUFFER_SIZE		(128 * 1024)
-#endif
 
 /* Byte offsets for indirect buffer data
  */
 #define R128_INDEX_PRIM_OFFSET		20
 #define R128_HOSTDATA_BLIT_OFFSET	32
-
-/* 2048x2048 @ 32bpp texture requires this many indirect buffers
- */
-#define R128_MAX_BLIT_BUFFERS		((2048 * 2048 * 4) / R128_BUFFER_SIZE)
 
 /* Keep these small for testing.
  */
@@ -98,7 +89,9 @@
 #define R128_LOG_TEX_GRANULARITY	16
 
 #define R128_NR_CONTEXT_REGS		12
-#define R128_TEX_MAXLEVELS		11
+
+#define R128_MAX_TEXTURE_LEVELS		11
+#define R128_MAX_TEXTURE_UNITS		2
 
 #endif /* __R128_SAREA_DEFINES__ */
 
@@ -137,28 +130,23 @@ typedef struct {
 	unsigned int scale_3d_cntl;
 } drm_r128_context_regs_t;
 
-/* Setup registers for each texture unit */
+/* Setup registers for each texture unit
+ */
 typedef struct {
 	unsigned int tex_cntl;
 	unsigned int tex_combine_cntl;
 	unsigned int tex_size_pitch;
-	unsigned int tex_offset[R128_TEX_MAXLEVELS];
+	unsigned int tex_offset[R128_MAX_TEXTURE_LEVELS];
 	unsigned int tex_border_color;
 } drm_r128_texture_regs_t;
 
-
-typedef struct drm_tex_region {
-	unsigned char next, prev;
-	unsigned char in_use;
-	int age;
-} drm_tex_region_t;
 
 typedef struct drm_r128_sarea {
 	/* The channel for communication of state information to the kernel
 	 * on firing a vertex buffer.
 	 */
 	drm_r128_context_regs_t context_state;
-	drm_r128_texture_regs_t tex_state[R128_NR_TEX_HEAPS];
+	drm_r128_texture_regs_t tex_state[R128_MAX_TEXTURE_UNITS];
 	unsigned int dirty;
 	unsigned int vertsize;
 	unsigned int vc_format;
@@ -174,20 +162,72 @@ typedef struct drm_r128_sarea {
 	unsigned int last_dispatch;
 
 	drm_tex_region_t tex_list[R128_NR_TEX_HEAPS][R128_NR_TEX_REGIONS+1];
-	int tex_age[R128_NR_TEX_HEAPS];
+	unsigned int tex_age[R128_NR_TEX_HEAPS];
 	int ctx_owner;
+	int pfAllowPageFlip;        /* number of 3d windows (0,1,2 or more) */
+	int pfCurrentPage;	    /* which buffer is being displayed? */
 } drm_r128_sarea_t;
 
 
 /* WARNING: If you change any of these defines, make sure to change the
  * defines in the Xserver file (xf86drmR128.h)
  */
+
+/* Rage 128 specific ioctls
+ * The device specific ioctl range is 0x40 to 0x79.
+ */
+#define DRM_R128_INIT       0x00
+#define DRM_R128_CCE_START  0x01
+#define DRM_R128_CCE_STOP   0x02
+#define DRM_R128_CCE_RESET  0x03
+#define DRM_R128_CCE_IDLE   0x04
+/* 0x05 not used */
+#define DRM_R128_RESET      0x06
+#define DRM_R128_SWAP       0x07
+#define DRM_R128_CLEAR      0x08
+#define DRM_R128_VERTEX     0x09
+#define DRM_R128_INDICES    0x0a
+#define DRM_R128_BLIT       0x0b
+#define DRM_R128_DEPTH      0x0c
+#define DRM_R128_STIPPLE    0x0d
+/* 0x0e not used */
+#define DRM_R128_INDIRECT   0x0f
+#define DRM_R128_FULLSCREEN 0x10
+#define DRM_R128_CLEAR2     0x11
+#define DRM_R128_GETPARAM   0x12
+#define DRM_R128_FLIP       0x13
+
+#define DRM_IOCTL_R128_INIT       DRM_IOW( DRM_COMMAND_BASE + DRM_R128_INIT, drm_r128_init_t)
+#define DRM_IOCTL_R128_CCE_START  DRM_IO(  DRM_COMMAND_BASE + DRM_R128_CCE_START)
+#define DRM_IOCTL_R128_CCE_STOP   DRM_IOW( DRM_COMMAND_BASE + DRM_R128_CCE_STOP, drm_r128_cce_stop_t)
+#define DRM_IOCTL_R128_CCE_RESET  DRM_IO(  DRM_COMMAND_BASE + DRM_R128_CCE_RESET)
+#define DRM_IOCTL_R128_CCE_IDLE   DRM_IO(  DRM_COMMAND_BASE + DRM_R128_CCE_IDLE)
+/* 0x05 not used */
+#define DRM_IOCTL_R128_RESET      DRM_IO(  DRM_COMMAND_BASE + DRM_R128_RESET)
+#define DRM_IOCTL_R128_SWAP       DRM_IO(  DRM_COMMAND_BASE + DRM_R128_SWAP)
+#define DRM_IOCTL_R128_CLEAR      DRM_IOW( DRM_COMMAND_BASE + DRM_R128_CLEAR, drm_r128_clear_t)
+#define DRM_IOCTL_R128_VERTEX     DRM_IOW( DRM_COMMAND_BASE + DRM_R128_VERTEX, drm_r128_vertex_t)
+#define DRM_IOCTL_R128_INDICES    DRM_IOW( DRM_COMMAND_BASE + DRM_R128_INDICES, drm_r128_indices_t)
+#define DRM_IOCTL_R128_BLIT       DRM_IOW( DRM_COMMAND_BASE + DRM_R128_BLIT, drm_r128_blit_t)
+#define DRM_IOCTL_R128_DEPTH      DRM_IOW( DRM_COMMAND_BASE + DRM_R128_DEPTH, drm_r128_depth_t)
+#define DRM_IOCTL_R128_STIPPLE    DRM_IOW( DRM_COMMAND_BASE + DRM_R128_STIPPLE, drm_r128_stipple_t)
+/* 0x0e not used */
+#define DRM_IOCTL_R128_INDIRECT   DRM_IOWR(DRM_COMMAND_BASE + DRM_R128_INDIRECT, drm_r128_indirect_t)
+#define DRM_IOCTL_R128_FULLSCREEN DRM_IOW( DRM_COMMAND_BASE + DRM_R128_FULLSCREEN, drm_r128_fullscreen_t)
+#define DRM_IOCTL_R128_CLEAR2     DRM_IOW( DRM_COMMAND_BASE + DRM_R128_CLEAR2, drm_r128_clear2_t)
+#define DRM_IOCTL_R128_GETPARAM   DRM_IOW( DRM_COMMAND_BASE + DRM_R128_GETPARAM, drm_r128_getparam_t)
+#define DRM_IOCTL_R128_FLIP       DRM_IO(  DRM_COMMAND_BASE + DRM_R128_FLIP)
+
 typedef struct drm_r128_init {
 	enum {
 		R128_INIT_CCE    = 0x01,
 		R128_CLEANUP_CCE = 0x02
 	} func;
+#if CONFIG_XFREE86_VERSION < XFREE86_VERSION(4,1,0,0)
 	int sarea_priv_offset;
+#else
+	unsigned long sarea_priv_offset;
+#endif
 	int is_pci;
 	int cce_mode;
 	int cce_secure;
@@ -201,12 +241,21 @@ typedef struct drm_r128_init {
 	unsigned int depth_offset, depth_pitch;
 	unsigned int span_offset;
 
+#if CONFIG_XFREE86_VERSION < XFREE86_VERSION(4,1,0,0)
 	unsigned int fb_offset;
 	unsigned int mmio_offset;
 	unsigned int ring_offset;
 	unsigned int ring_rptr_offset;
 	unsigned int buffers_offset;
 	unsigned int agp_textures_offset;
+#else
+	unsigned long fb_offset;
+	unsigned long mmio_offset;
+	unsigned long ring_offset;
+	unsigned long ring_rptr_offset;
+	unsigned long buffers_offset;
+	unsigned long agp_textures_offset;
+#endif
 } drm_r128_init_t;
 
 typedef struct drm_r128_cce_stop {
@@ -216,9 +265,15 @@ typedef struct drm_r128_cce_stop {
 
 typedef struct drm_r128_clear {
 	unsigned int flags;
+#if CONFIG_XFREE86_VERSION < XFREE86_VERSION(4,1,0,0)
 	int x, y, w, h;
+#endif
 	unsigned int clear_color;
 	unsigned int clear_depth;
+#if CONFIG_XFREE86_VERSION >= XFREE86_VERSION(4,1,0,0)
+	unsigned int color_mask;
+	unsigned int depth_mask;
+#endif
 } drm_r128_clear_t;
 
 typedef struct drm_r128_vertex {
@@ -253,20 +308,38 @@ typedef struct drm_r128_depth {
 		R128_READ_PIXELS	= 0x04
 	} func;
 	int n;
-	int *x;
-	int *y;
-	unsigned int *buffer;
-	unsigned char *mask;
+	int __user *x;
+	int __user *y;
+	unsigned int __user *buffer;
+	unsigned char __user *mask;
 } drm_r128_depth_t;
 
 typedef struct drm_r128_stipple {
-	unsigned int *mask;
+	unsigned int __user *mask;
 } drm_r128_stipple_t;
 
-typedef struct drm_r128_packet {
-	unsigned int *buffer;
-	int count;
-	int flags;
-} drm_r128_packet_t;
+typedef struct drm_r128_indirect {
+	int idx;
+	int start;
+	int end;
+	int discard;
+} drm_r128_indirect_t;
+
+typedef struct drm_r128_fullscreen {
+	enum {
+		R128_INIT_FULLSCREEN    = 0x01,
+		R128_CLEANUP_FULLSCREEN = 0x02
+	} func;
+} drm_r128_fullscreen_t;
+
+/* 2.3: An ioctl to get parameters that aren't available to the 3d
+ * client any other way.  
+ */
+#define R128_PARAM_IRQ_NR            1
+
+typedef struct drm_r128_getparam {
+	int param;
+	void __user *value;
+} drm_r128_getparam_t;
 
 #endif

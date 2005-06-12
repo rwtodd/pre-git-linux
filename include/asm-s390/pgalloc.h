@@ -1,5 +1,5 @@
 /*
- *  include/asm-s390/bugs.h
+ *  include/asm-s390/pgalloc.h
  *
  *  S390 version
  *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
@@ -16,11 +16,12 @@
 #include <linux/config.h>
 #include <asm/processor.h>
 #include <linux/threads.h>
+#include <linux/gfp.h>
+#include <linux/mm.h>
 
-#define pgd_quicklist (S390_lowcore.cpu_data.pgd_quick)
-#define pmd_quicklist ((unsigned long *)0)
-#define pte_quicklist (S390_lowcore.cpu_data.pte_quick)
-#define pgtable_cache_size (S390_lowcore.cpu_data.pgtable_cache_sz)
+#define check_pgt_cache()	do {} while (0)
+
+extern void diag10(unsigned long addr);
 
 /*
  * Allocate and free page tables. The xxx_kernel() versions are
@@ -28,318 +29,139 @@
  * if any.
  */
 
-extern __inline__ pgd_t* get_pgd_slow(void)
+static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
+	pgd_t *pgd;
+	int i;
+
+#ifndef __s390x__
+	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL,1);
+        if (pgd != NULL)
+		for (i = 0; i < USER_PTRS_PER_PGD; i++)
+			pmd_clear(pmd_offset(pgd + i, i*PGDIR_SIZE));
+#else /* __s390x__ */
+	pgd = (pgd_t *) __get_free_pages(GFP_KERNEL,2);
+        if (pgd != NULL)
+		for (i = 0; i < PTRS_PER_PGD; i++)
+			pgd_clear(pgd + i);
+#endif /* __s390x__ */
+	return pgd;
+}
+
+static inline void pgd_free(pgd_t *pgd)
+{
+#ifndef __s390x__
+        free_pages((unsigned long) pgd, 1);
+#else /* __s390x__ */
+        free_pages((unsigned long) pgd, 2);
+#endif /* __s390x__ */
+}
+
+#ifndef __s390x__
+/*
+ * page middle directory allocation/free routines.
+ * We use pmd cache only on s390x, so these are dummy routines. This
+ * code never triggers because the pgd will always be present.
+ */
+#define pmd_alloc_one(mm,address)       ({ BUG(); ((pmd_t *)2); })
+#define pmd_free(x)                     do { } while (0)
+#define __pmd_free_tlb(tlb,x)		do { } while (0)
+#define pgd_populate(mm, pmd, pte)      BUG()
+#else /* __s390x__ */
+static inline pmd_t * pmd_alloc_one(struct mm_struct *mm, unsigned long vmaddr)
+{
+	pmd_t *pmd;
         int i;
-        pgd_t *pgd,*ret = (pgd_t *)__get_free_pages(GFP_KERNEL,2);
-	if (ret)
-		for (i=0,pgd=ret;i<USER_PTRS_PER_PGD;i++,pgd++)
-			pmd_clear(pmd_offset(pgd,i*PGDIR_SIZE));
-        return ret;
+
+	pmd = (pmd_t *) __get_free_pages(GFP_KERNEL, 2);
+	if (pmd != NULL) {
+		for (i=0; i < PTRS_PER_PMD; i++)
+			pmd_clear(pmd+i);
+	}
+	return pmd;
 }
 
-extern __inline__ pgd_t* get_pgd_fast(void)
+static inline void pmd_free (pmd_t *pmd)
 {
-        unsigned long *ret;
-	
-        if((ret = pgd_quicklist) != NULL) {
-                pgd_quicklist = (unsigned long *)(*ret);
-                ret[0] = ret[1];
-                pgtable_cache_size--;
-		/*
-		 * Need to flush tlb, since private page tables
-		 * are unique thru address of pgd and virtual address.
-		 * If we reuse pgd we need to be sure no tlb entry
-		 * with that pdg is left -> global flush
-		 *
-		 * Fixme: To avoid this global flush we should
-		 * use pdg_quicklist as fix lenght fifo list
-		 * and not as stack
-		 */
-        } else
-                ret = (unsigned long *)get_pgd_slow();
-        return (pgd_t *)ret;
+	free_pages((unsigned long) pmd, 2);
 }
 
-extern __inline__ void free_pgd_fast(pgd_t *pgd)
+#define __pmd_free_tlb(tlb,pmd)			\
+	do {					\
+		tlb_flush_mmu(tlb, 0, 0);	\
+		pmd_free(pmd);			\
+	 } while (0)
+
+static inline void pgd_populate(struct mm_struct *mm, pgd_t *pgd, pmd_t *pmd)
 {
-        *(unsigned long *)pgd = (unsigned long) pgd_quicklist;
-        pgd_quicklist = (unsigned long *) pgd;
-        pgtable_cache_size++;
+	pgd_val(*pgd) = _PGD_ENTRY | __pa(pmd);
 }
 
-extern __inline__ void free_pgd_slow(pgd_t *pgd)
+#endif /* __s390x__ */
+
+static inline void 
+pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmd, pte_t *pte)
 {
-        free_pages((unsigned long)pgd,2);
+#ifndef __s390x__
+	pmd_val(pmd[0]) = _PAGE_TABLE + __pa(pte);
+	pmd_val(pmd[1]) = _PAGE_TABLE + __pa(pte+256);
+	pmd_val(pmd[2]) = _PAGE_TABLE + __pa(pte+512);
+	pmd_val(pmd[3]) = _PAGE_TABLE + __pa(pte+768);
+#else /* __s390x__ */
+	pmd_val(*pmd) = _PMD_ENTRY + __pa(pte);
+	pmd_val1(*pmd) = _PMD_ENTRY + __pa(pte+256);
+#endif /* __s390x__ */
 }
 
-extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
-extern pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long address_preadjusted);
-
-extern __inline__ pte_t* get_pte_fast(void)
+static inline void
+pmd_populate(struct mm_struct *mm, pmd_t *pmd, struct page *page)
 {
-        unsigned long *ret;
-
-        if((ret = (unsigned long *)pte_quicklist) != NULL) {
-                pte_quicklist = (unsigned long *)(*ret);
-                ret[0] = ret[1];
-                pgtable_cache_size--;
-        }
-        return (pte_t *)ret;
-}
-
-extern __inline__ void free_pte_fast(pte_t *pte)
-{
-        *(unsigned long *)pte = (unsigned long) pte_quicklist;
-        pte_quicklist = (unsigned long *) pte;
-        pgtable_cache_size++;
-}
-
-extern __inline__ void free_pte_slow(pte_t *pte)
-{
-        free_page((unsigned long)pte);
-}
-
-#define pte_free_kernel(pte)    free_pte_fast(pte)
-#define pte_free(pte)           free_pte_fast(pte)
-#define pgd_free(pgd)           free_pgd_fast(pgd)
-#define pgd_alloc()             get_pgd_fast()
-
-extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
-{
-        address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-        if (pmd_none(*pmd)) {
-                pte_t * page = (pte_t *) get_pte_fast();
-
-                if (!page)
-                        return get_pte_kernel_slow(pmd, address);
-                pmd_val(pmd[0]) = _KERNPG_TABLE + __pa(page);
-                pmd_val(pmd[1]) = _KERNPG_TABLE + __pa(page+1024);
-                pmd_val(pmd[2]) = _KERNPG_TABLE + __pa(page+2048);
-                pmd_val(pmd[3]) = _KERNPG_TABLE + __pa(page+3072);
-                return page + address;
-        }
-        if (pmd_bad(*pmd)) {
-                __handle_bad_pmd_kernel(pmd);
-                return NULL;
-        }
-        return (pte_t *) pmd_page(*pmd) + address;
-}
-
-extern inline pte_t * pte_alloc(pmd_t * pmd, unsigned long address)
-{
-        address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-
-        if (pmd_none(*pmd))
-                goto getnew;
-        if (pmd_bad(*pmd))
-                goto fix;
-        return (pte_t *) pmd_page(*pmd) + address;
-getnew:
-{
-        unsigned long page = (unsigned long) get_pte_fast();
-
-        if (!page)
-                return get_pte_slow(pmd, address);
-        pmd_val(pmd[0]) = _PAGE_TABLE + __pa(page);
-        pmd_val(pmd[1]) = _PAGE_TABLE + __pa(page+1024);
-        pmd_val(pmd[2]) = _PAGE_TABLE + __pa(page+2048);
-        pmd_val(pmd[3]) = _PAGE_TABLE + __pa(page+3072);
-        return (pte_t *) page + address;
-}
-fix:
-        __handle_bad_pmd(pmd);
-        return NULL;
+	pmd_populate_kernel(mm, pmd, (pte_t *)((page-mem_map) << PAGE_SHIFT));
 }
 
 /*
- * allocating and freeing a pmd is trivial: the 1-entry pmd is
- * inside the pgd, so has no extra memory associated with it.
+ * page table entry allocation/free routines.
  */
-extern inline void pmd_free(pmd_t * pmd)
+static inline pte_t *
+pte_alloc_one_kernel(struct mm_struct *mm, unsigned long vmaddr)
 {
+	pte_t *pte;
+        int i;
+
+	pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+	if (pte != NULL) {
+		for (i=0; i < PTRS_PER_PTE; i++)
+			pte_clear(pte+i);
+	}
+	return pte;
 }
 
-extern inline pmd_t * pmd_alloc(pgd_t * pgd, unsigned long address)
+static inline struct page *
+pte_alloc_one(struct mm_struct *mm, unsigned long vmaddr)
 {
-        return (pmd_t *) pgd;
+	pte_t *pte = pte_alloc_one_kernel(mm, vmaddr);
+	if (pte)
+		return virt_to_page(pte);
+	return 0;
 }
 
-#define pmd_free_kernel         pmd_free
-#define pmd_alloc_kernel        pmd_alloc
+static inline void pte_free_kernel(pte_t *pte)
+{
+        free_page((unsigned long) pte);
+}
 
-extern int do_check_pgt_cache(int, int);
+static inline void pte_free(struct page *pte)
+{
+        __free_page(pte);
+}
 
+#define __pte_free_tlb(tlb,pte) tlb_remove_page(tlb,pte)
+
+/*
+ * This establishes kernel virtual mappings (e.g., as a result of a
+ * vmalloc call).  Since s390-esame uses a separate kernel page table,
+ * there is nothing to do here... :)
+ */
 #define set_pgdir(addr,entry) do { } while(0)
-
-/*
- * TLB flushing:
- *
- *  - flush_tlb() flushes the current mm struct TLBs
- *  - flush_tlb_all() flushes all processes TLBs 
- *    called only from vmalloc/vfree
- *  - flush_tlb_mm(mm) flushes the specified mm context TLB's
- *  - flush_tlb_page(vma, vmaddr) flushes one page
- *  - flush_tlb_range(mm, start, end) flushes a range of pages
- *  - flush_tlb_pgtables(mm, start, end) flushes a range of page tables
- */
-
-/*
- * s390 has two ways of flushing TLBs
- * 'ptlb' does a flush of the local processor
- * 'ipte' invalidates a pte in a page table and flushes that out of 
- * the TLBs of all PUs of a SMP 
- */
-
-#define __flush_tlb() \
-do {  __asm__ __volatile__("ptlb": : :"memory"); } while (0)
-
-
-static inline void __flush_global_tlb(void) 
-{
-	int cs1=0,dum=0;
-	int *adr;
-	long long dummy=0;
-	adr = (int*) (((int)(((int*) &dummy)+1) & 0xfffffffc)|1);
-	__asm__ __volatile__("lr    2,%0\n\t"
-			     "lr    3,%1\n\t"
-			     "lr    4,%2\n\t"
-			     ".long 0xb2500024" :
-			     : "d" (cs1), "d" (dum), "d" (adr)
-			     : "2", "3", "4");
-}
-
-#if 0
-#define flush_tlb_one(a,b)     __flush_tlb()
-#define __flush_tlb_one(a,b)   __flush_tlb()
-#else
-static inline void __flush_tlb_one(struct mm_struct *mm,
-                                   unsigned long addr)
-{
-	pgd_t * pgdir;
-	pmd_t * pmd;
-	pte_t * pte, *pto;
-	
-	pgdir = pgd_offset(mm, addr);
-	if (pgd_none(*pgdir) || pgd_bad(*pgdir))
-		return;
-	pmd = pmd_offset(pgdir, addr);
-	if (pmd_none(*pmd) || pmd_bad(*pmd))
-		return;
-	pte = pte_offset(pmd,addr);
-
-	/*
-	 * S390 has 1mb segments, we are emulating 4MB segments
-	 */
-
-	pto = (pte_t*) (((unsigned long) pte) & 0x7ffffc00);
-	       
-       	__asm__ __volatile("    ic   0,2(%0)\n"
-			   "    ipte %1,%2\n"
-			   "    stc  0,2(%0)"
-			   : : "a" (pte), "a" (pto), "a" (addr): "0");
-}
-#endif
-
-
-#ifndef CONFIG_SMP
-
-#define flush_tlb()       __flush_tlb()
-#define flush_tlb_all()   __flush_tlb()
-#define local_flush_tlb() __flush_tlb()
-
-/*
- * We always need to flush, since s390 does not flush tlb
- * on each context switch
- */
-
-
-static inline void flush_tlb_mm(struct mm_struct *mm)
-{
-        __flush_tlb();
-}
-
-static inline void flush_tlb_page(struct vm_area_struct *vma,
-        unsigned long addr)
-{
-        __flush_tlb_one(vma->vm_mm,addr);
-}
-
-static inline void flush_tlb_range(struct mm_struct *mm,
-        unsigned long start, unsigned long end)
-{
-        __flush_tlb();
-}
-
-#else
-
-/*
- * We aren't very clever about this yet -  SMP could certainly
- * avoid some global flushes..
- */
-
-#include <asm/smp.h>
-
-#define local_flush_tlb() \
-        __flush_tlb()
-
-/*
- *      We only have to do global flush of tlb if process run since last
- *      flush on any other pu than current. 
- *      If we have threads (mm->count > 1) we always do a global flush, 
- *      since the process runs on more than one processor at the same time.
- */
-
-static inline void flush_tlb_current_task(void)
-{
-	if ((atomic_read(&current->mm->mm_count) != 1) ||
-	    (current->mm->cpu_vm_mask != (1UL << smp_processor_id()))) {
-		current->mm->cpu_vm_mask = (1UL << smp_processor_id());
-		__flush_global_tlb();
-	} else {                 
-		local_flush_tlb();
-	}
-}
-
-#define flush_tlb() flush_tlb_current_task()
-
-#define flush_tlb_all() __flush_global_tlb()
-
-static inline void flush_tlb_mm(struct mm_struct * mm)
-{
-	if ((atomic_read(&mm->mm_count) != 1) ||
-	    (mm->cpu_vm_mask != (1UL << smp_processor_id()))) {
-		mm->cpu_vm_mask = (1UL << smp_processor_id());
-		__flush_global_tlb();
-	} else {                 
-		local_flush_tlb();
-	}
-}
-
-static inline void flush_tlb_page(struct vm_area_struct * vma,
-        unsigned long va)
-{
-	__flush_tlb_one(vma->vm_mm,va);
-}
-
-static inline void flush_tlb_range(struct mm_struct * mm,
-				   unsigned long start, unsigned long end)
-{
-	if ((atomic_read(&mm->mm_count) != 1) ||
-	    (mm->cpu_vm_mask != (1UL << smp_processor_id()))) {
-		mm->cpu_vm_mask = (1UL << smp_processor_id());
-		__flush_global_tlb();
-	} else {                 
-		local_flush_tlb();
-	}
-}
-
-#endif
-
-extern inline void flush_tlb_pgtables(struct mm_struct *mm,
-                                      unsigned long start, unsigned long end)
-{
-        /* S/390 does not keep any page table caches in TLB */
-}
 
 #endif /* _S390_PGALLOC_H */

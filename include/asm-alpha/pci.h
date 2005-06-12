@@ -15,11 +15,12 @@ struct pci_dev;
 struct pci_bus;
 struct resource;
 struct pci_iommu_arena;
+struct page;
 
-/* A controler.  Used to manage multiple PCI busses.  */
+/* A controller.  Used to manage multiple PCI busses.  */
 
-struct pci_controler {
-	struct pci_controler *next;
+struct pci_controller {
+	struct pci_controller *next;
         struct pci_bus *bus;
 	struct resource *io_space;
 	struct resource *mem_space;
@@ -36,17 +37,21 @@ struct pci_controler {
 	unsigned long config_space_base;
 
 	unsigned int index;
-	unsigned int first_busno;
-	unsigned int last_busno;
+	/* For compatibility with current (as of July 2003) pciutils
+	   and XFree86. Eventually will be removed. */
+	unsigned int need_domain_info;
 
 	struct pci_iommu_arena *sg_pci;
 	struct pci_iommu_arena *sg_isa;
+
+	void *sysdata;
 };
 
 /* Override the logic in pci_scan_bus for skipping already-configured
    bus numbers.  */
 
 #define pcibios_assign_all_busses()	1
+#define pcibios_scan_all_fns(a, b)	0
 
 #define PCIBIOS_MIN_IO		alpha_mv.min_io_address
 #define PCIBIOS_MIN_MEM		alpha_mv.min_mem_address
@@ -60,38 +65,70 @@ extern inline void pcibios_penalize_isa_irq(int irq)
 
 /* IOMMU controls.  */
 
-/* Allocate and map kernel buffer using consistant mode DMA for PCI
+/* The PCI address space does not equal the physical memory address space.
+   The networking and block device layers use this boolean for bounce buffer
+   decisions.  */
+#define PCI_DMA_BUS_IS_PHYS  0
+
+/* Allocate and map kernel buffer using consistent mode DMA for PCI
    device.  Returns non-NULL cpu-view pointer to the buffer if
    successful and sets *DMA_ADDRP to the pci side dma address as well,
    else DMA_ADDRP is undefined.  */
 
-extern void *pci_alloc_consistent(struct pci_dev *, long, dma_addr_t *);
+extern void *pci_alloc_consistent(struct pci_dev *, size_t, dma_addr_t *);
 
-/* Free and unmap a consistant DMA buffer.  CPU_ADDR and DMA_ADDR must
-   be values that were returned from pci_alloc_consistant.  SIZE must
-   be the same as what as passed into pci_alloc_consistant.
-   References to the memory and mappings assosciated with CPU_ADDR or
+/* Free and unmap a consistent DMA buffer.  CPU_ADDR and DMA_ADDR must
+   be values that were returned from pci_alloc_consistent.  SIZE must
+   be the same as what as passed into pci_alloc_consistent.
+   References to the memory and mappings associated with CPU_ADDR or
    DMA_ADDR past this call are illegal.  */
 
-extern void pci_free_consistent(struct pci_dev *, long, void *, dma_addr_t);
+extern void pci_free_consistent(struct pci_dev *, size_t, void *, dma_addr_t);
 
-/* Map a single buffer of the indicate size for PCI DMA in streaming
-   mode.  The 32-bit PCI bus mastering address to use is returned.
-   Once the device is given the dma address, the device owns this memory
-   until either pci_unmap_single or pci_dma_sync_single is performed.  */
+/* Map a single buffer of the indicate size for PCI DMA in streaming mode.
+   The 32-bit PCI bus mastering address to use is returned.  Once the device
+   is given the dma address, the device owns this memory until either
+   pci_unmap_single or pci_dma_sync_single_for_cpu is performed.  */
 
-extern dma_addr_t pci_map_single(struct pci_dev *, void *, long, int);
+extern dma_addr_t pci_map_single(struct pci_dev *, void *, size_t, int);
+
+/* Likewise, but for a page instead of an address.  */
+extern dma_addr_t pci_map_page(struct pci_dev *, struct page *,
+			       unsigned long, size_t, int);
+
+/* Test for pci_map_single or pci_map_page having generated an error.  */
+
+static inline int
+pci_dma_mapping_error(dma_addr_t dma_addr)
+{
+	return dma_addr == 0;
+}
 
 /* Unmap a single streaming mode DMA translation.  The DMA_ADDR and
    SIZE must match what was provided for in a previous pci_map_single
    call.  All other usages are undefined.  After this call, reads by
-   the cpu to the buffer are guarenteed to see whatever the device
+   the cpu to the buffer are guaranteed to see whatever the device
    wrote there.  */
 
-extern void pci_unmap_single(struct pci_dev *, dma_addr_t, long, int);
+extern void pci_unmap_single(struct pci_dev *, dma_addr_t, size_t, int);
+extern void pci_unmap_page(struct pci_dev *, dma_addr_t, size_t, int);
+
+/* pci_unmap_{single,page} is not a nop, thus... */
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
+	dma_addr_t ADDR_NAME;
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
+	__u32 LEN_NAME;
+#define pci_unmap_addr(PTR, ADDR_NAME)			\
+	((PTR)->ADDR_NAME)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
+	(((PTR)->ADDR_NAME) = (VAL))
+#define pci_unmap_len(PTR, LEN_NAME)			\
+	((PTR)->LEN_NAME)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
+	(((PTR)->LEN_NAME) = (VAL))
 
 /* Map a set of buffers described by scatterlist in streaming mode for
-   PCI DMA.  This is the scather-gather version of the above
+   PCI DMA.  This is the scatter-gather version of the above
    pci_map_single interface.  Here the scatter gather list elements
    are each tagged with the appropriate PCI dma address and length.
    They are obtained via sg_dma_{address,length}(SG).
@@ -112,29 +149,45 @@ extern int pci_map_sg(struct pci_dev *, struct scatterlist *, int, int);
 
 extern void pci_unmap_sg(struct pci_dev *, struct scatterlist *, int, int);
 
-/* Make physical memory consistant for a single streaming mode DMA
-   translation after a transfer.
+/* Make physical memory consistent for a single streaming mode DMA
+   translation after a transfer and device currently has ownership
+   of the buffer.
 
    If you perform a pci_map_single() but wish to interrogate the
    buffer using the cpu, yet do not wish to teardown the PCI dma
    mapping, you must call this function before doing so.  At the next
-   point you give the PCI dma address back to the card, the device
-   again owns the buffer.  */
+   point you give the PCI dma address back to the card, you must first
+   perform a pci_dma_sync_for_device, and then the device again owns
+   the buffer.  */
 
-extern inline void
-pci_dma_sync_single(struct pci_dev *dev, dma_addr_t dma_addr, long size,
-		    int direction)
+static inline void
+pci_dma_sync_single_for_cpu(struct pci_dev *dev, dma_addr_t dma_addr,
+			    long size, int direction)
 {
 	/* Nothing to do.  */
 }
 
-/* Make physical memory consistant for a set of streaming mode DMA
-   translations after a transfer.  The same as pci_dma_sync_single but
-   for a scatter-gather list, same rules and usage.  */
+static inline void
+pci_dma_sync_single_for_device(struct pci_dev *dev, dma_addr_t dma_addr,
+			       size_t size, int direction)
+{
+	/* Nothing to do.  */
+}
 
-extern inline void
-pci_dma_sync_sg(struct pci_dev *dev, struct scatterlist *sg, int nents,
-	        int direction)
+/* Make physical memory consistent for a set of streaming mode DMA
+   translations after a transfer.  The same as pci_dma_sync_single_*
+   but for a scatter-gather list, same rules and usage.  */
+
+static inline void
+pci_dma_sync_sg_for_cpu(struct pci_dev *dev, struct scatterlist *sg,
+			int nents, int direction)
+{
+	/* Nothing to do.  */
+}
+
+static inline void
+pci_dma_sync_sg_for_device(struct pci_dev *dev, struct scatterlist *sg,
+			   int nents, int direction)
 {
 	/* Nothing to do.  */
 }
@@ -144,7 +197,56 @@ pci_dma_sync_sg(struct pci_dev *dev, struct scatterlist *sg, int nents,
    only drive the low 24-bits during PCI bus mastering, then
    you would pass 0x00ffffff as the mask to this function.  */
 
-extern int pci_dma_supported(struct pci_dev *hwdev, dma_addr_t mask);
+extern int pci_dma_supported(struct pci_dev *hwdev, u64 mask);
+
+/* True if the machine supports DAC addressing, and DEV can
+   make use of it given MASK.  */
+extern int pci_dac_dma_supported(struct pci_dev *hwdev, u64 mask);
+
+/* Convert to/from DAC dma address and struct page.  */
+extern dma64_addr_t pci_dac_page_to_dma(struct pci_dev *, struct page *,
+					unsigned long, int);
+extern struct page *pci_dac_dma_to_page(struct pci_dev *, dma64_addr_t);
+extern unsigned long pci_dac_dma_to_offset(struct pci_dev *, dma64_addr_t);
+
+static inline void
+pci_dac_dma_sync_single_for_cpu(struct pci_dev *pdev, dma64_addr_t dma_addr,
+				size_t len, int direction)
+{
+	/* Nothing to do. */
+}
+
+static inline void
+pci_dac_dma_sync_single_for_device(struct pci_dev *pdev, dma64_addr_t dma_addr,
+				   size_t len, int direction)
+{
+	/* Nothing to do. */
+}
+
+extern void pcibios_resource_to_bus(struct pci_dev *, struct pci_bus_region *,
+				    struct resource *);
+
+#define pci_domain_nr(bus) ((struct pci_controller *)(bus)->sysdata)->index
+
+static inline int
+pci_name_bus(char *name, struct pci_bus *bus)
+{
+	struct pci_controller *hose = bus->sysdata;
+
+	if (likely(hose->need_domain_info == 0)) {
+		sprintf(name, "%02x", bus->number);
+	} else {
+		sprintf(name, "%04x:%02x", hose->index, bus->number);
+	}
+	return 0;
+}
+
+static inline void
+pcibios_add_platform_entries(struct pci_dev *dev)
+{
+}
+
+struct pci_dev *alpha_gendev_to_pci(struct device *dev);
 
 #endif /* __KERNEL__ */
 

@@ -9,14 +9,15 @@
  */
 
 #include <linux/config.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/string.h>
 
 #include <asm/system.h>
 #include <asm/amigahw.h>
 
-static u_short *snd_data = NULL;
+static unsigned short *snd_data;
 static const signed char sine_data[] = {
 	0,  39,  75,  103,  121,  127,  121,  103,  75,  39,
 	0, -39, -75, -103, -121, -127, -121, -103, -75, -39
@@ -28,7 +29,7 @@ static const signed char sine_data[] = {
      * device since it depends on htotal (for OCS/ECS/AGA)
      */
 
-volatile u_short amiga_audio_min_period = 124;	/* Default for pre-OCS */
+volatile unsigned short amiga_audio_min_period = 124; /* Default for pre-OCS */
 
 #define MAX_PERIOD	(65535)
 
@@ -37,13 +38,13 @@ volatile u_short amiga_audio_min_period = 124;	/* Default for pre-OCS */
      *	Current period (set by dmasound.c)
      */
 
-u_short amiga_audio_period = MAX_PERIOD;
+unsigned short amiga_audio_period = MAX_PERIOD;
 
-static u_long clock_constant;
+static unsigned long clock_constant;
 
 void __init amiga_init_sound(void)
 {
-	static struct resource beep_res = { "Beep" };
+	static struct resource beep_res = { .name = "Beep" };
 
 	snd_data = amiga_chip_alloc_res(sizeof(sine_data), &beep_res);
 	if (!snd_data) {
@@ -62,7 +63,7 @@ void __init amiga_init_sound(void)
 }
 
 static void nosound( unsigned long ignored );
-static struct timer_list sound_timer = { function: nosound };
+static struct timer_list sound_timer = TIMER_INITIALIZER(nosound, 0, 0);
 
 void amiga_mksound( unsigned int hz, unsigned int ticks )
 {
@@ -71,12 +72,11 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 	if (!snd_data)
 		return;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	del_timer( &sound_timer );
 
 	if (hz > 20 && hz < 32767) {
-		u_long period = (clock_constant / hz);
+		unsigned long period = (clock_constant / hz);
 
 		if (period < amiga_audio_min_period)
 			period = amiga_audio_min_period;
@@ -86,9 +86,9 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 		/* setup pointer to data, period, length and volume */
 		custom.aud[2].audlc = snd_data;
 		custom.aud[2].audlen = sizeof(sine_data)/2;
-		custom.aud[2].audper = (u_short)period;
+		custom.aud[2].audper = (unsigned short)period;
 		custom.aud[2].audvol = 32; /* 50% of maxvol */
-	
+
 		if (ticks) {
 			sound_timer.expires = jiffies + ticks;
 			add_timer( &sound_timer );
@@ -100,7 +100,7 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 	} else
 		nosound( 0 );
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 

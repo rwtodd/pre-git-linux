@@ -7,299 +7,479 @@
 /*
  * This file contains the default values for the opereation of the
  * Linux VM subsystem. Fine-tuning documentation can be found in
- * linux/Documentation/sysctl/vm.txt.
+ * Documentation/sysctl/vm.txt.
  * Started 18.12.91
  * Swap aging added 23.2.95, Stephen Tweedie.
  * Buffermem limits added 12.3.98, Rik van Riel.
  */
 
 #include <linux/mm.h>
+#include <linux/sched.h>
 #include <linux/kernel_stat.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
+#include <linux/mman.h>
 #include <linux/pagemap.h>
+#include <linux/pagevec.h>
 #include <linux/init.h>
-
-#include <asm/dma.h>
-#include <asm/uaccess.h> /* for copy_to/from_user */
-#include <asm/pgtable.h>
-
-/*
- * We identify three levels of free memory.  We never let free mem
- * fall below the freepages.min except for atomic allocations.  We
- * start background swapping if we fall below freepages.high free
- * pages, and we begin intensive swapping below freepages.low.
- *
- * Actual initialization is done in mm/page_alloc.c or 
- * arch/sparc(64)/mm/init.c.
- */
-freepages_t freepages = {
-	0,	/* freepages.min */
-	0,	/* freepages.low */
-	0	/* freepages.high */
-};
+#include <linux/module.h>
+#include <linux/mm_inline.h>
+#include <linux/buffer_head.h>	/* for try_to_release_page() */
+#include <linux/module.h>
+#include <linux/percpu_counter.h>
+#include <linux/percpu.h>
+#include <linux/cpu.h>
+#include <linux/notifier.h>
+#include <linux/init.h>
 
 /* How many pages do we try to swap or page in/out together? */
 int page_cluster;
 
-/*
- * This variable contains the amount of page steals the system
- * is doing, averaged over a minute. We use this to determine how
- * many inactive pages we should have.
- *
- * In reclaim_page and __alloc_pages: memory_pressure++
- * In __free_pages_ok: memory_pressure--
- * In recalculate_vm_stats the value is decayed (once a second)
- */
-int memory_pressure;
+#ifdef CONFIG_HUGETLB_PAGE
 
-/* We track the number of pages currently being asynchronously swapped
-   out, so that we don't try to swap TOO many pages out at once */
-atomic_t nr_async_pages = ATOMIC_INIT(0);
-
-buffer_mem_t buffer_mem = {
-	2,	/* minimum percent buffer */
-	10,	/* borrow percent buffer */
-	60	/* maximum percent buffer */
-};
-
-buffer_mem_t page_cache = {
-	2,	/* minimum percent page cache */
-	15,	/* borrow percent page cache */
-	75	/* maximum */
-};
-
-pager_daemon_t pager_daemon = {
-	512,	/* base number for calculating the number of tries */
-	SWAP_CLUSTER_MAX,	/* minimum number of tries */
-	8,	/* do swap I/O in clusters of this size */
-};
-
-/**
- * age_page_{up,down} -	page aging helper functions
- * @page - the page we want to age
- * @nolock - are we already holding the pagelist_lru_lock?
- *
- * If the page is on one of the lists (active, inactive_dirty or
- * inactive_clean), we will grab the pagelist_lru_lock as needed.
- * If you're already holding the lock, call this function with the
- * nolock argument non-zero.
- */
-void age_page_up_nolock(struct page * page)
+void put_page(struct page *page)
 {
-	/*
-	 * We're dealing with an inactive page, move the page
-	 * to the active list.
-	 */
-	if (!page->age)
-		activate_page_nolock(page);
+	if (unlikely(PageCompound(page))) {
+		page = (struct page *)page->private;
+		if (put_page_testzero(page)) {
+			void (*dtor)(struct page *page);
 
-	/* The actual page aging bit */
-	page->age += PAGE_AGE_ADV;
-	if (page->age > PAGE_AGE_MAX)
-		page->age = PAGE_AGE_MAX;
+			dtor = (void (*)(struct page *))page[1].mapping;
+			(*dtor)(page);
+		}
+		return;
+	}
+	if (!PageReserved(page) && put_page_testzero(page))
+		__page_cache_release(page);
 }
+EXPORT_SYMBOL(put_page);
+#endif
 
 /*
- * We use this (minimal) function in the case where we
- * know we can't deactivate the page (yet).
+ * Writeback is about to end against a page which has been marked for immediate
+ * reclaim.  If it still appears to be reclaimable, move it to the tail of the
+ * inactive list.  The page still has PageWriteback set, which will pin it.
+ *
+ * We don't expect many pages to come through here, so don't bother batching
+ * things up.
+ *
+ * To avoid placing the page at the tail of the LRU while PG_writeback is still
+ * set, this function will clear PG_writeback before performing the page
+ * motion.  Do that inside the lru lock because once PG_writeback is cleared
+ * we may not touch the page.
+ *
+ * Returns zero if it cleared PG_writeback.
  */
-void age_page_down_ageonly(struct page * page)
+int rotate_reclaimable_page(struct page *page)
 {
-	page->age /= 2;
+	struct zone *zone;
+	unsigned long flags;
+
+	if (PageLocked(page))
+		return 1;
+	if (PageDirty(page))
+		return 1;
+	if (PageActive(page))
+		return 1;
+	if (!PageLRU(page))
+		return 1;
+
+	zone = page_zone(page);
+	spin_lock_irqsave(&zone->lru_lock, flags);
+	if (PageLRU(page) && !PageActive(page)) {
+		list_del(&page->lru);
+		list_add_tail(&page->lru, &zone->inactive_list);
+		inc_page_state(pgrotated);
+	}
+	if (!test_clear_page_writeback(page))
+		BUG();
+	spin_unlock_irqrestore(&zone->lru_lock, flags);
+	return 0;
 }
 
-void age_page_down_nolock(struct page * page)
+/*
+ * FIXME: speed this up?
+ */
+void fastcall activate_page(struct page *page)
 {
-	/* The actual page aging bit */
-	page->age /= 2;
+	struct zone *zone = page_zone(page);
 
-	/*
-	 * The page is now an old page. Move to the inactive
-	 * list (if possible ... see below).
-	 */
-	if (!page->age)
-	       deactivate_page_nolock(page);
+	spin_lock_irq(&zone->lru_lock);
+	if (PageLRU(page) && !PageActive(page)) {
+		del_page_from_inactive_list(zone, page);
+		SetPageActive(page);
+		add_page_to_active_list(zone, page);
+		inc_page_state(pgactivate);
+	}
+	spin_unlock_irq(&zone->lru_lock);
 }
 
-void age_page_up(struct page * page)
+/*
+ * Mark a page as having seen activity.
+ *
+ * inactive,unreferenced	->	inactive,referenced
+ * inactive,referenced		->	active,unreferenced
+ * active,unreferenced		->	active,referenced
+ */
+void fastcall mark_page_accessed(struct page *page)
 {
-	/*
-	 * We're dealing with an inactive page, move the page
-	 * to the active list.
-	 */
-	if (!page->age)
+	if (!PageActive(page) && PageReferenced(page) && PageLRU(page)) {
 		activate_page(page);
-
-	/* The actual page aging bit */
-	page->age += PAGE_AGE_ADV;
-	if (page->age > PAGE_AGE_MAX)
-		page->age = PAGE_AGE_MAX;
-}
-
-void age_page_down(struct page * page)
-{
-	/* The actual page aging bit */
-	page->age /= 2;
-
-	/*
-	 * The page is now an old page. Move to the inactive
-	 * list (if possible ... see below).
-	 */
-	if (!page->age)
-	       deactivate_page(page);
-}
-
-
-/**
- * (de)activate_page - move pages from/to active and inactive lists
- * @page: the page we want to move
- * @nolock - are we already holding the pagemap_lru_lock?
- *
- * Deactivate_page will move an active page to the right
- * inactive list, while activate_page will move a page back
- * from one of the inactive lists to the active list. If
- * called on a page which is not on any of the lists, the
- * page is left alone.
- */
-void deactivate_page_nolock(struct page * page)
-{
-	/*
-	 * One for the cache, one for the extra reference the
-	 * caller has and (maybe) one for the buffers.
-	 *
-	 * This isn't perfect, but works for just about everything.
-	 * Besides, as long as we don't move unfreeable pages to the
-	 * inactive_clean list it doesn't need to be perfect...
-	 */
-	int maxcount = (page->buffers ? 3 : 2);
-	page->age = 0;
-	ClearPageReferenced(page);
-
-	/*
-	 * Don't touch it if it's not on the active list.
-	 * (some pages aren't on any list at all)
-	 */
-	if (PageActive(page) && page_count(page) <= maxcount && !page_ramdisk(page)) {
-		del_page_from_active_list(page);
-		add_page_to_inactive_dirty_list(page);
+		ClearPageReferenced(page);
+	} else if (!PageReferenced(page)) {
+		SetPageReferenced(page);
 	}
-}	
-
-void deactivate_page(struct page * page)
-{
-	spin_lock(&pagemap_lru_lock);
-	deactivate_page_nolock(page);
-	spin_unlock(&pagemap_lru_lock);
 }
 
-/*
- * Move an inactive page to the active list.
- */
-void activate_page_nolock(struct page * page)
-{
-	if (PageInactiveDirty(page)) {
-		del_page_from_inactive_dirty_list(page);
-		add_page_to_active_list(page);
-	} else if (PageInactiveClean(page)) {
-		del_page_from_inactive_clean_list(page);
-		add_page_to_active_list(page);
-	} else {
-		/*
-		 * The page was not on any list, so we take care
-		 * not to do anything.
-		 */
-	}
-
-	/* Make sure the page gets a fair chance at staying active. */
-	if (page->age < PAGE_AGE_START)
-		page->age = PAGE_AGE_START;
-}
-
-void activate_page(struct page * page)
-{
-	spin_lock(&pagemap_lru_lock);
-	activate_page_nolock(page);
-	spin_unlock(&pagemap_lru_lock);
-}
+EXPORT_SYMBOL(mark_page_accessed);
 
 /**
  * lru_cache_add: add a page to the page lists
  * @page: the page to add
  */
-void lru_cache_add(struct page * page)
+static DEFINE_PER_CPU(struct pagevec, lru_add_pvecs) = { 0, };
+static DEFINE_PER_CPU(struct pagevec, lru_add_active_pvecs) = { 0, };
+
+void fastcall lru_cache_add(struct page *page)
 {
-	spin_lock(&pagemap_lru_lock);
-	if (!PageLocked(page))
-		BUG();
-	DEBUG_ADD_PAGE
-	add_page_to_active_list(page);
-	/* This should be relatively rare */
-	if (!page->age)
-		deactivate_page_nolock(page);
-	spin_unlock(&pagemap_lru_lock);
+	struct pagevec *pvec = &get_cpu_var(lru_add_pvecs);
+
+	page_cache_get(page);
+	if (!pagevec_add(pvec, page))
+		__pagevec_lru_add(pvec);
+	put_cpu_var(lru_add_pvecs);
 }
 
-/**
- * __lru_cache_del: remove a page from the page lists
- * @page: the page to add
- *
- * This function is for when the caller already holds
- * the pagemap_lru_lock.
- */
-void __lru_cache_del(struct page * page)
+void fastcall lru_cache_add_active(struct page *page)
 {
-	if (PageActive(page)) {
-		del_page_from_active_list(page);
-	} else if (PageInactiveDirty(page)) {
-		del_page_from_inactive_dirty_list(page);
-	} else if (PageInactiveClean(page)) {
-		del_page_from_inactive_clean_list(page);
-	} else {
-		printk("VM: __lru_cache_del, found unknown page ?!\n");
+	struct pagevec *pvec = &get_cpu_var(lru_add_active_pvecs);
+
+	page_cache_get(page);
+	if (!pagevec_add(pvec, page))
+		__pagevec_lru_add_active(pvec);
+	put_cpu_var(lru_add_active_pvecs);
+}
+
+void lru_add_drain(void)
+{
+	struct pagevec *pvec = &get_cpu_var(lru_add_pvecs);
+
+	if (pagevec_count(pvec))
+		__pagevec_lru_add(pvec);
+	pvec = &__get_cpu_var(lru_add_active_pvecs);
+	if (pagevec_count(pvec))
+		__pagevec_lru_add_active(pvec);
+	put_cpu_var(lru_add_pvecs);
+}
+
+/*
+ * This path almost never happens for VM activity - pages are normally
+ * freed via pagevecs.  But it gets used by networking.
+ */
+void fastcall __page_cache_release(struct page *page)
+{
+	unsigned long flags;
+	struct zone *zone = page_zone(page);
+
+	spin_lock_irqsave(&zone->lru_lock, flags);
+	if (TestClearPageLRU(page))
+		del_page_from_lru(zone, page);
+	if (page_count(page) != 0)
+		page = NULL;
+	spin_unlock_irqrestore(&zone->lru_lock, flags);
+	if (page)
+		free_hot_page(page);
+}
+
+EXPORT_SYMBOL(__page_cache_release);
+
+/*
+ * Batched page_cache_release().  Decrement the reference count on all the
+ * passed pages.  If it fell to zero then remove the page from the LRU and
+ * free it.
+ *
+ * Avoid taking zone->lru_lock if possible, but if it is taken, retain it
+ * for the remainder of the operation.
+ *
+ * The locking in this function is against shrink_cache(): we recheck the
+ * page count inside the lock to see whether shrink_cache grabbed the page
+ * via the LRU.  If it did, give up: shrink_cache will free it.
+ */
+void release_pages(struct page **pages, int nr, int cold)
+{
+	int i;
+	struct pagevec pages_to_free;
+	struct zone *zone = NULL;
+
+	pagevec_init(&pages_to_free, cold);
+	for (i = 0; i < nr; i++) {
+		struct page *page = pages[i];
+		struct zone *pagezone;
+
+		if (PageReserved(page) || !put_page_testzero(page))
+			continue;
+
+		pagezone = page_zone(page);
+		if (pagezone != zone) {
+			if (zone)
+				spin_unlock_irq(&zone->lru_lock);
+			zone = pagezone;
+			spin_lock_irq(&zone->lru_lock);
+		}
+		if (TestClearPageLRU(page))
+			del_page_from_lru(zone, page);
+		if (page_count(page) == 0) {
+			if (!pagevec_add(&pages_to_free, page)) {
+				spin_unlock_irq(&zone->lru_lock);
+				__pagevec_free(&pages_to_free);
+				pagevec_reinit(&pages_to_free);
+				zone = NULL;	/* No lock is held */
+			}
+		}
 	}
-	DEBUG_ADD_PAGE
+	if (zone)
+		spin_unlock_irq(&zone->lru_lock);
+
+	pagevec_free(&pages_to_free);
 }
 
-/**
- * lru_cache_del: remove a page from the page lists
- * @page: the page to remove
- */
-void lru_cache_del(struct page * page)
-{
-	if (!PageLocked(page))
-		BUG();
-	spin_lock(&pagemap_lru_lock);
-	__lru_cache_del(page);
-	spin_unlock(&pagemap_lru_lock);
-}
-
-/**
- * recalculate_vm_stats - recalculate VM statistics
+/*
+ * The pages which we're about to release may be in the deferred lru-addition
+ * queues.  That would prevent them from really being freed right now.  That's
+ * OK from a correctness point of view but is inefficient - those pages may be
+ * cache-warm and we want to give them back to the page allocator ASAP.
  *
- * This function should be called once a second to recalculate
- * some useful statistics the VM subsystem uses to determine
- * its behaviour.
+ * So __pagevec_release() will drain those queues here.  __pagevec_lru_add()
+ * and __pagevec_lru_add_active() call release_pages() directly to avoid
+ * mutual recursion.
  */
-void recalculate_vm_stats(void)
+void __pagevec_release(struct pagevec *pvec)
 {
-	/*
-	 * Substract one second worth of memory_pressure from
-	 * memory_pressure.
-	 */
-	memory_pressure -= (memory_pressure >> INACTIVE_SHIFT);
+	lru_add_drain();
+	release_pages(pvec->pages, pagevec_count(pvec), pvec->cold);
+	pagevec_reinit(pvec);
 }
+
+/*
+ * pagevec_release() for pages which are known to not be on the LRU
+ *
+ * This function reinitialises the caller's pagevec.
+ */
+void __pagevec_release_nonlru(struct pagevec *pvec)
+{
+	int i;
+	struct pagevec pages_to_free;
+
+	pagevec_init(&pages_to_free, pvec->cold);
+	pages_to_free.cold = pvec->cold;
+	for (i = 0; i < pagevec_count(pvec); i++) {
+		struct page *page = pvec->pages[i];
+
+		BUG_ON(PageLRU(page));
+		if (put_page_testzero(page))
+			pagevec_add(&pages_to_free, page);
+	}
+	pagevec_free(&pages_to_free);
+	pagevec_reinit(pvec);
+}
+
+/*
+ * Add the passed pages to the LRU, then drop the caller's refcount
+ * on them.  Reinitialises the caller's pagevec.
+ */
+void __pagevec_lru_add(struct pagevec *pvec)
+{
+	int i;
+	struct zone *zone = NULL;
+
+	for (i = 0; i < pagevec_count(pvec); i++) {
+		struct page *page = pvec->pages[i];
+		struct zone *pagezone = page_zone(page);
+
+		if (pagezone != zone) {
+			if (zone)
+				spin_unlock_irq(&zone->lru_lock);
+			zone = pagezone;
+			spin_lock_irq(&zone->lru_lock);
+		}
+		if (TestSetPageLRU(page))
+			BUG();
+		add_page_to_inactive_list(zone, page);
+	}
+	if (zone)
+		spin_unlock_irq(&zone->lru_lock);
+	release_pages(pvec->pages, pvec->nr, pvec->cold);
+	pagevec_reinit(pvec);
+}
+
+EXPORT_SYMBOL(__pagevec_lru_add);
+
+void __pagevec_lru_add_active(struct pagevec *pvec)
+{
+	int i;
+	struct zone *zone = NULL;
+
+	for (i = 0; i < pagevec_count(pvec); i++) {
+		struct page *page = pvec->pages[i];
+		struct zone *pagezone = page_zone(page);
+
+		if (pagezone != zone) {
+			if (zone)
+				spin_unlock_irq(&zone->lru_lock);
+			zone = pagezone;
+			spin_lock_irq(&zone->lru_lock);
+		}
+		if (TestSetPageLRU(page))
+			BUG();
+		if (TestSetPageActive(page))
+			BUG();
+		add_page_to_active_list(zone, page);
+	}
+	if (zone)
+		spin_unlock_irq(&zone->lru_lock);
+	release_pages(pvec->pages, pvec->nr, pvec->cold);
+	pagevec_reinit(pvec);
+}
+
+/*
+ * Try to drop buffers from the pages in a pagevec
+ */
+void pagevec_strip(struct pagevec *pvec)
+{
+	int i;
+
+	for (i = 0; i < pagevec_count(pvec); i++) {
+		struct page *page = pvec->pages[i];
+
+		if (PagePrivate(page) && !TestSetPageLocked(page)) {
+			try_to_release_page(page, 0);
+			unlock_page(page);
+		}
+	}
+}
+
+/**
+ * pagevec_lookup - gang pagecache lookup
+ * @pvec:	Where the resulting pages are placed
+ * @mapping:	The address_space to search
+ * @start:	The starting page index
+ * @nr_pages:	The maximum number of pages
+ *
+ * pagevec_lookup() will search for and return a group of up to @nr_pages pages
+ * in the mapping.  The pages are placed in @pvec.  pagevec_lookup() takes a
+ * reference against the pages in @pvec.
+ *
+ * The search returns a group of mapping-contiguous pages with ascending
+ * indexes.  There may be holes in the indices due to not-present pages.
+ *
+ * pagevec_lookup() returns the number of pages which were found.
+ */
+unsigned pagevec_lookup(struct pagevec *pvec, struct address_space *mapping,
+		pgoff_t start, unsigned nr_pages)
+{
+	pvec->nr = find_get_pages(mapping, start, nr_pages, pvec->pages);
+	return pagevec_count(pvec);
+}
+
+unsigned pagevec_lookup_tag(struct pagevec *pvec, struct address_space *mapping,
+		pgoff_t *index, int tag, unsigned nr_pages)
+{
+	pvec->nr = find_get_pages_tag(mapping, index, tag,
+					nr_pages, pvec->pages);
+	return pagevec_count(pvec);
+}
+
+
+#ifdef CONFIG_SMP
+/*
+ * We tolerate a little inaccuracy to avoid ping-ponging the counter between
+ * CPUs
+ */
+#define ACCT_THRESHOLD	max(16, NR_CPUS * 2)
+
+static DEFINE_PER_CPU(long, committed_space) = 0;
+
+void vm_acct_memory(long pages)
+{
+	long *local;
+
+	preempt_disable();
+	local = &__get_cpu_var(committed_space);
+	*local += pages;
+	if (*local > ACCT_THRESHOLD || *local < -ACCT_THRESHOLD) {
+		atomic_add(*local, &vm_committed_space);
+		*local = 0;
+	}
+	preempt_enable();
+}
+EXPORT_SYMBOL(vm_acct_memory);
+
+#ifdef CONFIG_HOTPLUG_CPU
+static void lru_drain_cache(unsigned int cpu)
+{
+	struct pagevec *pvec = &per_cpu(lru_add_pvecs, cpu);
+
+	/* CPU is dead, so no locking needed. */
+	if (pagevec_count(pvec))
+		__pagevec_lru_add(pvec);
+	pvec = &per_cpu(lru_add_active_pvecs, cpu);
+	if (pagevec_count(pvec))
+		__pagevec_lru_add_active(pvec);
+}
+
+/* Drop the CPU's cached committed space back into the central pool. */
+static int cpu_swap_callback(struct notifier_block *nfb,
+			     unsigned long action,
+			     void *hcpu)
+{
+	long *committed;
+
+	committed = &per_cpu(committed_space, (long)hcpu);
+	if (action == CPU_DEAD) {
+		atomic_add(*committed, &vm_committed_space);
+		*committed = 0;
+		lru_drain_cache((long)hcpu);
+	}
+	return NOTIFY_OK;
+}
+#endif /* CONFIG_HOTPLUG_CPU */
+#endif /* CONFIG_SMP */
+
+#ifdef CONFIG_SMP
+void percpu_counter_mod(struct percpu_counter *fbc, long amount)
+{
+	long count;
+	long *pcount;
+	int cpu = get_cpu();
+
+	pcount = per_cpu_ptr(fbc->counters, cpu);
+	count = *pcount + amount;
+	if (count >= FBC_BATCH || count <= -FBC_BATCH) {
+		spin_lock(&fbc->lock);
+		fbc->count += count;
+		spin_unlock(&fbc->lock);
+		count = 0;
+	}
+	*pcount = count;
+	put_cpu();
+}
+EXPORT_SYMBOL(percpu_counter_mod);
+#endif
 
 /*
  * Perform any setup for the swap system
  */
 void __init swap_setup(void)
 {
-	/* Use a smaller cluster for memory <16MB or <32MB */
-	if (num_physpages < ((16 * 1024 * 1024) >> PAGE_SHIFT))
+	unsigned long megs = num_physpages >> (20 - PAGE_SHIFT);
+
+	/* Use a smaller cluster for small-memory machines */
+	if (megs < 16)
 		page_cluster = 2;
-	else if (num_physpages < ((32 * 1024 * 1024) >> PAGE_SHIFT))
-		page_cluster = 3;
 	else
-		page_cluster = 4;
+		page_cluster = 3;
+	/*
+	 * Right now other parts of the system means that we
+	 * _really_ don't want to cluster much more
+	 */
+	hotcpu_notifier(cpu_swap_callback, 0);
 }

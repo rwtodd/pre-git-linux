@@ -22,6 +22,7 @@
 #include <linux/ipv6.h>
 #include <linux/skbuff.h>
 #endif
+#include <linux/compiler.h>
 #include <linux/netfilter_ipv6.h>
 
 #define IP6T_FUNCTION_MAXNAMELEN 30
@@ -258,7 +259,7 @@ struct ip6t_replace
 	/* Number of counters (must be equal to current number of entries). */
 	unsigned int num_counters;
 	/* The old entries' counters. */
-	struct ip6t_counters *counters;
+	struct ip6t_counters __user *counters;
 
 	/* The entries (hang off end: not really an array). */
 	struct ip6t_entry entries[0];
@@ -295,7 +296,7 @@ struct ip6t_get_entries
 #define IP6T_ERROR_TARGET "ERROR"
 
 /* Helper functions */
-extern __inline__ struct ip6t_entry_target *
+static __inline__ struct ip6t_entry_target *
 ip6t_get_target(struct ip6t_entry *e)
 {
 	return (void *)e + e->target_offset;
@@ -354,13 +355,15 @@ struct ip6t_match
 
 	/* Return true or false: return FALSE and set *hotdrop = 1 to
            force immediate packet drop. */
+	/* Arguments changed since 2.6.9, as this must now handle
+	   non-linear skb, using skb_header_pointer and
+	   skb_ip_make_writable. */
 	int (*match)(const struct sk_buff *skb,
 		     const struct net_device *in,
 		     const struct net_device *out,
 		     const void *matchinfo,
 		     int offset,
-		     const void *hdr,
-		     u_int16_t datalen,
+		     unsigned int protoff,
 		     int *hotdrop);
 
 	/* Called when user tries to insert an entry of this type. */
@@ -385,11 +388,13 @@ struct ip6t_target
 
 	const char name[IP6T_FUNCTION_MAXNAMELEN];
 
-	/* Returns verdict. */
+	/* Returns verdict. Argument order changed since 2.6.9, as this
+	   must now handle non-linear skbs, using skb_copy_bits and
+	   skb_ip_make_writable. */
 	unsigned int (*target)(struct sk_buff **pskb,
-			       unsigned int hooknum,
 			       const struct net_device *in,
 			       const struct net_device *out,
+			       unsigned int hooknum,
 			       const void *targinfo,
 			       void *userdata);
 
@@ -424,9 +429,6 @@ struct ip6t_table
 	/* A unique name... */
 	char name[IP6T_TABLE_MAXNAMELEN];
 
-	/* Seed table: copied in register_table */
-	struct ip6t_replace *table;
-
 	/* What hooks you will enter on */
 	unsigned int valid_hooks;
 
@@ -435,9 +437,13 @@ struct ip6t_table
 
 	/* Man behind the curtain... */
 	struct ip6t_table_info *private;
+
+	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	struct module *me;
 };
 
-extern int ip6t_register_table(struct ip6t_table *table);
+extern int ip6t_register_table(struct ip6t_table *table,
+			       const struct ip6t_replace *repl);
 extern void ip6t_unregister_table(struct ip6t_table *table);
 extern unsigned int ip6t_do_table(struct sk_buff **pskb,
 				  unsigned int hook,
@@ -445,6 +451,9 @@ extern unsigned int ip6t_do_table(struct sk_buff **pskb,
 				  const struct net_device *out,
 				  struct ip6t_table *table,
 				  void *userdata);
+
+/* Check for an extension */
+extern int ip6t_ext_hdr(u8 nexthdr);
 
 #define IP6T_ALIGN(s) (((s) + (__alignof__(struct ip6t_entry)-1)) & ~(__alignof__(struct ip6t_entry)-1))
 

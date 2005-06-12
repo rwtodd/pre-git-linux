@@ -26,11 +26,14 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #if defined(__alpha__)
 # include <asm/hwrpb.h>
+#elif defined(__x86_64__)
+# include <asm/msr.h>
+# include <asm/timex.h>
 #elif defined(__i386__)
 # include <linux/timex.h>
 #endif
@@ -41,13 +44,15 @@
 
 #undef DEBUG
 
-#if !defined(__alpha__) && !defined(__i386__)
+#if !defined(__alpha__) && !defined(__i386__) && !defined(__x86_64__)
 # error Ftape is not implemented for this architecture!
 #endif
 
-#if defined(__alpha__)
+#if defined(__alpha__) || defined(__x86_64__)
 static unsigned long ps_per_cycle = 0;
 #endif
+
+static spinlock_t calibr_lock;
 
 /*
  * Note: On Intel PCs, the clock ticks at 100 Hz (HZ==100) which is
@@ -56,7 +61,7 @@ static unsigned long ps_per_cycle = 0;
  * used directly to implement fine-grained timeouts.  However, on
  * Alpha PCs, the 8254 is *not* used to implement the clock tick
  * (which is 1024 Hz, normally) and the 8254 timer runs at some
- * "random" frequency (it seems to run at 18Hz, but its not safe to
+ * "random" frequency (it seems to run at 18Hz, but it's not safe to
  * rely on this value).  Instead, we use the Alpha's "rpcc"
  * instruction to read cycle counts.  As this is a 32 bit counter,
  * it will overflow only once per 30 seconds (on a 200MHz machine),
@@ -70,44 +75,53 @@ unsigned int ftape_timestamp(void)
 
 	asm volatile ("rpcc %0" : "=r" (r));
 	return r;
+#elif defined(__x86_64__)
+	unsigned long r;
+	rdtscl(r);
+	return r;
 #elif defined(__i386__)
+
+/*
+ * Note that there is some time between counter underflowing and jiffies
+ * increasing, so the code below won't always give correct output.
+ * -Vojtech
+ */
+
 	unsigned long flags;
 	__u16 lo;
 	__u16 hi;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&calibr_lock, flags);
 	outb_p(0x00, 0x43);	/* latch the count ASAP */
 	lo = inb_p(0x40);	/* read the latched count */
 	lo |= inb(0x40) << 8;
 	hi = jiffies;
-	restore_flags(flags);
+	spin_unlock_irqrestore(&calibr_lock, flags);
 	return ((hi + 1) * (unsigned int) LATCH) - lo;  /* downcounter ! */
 #endif
 }
 
 static unsigned int short_ftape_timestamp(void)
 {
-#if defined(__alpha__)
+#if defined(__alpha__) || defined(__x86_64__)
 	return ftape_timestamp();
 #elif defined(__i386__)
 	unsigned int count;
  	unsigned long flags;
  
- 	save_flags(flags);
- 	cli();
+	spin_lock_irqsave(&calibr_lock, flags);
  	outb_p(0x00, 0x43);	/* latch the count ASAP */
 	count = inb_p(0x40);	/* read the latched count */
 	count |= inb(0x40) << 8;
- 	restore_flags(flags);
+	spin_unlock_irqrestore(&calibr_lock, flags);
 	return (LATCH - count);	/* normal: downcounter */
 #endif
 }
 
 static unsigned int diff(unsigned int t0, unsigned int t1)
 {
-#if defined(__alpha__)
-	return (t1 <= t0) ? t1 + (1UL << 32) - t0 : t1 - t0;
+#if defined(__alpha__) || defined(__x86_64__)
+	return (t1 - t0);
 #elif defined(__i386__)
 	/*
 	 * This is tricky: to work for both short and full ftape_timestamps
@@ -122,7 +136,7 @@ static unsigned int diff(unsigned int t0, unsigned int t1)
 
 static unsigned int usecs(unsigned int count)
 {
-#if defined(__alpha__)
+#if defined(__alpha__) || defined(__x86_64__)
 	return (ps_per_cycle * count) / 1000000UL;
 #elif defined(__i386__)
 	return (10000 * count) / ((CLOCK_TICK_RATE + 50) / 100);
@@ -150,52 +164,26 @@ static void time_inb(void)
 	int status;
 	TRACE_FUN(ft_t_any);
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&calibr_lock, flags);
 	t0 = short_ftape_timestamp();
 	for (i = 0; i < 1000; ++i) {
 		status = inb(fdc.msr);
 	}
 	t1 = short_ftape_timestamp();
-	restore_flags(flags);
+	spin_unlock_irqrestore(&calibr_lock, flags);
 	TRACE(ft_t_info, "inb() duration: %d nsec", ftape_timediff(t0, t1));
 	TRACE_EXIT;
 }
 
 static void init_clock(void)
 {
-#if defined(__i386__)
-	unsigned int t;
-	int i;
 	TRACE_FUN(ft_t_any);
 
-	/*  Haven't studied on why, but there sometimes is a problem
-	 *  with the tick timer readout. The two bytes get swapped.
-	 *  This hack solves that problem by doing one extra input.
-	 */
-	for (i = 0; i < 1000; ++i) {
-		t = short_ftape_timestamp();
-		if (t > LATCH) {
-			inb_p(0x40);	/* get in sync again */
-			TRACE(ft_t_warn, "clock counter fixed");
-			break;
-		}
-	}
+#if defined(__x86_64__)
+	ps_per_cycle = 1000000000UL / cpu_khz;
 #elif defined(__alpha__)
-#if CONFIG_FT_ALPHA_CLOCK == 0
-#error You must define and set CONFIG_FT_ALPHA_CLOCK in 'make config' !
-#endif
 	extern struct hwrpb_struct *hwrpb;
-	TRACE_FUN(ft_t_any);
-
-	if (hwrpb->cycle_freq != 0) {
-		ps_per_cycle = (1000*1000*1000*1000UL) / hwrpb->cycle_freq;
-	} else {
-		/*
-		 * HELP:  Linux 2.0.x doesn't set cycle_freq on my noname !
-		 */
-		ps_per_cycle = (1000*1000*1000*1000UL) / CONFIG_FT_ALPHA_CLOCK;
-	}
+	ps_per_cycle = (1000*1000*1000*1000UL) / hwrpb->cycle_freq;
 #endif
 	TRACE_EXIT;
 }
@@ -241,8 +229,7 @@ void ftape_calibrate(char *name,
 
 		*calibr_count =
 		*calibr_time = count;	/* set TC to 1 */
-		save_flags(flags);
-		cli();
+		spin_lock_irqsave(&calibr_lock, flags);
 		fun(0);		/* dummy, get code into cache */
 		t0 = short_ftape_timestamp();
 		fun(0);		/* overhead + one test */
@@ -252,12 +239,12 @@ void ftape_calibrate(char *name,
 		fun(count);		/* overhead + count tests */
 		t1 = short_ftape_timestamp();
 		multiple = diff(t0, t1);
-		restore_flags(flags);
+		spin_unlock_irqrestore(&calibr_lock, flags);
 		time = ftape_timediff(0, multiple - once);
 		tc = (1000 * time) / (count - 1);
 		TRACE(ft_t_any, "once:%3d us,%6d times:%6d us, TC:%5d ns",
 			usecs(once), count - 1, usecs(multiple), tc);
-#if defined(__alpha__)
+#if defined(__alpha__) || defined(__x86_64__)
 		/*
 		 * Increase the calibration count exponentially until the
 		 * calibration time exceeds 100 ms.

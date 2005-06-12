@@ -1,29 +1,22 @@
-/* $Id: module.c,v 1.14 2000/11/12 16:32:06 kai Exp $
+/* $Id: module.c,v 1.14.6.4 2001/09/23 22:24:32 kai Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000.
  *
- * Copyright 1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Author       Fritz Elfert
+ * Copyright    by Fritz Elfert      <fritz@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  * Thanks to Friedemann Baitinger and IBM Germany
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
  */
 
 #include "act2000.h"
 #include "act2000_isa.h"
 #include "capi.h"
+#include <linux/module.h>
+#include <linux/init.h>
 
 static unsigned short act2000_isa_ports[] =
 {
@@ -37,20 +30,20 @@ static act2000_card *cards = (act2000_card *) NULL;
 /* Parameters to be set by insmod */
 static int   act_bus  =  0;
 static int   act_port = -1;  /* -1 = Autoprobe  */
-static int   act_irq  = -1;  /* -1 = Autoselect */
+static int   act_irq  = -1;
 static char *act_id   = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
-MODULE_DESCRIPTION(       "Driver for IBM Active 2000 ISDN card");
+MODULE_DESCRIPTION(       "ISDN4Linux: Driver for IBM Active 2000 ISDN card");
 MODULE_AUTHOR(            "Fritz Elfert");
-MODULE_SUPPORTED_DEVICE(  "ISDN subsystem");
+MODULE_LICENSE(           "GPL");
 MODULE_PARM_DESC(act_bus, "BusType of first card, 1=ISA, 2=MCA, 3=PCMCIA, currently only ISA");
 MODULE_PARM_DESC(membase, "Base port address of first card");
-MODULE_PARM_DESC(act_irq, "IRQ of first card (-1 = grab next free IRQ)");
+MODULE_PARM_DESC(act_irq, "IRQ of first card");
 MODULE_PARM_DESC(act_id,  "ID-String of first card");
-MODULE_PARM(act_bus,  "i");
-MODULE_PARM(act_port, "i");
-MODULE_PARM(act_irq,  "i");
-MODULE_PARM(act_id,   "s");
+module_param(act_bus,  int, 0);
+module_param(act_port, int, 0);
+module_param(act_irq, int, 0);
+module_param(act_id, charp, 0);
 
 static int act2000_addcard(int, int, int, char *);
 
@@ -69,19 +62,18 @@ find_channel(act2000_card *card, int channel)
 static void
 act2000_clear_msn(act2000_card *card)
 {
-        struct msn_entry *p = card->msn_list;
-        struct msn_entry *q;
+	struct msn_entry *p = card->msn_list;
+	struct msn_entry *q;
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
-        card->msn_list = NULL;
-	restore_flags(flags);
-        while (p) {
-                q  = p->next;
-                kfree(p);
-                p = q;
-        }
+	spin_lock_irqsave(&card->lock, flags);
+	card->msn_list = NULL;
+	spin_unlock_irqrestore(&card->lock, flags);
+	while (p) {
+		q  = p->next;
+		kfree(p);
+		p = q;
+	}
 }
 
 /*
@@ -150,13 +142,12 @@ act2000_set_msn(act2000_card *card, char *eazmsn)
 		/* Delete a single MSN */
 		while (p) {
 			if (p->eaz == eazmsn[0]) {
-				save_flags(flags);
-				cli();
+				spin_lock_irqsave(&card->lock, flags);
 				if (q)
 					q->next = p->next;
 				else
 					card->msn_list = p->next;
-				restore_flags(flags);
+				spin_unlock_irqrestore(&card->lock, flags);
 				kfree(p);
 				printk(KERN_DEBUG
 				       "Mapping for EAZ %c deleted\n",
@@ -172,10 +163,9 @@ act2000_set_msn(act2000_card *card, char *eazmsn)
 	while (p) {
 		/* Found in list, replace MSN */
 		if (p->eaz == eazmsn[0]) {
-			save_flags(flags);
-			cli();
+			spin_lock_irqsave(&card->lock, flags);
 			strcpy(p->msn, &eazmsn[1]);
-			restore_flags(flags);
+			spin_unlock_irqrestore(&card->lock, flags);
 			printk(KERN_DEBUG
 			       "Mapping for EAZ %c changed to %s\n",
 			       eazmsn[0],
@@ -191,10 +181,9 @@ act2000_set_msn(act2000_card *card, char *eazmsn)
 	p->eaz = eazmsn[0];
 	strcpy(p->msn, &eazmsn[1]);
 	p->next = card->msn_list;
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&card->lock, flags);
 	card->msn_list = p;
-	restore_flags(flags);
+	spin_unlock_irqrestore(&card->lock, flags);
 	printk(KERN_DEBUG
 	       "Mapping %c -> %s added\n",
 	       eazmsn[0],
@@ -239,10 +228,9 @@ act2000_poll(unsigned long data)
 	unsigned long flags;
 
 	act2000_receive(card);
-        save_flags(flags);
-        cli();
-        mod_timer(&card->ptimer, jiffies+3);
-        restore_flags(flags);
+	spin_lock_irqsave(&card->lock, flags);
+	mod_timer(&card->ptimer, jiffies+3);
+	spin_unlock_irqrestore(&card->lock, flags);
 }
 
 static int
@@ -255,16 +243,18 @@ act2000_command(act2000_card * card, isdn_ctrl * c)
 	char tmp[17];
 	int ret;
 	unsigned long flags;
+	void __user *arg;
  
         switch (c->command) {
 		case ISDN_CMD_IOCTL:
 			memcpy(&a, c->parm.num, sizeof(ulong));
+			arg = (void __user *)a;
 			switch (c->arg) {
 				case ACT2000_IOCTL_LOADBOOT:
 					switch (card->bus) {
 						case ACT2000_BUS_ISA:
 							ret = act2000_isa_download(card,
-									   (act2000_ddef *)a);
+									   arg);
 							if (!ret) {
 								card->flags |= ACT2000_FLAGS_LOADED;
 								if (!(card->flags & ACT2000_FLAGS_IVALID)) {
@@ -290,16 +280,18 @@ act2000_command(act2000_card * card, isdn_ctrl * c)
 					actcapi_manufacturer_req_net(card);
 					return 0;
 				case ACT2000_IOCTL_SETMSN:
-					if ((ret = copy_from_user(tmp, (char *)a, sizeof(tmp))))
-						return ret;
+					if (copy_from_user(tmp, arg,
+							   sizeof(tmp)))
+						return -EFAULT;
 					if ((ret = act2000_set_msn(card, tmp)))
 						return ret;
 					if (card->flags & ACT2000_FLAGS_RUNNING)
 						return(actcapi_manufacturer_req_msn(card));
 					return 0;
 				case ACT2000_IOCTL_ADDCARD:
-					if ((ret = copy_from_user(&cdef, (char *)a, sizeof(cdef))))
-						return ret;
+					if (copy_from_user(&cdef, arg,
+							   sizeof(cdef)))
+						return -EFAULT;
 					if (act2000_addcard(cdef.bus, cdef.port, cdef.irq, cdef.id))
 						return -EIO;
 					return 0;
@@ -316,10 +308,9 @@ act2000_command(act2000_card * card, isdn_ctrl * c)
 				return -ENODEV;
 			if (!(chan = find_channel(card, c->arg & 0x0f)))
 				break;
-			save_flags(flags);
-			cli();
+			spin_lock_irqsave(&card->lock, flags);
 			if (chan->fsm_state != ACT2000_STATE_NULL) {
-				restore_flags(flags);
+				spin_unlock_irqrestore(&card->lock, flags);
 				printk(KERN_WARNING "Dial on channel with state %d\n",
 					chan->fsm_state);
 				return -EBUSY;
@@ -330,7 +321,7 @@ act2000_command(act2000_card * card, isdn_ctrl * c)
 				tmp[0] = c->parm.setup.eazmsn[0];
 			chan->fsm_state = ACT2000_STATE_OCALL;
 			chan->callref = 0xffff;
-			restore_flags(flags);
+			spin_unlock_irqrestore(&card->lock, flags);
 			ret = actcapi_connect_req(card, chan, c->parm.setup.phone,
 						  tmp[0], c->parm.setup.si1,
 						  c->parm.setup.si2);
@@ -403,12 +394,6 @@ act2000_command(act2000_card * card, isdn_ctrl * c)
 				break;
 			chan->l2prot = (c->arg >> 8);
 			return 0;
-		case ISDN_CMD_GETL2:
-			if (!card->flags & ACT2000_FLAGS_RUNNING)
-				return -ENODEV;
-			if (!(chan = find_channel(card, c->arg & 0x0f)))
-				break;
-			return chan->l2prot;
 		case ISDN_CMD_SETL3:
 			if (!card->flags & ACT2000_FLAGS_RUNNING)
 				return -ENODEV;
@@ -419,33 +404,6 @@ act2000_command(act2000_card * card, isdn_ctrl * c)
 			if (!(chan = find_channel(card, c->arg & 0x0f)))
 				break;
 			chan->l3prot = (c->arg >> 8);
-			return 0;
-		case ISDN_CMD_GETL3:
-			if (!card->flags & ACT2000_FLAGS_RUNNING)
-				return -ENODEV;
-			if (!(chan = find_channel(card, c->arg & 0x0f)))
-				break;
-			return chan->l3prot;
-		case ISDN_CMD_GETEAZ:
-			if (!card->flags & ACT2000_FLAGS_RUNNING)
-				return -ENODEV;
-			printk(KERN_DEBUG "act2000 CMD_GETEAZ not implemented\n");
-			return 0;
-		case ISDN_CMD_SETSIL:
-			if (!card->flags & ACT2000_FLAGS_RUNNING)
-				return -ENODEV;
-			printk(KERN_DEBUG "act2000 CMD_SETSIL not implemented\n");
-			return 0;
-		case ISDN_CMD_GETSIL:
-			if (!card->flags & ACT2000_FLAGS_RUNNING)
-				return -ENODEV;
-			printk(KERN_DEBUG "act2000 CMD_GETSIL not implemented\n");
-			return 0;
-		case ISDN_CMD_LOCK:
-			MOD_INC_USE_COUNT;
-			return 0;
-		case ISDN_CMD_UNLOCK:
-			MOD_DEC_USE_COUNT;
 			return 0;
         }
 	
@@ -507,18 +465,15 @@ act2000_sendbuf(act2000_card *card, int channel, int ack, struct sk_buff *skb)
 
 /* Read the Status-replies from the Interface */
 static int
-act2000_readstatus(u_char * buf, int len, int user, act2000_card * card)
+act2000_readstatus(u_char __user * buf, int len, act2000_card * card)
 {
         int count;
-        u_char *p;
+        u_char __user *p;
 
         for (p = buf, count = 0; count < len; p++, count++) {
                 if (card->status_buf_read == card->status_buf_write)
                         return count;
-                if (user)
-                        put_user(*card->status_buf_read++, p);
-                else
-                        *p = *card->status_buf_read++;
+		put_user(*card->status_buf_read++, p);
                 if (card->status_buf_read > card->status_buf_end)
                         card->status_buf_read = card->status_buf;
         }
@@ -558,7 +513,7 @@ if_command(isdn_ctrl * c)
 }
 
 static int
-if_writecmd(const u_char * buf, int len, int user, int id, int channel)
+if_writecmd(const u_char __user *buf, int len, int id, int channel)
 {
         act2000_card *card = act2000_findcard(id);
 
@@ -573,14 +528,14 @@ if_writecmd(const u_char * buf, int len, int user, int id, int channel)
 }
 
 static int
-if_readstatus(u_char * buf, int len, int user, int id, int channel)
+if_readstatus(u_char __user * buf, int len, int id, int channel)
 {
         act2000_card *card = act2000_findcard(id);
 	
         if (card) {
                 if (!card->flags & ACT2000_FLAGS_RUNNING)
                         return -ENODEV;
-                return (act2000_readstatus(buf, len, user, card));
+                return (act2000_readstatus(buf, len, card));
         }
         printk(KERN_ERR
                "act2000: if_readstatus called with invalid driverId!\n");
@@ -618,16 +573,16 @@ act2000_alloccard(int bus, int port, int irq, char *id)
                 return;
         }
         memset((char *) card, 0, sizeof(act2000_card));
+        spin_lock_init(&card->lock);
+        spin_lock_init(&card->mnlock);
 	skb_queue_head_init(&card->sndq);
 	skb_queue_head_init(&card->rcvq);
 	skb_queue_head_init(&card->ackq);
-	card->snd_tq.routine = (void *) (void *) act2000_transmit;
-	card->snd_tq.data = card;
-	card->rcv_tq.routine = (void *) (void *) actcapi_dispatch;
-	card->rcv_tq.data = card;
-	card->poll_tq.routine = (void *) (void *) act2000_receive;
-	card->poll_tq.data = card;
+	INIT_WORK(&card->snd_tq, (void *) (void *) act2000_transmit, card);
+	INIT_WORK(&card->rcv_tq, (void *) (void *) actcapi_dispatch, card);
+	INIT_WORK(&card->poll_tq, (void *) (void *) act2000_receive, card);
 	init_timer(&card->ptimer);
+	card->interface.owner = THIS_MODULE;
         card->interface.channels = ACT2000_BCH;
         card->interface.maxbufsize = 4000;
         card->interface.command = if_command;
@@ -641,7 +596,7 @@ act2000_alloccard(int bus, int port, int irq, char *id)
 		ISDN_FEATURE_P_UNKNOWN;
         card->interface.hl_hdrlen = 20;
         card->ptype = ISDN_PTYPE_EURO;
-        strncpy(card->interface.id, id, sizeof(card->interface.id) - 1);
+        strlcpy(card->interface.id, id, sizeof(card->interface.id));
         for (i=0; i<ACT2000_BCH; i++) {
                 card->bch[i].plci = 0x8000;
                 card->bch[i].ncci = 0x8000;
@@ -820,26 +775,17 @@ act2000_addcard(int bus, int port, int irq, char *id)
 
 #define DRIVERNAME "IBM Active 2000 ISDN driver"
 
-#ifdef MODULE
-#define act2000_init init_module
-#endif
-
-int
-act2000_init(void)
+static int __init act2000_init(void)
 {
         printk(KERN_INFO "%s\n", DRIVERNAME);
         if (!cards)
 		act2000_addcard(act_bus, act_port, act_irq, act_id);
         if (!cards)
                 printk(KERN_INFO "act2000: No cards defined yet\n");
-        /* No symbols to export, hide all symbols */
-        EXPORT_NO_SYMBOLS;
         return 0;
 }
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static void __exit act2000_exit(void)
 {
         act2000_card *card = cards;
         act2000_card *last;
@@ -858,34 +804,5 @@ cleanup_module(void)
         printk(KERN_INFO "%s unloaded\n", DRIVERNAME);
 }
 
-#else
-void
-act2000_setup(char *str, int *ints)
-{
-        int i, j, argc, port, irq, bus;
-	
-        argc = ints[0];
-        i = 1;
-        if (argc)
-                while (argc) {
-                        port = irq = -1;
-			bus = 0;
-                        if (argc) {
-                                bus = ints[i];
-                                i++;
-                                argc--;
-                        }
-                        if (argc) {
-                                port = ints[i];
-                                i++;
-                                argc--;
-                        }
-                        if (argc) {
-                                irq = ints[i];
-                                i++;
-                                argc--;
-                        }
-			act2000_addcard(bus, port, irq, act_id);
-		}
-}
-#endif
+module_init(act2000_init);
+module_exit(act2000_exit);

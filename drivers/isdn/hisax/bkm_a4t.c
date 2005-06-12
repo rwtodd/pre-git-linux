@@ -1,16 +1,15 @@
-/* $Id: bkm_a4t.c,v 1.13.6.2 2000/11/29 16:00:14 kai Exp $
- * bkm_a4t.c    low level stuff for T-Berkom A4T
- *              derived from the original file sedlbauer.c
- *              derived from the original file niccy.c
- *              derived from the original file netjet.c
+/* $Id: bkm_a4t.c,v 1.22.2.4 2004/01/14 16:04:48 keil Exp $
  *
- * Author       Roland Klabunde (R.Klabunde@Berkom.de)
+ * low level stuff for T-Berkom A4T
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Roland Klabunde
+ * Copyright    by Roland Klabunde   <R.Klabunde@Berkom.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 
 #include <linux/config.h>
 #include <linux/init.h>
@@ -24,31 +23,27 @@
 
 extern const char *CardType[];
 
-const char *bkm_a4t_revision = "$Revision: 1.13.6.2 $";
+const char *bkm_a4t_revision = "$Revision: 1.22.2.4 $";
 
 
 static inline u_char
-readreg(unsigned int ale, unsigned int adr, u_char off)
+readreg(unsigned int ale, unsigned long adr, u_char off)
 {
 	register u_int ret;
-	long flags;
 	unsigned int *po = (unsigned int *) adr;	/* Postoffice */
-	save_flags(flags);
-	cli();
+
 	*po = (GCS_2 | PO_WRITE | off);
 	__WAITI20__(po);
 	*po = (ale | PO_READ);
 	__WAITI20__(po);
 	ret = *po;
-	restore_flags(flags);
 	return ((unsigned char) ret);
 }
 
 
 static inline void
-readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
+readfifo(unsigned int ale, unsigned long adr, u_char off, u_char * data, int size)
 {
-	/* fifo read without cli because it's allready done  */
 	int i;
 	for (i = 0; i < size; i++)
 		*data++ = readreg(ale, adr, off);
@@ -56,24 +51,19 @@ readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size
 
 
 static inline void
-writereg(unsigned int ale, unsigned int adr, u_char off, u_char data)
+writereg(unsigned int ale, unsigned long adr, u_char off, u_char data)
 {
-	long flags;
 	unsigned int *po = (unsigned int *) adr;	/* Postoffice */
-	save_flags(flags);
-	cli();
 	*po = (GCS_2 | PO_WRITE | off);
 	__WAITI20__(po);
 	*po = (ale | PO_WRITE | data);
 	__WAITI20__(po);
-	restore_flags(flags);
 }
 
 
 static inline void
-writefifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
+writefifo(unsigned int ale, unsigned long adr, u_char off, u_char * data, int size)
 {
-	/* fifo write without cli because it's allready done  */
 	int i;
 
 	for (i = 0; i < size; i++)
@@ -135,17 +125,15 @@ WriteJADE(struct IsdnCardState *cs, int jade, u_char offset, u_char value)
 
 #include "jade_irq.c"
 
-static void
+static irqreturn_t
 bkm_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val = 0;
+	u_long flags;
 	I20_REGISTER_FILE *pI20_Regs;
 
-	if (!cs) {
-		printk(KERN_WARNING "HiSax: Telekom A4T: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	pI20_Regs = (I20_REGISTER_FILE *) (cs->hw.ax.base);
 
 	/* ISDN interrupt pending? */
@@ -171,6 +159,11 @@ bkm_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 		}
 		/* Reenable ISDN interrupt */
 		pI20_Regs->i20IntCtrl |= intISDN;
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return IRQ_HANDLED;
+	} else {
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return IRQ_NONE;
 	}
 }
 
@@ -199,20 +192,14 @@ enable_bkm_int(struct IsdnCardState *cs, unsigned bEnable)
 static void
 reset_bkm(struct IsdnCardState *cs)
 {
-	long flags;
-
 	if (cs->typ == ISDN_CTYPE_BKM_A4T) {
 		I20_REGISTER_FILE *pI20_Regs = (I20_REGISTER_FILE *) (cs->hw.ax.base);
-		save_flags(flags);
-		sti();
 		/* Issue the I20 soft reset     */
 		pI20_Regs->i20SysControl = 0xFF;	/* all in */
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10 * HZ) / 1000);
+		mdelay(10);
 		/* Remove the soft reset */
 		pI20_Regs->i20SysControl = sysRESET | 0xFF;
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10 * HZ) / 1000);
+		mdelay(10);
 		/* Set our configuration */
 		pI20_Regs->i20SysControl = sysRESET | sysCFG;
 		/* Issue ISDN reset     */
@@ -222,41 +209,46 @@ reset_bkm(struct IsdnCardState *cs)
 		    g_A4T_ISAC_RES |
 		    g_A4T_JADE_BOOTR |
 		    g_A4T_ISAR_BOOTR;
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10 * HZ) / 1000);
+		mdelay(10);
 
 		/* Remove RESET state from ISDN */
 		pI20_Regs->i20GuestControl &= ~(g_A4T_ISAC_RES |
 						g_A4T_JADE_RES |
 						g_A4T_ISAR_RES);
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10 * HZ) / 1000);
-		restore_flags(flags);
+		mdelay(10);
 	}
 }
 
 static int
 BKM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+
 	switch (mt) {
 		case CARD_RESET:
 			/* Disable ints */
+			spin_lock_irqsave(&cs->lock, flags);
 			enable_bkm_int(cs, 0);
 			reset_bkm(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_RELEASE:
 			/* Sanity */
+			spin_lock_irqsave(&cs->lock, flags);
 			enable_bkm_int(cs, 0);
 			reset_bkm(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			release_io_bkm(cs);
 			return (0);
 		case CARD_INIT:
+			spin_lock_irqsave(&cs->lock, flags);
 			clear_pending_isac_ints(cs);
 			clear_pending_jade_ints(cs);
 			initisac(cs);
 			initjade(cs);
 			/* Enable ints */
 			enable_bkm_int(cs, 1);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_TEST:
 			return (0);
@@ -273,7 +265,7 @@ setup_bkm_a4t(struct IsdnCard *card)
 	char tmp[64];
 	u_int pci_memaddr = 0, found = 0;
 	I20_REGISTER_FILE *pI20_Regs;
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 #endif
 
 	strcpy(tmp, bkm_a4t_revision);
@@ -283,11 +275,7 @@ setup_bkm_a4t(struct IsdnCard *card)
 	} else
 		return (0);
 
-#if CONFIG_PCI
-	if (!pci_present()) {
-		printk(KERN_ERR "bkm_a4t: no PCI bus present\n");
-		return (0);
-	}
+#ifdef CONFIG_PCI
 	while ((dev_a4t = pci_find_device(PCI_VENDOR_ID_ZORAN,
 		PCI_DEVICE_ID_ZORAN_36120, dev_a4t))) {
 		u16 sub_sys;
@@ -316,11 +304,11 @@ setup_bkm_a4t(struct IsdnCard *card)
 		printk(KERN_WARNING "HiSax: %s: No Memory base address\n", CardType[card->typ]);
 		return (0);
 	}
-	cs->hw.ax.base = (u_int) ioremap(pci_memaddr, 4096);
+	cs->hw.ax.base = (long) ioremap(pci_memaddr, 4096);
 	/* Check suspecious address */
 	pI20_Regs = (I20_REGISTER_FILE *) (cs->hw.ax.base);
 	if ((pI20_Regs->i20IntStatus & 0x8EFFFFFF) != 0) {
-		printk(KERN_WARNING "HiSax: %s address %x-%x suspecious\n",
+		printk(KERN_WARNING "HiSax: %s address %lx-%lx suspecious\n",
 		       CardType[card->typ], cs->hw.ax.base, cs->hw.ax.base + 4096);
 		iounmap((void *) cs->hw.ax.base);
 		cs->hw.ax.base = 0;
@@ -335,10 +323,10 @@ setup_bkm_a4t(struct IsdnCard *card)
 	printk(KERN_WARNING "HiSax: %s: unable to configure\n", CardType[card->typ]);
 	return (0);
 #endif				/* CONFIG_PCI */
-	printk(KERN_INFO "HiSax: %s: Card configured at 0x%X IRQ %d\n",
+	printk(KERN_INFO "HiSax: %s: Card configured at 0x%lX IRQ %d\n",
 	       CardType[card->typ], cs->hw.ax.base, cs->irq);
 
-	reset_bkm(cs);
+	setup_isac(cs);
 	cs->readisac = &ReadISAC;
 	cs->writeisac = &WriteISAC;
 	cs->readisacfifo = &ReadISACfifo;

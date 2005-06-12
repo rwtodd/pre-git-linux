@@ -1,6 +1,6 @@
 /* Driver for Microtech DPCM-USB CompactFlash/SmartMedia reader
  *
- * $Id: dpcm.c,v 1.3 2000/08/25 00:13:51 mdharm Exp $
+ * $Id: dpcm.c,v 1.4 2001/06/11 02:54:25 mdharm Exp $
  *
  * DPCM driver v0.1:
  *
@@ -10,7 +10,7 @@
  *   (c) 2000 Brian Webb (webbb@earthlink.net)
  *
  * This device contains both a CompactFlash card reader, which
- * usest the Control/Bulk w/o Interrupt protocol and
+ * uses the Control/Bulk w/o Interrupt protocol and
  * a SmartMedia card reader that uses the same protocol
  * as the SDDR09.
  *
@@ -30,6 +30,10 @@
  */
 
 #include <linux/config.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
+
 #include "transport.h"
 #include "protocol.h"
 #include "usb.h"
@@ -41,22 +45,23 @@
  * Transport for the Microtech DPCM-USB
  *
  */
-int dpcm_transport(Scsi_Cmnd *srb, struct us_data *us)
+int dpcm_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
   int ret;
 
   if(srb == NULL)
     return USB_STOR_TRANSPORT_ERROR;
 
-  US_DEBUGP("dpcm_transport: LUN=%d\n", srb->lun);
+  US_DEBUGP("dpcm_transport: LUN=%d\n", srb->device->lun);
 
-  switch(srb->lun) {
+  switch(srb->device->lun) {
   case 0:
 
     /*
      * LUN 0 corresponds to the CompactFlash card reader.
      */
-    return usb_stor_CB_transport(srb, us);
+    ret = usb_stor_CB_transport(srb, us);
+    break;
 
 #ifdef CONFIG_USB_STORAGE_SDDR09
   case 1:
@@ -68,15 +73,17 @@ int dpcm_transport(Scsi_Cmnd *srb, struct us_data *us)
     /*
      * Set the LUN to 0 (just in case).
      */
-    srb->lun = 0; us->srb->lun = 0;
+    srb->device->lun = 0; us->srb->device->lun = 0;
     ret = sddr09_transport(srb, us);
-    srb->lun = 1; us->srb->lun = 1;
+    srb->device->lun = 1; us->srb->device->lun = 1;
+    break;
 
-    return ret;
 #endif
 
   default:
-    US_DEBUGP("dpcm_transport: Invalid LUN %d\n", srb->lun);
-    return USB_STOR_TRANSPORT_ERROR;
+    US_DEBUGP("dpcm_transport: Invalid LUN %d\n", srb->device->lun);
+    ret = USB_STOR_TRANSPORT_ERROR;
+    break;
   }
+  return ret;
 }

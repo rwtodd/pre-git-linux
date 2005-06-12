@@ -1,24 +1,13 @@
-/*
- *  $Id: card.h,v 1.1 1996/11/07 13:07:40 fritz Exp $
- *  Copyright (C) 1996  SpellCaster Telecommunications Inc.
+/* $Id: card.h,v 1.1.10.1 2001/09/23 22:24:59 kai Exp $
  *
- *  card.h - Driver parameters for SpellCaster ISA ISDN adapters
+ * Driver parameters for SpellCaster ISA ISDN adapters
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- *  For more information, please contact gpl-info@spellcast.com or write:
+ * For more information, please contact gpl-info@spellcast.com or write:
  *
  *     SpellCaster Telecommunications Inc.
  *     5621 Finch Avenue East, Unit #3
@@ -35,24 +24,25 @@
  * We need these if they're not already included
  */
 #include <linux/timer.h>
+#include <linux/time.h>
 #include <linux/isdnif.h>
 #include "message.h"
 
 /*
  * Amount of time to wait for a reset to complete
  */
-#define CHECKRESET_TIME		milliseconds(4000)
+#define CHECKRESET_TIME		msecs_to_jiffies(4000)
 
 /*
  * Amount of time between line status checks
  */
-#define CHECKSTAT_TIME		milliseconds(8000)
+#define CHECKSTAT_TIME		msecs_to_jiffies(8000)
 
 /*
  * The maximum amount of time to wait for a message response
  * to arrive. Use exclusively by send_and_receive
  */
-#define SAR_TIMEOUT		milliseconds(10000)
+#define SAR_TIMEOUT		msecs_to_jiffies(10000)
 
 /*
  * Macro to determine is a card id is valid
@@ -105,6 +95,7 @@ typedef struct {
 	int StartOnReset;		/* Indicates startproc after reset */
 	int EngineUp;			/* Indicates CommEngine Up */
 	int trace_mode;			/* Indicate if tracing is on */
+	spinlock_t lock;		/* local lock */
 } board;
 
 #endif /* CARD_H */

@@ -2,7 +2,7 @@
     Written 1994 by David C. Davies.
 
     Copyright 1994 David C. Davies. This software may be used and distributed
-    according to the terms of the GNU Public License, incorporated herein by
+    according to the terms of the GNU General Public License, incorporated herein by
     reference.
 */
 
@@ -162,7 +162,7 @@
 struct depca_ioctl {
 	unsigned short cmd;                /* Command to run */
 	unsigned short len;                /* Length of the data buffer */
-	unsigned char  *data;              /* Pointer to the data buffer */
+	unsigned char  __user *data;       /* Pointer to the data buffer */
 };
 
 /* 

@@ -1,98 +1,65 @@
 #
 # Makefile for the Linux/MIPS kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
 
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $*.o
+extra-y		:= head.o init_task.o vmlinux.lds
 
-all:	kernel.o head.o init_task.o
-EXTRA_ASFLAGS = -mips3 -mcpu=r4000
-O_TARGET := kernel.o
-O_OBJS	:= branch.o process.o signal.o entry.o traps.o ptrace.o vm86.o \
-	   ioport.o reset.o semaphore.o setup.o syscall.o sysmips.o ipc.o \
-	   scall_o32.o softfp.o unaligned.o
-OX_OBJS := mips_ksyms.o
+obj-y		+= cpu-probe.o branch.o entry.o genex.o irq.o process.o \
+		   ptrace.o reset.o semaphore.o setup.o signal.o syscall.o \
+		   time.o traps.o unaligned.o
 
-ifdef CONFIG_CPU_R3000
-O_OBJS	+= r2300_misc.o r2300_fpu.o r2300_switch.o
-else
-O_OBJS	+= r4k_misc.o r4k_switch.o 
-ifdef CONFIG_CPU_R6000
-O_OBJS	+= r6000_fpu.o
-else
-O_OBJS	+= r4k_fpu.o
-endif
+binfmt_irix-objs	:= irixelf.o irixinv.o irixioctl.o irixsig.o	\
+			   irix5sys.o sysirix.o
+
+ifdef CONFIG_MODULES
+obj-y				+= mips_ksyms.o module.o
+obj-$(CONFIG_MIPS32)		+= module-elf32.o
+obj-$(CONFIG_MIPS64)		+= module-elf64.o
 endif
 
-ifdef CONFIG_MIPS_FPE_MODULE
-M_OBJS += fpe.o
-endif
+obj-$(CONFIG_CPU_R3000)		+= r2300_fpu.o r2300_switch.o
+obj-$(CONFIG_CPU_TX39XX)	+= r2300_fpu.o r2300_switch.o
+obj-$(CONFIG_CPU_TX49XX)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R4000)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_VR41XX)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R4300)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R4X00)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R5000)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R5432)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R8000)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_RM7000)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_RM9000)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_NEVADA)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R10000)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_SB1)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_MIPS32)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_MIPS64)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R6000)		+= r6000_fpu.o r4k_switch.o
 
-#
-# SGIs have very different interrupt/timer hardware.
-#
-ifndef CONFIG_DECSTATION
-  ifndef CONFIG_BAGET_MIPS
-    O_OBJS += time.o
-    ifndef CONFIG_SGI_IP22
-      ifndef CONFIG_ORION
-        OX_OBJS += irq.o
-      endif
-    endif
-  endif
-endif
+obj-$(CONFIG_SMP)		+= smp.o
 
-#
-# Do we want to be able to execute IRIX elf binaries?
-#
-ifdef CONFIG_BINFMT_IRIX
-O_OBJS += irixelf.o irixioctl.o irixsig.o sysirix.o irixinv.o
-endif
+obj-$(CONFIG_NO_ISA)		+= dma-no-isa.o
+obj-$(CONFIG_I8259)		+= i8259.o
+obj-$(CONFIG_IRQ_CPU)		+= irq_cpu.o
+obj-$(CONFIG_IRQ_CPU_RM7K)	+= irq-rm7000.o
+obj-$(CONFIG_IRQ_CPU_RM9K)	+= irq-rm9000.o
+obj-$(CONFIG_IRQ_MV64340)	+= irq-mv6434x.o
 
-#
-# Kernel debugging
-#
-ifdef CONFIG_REMOTE_DEBUG
-O_OBJS += gdb-low.o gdb-stub.o 
-endif
+obj-$(CONFIG_MIPS32)		+= scall32-o32.o
+obj-$(CONFIG_MIPS64)		+= scall64-64.o
+obj-$(CONFIG_BINFMT_IRIX)	+= binfmt_irix.o
+obj-$(CONFIG_MIPS32_COMPAT)	+= ioctl32.o linux32.o signal32.o
+obj-$(CONFIG_MIPS32_N32)	+= binfmt_elfn32.o scall64-n32.o signal_n32.o
+obj-$(CONFIG_MIPS32_O32)	+= binfmt_elfo32.o scall64-o32.o ptrace32.o
 
-#
-# Depending from some other kernel option
-#
-ifdef CONFIG_PROC_FS
-O_OBJS += proc.o
-endif
+obj-$(CONFIG_KGDB)		+= gdb-low.o gdb-stub.o
+obj-$(CONFIG_PROC_FS)		+= proc.o
 
-#
-# Since we add the same object files to O_OBJS for different configurations.
-# O_OBJS might contain duplicate files.  We correct this by filtering out
-# duplicate files.  Just to avoid users having to know about all the
-# compatibility stuff between various boards and boards.
-#
-O_OBJS := $(sort $(O_OBJS))
+obj-$(CONFIG_MIPS64)		+= cpu-bugs64.o
 
-entry.o: entry.S
+obj-$(CONFIG_GEN_RTC)		+= genrtc.o
 
-head.o: head.S
+CFLAGS_cpu-bugs64.o	= $(shell if $(CC) $(CFLAGS) -Wa,-mdaddi -c -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-DHAVE_AS_SET_DADDI"; fi)
+CFLAGS_ioctl32.o	+= -Ifs/
 
-#r4k_switch.o: r4k_switch.S
-#
-#r4k_misc.o: r4k_misc.S
-#
-#r4k_fpu.o: r4k_fpu.S
-#
-#r2300_switch.o: r2300_switch.S
-#
-#r2300_misc.o: r2300_misc.S
-#
-#r2300_fpu.o: r2300_fpu.S
-#
-#r6000_fpu.o: r6000_fpu.S
-
-clean:
-
-include $(TOPDIR)/Rules.make
+EXTRA_AFLAGS := $(CFLAGS)

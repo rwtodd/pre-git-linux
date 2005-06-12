@@ -30,26 +30,51 @@
  *  look.
  */
 
-#include <linux/kernel.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/kernel.h>
+#include <linux/mca.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
-#include <linux/blk.h>
+#include <linux/slab.h>
+#include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/mca-legacy.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "NCR53C9x.h"
-#include "mca_53c9x.h"
 
 #include <asm/dma.h>
-#include <linux/mca.h>
 #include <asm/irq.h>
 #include <asm/mca_dma.h>
-
 #include <asm/pgtable.h>
+
+/*
+ * From ibmmca.c (IBM scsi controller card driver) -- used for turning PS2 disk
+ *  activity LED on and off
+ */
+
+#define PS2_SYS_CTR	0x92
+
+/* Ports the ncr's 53c94 can be put at; indexed by pos register value */
+
+#define MCA_53C9X_IO_PORTS {                             \
+                         0x0000, 0x0240, 0x0340, 0x0400, \
+	                 0x0420, 0x3240, 0x8240, 0xA240, \
+	                }
+			
+/*
+ * Supposedly there were some cards put together with the 'c9x and 86c01.  If
+ *   they have different ID's from the ones on the 3500 series machines, 
+ *   you can add them here and hopefully things will work out.
+ */
+			
+#define MCA_53C9X_IDS {          \
+                         0x7F4C, \
+			 0x0000, \
+                        }
 
 static int  dma_bytes_sent(struct NCR_ESP *, int);
 static int  dma_can_transfer(struct NCR_ESP *, Scsi_Cmnd *);
@@ -68,7 +93,7 @@ static void dma_led_off(struct NCR_ESP *);
  *  53c9x via PIO.
  */
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 
 /*
  * We keep the structure that is used to access the registers on the 53c9x
@@ -78,7 +103,7 @@ volatile unsigned char cmd_buffer[16];
 static struct ESP_regs eregs;
 
 /***************************************************************** Detection */
-int mca_esp_detect(Scsi_Host_Template *tpnt)
+static int mca_esp_detect(Scsi_Host_Template *tpnt)
 {
 	struct NCR_ESP *esp;
 	static int io_port_by_pos[] = MCA_53C9X_IO_PORTS;
@@ -153,7 +178,7 @@ int mca_esp_detect(Scsi_Host_Template *tpnt)
 			esp->slot = slot;
 
 			if (request_irq(esp->irq, esp_intr, 0,
-			 "NCR 53c9x SCSI", esp_intr))
+			 "NCR 53c9x SCSI", esp->ehost))
 			{
 				printk("Unable to request IRQ %d.\n", esp->irq);
 				esp_deallocate(esp);
@@ -213,21 +238,21 @@ int mca_esp_detect(Scsi_Host_Template *tpnt)
 
 			/* Optional functions */
 
-			esp->dma_barrier = 0;
-			esp->dma_drain = 0;
-			esp->dma_invalidate = 0;
-			esp->dma_irq_entry = 0;
-			esp->dma_irq_exit = 0;
+			esp->dma_barrier = NULL;
+			esp->dma_drain = NULL;
+			esp->dma_invalidate = NULL;
+			esp->dma_irq_entry = NULL;
+			esp->dma_irq_exit = NULL;
 			esp->dma_led_on = dma_led_on;
 			esp->dma_led_off = dma_led_off;
-			esp->dma_poll = 0;
-			esp->dma_reset = 0;
+			esp->dma_poll = NULL;
+			esp->dma_reset = NULL;
 
 			/* Set the command buffer */
 
 			esp->esp_command = (volatile unsigned char*)
 			  cmd_buffer;
-	 		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
+	 		esp->esp_command_dvma = isa_virt_to_bus(cmd_buffer);
 
 			/* SCSI chip speed */
 
@@ -258,7 +283,7 @@ int mca_esp_detect(Scsi_Host_Template *tpnt)
 
 /******************************************************************* Release */
 
-int mca_esp_release(struct Scsi_Host *host)
+static int mca_esp_release(struct Scsi_Host *host)
 {
 	struct NCR_ESP *esp = (struct NCR_ESP *)host->hostdata;
 	unsigned char tmp_byte;
@@ -419,7 +444,24 @@ static void dma_led_off(struct NCR_ESP *esp)
 	outb(inb(PS2_SYS_CTR) & 0x3f, PS2_SYS_CTR);
 }
 
-static Scsi_Host_Template driver_template = MCA_53C9X;
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "mca_53c9x",
+	.name			= "NCR 53c9x SCSI",
+	.detect			= mca_esp_detect,
+	.slave_alloc		= esp_slave_alloc,
+	.slave_destroy		= esp_slave_destroy,
+	.release		= mca_esp_release,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.unchecked_isa_dma	= 1,
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
+
 #include "scsi_module.c"
 
 /*

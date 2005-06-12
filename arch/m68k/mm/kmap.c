@@ -12,7 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/setup.h>
@@ -45,14 +45,14 @@ static inline struct vm_struct *get_io_area(unsigned long size)
 
 static inline void free_io_area(void *addr)
 {
-	return vfree((void *)(PAGE_MASK & (unsigned long)addr));
+	vfree((void *)(PAGE_MASK & (unsigned long)addr));
 }
 
 #else
 
 #define IO_SIZE		(256*1024)
 
-static struct vm_struct *iolist = NULL;
+static struct vm_struct *iolist;
 
 static struct vm_struct *get_io_area(unsigned long size)
 {
@@ -189,7 +189,7 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 			printk ("\npa=%#lx va=%#lx ", physaddr, virtaddr);
 #endif
 		pgd_dir = pgd_offset_k(virtaddr);
-		pmd_dir = pmd_alloc_kernel(pgd_dir, virtaddr);
+		pmd_dir = pmd_alloc(&init_mm, pgd_dir, virtaddr);
 		if (!pmd_dir) {
 			printk("ioremap: no mem for pmd_dir\n");
 			return NULL;
@@ -201,7 +201,7 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 			virtaddr += PTRTREESIZE;
 			size -= PTRTREESIZE;
 		} else {
-			pte_dir = pte_alloc_kernel(pmd_dir, virtaddr);
+			pte_dir = pte_alloc_kernel(&init_mm, pmd_dir, virtaddr);
 			if (!pte_dir) {
 				printk("ioremap: no mem for pte_dir\n");
 				return NULL;
@@ -273,7 +273,7 @@ void __iounmap(void *addr, unsigned long size)
 			pmd_clear(pmd_dir);
 			return;
 		}
-		pte_dir = pte_offset(pmd_dir, virtaddr);
+		pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
 
 		pte_val(*pte_dir) = 0;
 		virtaddr += PAGE_SIZE;
@@ -350,7 +350,7 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 			pmd_clear(pmd_dir);
 			return;
 		}
-		pte_dir = pte_offset(pmd_dir, virtaddr);
+		pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
 
 		pte_val(*pte_dir) = (pte_val(*pte_dir) & _CACHEMASK040) | cmode;
 		virtaddr += PAGE_SIZE;

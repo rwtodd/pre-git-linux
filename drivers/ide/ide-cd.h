@@ -35,17 +35,24 @@
 #define NO_DOOR_LOCKING 0
 #endif
 
+/*
+ * typical timeout for packet command
+ */
+#define ATAPI_WAIT_PC		(60 * HZ)
+#define ATAPI_WAIT_WRITE_BUSY	(10 * HZ)
+
 /************************************************************************/
 
-#define SECTOR_SIZE		512
 #define SECTOR_BITS 		9
-#define SECTORS_PER_FRAME	(CD_FRAMESIZE / SECTOR_SIZE)
+#ifndef SECTOR_SIZE
+#define SECTOR_SIZE		(1 << SECTOR_BITS)
+#endif
+#define SECTORS_PER_FRAME	(CD_FRAMESIZE >> SECTOR_BITS)
 #define SECTOR_BUFFER_SIZE	(CD_FRAMESIZE * 32)
-#define SECTORS_BUFFER		(SECTOR_BUFFER_SIZE / SECTOR_SIZE)
+#define SECTORS_BUFFER		(SECTOR_BUFFER_SIZE >> SECTOR_BITS)
+#define SECTORS_MAX		(131072 >> SECTOR_BITS)
 
 #define BLOCKS_PER_FRAME	(CD_FRAMESIZE / BLOCK_SIZE)
-
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 /* special command codes for strategy routine. */
 #define PACKET_COMMAND        4315
@@ -72,6 +79,7 @@ struct ide_cd_config_flags {
 	__u8 dvd		: 1; /* Drive is a DVD-ROM */
 	__u8 dvd_r		: 1; /* Drive can write DVD-R */
 	__u8 dvd_ram		: 1; /* Drive can write DVD-RAM */
+	__u8 ram		: 1; /* generic WRITE (dvd-ram/mrw) */
 	__u8 test_write		: 1; /* Drive can fake writes */
 	__u8 supp_disc_present	: 1; /* Changer can report exact contents
 					of slots. */
@@ -82,7 +90,8 @@ struct ide_cd_config_flags {
 	__u8 audio_play		: 1; /* can do audio related commands */
 	__u8 close_tray		: 1; /* can close the tray */
 	__u8 writing		: 1; /* pseudo write in progress */
-	__u8 reserved		: 3;
+	__u8 mo_drive		: 1; /* drive is an MO device */
+	__u8 reserved		: 2;
 	byte max_speed;		     /* Max speed of the drive */
 };
 #define CDROM_CONFIG_FLAGS(drive) (&(((struct cdrom_info *)(drive->driver_data))->config_flags))
@@ -100,16 +109,6 @@ struct ide_cd_state_flags {
 };
 
 #define CDROM_STATE_FLAGS(drive) (&(((struct cdrom_info *)(drive->driver_data))->state_flags))
-
-struct packet_command {
-	char *buffer;
-	int buflen;
-	int stat;
-	int quiet;
-	int timeout;
-	struct request_sense *sense;
-	unsigned char c[12];
-};
 
 /* Structure of a MSF cdrom address. */
 struct atapi_msf {
@@ -149,7 +148,7 @@ struct atapi_toc_entry {
 struct atapi_toc {
 	int    last_session_lba;
 	int    xa_flag;
-	unsigned capacity;
+	unsigned long capacity;
 	struct atapi_toc_header hdr;
 	struct atapi_toc_entry  ent[MAX_TRACKS+1];
 	  /* One extra for the leadout. */
@@ -434,7 +433,7 @@ struct atapi_mechstat_header {
 
 	byte     curlba[3];
 	byte     nslots;
-	__u8 short slot_tablelen;
+	__u16	 slot_tablelen;
 };
 
 
@@ -476,7 +475,6 @@ struct cdrom_info {
 	struct request_sense sense_data;
 
 	struct request request_sense_request;
-	struct packet_command request_sense_pc;
 	int dma;
 	int cmd;
 	unsigned long last_block;
@@ -489,6 +487,8 @@ struct cdrom_info {
 
         /* Per-device info needed by cdrom.c generic driver. */
         struct cdrom_device_info devinfo;
+
+	unsigned long write_timeout;
 };
 
 /****************************************************************************
@@ -508,6 +508,7 @@ struct cdrom_info {
 #define ILLEGAL_REQUEST         0x05
 #define UNIT_ATTENTION          0x06
 #define DATA_PROTECT            0x07
+#define BLANK_CHECK             0x08
 #define ABORTED_COMMAND         0x0b
 #define MISCOMPARE              0x0e
 
@@ -518,7 +519,7 @@ struct cdrom_info {
 
  /* The generic packet command opcodes for CD/DVD Logical Units,
  * From Table 57 of the SFF8090 Ver. 3 (Mt. Fuji) draft standard. */ 
-const struct {
+static const struct {
 	unsigned short packet_command;
 	const char * const text;
 } packet_command_texts[] = {
@@ -576,7 +577,7 @@ const struct {
 
 
 /* From Table 303 of the SFF8090 Ver. 3 (Mt. Fuji) draft standard. */
-const char * const sense_key_texts[16] = {
+static const char * const sense_key_texts[16] = {
 	"No sense data",
 	"Recovered error",
 	"Not ready",
@@ -585,7 +586,7 @@ const char * const sense_key_texts[16] = {
 	"Illegal request",
 	"Unit attention",
 	"Data protect",
-	"(reserved)",
+	"Blank check",
 	"(reserved)",
 	"(reserved)",
 	"Aborted command",
@@ -596,7 +597,7 @@ const char * const sense_key_texts[16] = {
 };
 
 /* From Table 304 of the SFF8090 Ver. 3 (Mt. Fuji) draft standard. */
-const struct {
+static const struct {
 	unsigned long asc_ascq;
 	const char * const text;
 } sense_data_texts[] = {

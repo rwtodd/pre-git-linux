@@ -7,18 +7,16 @@
  */
 
 #include <linux/linkage.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/errno.h>
-#include <linux/locks.h>
 #include <linux/fs.h>
 #include <linux/ext2_fs.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/net.h>
 #include <linux/in.h>
-#include <linux/version.h>
 #include <linux/unistd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/major.h>
 
 #include <linux/sunrpc/svc.h>
@@ -41,16 +39,6 @@ static int	nfs3_ftypes[] = {
 	S_IFSOCK,		/* NF3SOCK */
 	S_IFIFO,		/* NF3FIFO */
 };
-
-/*
- * Reserve room in the send buffer
- */
-static void
-svcbuf_reserve(struct svc_buf *buf, u32 **ptr, int *len, int nr)
-{
-	*ptr = buf->buf + nr;
-	*len = buf->buflen - buf->len - nr;
-}
 
 /*
  * NULL call.
@@ -91,7 +79,8 @@ nfsd3_proc_setattr(struct svc_rqst *rqstp, struct nfsd3_sattrargs *argp,
 				SVCFH_fmt(&argp->fh));
 
 	fh_copy(&resp->fh, &argp->fh);
-	nfserr = nfsd_setattr(rqstp, &resp->fh, &argp->attrs);
+	nfserr = nfsd_setattr(rqstp, &resp->fh, &argp->attrs,
+			      argp->check_guard, argp->guardtime);
 	RETURN_STATUS(nfserr);
 }
 
@@ -104,8 +93,9 @@ nfsd3_proc_lookup(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: LOOKUP(3)   %s %s\n",
+	dprintk("nfsd: LOOKUP(3)   %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	fh_copy(&resp->dirfh, &argp->fh);
@@ -133,7 +123,7 @@ nfsd3_proc_access(struct svc_rqst *rqstp, struct nfsd3_accessargs *argp,
 
 	fh_copy(&resp->fh, &argp->fh);
 	resp->access = argp->access;
-	nfserr = nfsd_access(rqstp, &resp->fh, &resp->access);
+	nfserr = nfsd_access(rqstp, &resp->fh, &resp->access, NULL);
 	RETURN_STATUS(nfserr);
 }
 
@@ -141,22 +131,17 @@ nfsd3_proc_access(struct svc_rqst *rqstp, struct nfsd3_accessargs *argp,
  * Read a symlink.
  */
 static int
-nfsd3_proc_readlink(struct svc_rqst *rqstp, struct nfsd_fhandle     *argp,
+nfsd3_proc_readlink(struct svc_rqst *rqstp, struct nfsd3_readlinkargs *argp,
 					   struct nfsd3_readlinkres *resp)
 {
-	u32		*path;
-	int		dummy, nfserr;
+	int nfserr;
 
 	dprintk("nfsd: READLINK(3) %s\n", SVCFH_fmt(&argp->fh));
-
-	/* Reserve room for status, post_op_attr, and path length */
-	svcbuf_reserve(&rqstp->rq_resbuf, &path, &dummy,
-				1 + NFS3_POST_OP_ATTR_WORDS + 1);
 
 	/* Read the symlink. */
 	fh_copy(&resp->fh, &argp->fh);
 	resp->len = NFS3_MAXPATHLEN;
-	nfserr = nfsd_readlink(rqstp, &resp->fh, (char *) path, &resp->len);
+	nfserr = nfsd_readlink(rqstp, &resp->fh, argp->buffer, &resp->len);
 	RETURN_STATUS(nfserr);
 }
 
@@ -167,8 +152,7 @@ static int
 nfsd3_proc_read(struct svc_rqst *rqstp, struct nfsd3_readargs *argp,
 				        struct nfsd3_readres  *resp)
 {
-	u32 *	buffer;
-	int	nfserr, avail;
+	int	nfserr;
 
 	dprintk("nfsd: READ(3) %s %lu bytes at %lu\n",
 				SVCFH_fmt(&argp->fh),
@@ -179,17 +163,17 @@ nfsd3_proc_read(struct svc_rqst *rqstp, struct nfsd3_readargs *argp,
 	 * 1 (status) + 22 (post_op_attr) + 1 (count) + 1 (eof)
 	 * + 1 (xdr opaque byte count) = 26
 	 */
-	svcbuf_reserve(&rqstp->rq_resbuf, &buffer, &avail,
-			1 + NFS3_POST_OP_ATTR_WORDS + 3);
 
 	resp->count = argp->count;
-	if ((avail << 2) < resp->count)
-		resp->count = avail << 2;
+	if (NFSSVC_MAXBLKSIZE < resp->count)
+		resp->count = NFSSVC_MAXBLKSIZE;
+
+	svc_reserve(rqstp, ((1 + NFS3_POST_OP_ATTR_WORDS + 3)<<2) + resp->count +4);
 
 	fh_copy(&resp->fh, &argp->fh);
 	nfserr = nfsd_read(rqstp, &resp->fh,
 				  argp->offset,
-				  (char *) buffer,
+			   	  argp->vec, argp->vlen,
 				  &resp->count);
 	if (nfserr == 0) {
 		struct inode	*inode = resp->fh.fh_dentry->d_inode;
@@ -219,7 +203,7 @@ nfsd3_proc_write(struct svc_rqst *rqstp, struct nfsd3_writeargs *argp,
 	resp->committed = argp->stable;
 	nfserr = nfsd_write(rqstp, &resp->fh,
 				   argp->offset,
-				   argp->data,
+				   argp->vec, argp->vlen,
 				   argp->len,
 				   &resp->committed);
 	resp->count = argp->count;
@@ -239,8 +223,9 @@ nfsd3_proc_create(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 	struct iattr	*attr;
 	u32		nfserr;
 
-	dprintk("nfsd: CREATE(3)   %s %s\n",
+	dprintk("nfsd: CREATE(3)   %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	dirfhp = fh_copy(&resp->dirfh, &argp->fh);
@@ -264,7 +249,7 @@ nfsd3_proc_create(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 	/* Now create the file and set attributes */
 	nfserr = nfsd_create_v3(rqstp, dirfhp, argp->name, argp->len,
 				attr, newfhp,
-				argp->createmode, argp->verf);
+				argp->createmode, argp->verf, NULL);
 
 	RETURN_STATUS(nfserr);
 }
@@ -278,8 +263,9 @@ nfsd3_proc_mkdir(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: MKDIR(3)    %s %s\n",
+	dprintk("nfsd: MKDIR(3)    %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	argp->attrs.ia_valid &= ~ATTR_SIZE;
@@ -297,9 +283,10 @@ nfsd3_proc_symlink(struct svc_rqst *rqstp, struct nfsd3_symlinkargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: SYMLINK(3)  %s %s -> %s\n",
+	dprintk("nfsd: SYMLINK(3)  %s %.*s -> %.*s\n",
 				SVCFH_fmt(&argp->ffh),
-				argp->fname, argp->tname);
+				argp->flen, argp->fname,
+				argp->tlen, argp->tname);
 
 	fh_copy(&resp->dirfh, &argp->ffh);
 	fh_init(&resp->fh, NFS3_FHSIZE);
@@ -319,8 +306,9 @@ nfsd3_proc_mknod(struct svc_rqst *rqstp, struct nfsd3_mknodargs *argp,
 	int	nfserr, type;
 	dev_t	rdev = 0;
 
-	dprintk("nfsd: MKNOD(3)    %s %s\n",
+	dprintk("nfsd: MKNOD(3)    %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	fh_copy(&resp->dirfh, &argp->fh);
@@ -329,11 +317,10 @@ nfsd3_proc_mknod(struct svc_rqst *rqstp, struct nfsd3_mknodargs *argp,
 	if (argp->ftype == 0 || argp->ftype >= NF3BAD)
 		RETURN_STATUS(nfserr_inval);
 	if (argp->ftype == NF3CHR || argp->ftype == NF3BLK) {
-		if ((argp->ftype == NF3CHR && argp->major >= MAX_CHRDEV)
-		    || (argp->ftype == NF3BLK && argp->major >= MAX_BLKDEV)
-		    || argp->minor > 0xFF)
+		rdev = MKDEV(argp->major, argp->minor);
+		if (MAJOR(rdev) != argp->major ||
+		    MINOR(rdev) != argp->minor)
 			RETURN_STATUS(nfserr_inval);
-		rdev = ((argp->major) << 8) | (argp->minor);
 	} else
 		if (argp->ftype != NF3SOCK && argp->ftype != NF3FIFO)
 			RETURN_STATUS(nfserr_inval);
@@ -354,8 +341,9 @@ nfsd3_proc_remove(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: REMOVE(3)   %s %s\n",
+	dprintk("nfsd: REMOVE(3)   %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	/* Unlink. -S_IFDIR means file must not be a directory */
@@ -373,8 +361,9 @@ nfsd3_proc_rmdir(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: RMDIR(3)    %s %s\n",
+	dprintk("nfsd: RMDIR(3)    %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	fh_copy(&resp->fh, &argp->fh);
@@ -388,11 +377,13 @@ nfsd3_proc_rename(struct svc_rqst *rqstp, struct nfsd3_renameargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: RENAME(3)   %s %s ->\n",
+	dprintk("nfsd: RENAME(3)   %s %.*s ->\n",
 				SVCFH_fmt(&argp->ffh),
+				argp->flen,
 				argp->fname);
-	dprintk("nfsd: -> %s %s\n",
+	dprintk("nfsd: -> %s %.*s\n",
 				SVCFH_fmt(&argp->tfh),
+				argp->tlen,
 				argp->tname);
 
 	fh_copy(&resp->ffh, &argp->ffh);
@@ -410,8 +401,9 @@ nfsd3_proc_link(struct svc_rqst *rqstp, struct nfsd3_linkargs *argp,
 
 	dprintk("nfsd: LINK(3)     %s ->\n",
 				SVCFH_fmt(&argp->ffh));
-	dprintk("nfsd:   -> %s %s\n",
+	dprintk("nfsd:   -> %s %.*s\n",
 				SVCFH_fmt(&argp->tfh),
+				argp->tlen,
 				argp->tname);
 
 	fh_copy(&resp->fh,  &argp->ffh);
@@ -428,30 +420,29 @@ static int
 nfsd3_proc_readdir(struct svc_rqst *rqstp, struct nfsd3_readdirargs *argp,
 					   struct nfsd3_readdirres  *resp)
 {
-	u32 *		buffer;
 	int		nfserr, count;
-	unsigned int	want;
 
 	dprintk("nfsd: READDIR(3)  %s %d bytes at %d\n",
 				SVCFH_fmt(&argp->fh),
 				argp->count, (u32) argp->cookie);
 
-	/* Reserve buffer space for status, attributes and verifier */
-	svcbuf_reserve(&rqstp->rq_resbuf, &buffer, &count,
-				1 + NFS3_POST_OP_ATTR_WORDS + 2);
-
 	/* Make sure we've room for the NULL ptr & eof flag, and shrink to
 	 * client read size */
-	if ((count -= 2) > (want = (argp->count >> 2) - 2))
-		count = want;
+	count = (argp->count >> 2) - 2;
 
 	/* Read directory and encode entries on the fly */
 	fh_copy(&resp->fh, &argp->fh);
-	nfserr = nfsd_readdir(rqstp, &resp->fh, (loff_t) argp->cookie, 
-					nfs3svc_encode_entry,
-					buffer, &count, argp->verf);
+
+	resp->buflen = count;
+	resp->common.err = nfs_ok;
+	resp->buffer = argp->buffer;
+	resp->rqstp = rqstp;
+	nfserr = nfsd_readdir(rqstp, &resp->fh, (loff_t*) &argp->cookie, 
+					&resp->common, nfs3svc_encode_entry);
 	memcpy(resp->verf, argp->verf, 8);
-	resp->count = count;
+	resp->count = resp->buffer - argp->buffer;
+	if (resp->offset)
+		xdr_encode_hyper(resp->offset, argp->cookie);
 
 	RETURN_STATUS(nfserr);
 }
@@ -464,29 +455,53 @@ static int
 nfsd3_proc_readdirplus(struct svc_rqst *rqstp, struct nfsd3_readdirargs *argp,
 					       struct nfsd3_readdirres  *resp)
 {
-	u32 *	buffer;
-	int	nfserr, count, want;
+	int	nfserr, count = 0;
+	loff_t	offset;
+	int	i;
+	caddr_t	page_addr = NULL;
 
 	dprintk("nfsd: READDIR+(3) %s %d bytes at %d\n",
 				SVCFH_fmt(&argp->fh),
 				argp->count, (u32) argp->cookie);
 
-	/* Reserve buffer space for status, attributes and verifier */
-	svcbuf_reserve(&rqstp->rq_resbuf, &buffer, &count,
-				1 + NFS3_POST_OP_ATTR_WORDS + 2);
-
-	/* Make sure we've room for the NULL ptr & eof flag, and shrink to
-	 * client read size */
-	if ((count -= 2) > (want = argp->count >> 2))
-		count = want;
+	/* Convert byte count to number of words (i.e. >> 2),
+	 * and reserve room for the NULL ptr & eof flag (-2 words) */
+	resp->count = (argp->count >> 2) - 2;
 
 	/* Read directory and encode entries on the fly */
 	fh_copy(&resp->fh, &argp->fh);
-	nfserr = nfsd_readdir(rqstp, &resp->fh, (loff_t) argp->cookie, 
-					nfs3svc_encode_entry_plus,
-					buffer, &count, argp->verf);
+
+	resp->common.err = nfs_ok;
+	resp->buffer = argp->buffer;
+	resp->buflen = resp->count;
+	resp->rqstp = rqstp;
+	offset = argp->cookie;
+	nfserr = nfsd_readdir(rqstp, &resp->fh,
+				     &offset,
+				     &resp->common,
+				     nfs3svc_encode_entry_plus);
 	memcpy(resp->verf, argp->verf, 8);
-	resp->count = count;
+	for (i=1; i<rqstp->rq_resused ; i++) {
+		page_addr = page_address(rqstp->rq_respages[i]);
+
+		if (((caddr_t)resp->buffer >= page_addr) &&
+		    ((caddr_t)resp->buffer < page_addr + PAGE_SIZE)) {
+			count += (caddr_t)resp->buffer - page_addr;
+			break;
+		}
+		count += PAGE_SIZE;
+	}
+	resp->count = count >> 2;
+	if (resp->offset) {
+		if (unlikely(resp->offset1)) {
+			/* we ended up with offset on a page boundary */
+			*resp->offset = htonl(offset >> 32);
+			*resp->offset1 = htonl(offset & 0xffffffff);
+			resp->offset1 = NULL;
+		} else {
+			xdr_encode_hyper(resp->offset, offset);
+		}
+	}
 
 	RETURN_STATUS(nfserr);
 }
@@ -542,6 +557,7 @@ nfsd3_proc_fsinfo(struct svc_rqst * rqstp, struct nfsd_fhandle    *argp,
 		if (sb->s_magic == 0x4d44 /* MSDOS_SUPER_MAGIC */) {
 			resp->f_properties = NFS3_FSF_BILLYBOY;
 		}
+		resp->f_maxfilesize = sb->s_maxbytes;
 	}
 
 	fh_put(&argp->fh);
@@ -600,10 +616,10 @@ nfsd3_proc_commit(struct svc_rqst * rqstp, struct nfsd3_commitargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: COMMIT(3)   %s %d@%ld\n",
+	dprintk("nfsd: COMMIT(3)   %s %u@%Lu\n",
 				SVCFH_fmt(&argp->fh),
 				argp->count,
-				(unsigned long) argp->offset);
+				(unsigned long long) argp->offset);
 
 	if (argp->offset > NFS_OFFSET_MAX)
 		RETURN_STATUS(nfserr_inval);
@@ -634,7 +650,7 @@ nfsd3_proc_commit(struct svc_rqst * rqstp, struct nfsd3_commitargs *argp,
 #define nfsd3_voidres			nfsd3_voidargs
 struct nfsd3_voidargs { int dummy; };
 
-#define PROC(name, argt, rest, relt, cache)	\
+#define PROC(name, argt, rest, relt, cache, respsize)	\
  { (svc_procfunc) nfsd3_proc_##name,		\
    (kxdrproc_t) nfs3svc_decode_##argt##args,	\
    (kxdrproc_t) nfs3svc_encode_##rest##res,	\
@@ -642,29 +658,45 @@ struct nfsd3_voidargs { int dummy; };
    sizeof(struct nfsd3_##argt##args),		\
    sizeof(struct nfsd3_##rest##res),		\
    0,						\
-   cache					\
+   cache,					\
+   respsize,					\
  }
-struct svc_procedure		nfsd_procedures3[22] = {
-  PROC(null,	 void,		void,		void,	 RC_NOCACHE),
-  PROC(getattr,	 fhandle,	attrstat,	fhandle, RC_NOCACHE),
-  PROC(setattr,  sattr,		wccstat,	fhandle,  RC_REPLBUFF),
-  PROC(lookup,	 dirop,		dirop,		fhandle2, RC_NOCACHE),
-  PROC(access,	 access,	access,		fhandle,  RC_NOCACHE),
-  PROC(readlink, fhandle,	readlink,	fhandle,  RC_NOCACHE),
-  PROC(read,	 read,		read,		fhandle, RC_NOCACHE),
-  PROC(write,	 write,		write,		fhandle,  RC_REPLBUFF),
-  PROC(create,	 create,	create,		fhandle2, RC_REPLBUFF),
-  PROC(mkdir,	 mkdir,		create,		fhandle2, RC_REPLBUFF),
-  PROC(symlink,	 symlink,	create,		fhandle2, RC_REPLBUFF),
-  PROC(mknod,	 mknod,		create,		fhandle2, RC_REPLBUFF),
-  PROC(remove,	 dirop,		wccstat,	fhandle,  RC_REPLBUFF),
-  PROC(rmdir,	 dirop,		wccstat,	fhandle,  RC_REPLBUFF),
-  PROC(rename,	 rename,	rename,		fhandle2, RC_REPLBUFF),
-  PROC(link,	 link,		link,		fhandle2, RC_REPLBUFF),
-  PROC(readdir,	 readdir,	readdir,	fhandle,  RC_NOCACHE),
-  PROC(readdirplus,readdirplus,	readdir,	fhandle,  RC_NOCACHE),
-  PROC(fsstat,	 fhandle,	fsstat,		void,     RC_NOCACHE),
-  PROC(fsinfo,   fhandle,	fsinfo,		void,     RC_NOCACHE),
-  PROC(pathconf, fhandle,	pathconf,	void,     RC_NOCACHE),
-  PROC(commit,	 commit,	commit,		fhandle,  RC_NOCACHE)
+
+#define ST 1		/* status*/
+#define FH 17		/* filehandle with length */
+#define AT 21		/* attributes */
+#define pAT (1+AT)	/* post attributes - conditional */
+#define WC (7+pAT)	/* WCC attributes */
+
+static struct svc_procedure		nfsd_procedures3[22] = {
+  PROC(null,	 void,		void,		void,	  RC_NOCACHE, ST),
+  PROC(getattr,	 fhandle,	attrstat,	fhandle,  RC_NOCACHE, ST+AT),
+  PROC(setattr,  sattr,		wccstat,	fhandle,  RC_REPLBUFF, ST+WC),
+  PROC(lookup,	 dirop,		dirop,		fhandle2, RC_NOCACHE, ST+FH+pAT+pAT),
+  PROC(access,	 access,	access,		fhandle,  RC_NOCACHE, ST+pAT+1),
+  PROC(readlink, readlink,	readlink,	fhandle,  RC_NOCACHE, ST+pAT+1+NFS3_MAXPATHLEN/4),
+  PROC(read,	 read,		read,		fhandle,  RC_NOCACHE, ST+pAT+4+NFSSVC_MAXBLKSIZE),
+  PROC(write,	 write,		write,		fhandle,  RC_REPLBUFF, ST+WC+4),
+  PROC(create,	 create,	create,		fhandle2, RC_REPLBUFF, ST+(1+FH+pAT)+WC),
+  PROC(mkdir,	 mkdir,		create,		fhandle2, RC_REPLBUFF, ST+(1+FH+pAT)+WC),
+  PROC(symlink,	 symlink,	create,		fhandle2, RC_REPLBUFF, ST+(1+FH+pAT)+WC),
+  PROC(mknod,	 mknod,		create,		fhandle2, RC_REPLBUFF, ST+(1+FH+pAT)+WC),
+  PROC(remove,	 dirop,		wccstat,	fhandle,  RC_REPLBUFF, ST+WC),
+  PROC(rmdir,	 dirop,		wccstat,	fhandle,  RC_REPLBUFF, ST+WC),
+  PROC(rename,	 rename,	rename,		fhandle2, RC_REPLBUFF, ST+WC+WC),
+  PROC(link,	 link,		link,		fhandle2, RC_REPLBUFF, ST+pAT+WC),
+  PROC(readdir,	 readdir,	readdir,	fhandle,  RC_NOCACHE, 0),
+  PROC(readdirplus,readdirplus,	readdir,	fhandle,  RC_NOCACHE, 0),
+  PROC(fsstat,	 fhandle,	fsstat,		void,     RC_NOCACHE, ST+pAT+2*6+1),
+  PROC(fsinfo,   fhandle,	fsinfo,		void,     RC_NOCACHE, ST+pAT+12),
+  PROC(pathconf, fhandle,	pathconf,	void,     RC_NOCACHE, ST+pAT+6),
+  PROC(commit,	 commit,	commit,		fhandle,  RC_NOCACHE, ST+WC+2),
+};
+
+struct svc_version	nfsd_version3 = {
+		.vs_vers	= 3,
+		.vs_nproc	= 22,
+		.vs_proc	= nfsd_procedures3,
+		.vs_dispatch	= nfsd_dispatch,
+		.vs_xdrsize	= NFS3_SVC_XDRSIZE,
 };

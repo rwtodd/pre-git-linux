@@ -4,7 +4,7 @@
 #ifdef INCLUDE_INLINE_FUNCS
 #define _INLINE_ extern
 #else
-#define _INLINE_ extern __inline__
+#define _INLINE_ static __inline__
 #endif
 
 _INLINE_ void tty_insert_flip_char(struct tty_struct *tty,
@@ -19,7 +19,7 @@ _INLINE_ void tty_insert_flip_char(struct tty_struct *tty,
 
 _INLINE_ void tty_schedule_flip(struct tty_struct *tty)
 {
-	queue_task(&tty->flip.tqueue, &tq_timer);
+	schedule_delayed_work(&tty->flip.work, 1);
 }
 
 #undef _INLINE_

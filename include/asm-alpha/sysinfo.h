@@ -18,6 +18,7 @@
 #define SSI_IEEE_FP_CONTROL		14
 #define SSI_IEEE_STATE_AT_SIGNAL	15
 #define SSI_IEEE_IGNORE_STATE_AT_SIGNAL	16
+#define SSI_IEEE_RAISE_EXCEPTION	1001	/* linux specific */
 
 #define SSIN_UACPROC			6
 
@@ -29,8 +30,8 @@
 
 #ifdef __KERNEL__
 
-/* This is the shift that is applied to the UAC bits as stored in the 
-   per-thread flags.  */
+/* This is the shift that is applied to the UAC bits as stored in the
+   per-thread flags.  See thread_info.h.  */
 #define UAC_SHIFT			6
 
 #endif

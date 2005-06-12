@@ -1,4 +1,4 @@
-/*  $Id: irq.c,v 1.109 2000/08/31 10:00:39 anton Exp $
+/*  $Id: irq.c,v 1.114 2001/12/11 04:55:51 davem Exp $
  *  arch/sparc/kernel/irq.c:  Interrupt request handling routines. On the
  *                            Sparc the IRQ's are basically 'cast in stone'
  *                            and you are supposed to probe the prom's device
@@ -6,12 +6,14 @@
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  *  Copyright (C) 1995 Miguel de Icaza (miguel@nuclecu.unam.mx)
- *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@metabyte.com)
+ *  Copyright (C) 1995,2002 Pete A. Zaitcev (zaitcev@yahoo.com)
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
- *  Copyright (C) 1998-2000 Anton Blanchard (anton@linuxcare.com)
+ *  Copyright (C) 1998-2000 Anton Blanchard (anton@samba.org)
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
+#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -19,7 +21,7 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/smp.h>
@@ -27,6 +29,7 @@
 #include <linux/delay.h>
 #include <linux/threads.h>
 #include <linux/spinlock.h>
+#include <linux/seq_file.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -42,9 +45,68 @@
 #include <asm/io.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
-#include <asm/hardirq.h>
-#include <asm/softirq.h>
 #include <asm/pcic.h>
+#include <asm/cacheflush.h>
+
+#ifdef CONFIG_SMP
+#define SMP_NOP2 "nop; nop;\n\t"
+#define SMP_NOP3 "nop; nop; nop;\n\t"
+#else
+#define SMP_NOP2
+#define SMP_NOP3
+#endif /* SMP */
+unsigned long __local_irq_save(void)
+{
+	unsigned long retval;
+	unsigned long tmp;
+
+	__asm__ __volatile__(
+		"rd	%%psr, %0\n\t"
+		SMP_NOP3	/* Sun4m + Cypress + SMP bug */
+		"or	%0, %2, %1\n\t"
+		"wr	%1, 0, %%psr\n\t"
+		"nop; nop; nop\n"
+		: "=&r" (retval), "=r" (tmp)
+		: "i" (PSR_PIL)
+		: "memory");
+
+	return retval;
+}
+
+void local_irq_enable(void)
+{
+	unsigned long tmp;
+
+	__asm__ __volatile__(
+		"rd	%%psr, %0\n\t"
+		SMP_NOP3	/* Sun4m + Cypress + SMP bug */
+		"andn	%0, %1, %0\n\t"
+		"wr	%0, 0, %%psr\n\t"
+		"nop; nop; nop\n"
+		: "=&r" (tmp)
+		: "i" (PSR_PIL)
+		: "memory");
+}
+
+void local_irq_restore(unsigned long old_psr)
+{
+	unsigned long tmp;
+
+	__asm__ __volatile__(
+		"rd	%%psr, %0\n\t"
+		"and	%2, %1, %2\n\t"
+		SMP_NOP2	/* Sun4m + Cypress + SMP bug */
+		"andn	%0, %1, %0\n\t"
+		"wr	%0, %2, %%psr\n\t"
+		"nop; nop; nop\n"
+		: "=&r" (tmp)
+		: "i" (PSR_PIL), "r" (old_psr)
+		: "memory");
+}
+
+EXPORT_SYMBOL(__local_irq_save);
+EXPORT_SYMBOL(local_irq_enable);
+EXPORT_SYMBOL(local_irq_restore);
 
 /*
  * Dave Redman (djhr@tadpole.co.uk)
@@ -72,8 +134,8 @@ static void irq_panic(void)
     prom_halt();
 }
 
-void (*init_timers)(void (*)(int, void *,struct pt_regs *)) =
-    (void (*)(void (*)(int, void *,struct pt_regs *))) irq_panic;
+void (*sparc_init_timers)(irqreturn_t (*)(int, void *,struct pt_regs *)) =
+    (void (*)(irqreturn_t (*)(int, void *,struct pt_regs *))) irq_panic;
 
 /*
  * Dave Redman (djhr@tadpole.co.uk)
@@ -90,49 +152,57 @@ void (*init_timers)(void (*)(int, void *,struct pt_regs *)) =
  */
 #define MAX_STATIC_ALLOC	4
 struct irqaction static_irqaction[MAX_STATIC_ALLOC];
-int static_irq_count = 0;
+int static_irq_count;
 
-struct irqaction *irq_action[NR_IRQS+1] = {
-	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL,
-	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL
+struct irqaction *irq_action[NR_IRQS] = {
+	[0 ... (NR_IRQS-1)] = NULL
 };
 
-int get_irq_list(char *buf)
+/* Used to protect the IRQ action lists */
+DEFINE_SPINLOCK(irq_action_lock);
+
+int show_interrupts(struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i = *(loff_t *) v;
 	struct irqaction * action;
+	unsigned long flags;
 #ifdef CONFIG_SMP
 	int j;
 #endif
 
 	if (sparc_cpu_model == sun4d) {
-		extern int sun4d_get_irq_list(char *);
+		extern int show_sun4d_interrupts(struct seq_file *, void *);
 		
-		return sun4d_get_irq_list(buf);
+		return show_sun4d_interrupts(p, v);
 	}
-	for (i = 0 ; i < (NR_IRQS+1) ; i++) {
+	spin_lock_irqsave(&irq_action_lock, flags);
+	if (i < NR_IRQS) {
 	        action = *(i + irq_action);
 		if (!action) 
-		        continue;
-		len += sprintf(buf+len, "%3d: ", i);
+			goto out_unlock;
+		seq_printf(p, "%3d: ", i);
 #ifndef CONFIG_SMP
-		len += sprintf(buf+len, "%10u ", kstat_irqs(i));
+		seq_printf(p, "%10u ", kstat_irqs(i));
 #else
-		for (j = 0; j < smp_num_cpus; j++)
-			len += sprintf(buf+len, "%10u ",
-				kstat.irqs[cpu_logical_map(j)][i]);
+		for (j = 0; j < NR_CPUS; j++) {
+			if (cpu_online(j))
+				seq_printf(p, "%10u ",
+				    kstat_cpu(cpu_logical_map(j)).irqs[i]);
+		}
 #endif
-		len += sprintf(buf+len, " %c %s",
+		seq_printf(p, " %c %s",
 			(action->flags & SA_INTERRUPT) ? '+' : ' ',
 			action->name);
 		for (action=action->next; action; action = action->next) {
-			len += sprintf(buf+len, ",%s %s",
+			seq_printf(p, ",%s %s",
 				(action->flags & SA_INTERRUPT) ? " +" : "",
 				action->name);
 		}
-		len += sprintf(buf+len, "\n");
+		seq_putc(p, '\n');
 	}
-	return len;
+out_unlock:
+	spin_unlock_irqrestore(&irq_action_lock, flags);
+	return 0;
 }
 
 void free_irq(unsigned int irq, void *dev_id)
@@ -145,17 +215,22 @@ void free_irq(unsigned int irq, void *dev_id)
 	if (sparc_cpu_model == sun4d) {
 		extern void sun4d_free_irq(unsigned int, void *);
 		
-		return sun4d_free_irq(irq, dev_id);
+		sun4d_free_irq(irq, dev_id);
+		return;
 	}
-	cpu_irq = irq & NR_IRQS;
-	action = *(cpu_irq + irq_action);
+	cpu_irq = irq & (NR_IRQS - 1);
         if (cpu_irq > 14) {  /* 14 irq levels on the sparc */
                 printk("Trying to free bogus IRQ %d\n", irq);
                 return;
         }
+
+	spin_lock_irqsave(&irq_action_lock, flags);
+
+	action = *(cpu_irq + irq_action);
+
 	if (!action->handler) {
 		printk("Trying to free free IRQ%d\n",irq);
-		return;
+		goto out_unlock;
 	}
 	if (dev_id) {
 		for (; action; action = action->next) {
@@ -165,74 +240,43 @@ void free_irq(unsigned int irq, void *dev_id)
 		}
 		if (!action) {
 			printk("Trying to free free shared IRQ%d\n",irq);
-			return;
+			goto out_unlock;
 		}
 	} else if (action->flags & SA_SHIRQ) {
 		printk("Trying to free shared IRQ%d with NULL device ID\n", irq);
-		return;
+		goto out_unlock;
 	}
 	if (action->flags & SA_STATIC_ALLOC)
 	{
-	    /* This interrupt is marked as specially allocated
-	     * so it is a bad idea to free it.
-	     */
-	    printk("Attempt to free statically allocated IRQ%d (%s)\n",
-		   irq, action->name);
-	    return;
+		/* This interrupt is marked as specially allocated
+		 * so it is a bad idea to free it.
+		 */
+		printk("Attempt to free statically allocated IRQ%d (%s)\n",
+		       irq, action->name);
+		goto out_unlock;
 	}
 	
-        save_and_cli(flags);
 	if (action && tmp)
 		tmp->next = action->next;
 	else
 		*(cpu_irq + irq_action) = action->next;
+
+	spin_unlock_irqrestore(&irq_action_lock, flags);
+
+	synchronize_irq(irq);
+
+	spin_lock_irqsave(&irq_action_lock, flags);
 
 	kfree(action);
 
 	if (!(*(cpu_irq + irq_action)))
 		disable_irq(irq);
 
-        restore_flags(flags);
+out_unlock:
+	spin_unlock_irqrestore(&irq_action_lock, flags);
 }
 
-#ifdef CONFIG_SMP
-
-/* Who has the global irq brlock */
-unsigned char global_irq_holder = NO_PROC_ID;
-
-void smp_show_backtrace_all_cpus(void);
-void show_backtrace(void);
-
-#define VERBOSE_DEBUG_IRQLOCK
-#define MAXCOUNT 100000000
-
-static void show(char * str)
-{
-	int cpu = smp_processor_id();
-	int i;
-
-	printk("\n%s, CPU %d:\n", str, cpu);
-	printk("irq:  %d [ ", irqs_running());
-	for (i = 0; i < smp_num_cpus; i++)
-		printk("%u ", __brlock_array[i][BR_GLOBALIRQ_LOCK]);
-	printk("]\nbh:   %d [ ",
-	       (spin_is_locked(&global_bh_lock) ? 1 : 0));
-	for (i = 0; i < smp_num_cpus; i++)
-		printk("%u ", local_bh_count(i));
-	printk("]\n");
-
-#ifdef VERBOSE_DEBUG_IRQLOCK
-	smp_show_backtrace_all_cpus();
-#else
-	show_backtrace();
-#endif
-}
-
-
-/*
- * We have to allow irqs to arrive between __sti and __cli
- */
-#define SYNC_OTHER_CORES(x) barrier()
+EXPORT_SYMBOL(free_irq);
 
 /*
  * This is called when we want to synchronize with
@@ -241,140 +285,13 @@ static void show(char * str)
  * are no interrupts that are executing on another
  * CPU we need to call this function.
  */
-void synchronize_irq(void)
+#ifdef CONFIG_SMP
+void synchronize_irq(unsigned int irq)
 {
-	if (irqs_running()) {
-		cli();
-		sti();
-	}
+	printk("synchronize_irq says: implement me!\n");
+	BUG();
 }
-
-static inline void get_irqlock(int cpu)
-{
-	int count;
-
-	if ((unsigned char)cpu == global_irq_holder)
-		return;
-
-	count = MAXCOUNT;
-again:
-	br_write_lock(BR_GLOBALIRQ_LOCK);
-	for (;;) {
-		spinlock_t *lock;
-
-		if (!irqs_running() &&
-		    (local_bh_count(smp_processor_id()) || !spin_is_locked(&global_bh_lock)))
-			break;
-
-		br_write_unlock(BR_GLOBALIRQ_LOCK);
-		lock = &__br_write_locks[BR_GLOBALIRQ_LOCK].lock;
-		while (irqs_running() ||
-		       spin_is_locked(lock) ||
-		       (!local_bh_count(smp_processor_id()) && spin_is_locked(&global_bh_lock))) {
-			if (!--count) {
-				show("get_irqlock");
-				count = (~0 >> 1);
-			}
-			__sti();
-			SYNC_OTHER_CORES(cpu);
-			__cli();
-		}
-		goto again;
-	}
-
-	global_irq_holder = cpu;
-}
-
-/*
- * A global "cli()" while in an interrupt context
- * turns into just a local cli(). Interrupts
- * should use spinlocks for the (very unlikely)
- * case that they ever want to protect against
- * each other.
- *
- * If we already have local interrupts disabled,
- * this will not turn a local disable into a
- * global one (problems with spinlocks: this makes
- * save_flags+cli+sti usable inside a spinlock).
- */
-void __global_cli(void)
-{
-	unsigned long flags;
-
-	__save_flags(flags);
-
-	if ((flags & PSR_PIL) != PSR_PIL) {
-		int cpu = smp_processor_id();
-		__cli();
-		if (!local_irq_count(cpu))
-			get_irqlock(cpu);
-	}
-}
-
-void __global_sti(void)
-{
-	int cpu = smp_processor_id();
-
-	if (!local_irq_count(cpu))
-		release_irqlock(cpu);
-	__sti();
-}
-
-/*
- * SMP flags value to restore to:
- * 0 - global cli
- * 1 - global sti
- * 2 - local cli
- * 3 - local sti
- */
-unsigned long __global_save_flags(void)
-{
-	unsigned long flags, retval;
-	unsigned long local_enabled = 0;
-
-	__save_flags(flags);
-
-	if ((flags & PSR_PIL) != PSR_PIL)
-		local_enabled = 1;
-
-	/* default to local */
-	retval = 2 + local_enabled;
-
-	/* check for global flags if we're not in an interrupt */
-	if (!local_irq_count(smp_processor_id())) {
-		if (local_enabled)
-			retval = 1;
-		if (global_irq_holder == (unsigned char) smp_processor_id())
-			retval = 0;
-	}
-	return retval;
-}
-
-void __global_restore_flags(unsigned long flags)
-{
-	switch (flags) {
-	case 0:
-		__global_cli();
-		break;
-	case 1:
-		__global_sti();
-		break;
-	case 2:
-		__cli();
-		break;
-	case 3:
-		__sti();
-		break;
-	default:
-	{
-		unsigned long pc;
-		__asm__ __volatile__("mov %%i7, %0" : "=r" (pc));
-		printk("global_restore_flags: Bogon flags(%08lx) caller %08lx\n", flags, pc);
-	}
-	}
-}
-
-#endif /* CONFIG_SMP */
+#endif /* SMP */
 
 void unexpected_irq(int irq, void *dev_id, struct pt_regs * regs)
 {
@@ -382,7 +299,7 @@ void unexpected_irq(int irq, void *dev_id, struct pt_regs * regs)
 	struct irqaction * action;
 	unsigned int cpu_irq;
 	
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	action = *(cpu_irq + irq_action);
 
         printk("IO device interrupt, irq = %d\n", irq);
@@ -392,8 +309,8 @@ void unexpected_irq(int irq, void *dev_id, struct pt_regs * regs)
 		printk("Expecting: ");
         	for (i = 0; i < 16; i++)
                 	if (action->handler)
-                        	prom_printf("[%s:%d:0x%x] ", action->name,
-				    (int) i, (unsigned int) action->handler);
+                        	printk("[%s:%d:0x%x] ", action->name,
+				       (int) i, (unsigned int) action->handler);
 	}
         printk("AIEEE\n");
 	panic("bogus interrupt received");
@@ -407,7 +324,7 @@ void handler_irq(int irq, struct pt_regs * regs)
 	extern void smp4m_irq_rotate(int cpu);
 #endif
 
-	irq_enter(cpu, irq);
+	irq_enter();
 	disable_pil_irq(irq);
 #ifdef CONFIG_SMP
 	/* Only rotate on lower priority IRQ's (scsi, ethernet, etc.). */
@@ -415,15 +332,15 @@ void handler_irq(int irq, struct pt_regs * regs)
 		smp4m_irq_rotate(cpu);
 #endif
 	action = *(irq + irq_action);
-	kstat.irqs[cpu][irq]++;
+	kstat_cpu(cpu).irqs[irq]++;
 	do {
 		if (!action || !action->handler)
-			unexpected_irq(irq, 0, regs);
+			unexpected_irq(irq, NULL, regs);
 		action->handler(irq, action->dev_id, regs);
 		action = action->next;
 	} while (action);
 	enable_pil_irq(irq);
-	irq_exit(cpu, irq);
+	irq_exit();
 }
 
 #ifdef CONFIG_BLK_DEV_FD
@@ -434,11 +351,14 @@ void sparc_floppy_irq(int irq, void *dev_id, struct pt_regs *regs)
 	int cpu = smp_processor_id();
 
 	disable_pil_irq(irq);
-	irq_enter(cpu, irq);
-	kstat.irqs[cpu][irq]++;
+	irq_enter();
+	kstat_cpu(cpu).irqs[irq]++;
 	floppy_interrupt(irq, dev_id, regs);
-	irq_exit(cpu, irq);
+	irq_exit();
 	enable_pil_irq(irq);
+	// XXX Eek, it's totally changed with preempt_count() and such
+	// if (softirq_pending(cpu))
+	//	do_softirq();
 }
 #endif
 
@@ -446,22 +366,30 @@ void sparc_floppy_irq(int irq, void *dev_id, struct pt_regs *regs)
  * thus no sharing possible.
  */
 int request_fast_irq(unsigned int irq,
-		     void (*handler)(int, void *, struct pt_regs *),
+		     irqreturn_t (*handler)(int, void *, struct pt_regs *),
 		     unsigned long irqflags, const char *devname)
 {
 	struct irqaction *action;
 	unsigned long flags;
 	unsigned int cpu_irq;
+	int ret;
 #ifdef CONFIG_SMP
 	struct tt_entry *trap_table;
 	extern struct tt_entry trapbase_cpu1, trapbase_cpu2, trapbase_cpu3;
 #endif
 	
-	cpu_irq = irq & NR_IRQS;
-	if(cpu_irq > 14)
-		return -EINVAL;
-	if(!handler)
-		return -EINVAL;
+	cpu_irq = irq & (NR_IRQS - 1);
+	if(cpu_irq > 14) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if(!handler) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	spin_lock_irqsave(&irq_action_lock, flags);
+
 	action = *(cpu_irq + irq_action);
 	if(action) {
 		if(action->flags & SA_SHIRQ)
@@ -471,10 +399,9 @@ int request_fast_irq(unsigned int irq,
 
 		/* Anyway, someone already owns it so cannot be made fast. */
 		printk("request_fast_irq: Trying to register yet already owned.\n");
-		return -EBUSY;
+		ret = -EBUSY;
+		goto out_unlock;
 	}
-
-	save_and_cli(flags);
 
 	/* If this is flagged as statically allocated then we use our
 	 * private struct which is never freed.
@@ -489,11 +416,11 @@ int request_fast_irq(unsigned int irq,
 	
 	if (action == NULL)
 	    action = (struct irqaction *)kmalloc(sizeof(struct irqaction),
-						 GFP_KERNEL);
+						 GFP_ATOMIC);
 	
 	if (!action) { 
-		restore_flags(flags);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out_unlock;
 	}
 
 	/* Dork with trap table if we get this far. */
@@ -521,7 +448,7 @@ int request_fast_irq(unsigned int irq,
 
 	action->handler = handler;
 	action->flags = irqflags;
-	action->mask = 0;
+	cpus_clear(action->mask);
 	action->name = devname;
 	action->dev_id = NULL;
 	action->next = NULL;
@@ -529,69 +456,79 @@ int request_fast_irq(unsigned int irq,
 	*(cpu_irq + irq_action) = action;
 
 	enable_irq(irq);
-	restore_flags(flags);
-	return 0;
+
+	ret = 0;
+out_unlock:
+	spin_unlock_irqrestore(&irq_action_lock, flags);
+out:
+	return ret;
 }
 
 int request_irq(unsigned int irq,
-		void (*handler)(int, void *, struct pt_regs *),
+		irqreturn_t (*handler)(int, void *, struct pt_regs *),
 		unsigned long irqflags, const char * devname, void *dev_id)
 {
 	struct irqaction * action, *tmp = NULL;
 	unsigned long flags;
 	unsigned int cpu_irq;
+	int ret;
 	
 	if (sparc_cpu_model == sun4d) {
 		extern int sun4d_request_irq(unsigned int, 
-					     void (*)(int, void *, struct pt_regs *),
+					     irqreturn_t (*)(int, void *, struct pt_regs *),
 					     unsigned long, const char *, void *);
 		return sun4d_request_irq(irq, handler, irqflags, devname, dev_id);
 	}
-	cpu_irq = irq & NR_IRQS;
-	if(cpu_irq > 14)
-		return -EINVAL;
-
-	if (!handler)
-	    return -EINVAL;
+	cpu_irq = irq & (NR_IRQS - 1);
+	if(cpu_irq > 14) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (!handler) {
+		ret = -EINVAL;
+		goto out;
+	}
 	    
+	spin_lock_irqsave(&irq_action_lock, flags);
+
 	action = *(cpu_irq + irq_action);
 	if (action) {
 		if ((action->flags & SA_SHIRQ) && (irqflags & SA_SHIRQ)) {
 			for (tmp = action; tmp->next; tmp = tmp->next);
 		} else {
-			return -EBUSY;
+			ret = -EBUSY;
+			goto out_unlock;
 		}
 		if ((action->flags & SA_INTERRUPT) ^ (irqflags & SA_INTERRUPT)) {
 			printk("Attempt to mix fast and slow interrupts on IRQ%d denied\n", irq);
-			return -EBUSY;
+			ret = -EBUSY;
+			goto out_unlock;
 		}   
 		action = NULL;		/* Or else! */
 	}
-
-	save_and_cli(flags);
 
 	/* If this is flagged as statically allocated then we use our
 	 * private struct which is never freed.
 	 */
 	if (irqflags & SA_STATIC_ALLOC) {
-	    if (static_irq_count < MAX_STATIC_ALLOC)
-		action = &static_irqaction[static_irq_count++];
-	    else
-		printk("Request for IRQ%d (%s) SA_STATIC_ALLOC failed using kmalloc\n",irq, devname);
+		if (static_irq_count < MAX_STATIC_ALLOC)
+			action = &static_irqaction[static_irq_count++];
+		else
+			printk("Request for IRQ%d (%s) SA_STATIC_ALLOC failed using kmalloc\n", irq, devname);
 	}
 	
 	if (action == NULL)
-	    action = (struct irqaction *)kmalloc(sizeof(struct irqaction),
-						 GFP_KERNEL);
+		action = (struct irqaction *)kmalloc(sizeof(struct irqaction),
+						     GFP_ATOMIC);
 	
 	if (!action) { 
-		restore_flags(flags);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out_unlock;
 	}
 
 	action->handler = handler;
 	action->flags = irqflags;
-	action->mask = 0;
+	cpus_clear(action->mask);
 	action->name = devname;
 	action->next = NULL;
 	action->dev_id = dev_id;
@@ -602,9 +539,15 @@ int request_irq(unsigned int irq,
 		*(cpu_irq + irq_action) = action;
 
 	enable_irq(irq);
-	restore_flags(flags);
-	return 0;
+
+	ret = 0;
+out_unlock:
+	spin_unlock_irqrestore(&irq_action_lock, flags);
+out:
+	return ret;
 }
+
+EXPORT_SYMBOL(request_irq);
 
 /* We really don't need these at all on the Sparc.  We only have
  * stubs here because they are exported to modules.
@@ -614,10 +557,14 @@ unsigned long probe_irq_on(void)
 	return 0;
 }
 
+EXPORT_SYMBOL(probe_irq_on);
+
 int probe_irq_off(unsigned long mask)
 {
 	return 0;
 }
+
+EXPORT_SYMBOL(probe_irq_off);
 
 /* djhr
  * This could probably be made indirect too and assigned in the CPU
@@ -632,7 +579,7 @@ void __init init_IRQ(void)
 	extern void sun4c_init_IRQ( void );
 	extern void sun4m_init_IRQ( void );
 	extern void sun4d_init_IRQ( void );
-    
+
 	switch(sparc_cpu_model) {
 	case sun4c:
 	case sun4:

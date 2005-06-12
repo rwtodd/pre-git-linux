@@ -7,9 +7,6 @@
  * Defines for the AlphaPC EISA IO and memory address space.
  */
 
-/* The Jensen is strange */
-#define AUX_IRQ (9)
-
 /*
  * NOTE! The memory operations do not set any memory barriers, as it's
  * not needed for cases like a frame buffer that is essentially memory-like.
@@ -118,7 +115,7 @@ static inline unsigned int jensen_local_inb(unsigned long addr)
 	return 0xff & *(vuip)((addr << 9) + EISA_VL82C106);
 }
 
-static inline void jensen_local_outb(unsigned char b, unsigned long addr)
+static inline void jensen_local_outb(u8 b, unsigned long addr)
 {
 	*(vuip)((addr << 9) + EISA_VL82C106) = b;
 	mb();
@@ -133,7 +130,7 @@ static inline unsigned int jensen_bus_inb(unsigned long addr)
 	return __kernel_extbl(result, addr & 3);
 }
 
-static inline void jensen_bus_outb(unsigned char b, unsigned long addr)
+static inline void jensen_bus_outb(u8 b, unsigned long addr)
 {
 	jensen_set_hae(0);
 	*(vuip)((addr << 7) + EISA_IO + 0x00) = b * 0x01010101;
@@ -153,7 +150,7 @@ static inline void jensen_bus_outb(unsigned char b, unsigned long addr)
 /* mb LPT1 */	(addr >= 0x3bc && addr <= 0x3be) || \
 /* mb COM2 */	(addr >= 0x3f8 && addr <= 0x3ff))
 
-__EXTERN_INLINE unsigned int jensen_inb(unsigned long addr)
+__EXTERN_INLINE u8 jensen_inb(unsigned long addr)
 {
 	if (jensen_is_local(addr))
 		return jensen_local_inb(addr);
@@ -161,7 +158,7 @@ __EXTERN_INLINE unsigned int jensen_inb(unsigned long addr)
 		return jensen_bus_inb(addr);
 }
 
-__EXTERN_INLINE void jensen_outb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void jensen_outb(u8 b, unsigned long addr)
 {
 	if (jensen_is_local(addr))
 		jensen_local_outb(b, addr);
@@ -169,7 +166,7 @@ __EXTERN_INLINE void jensen_outb(unsigned char b, unsigned long addr)
 		jensen_bus_outb(b, addr);
 }
 
-__EXTERN_INLINE unsigned int jensen_inw(unsigned long addr)
+__EXTERN_INLINE u16 jensen_inw(unsigned long addr)
 {
 	long result;
 
@@ -179,20 +176,20 @@ __EXTERN_INLINE unsigned int jensen_inw(unsigned long addr)
 	return 0xffffUL & result;
 }
 
-__EXTERN_INLINE unsigned int jensen_inl(unsigned long addr)
+__EXTERN_INLINE u32 jensen_inl(unsigned long addr)
 {
 	jensen_set_hae(0);
 	return *(vuip) ((addr << 7) + EISA_IO + 0x60);
 }
 
-__EXTERN_INLINE void jensen_outw(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void jensen_outw(u16 b, unsigned long addr)
 {
 	jensen_set_hae(0);
 	*(vuip) ((addr << 7) + EISA_IO + 0x20) = b * 0x00010001;
 	mb();
 }
 
-__EXTERN_INLINE void jensen_outl(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void jensen_outl(u32 b, unsigned long addr)
 {
 	jensen_set_hae(0);
 	*(vuip) ((addr << 7) + EISA_IO + 0x60) = b;
@@ -203,8 +200,9 @@ __EXTERN_INLINE void jensen_outl(unsigned int b, unsigned long addr)
  * Memory functions.
  */
 
-__EXTERN_INLINE unsigned long jensen_readb(unsigned long addr)
+__EXTERN_INLINE u8 jensen_readb(const volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	long result;
 
 	jensen_set_hae(addr);
@@ -214,8 +212,9 @@ __EXTERN_INLINE unsigned long jensen_readb(unsigned long addr)
 	return 0xffUL & result;
 }
 
-__EXTERN_INLINE unsigned long jensen_readw(unsigned long addr)
+__EXTERN_INLINE u16 jensen_readw(const volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	long result;
 
 	jensen_set_hae(addr);
@@ -225,15 +224,17 @@ __EXTERN_INLINE unsigned long jensen_readw(unsigned long addr)
 	return 0xffffUL & result;
 }
 
-__EXTERN_INLINE unsigned long jensen_readl(unsigned long addr)
+__EXTERN_INLINE u32 jensen_readl(const volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	jensen_set_hae(addr);
 	addr &= JENSEN_HAE_MASK;
 	return *(vuip) ((addr << 7) + EISA_MEM + 0x60);
 }
 
-__EXTERN_INLINE unsigned long jensen_readq(unsigned long addr)
+__EXTERN_INLINE u64 jensen_readq(const volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	unsigned long r0, r1;
 
 	jensen_set_hae(addr);
@@ -244,29 +245,33 @@ __EXTERN_INLINE unsigned long jensen_readq(unsigned long addr)
 	return r1 << 32 | r0;
 }
 
-__EXTERN_INLINE void jensen_writeb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void jensen_writeb(u8 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	jensen_set_hae(addr);
 	addr &= JENSEN_HAE_MASK;
 	*(vuip) ((addr << 7) + EISA_MEM + 0x00) = b * 0x01010101;
 }
 
-__EXTERN_INLINE void jensen_writew(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void jensen_writew(u16 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	jensen_set_hae(addr);
 	addr &= JENSEN_HAE_MASK;
 	*(vuip) ((addr << 7) + EISA_MEM + 0x20) = b * 0x00010001;
 }
 
-__EXTERN_INLINE void jensen_writel(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void jensen_writel(u32 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	jensen_set_hae(addr);
 	addr &= JENSEN_HAE_MASK;
 	*(vuip) ((addr << 7) + EISA_MEM + 0x60) = b;
 }
 
-__EXTERN_INLINE void jensen_writeq(unsigned long b, unsigned long addr)
+__EXTERN_INLINE void jensen_writeq(u64 b, volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	jensen_set_hae(addr);
 	addr &= JENSEN_HAE_MASK;
 	addr = (addr << 7) + EISA_MEM + 0x60;
@@ -274,9 +279,15 @@ __EXTERN_INLINE void jensen_writeq(unsigned long b, unsigned long addr)
 	*(vuip) (addr + (4 << 7)) = b >> 32;
 }
 
-__EXTERN_INLINE unsigned long jensen_ioremap(unsigned long addr)
+__EXTERN_INLINE void __iomem *jensen_ioportmap(unsigned long addr)
 {
-	return addr;
+	return (void __iomem *)addr;
+}
+
+__EXTERN_INLINE void __iomem *jensen_ioremap(unsigned long addr,
+					     unsigned long size)
+{
+	return (void __iomem *)(addr + 0x100000000ul);
 }
 
 __EXTERN_INLINE int jensen_is_ioaddr(unsigned long addr)
@@ -284,38 +295,46 @@ __EXTERN_INLINE int jensen_is_ioaddr(unsigned long addr)
 	return (long)addr >= 0;
 }
 
+__EXTERN_INLINE int jensen_is_mmio(const volatile void __iomem *addr)
+{
+	return (unsigned long)addr >= 0x100000000ul;
+}
+
+/* New-style ioread interface.  All the routines are so ugly for Jensen
+   that it doesn't make sense to merge them.  */
+
+#define IOPORT(OS, NS)							\
+__EXTERN_INLINE unsigned int jensen_ioread##NS(void __iomem *xaddr)	\
+{									\
+	if (jensen_is_mmio(xaddr))					\
+		return jensen_read##OS(xaddr - 0x100000000ul);		\
+	else								\
+		return jensen_in##OS((unsigned long)xaddr);		\
+}									\
+__EXTERN_INLINE void jensen_iowrite##NS(u##NS b, void __iomem *xaddr)	\
+{									\
+	if (jensen_is_mmio(xaddr))					\
+		jensen_write##OS(b, xaddr - 0x100000000ul);		\
+	else								\
+		jensen_out##OS(b, (unsigned long)xaddr);		\
+}
+
+IOPORT(b, 8)
+IOPORT(w, 16)
+IOPORT(l, 32)
+
+#undef IOPORT
+
 #undef vuip
 
-#ifdef __WANT_IO_DEF
-
-#define __inb		jensen_inb
-#define __inw		jensen_inw
-#define __inl		jensen_inl
-#define __outb		jensen_outb
-#define __outw		jensen_outw
-#define __outl		jensen_outl
-#define __readb		jensen_readb
-#define __readw		jensen_readw
-#define __writeb	jensen_writeb
-#define __writew	jensen_writew
-#define __readl		jensen_readl
-#define __readq		jensen_readq
-#define __writel	jensen_writel
-#define __writeq	jensen_writeq
-#define __ioremap	jensen_ioremap
-#define __is_ioaddr	jensen_is_ioaddr
-
-/*
- * The above have so much overhead that it probably doesn't make
- * sense to have them inlined (better icache behaviour).
- */
-#define inb(port) \
-(__builtin_constant_p((port))?__inb(port):_inb(port))
-
-#define outb(x, port) \
-(__builtin_constant_p((port))?__outb((x),(port)):_outb((x),(port)))
-
-#endif /* __WANT_IO_DEF */
+#undef __IO_PREFIX
+#define __IO_PREFIX		jensen
+#define jensen_trivial_rw_bw	0
+#define jensen_trivial_rw_lq	0
+#define jensen_trivial_io_bw	0
+#define jensen_trivial_io_lq	0
+#define jensen_trivial_iounmap	1
+#include <asm/io_trivial.h>
 
 #ifdef __IO_EXTERN_INLINE
 #undef __EXTERN_INLINE

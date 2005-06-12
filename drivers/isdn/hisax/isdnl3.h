@@ -1,6 +1,7 @@
-/* $Id: isdnl3.h,v 2.6 2000/06/26 08:59:13 keil Exp $
+/* $Id: isdnl3.h,v 2.6.6.2 2001/09/23 22:24:49 kai Exp $
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -19,7 +20,7 @@
 struct stateentry {
 	int state;
 	int primitive;
-	void (*rout) (struct l3_process *, u_char, void *);
+	void (*rout) (struct l3_process *, u8, void *);
 };
 
 #define l3_debug(st, fmt, args...) HiSax_putstatus(st->l1.hardware, "l3 ", fmt, ## args)

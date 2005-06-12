@@ -17,10 +17,11 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
-#include <linux/sched.h>
-#include <linux/locks.h>
+#include <linux/slab.h>
+#include <linux/time.h>
 #include <linux/config.h>
+#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
 
 #include <asm/uaccess.h>
 
@@ -28,8 +29,8 @@ static int isofs_readdir(struct file *, void *, filldir_t);
 
 struct file_operations isofs_dir_operations =
 {
-	read:		generic_read_dir,
-	readdir:	isofs_readdir,
+	.read		= generic_read_dir,
+	.readdir	= isofs_readdir,
 };
 
 /*
@@ -37,7 +38,7 @@ struct file_operations isofs_dir_operations =
  */
 struct inode_operations isofs_dir_inode_operations =
 {
-	lookup:		isofs_lookup,
+	.lookup		= isofs_lookup,
 };
 
 int isofs_name_translate(struct iso_directory_record *de, char *new, struct inode *inode)
@@ -63,7 +64,8 @@ int isofs_name_translate(struct iso_directory_record *de, char *new, struct inod
 			break;
 
 		/* Convert remaining ';' to '.' */
-		if (c == ';')
+		/* Also '/' to '.' (broken Acorn-generated ISO9660 images) */
+		if (c == ';' || c == '/')
 			c = '.';
 
 		new[i] = c;
@@ -105,32 +107,29 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 {
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
 	unsigned char bufbits = ISOFS_BUFFER_BITS(inode);
-	unsigned int block, offset;
-	int inode_number = 0;	/* Quiet GCC */
+	unsigned long block, offset, block_saved, offset_saved;
+	unsigned long inode_number = 0;	/* Quiet GCC */
 	struct buffer_head *bh = NULL;
 	int len;
 	int map;
-	int high_sierra;
 	int first_de = 1;
 	char *p = NULL;		/* Quiet GCC */
 	struct iso_directory_record *de;
+	struct isofs_sb_info *sbi = ISOFS_SB(inode->i_sb);
 
 	offset = filp->f_pos & (bufsize - 1);
 	block = filp->f_pos >> bufbits;
-	high_sierra = inode->i_sb->u.isofs_sb.s_high_sierra;
 
 	while (filp->f_pos < inode->i_size) {
 		int de_len;
 
 		if (!bh) {
-			bh = isofs_bread(inode, bufsize, block);
+			bh = isofs_bread(inode, block);
 			if (!bh)
 				return 0;
 		}
 
 		de = (struct iso_directory_record *) (bh->b_data + offset);
-		if (first_de)
-			inode_number = (bh->b_blocknr << bufbits) + offset;
 
 		de_len = *(unsigned char *) de;
 
@@ -147,6 +146,8 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 			continue;
 		}
 
+		block_saved = block;
+		offset_saved = offset;
 		offset += de_len;
 
 		/* Make sure we have a full directory entry */
@@ -158,7 +159,7 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 			brelse(bh);
 			bh = NULL;
 			if (offset) {
-				bh = isofs_bread(inode, bufsize, block);
+				bh = isofs_bread(inode, block);
 				if (!bh)
 					return 0;
 				memcpy((void *) tmpde + slop, bh->b_data, offset);
@@ -166,7 +167,16 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 			de = tmpde;
 		}
 
-		if (de->flags[-high_sierra] & 0x80) {
+		if (first_de) {
+			isofs_normalize_block_and_offset(de,
+							 &block_saved,
+							 &offset_saved);
+			inode_number = isofs_get_ino(block_saved,
+						     offset_saved,
+						     bufbits);
+		}
+
+		if (de->flags[-sbi->s_high_sierra] & 0x80) {
 			first_de = 0;
 			filp->f_pos += de_len;
 			continue;
@@ -185,7 +195,7 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 
 		/* Handle the case of the '..' directory */
 		if (de->name_len[0] == 1 && de->name[0] == 1) {
-			inode_number = filp->f_dentry->d_parent->d_inode->i_ino;
+			inode_number = parent_ino(filp->f_dentry);
 			if (filldir(dirent, "..", 2, filp->f_pos, inode_number, DT_DIR) < 0)
 				break;
 			filp->f_pos += de_len;
@@ -194,16 +204,16 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 
 		/* Handle everything else.  Do name translation if there
 		   is no Rock Ridge NM field. */
-		if (inode->i_sb->u.isofs_sb.s_unhide == 'n') {
+		if (sbi->s_unhide == 'n') {
 			/* Do not report hidden or associated files */
-			if (de->flags[-high_sierra] & 5) {
+			if (de->flags[-sbi->s_high_sierra] & 5) {
 				filp->f_pos += de_len;
 				continue;
 			}
 		}
 
 		map = 1;
-		if (inode->i_sb->u.isofs_sb.s_rock) {
+		if (sbi->s_rock) {
 			len = get_rock_ridge_filename(de, tmpname, inode);
 			if (len != 0) {		/* may be -1 */
 				p = tmpname;
@@ -212,16 +222,16 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 		}
 		if (map) {
 #ifdef CONFIG_JOLIET
-			if (inode->i_sb->u.isofs_sb.s_joliet_level) {
+			if (sbi->s_joliet_level) {
 				len = get_joliet_filename(de, tmpname, inode);
 				p = tmpname;
 			} else
 #endif
-			if (inode->i_sb->u.isofs_sb.s_mapping == 'a') {
+			if (sbi->s_mapping == 'a') {
 				len = get_acorn_filename(de, tmpname, inode);
 				p = tmpname;
 			} else
-			if (inode->i_sb->u.isofs_sb.s_mapping == 'n') {
+			if (sbi->s_mapping == 'n') {
 				len = isofs_name_translate(de, tmpname, inode);
 				p = tmpname;
 			} else {
@@ -254,13 +264,17 @@ static int isofs_readdir(struct file *filp,
 	struct iso_directory_record * tmpde;
 	struct inode *inode = filp->f_dentry->d_inode;
 
-	tmpname = (char *) __get_free_page(GFP_KERNEL);
-	if (!tmpname)
+
+	tmpname = (char *)__get_free_page(GFP_KERNEL);
+	if (tmpname == NULL)
 		return -ENOMEM;
+
+	lock_kernel();
 	tmpde = (struct iso_directory_record *) (tmpname+1024);
 
 	result = do_isofs_readdir(inode, filp, dirent, filldir, tmpname, tmpde);
 
 	free_page((unsigned long) tmpname);
+	unlock_kernel();
 	return result;
 }

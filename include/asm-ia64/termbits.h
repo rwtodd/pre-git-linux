@@ -2,8 +2,10 @@
 #define _ASM_IA64_TERMBITS_H
 
 /*
- * Copyright (C) 1999 Hewlett-Packard Co
- * Copyright (C) 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Based on <asm-i386/termbits.h>.
+ *
+ * Modified 1999
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  *
  * 99/01/28	Added new baudrates
  */
@@ -58,6 +60,7 @@ struct termios {
 #define IXANY	0004000
 #define IXOFF	0010000
 #define IMAXBEL	0020000
+#define IUTF8	0040000
 
 /* c_oflag bits */
 #define OPOST	0000001

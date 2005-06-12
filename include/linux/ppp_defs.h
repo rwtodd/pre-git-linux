@@ -42,6 +42,8 @@
 #ifndef _PPP_DEFS_H_
 #define _PPP_DEFS_H_
 
+#include <linux/crc-ccitt.h>
+
 /*
  * The basic PPP frame.
  */
@@ -74,12 +76,15 @@
 #define PPP_IPV6	0x57	/* Internet Protocol Version 6 */
 #define PPP_COMPFRAG	0xfb	/* fragment compressed below bundle */
 #define PPP_COMP	0xfd	/* compressed packet */
+#define PPP_MPLS_UC	0x0281	/* Multi Protocol Label Switching - Unicast */
+#define PPP_MPLS_MC	0x0283	/* Multi Protocol Label Switching - Multicast */
 #define PPP_IPCP	0x8021	/* IP Control Protocol */
 #define PPP_ATCP	0x8029	/* AppleTalk Control Protocol */
 #define PPP_IPXCP	0x802b	/* IPX Control Protocol */
 #define PPP_IPV6CP	0x8057	/* IPv6 Control Protocol */
 #define PPP_CCPFRAG	0x80fb	/* CCP at link level (below MP bundle) */
 #define PPP_CCP		0x80fd	/* Compression Control Protocol */
+#define PPP_MPLSCP	0x80fd	/* MPLS Control Protocol */
 #define PPP_LCP		0xc021	/* Link Control Protocol */
 #define PPP_PAP		0xc023	/* Password Authentication Protocol */
 #define PPP_LQR		0xc025	/* Link Quality Report protocol */
@@ -92,7 +97,7 @@
 
 #define PPP_INITFCS	0xffff	/* Initial FCS value */
 #define PPP_GOODFCS	0xf0b8	/* Good final FCS value */
-#define PPP_FCS(fcs, c)	(((fcs) >> 8) ^ fcstab[((fcs) ^ (c)) & 0xff])
+#define PPP_FCS(fcs, c) crc_ccitt_byte(fcs, c)
 
 /*
  * Extended asyncmap - allows any character to be escaped.

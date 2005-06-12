@@ -47,6 +47,8 @@ static int reboot_count = NUM_PRESSES_REBOOT; /* Number of presses to reboot */
  * Because callbacks can be unregistered at random the list can become
  * fragmented, so we need to search through the list until we find the first
  * free entry.
+ *
+ * FIXME: Has anyone spotted any locking functions int his code recently ??
  */
 
 int button_add_callback (void (*callback) (void), int count)
@@ -144,7 +146,7 @@ static void button_sequence_finished (unsigned long parameters)
  *  increments the counter.
  */ 
 
-static void button_handler (int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t button_handler (int irq, void *dev_id, struct pt_regs *regs)
 {
 	if (button_press_count) {
 		del_timer (&button_timer);
@@ -154,6 +156,8 @@ static void button_handler (int irq, void *dev_id, struct pt_regs *regs)
 	button_timer.function = button_sequence_finished;
 	button_timer.expires = (jiffies + bdelay);
 	add_timer (&button_timer);
+
+	return IRQ_HANDLED;
 }
 
 /*
@@ -166,7 +170,7 @@ static void button_handler (int irq, void *dev_id, struct pt_regs *regs)
  * device at any one time.
  */
 
-static int button_read (struct file *filp, char *buffer,
+static int button_read (struct file *filp, char __user *buffer,
 			size_t count, loff_t *ppos)
 {
 	interruptible_sleep_on (&button_wait_queue);
@@ -181,8 +185,8 @@ static int button_read (struct file *filp, char *buffer,
  */
 
 static struct file_operations button_fops = {
-	owner:		THIS_MODULE,
-	read:		button_read,
+	.owner		= THIS_MODULE,
+	.read		= button_read,
 };
 
 /* 
@@ -236,7 +240,9 @@ static void __exit nwbutton_exit (void)
 	misc_deregister (&button_misc_device);
 }
 
-EXPORT_NO_SYMBOLS;
+
+MODULE_AUTHOR("Alex Holden");
+MODULE_LICENSE("GPL");
 
 module_init(nwbutton_init);
 module_exit(nwbutton_exit);

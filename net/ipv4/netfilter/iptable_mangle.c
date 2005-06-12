@@ -2,6 +2,13 @@
  * This is the 1999 rewrite of IP Firewalling, aiming for kernel 2.3.x.
  *
  * Copyright (C) 1999 Paul `Rusty' Russell & Michael J. Neuling
+ * Copyright (C) 2000-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * Extended to all five netfilter hooks by Brad Chapman & Harald Welte
  */
 #include <linux/config.h>
 #include <linux/module.h>
@@ -12,39 +19,35 @@
 #include <net/route.h>
 #include <linux/ip.h>
 
-#define MANGLE_VALID_HOOKS ((1 << NF_IP_PRE_ROUTING) | (1 << NF_IP_LOCAL_OUT))
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables mangle table");
 
-/* Standard entry. */
-struct ipt_standard
-{
-	struct ipt_entry entry;
-	struct ipt_standard_target target;
-};
+#define MANGLE_VALID_HOOKS ((1 << NF_IP_PRE_ROUTING) | \
+			    (1 << NF_IP_LOCAL_IN) | \
+			    (1 << NF_IP_FORWARD) | \
+			    (1 << NF_IP_LOCAL_OUT) | \
+			    (1 << NF_IP_POST_ROUTING))
 
-struct ipt_error_target
-{
-	struct ipt_entry_target target;
-	char errorname[IPT_FUNCTION_MAXNAMELEN];
-};
-
-struct ipt_error
-{
-	struct ipt_entry entry;
-	struct ipt_error_target target;
-};
-
+/* Ouch - five different hooks? Maybe this should be a config option..... -- BC */
 static struct
 {
 	struct ipt_replace repl;
-	struct ipt_standard entries[2];
+	struct ipt_standard entries[5];
 	struct ipt_error term;
 } initial_table __initdata
-= { { "mangle", MANGLE_VALID_HOOKS, 3,
-      sizeof(struct ipt_standard) * 2 + sizeof(struct ipt_error),
-      { [NF_IP_PRE_ROUTING] 0,
-	[NF_IP_LOCAL_OUT] sizeof(struct ipt_standard) },
-      { [NF_IP_PRE_ROUTING] 0,
-	[NF_IP_LOCAL_OUT] sizeof(struct ipt_standard) },
+= { { "mangle", MANGLE_VALID_HOOKS, 6,
+      sizeof(struct ipt_standard) * 5 + sizeof(struct ipt_error),
+      { [NF_IP_PRE_ROUTING] 	= 0,
+	[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
+	[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
+	[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
+	[NF_IP_POST_ROUTING] 	= sizeof(struct ipt_standard) * 4 },
+      { [NF_IP_PRE_ROUTING] 	= 0,
+	[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
+	[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
+	[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
+	[NF_IP_POST_ROUTING]	= sizeof(struct ipt_standard) * 4 },
       0, NULL, { } },
     {
 	    /* PRE_ROUTING */
@@ -53,7 +56,23 @@ static struct
 		sizeof(struct ipt_entry),
 		sizeof(struct ipt_standard),
 		0, { 0, 0 }, { } },
-	      { { { { sizeof(struct ipt_standard_target), "" } }, { } },
+	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
+		-NF_ACCEPT - 1 } },
+	    /* LOCAL_IN */
+ 	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
+		0,
+		sizeof(struct ipt_entry),
+		sizeof(struct ipt_standard),
+		0, { 0, 0 }, { } },
+	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
+		-NF_ACCEPT - 1 } },
+	    /* FORWARD */
+ 	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
+		0,
+		sizeof(struct ipt_entry),
+		sizeof(struct ipt_standard),
+		0, { 0, 0 }, { } },
+	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
 		-NF_ACCEPT - 1 } },
 	    /* LOCAL_OUT */
 	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
@@ -61,8 +80,16 @@ static struct
 		sizeof(struct ipt_entry),
 		sizeof(struct ipt_standard),
 		0, { 0, 0 }, { } },
-	      { { { { sizeof(struct ipt_standard_target), "" } }, { } },
-		-NF_ACCEPT - 1 } }
+	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
+		-NF_ACCEPT - 1 } },
+	    /* POST_ROUTING */
+	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
+		0,
+		sizeof(struct ipt_entry),
+		sizeof(struct ipt_standard),
+		0, { 0, 0 }, { } },
+	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
+		-NF_ACCEPT - 1 } },
     },
     /* ERROR */
     { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
@@ -70,20 +97,23 @@ static struct
 	sizeof(struct ipt_entry),
 	sizeof(struct ipt_error),
 	0, { 0, 0 }, { } },
-      { { { { sizeof(struct ipt_error_target), IPT_ERROR_TARGET } },
+      { { { { IPT_ALIGN(sizeof(struct ipt_error_target)), IPT_ERROR_TARGET } },
 	  { } },
 	"ERROR"
       }
     }
 };
 
-static struct ipt_table packet_mangler
-= { { NULL, NULL }, "mangle", &initial_table.repl,
-    MANGLE_VALID_HOOKS, RW_LOCK_UNLOCKED, NULL };
+static struct ipt_table packet_mangler = {
+	.name		= "mangle",
+	.valid_hooks	= MANGLE_VALID_HOOKS,
+	.lock		= RW_LOCK_UNLOCKED,
+	.me		= THIS_MODULE,
+};
 
 /* The work comes in here from netfilter.c. */
 static unsigned int
-ipt_hook(unsigned int hook,
+ipt_route_hook(unsigned int hook,
 	 struct sk_buff **pskb,
 	 const struct net_device *in,
 	 const struct net_device *out,
@@ -92,36 +122,8 @@ ipt_hook(unsigned int hook,
 	return ipt_do_table(pskb, hook, in, out, &packet_mangler, NULL);
 }
 
-/* FIXME: change in oif may mean change in hh_len.  Check and realloc
-   --RR */
-static int
-route_me_harder(struct sk_buff *skb)
-{
-	struct iphdr *iph = skb->nh.iph;
-	struct rtable *rt;
-	struct rt_key key = { dst:iph->daddr,
-			      src:iph->saddr,
-			      oif:skb->sk ? skb->sk->bound_dev_if : 0,
-			      tos:RT_TOS(iph->tos)|RTO_CONN,
-#ifdef CONFIG_IP_ROUTE_FWMARK
-			      fwmark:skb->nfmark
-#endif
-			    };
-
-	if (ip_route_output_key(&rt, &key) != 0) {
-		printk("route_me_harder: No more route.\n");
-		return -EINVAL;
-	}
-
-	/* Drop old route. */
-	dst_release(skb->dst);
-
-	skb->dst = &rt->u.dst;
-	return 0;
-}
-
 static unsigned int
-ipt_local_out_hook(unsigned int hook,
+ipt_local_hook(unsigned int hook,
 		   struct sk_buff **pskb,
 		   const struct net_device *in,
 		   const struct net_device *out,
@@ -148,20 +150,54 @@ ipt_local_out_hook(unsigned int hook,
 
 	ret = ipt_do_table(pskb, hook, in, out, &packet_mangler, NULL);
 	/* Reroute for ANY change. */
-	if (ret != NF_DROP && ret != NF_STOLEN
+	if (ret != NF_DROP && ret != NF_STOLEN && ret != NF_QUEUE
 	    && ((*pskb)->nh.iph->saddr != saddr
 		|| (*pskb)->nh.iph->daddr != daddr
+#ifdef CONFIG_IP_ROUTE_FWMARK
 		|| (*pskb)->nfmark != nfmark
+#endif
 		|| (*pskb)->nh.iph->tos != tos))
-		return route_me_harder(*pskb) == 0 ? ret : NF_DROP;
+		return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
 
 	return ret;
 }
 
-static struct nf_hook_ops ipt_ops[]
-= { { { NULL, NULL }, ipt_hook, PF_INET, NF_IP_PRE_ROUTING, NF_IP_PRI_MANGLE },
-    { { NULL, NULL }, ipt_local_out_hook, PF_INET, NF_IP_LOCAL_OUT,
-		NF_IP_PRI_MANGLE }
+static struct nf_hook_ops ipt_ops[] = {
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_PRE_ROUTING, 
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_LOCAL_IN,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_FORWARD,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_local_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_LOCAL_OUT,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_POST_ROUTING,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
 };
 
 static int __init init(void)
@@ -169,7 +205,7 @@ static int __init init(void)
 	int ret;
 
 	/* Register table */
-	ret = ipt_register_table(&packet_mangler);
+	ret = ipt_register_table(&packet_mangler, &initial_table.repl);
 	if (ret < 0)
 		return ret;
 
@@ -182,8 +218,26 @@ static int __init init(void)
 	if (ret < 0)
 		goto cleanup_hook0;
 
+	ret = nf_register_hook(&ipt_ops[2]);
+	if (ret < 0)
+		goto cleanup_hook1;
+
+	ret = nf_register_hook(&ipt_ops[3]);
+	if (ret < 0)
+		goto cleanup_hook2;
+
+	ret = nf_register_hook(&ipt_ops[4]);
+	if (ret < 0)
+		goto cleanup_hook3;
+
 	return ret;
 
+ cleanup_hook3:
+        nf_unregister_hook(&ipt_ops[3]);
+ cleanup_hook2:
+        nf_unregister_hook(&ipt_ops[2]);
+ cleanup_hook1:
+	nf_unregister_hook(&ipt_ops[1]);
  cleanup_hook0:
 	nf_unregister_hook(&ipt_ops[0]);
  cleanup_table:

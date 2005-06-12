@@ -71,7 +71,7 @@ print_item (WINDOW * win, const char *item, int choice, int selected, int hotkey
 
     strncpy(menu_item, item, menu_width);
     menu_item[menu_width] = 0;
-    j = first_alpha(menu_item, "YyNnMm");
+    j = first_alpha(menu_item, "YyNnMmHh");
 
     /* Clear 'residue' of last item */
     wattrset (win, menubox_attr);
@@ -90,6 +90,10 @@ print_item (WINDOW * win, const char *item, int choice, int selected, int hotkey
     if (hotkey) {
     	wattrset (win, selected ? tag_key_selected_attr : tag_key_attr);
     	mvwaddch(win, choice, item_x+j, menu_item[j]);
+    }
+    if (selected) {
+	wmove (win, choice, item_x+1);
+	wrefresh (win);
     }
 }
 
@@ -267,23 +271,25 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
 		 box_y, box_x+item_x+1, menu_height);
 
     print_buttons (dialog, height, width, 0);
+    wmove (menu, choice, item_x+1);
+    wrefresh (menu);
 
     while (key != ESC) {
-	key = wgetch(dialog);
+	key = wgetch(menu);
 
 	if (key < 256 && isalpha(key)) key = tolower(key);
 
-	if (strchr("ynm", key))
+	if (strchr("ynmh", key))
 		i = max_choice;
 	else {
         for (i = choice+1; i < max_choice; i++) {
-		j = first_alpha(items[(scroll+i)*2+1], "YyNnMm");
+		j = first_alpha(items[(scroll+i)*2+1], "YyNnMmHh");
 		if (key == tolower(items[(scroll+i)*2+1][j]))
                 	break;
 	}
 	if (i == max_choice)
        		for (i = 0; i < max_choice; i++) {
-			j = first_alpha(items[(scroll+i)*2+1], "YyNnMm");
+			j = first_alpha(items[(scroll+i)*2+1], "YyNnMmHh");
 			if (key == tolower(items[(scroll+i)*2+1][j]))
                 		break;
 		}
@@ -372,8 +378,8 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
             print_arrows(dialog, item_no, scroll,
                          box_y, box_x+item_x+1, menu_height);
 
-            wnoutrefresh (menu);
-            wrefresh (dialog);
+            wnoutrefresh (dialog);
+            wrefresh (menu);
 
 	    continue;		/* wait for another key press */
         }
@@ -386,13 +392,14 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
 			? 2 : (button > 2 ? 0 : button);
 
 	    print_buttons(dialog, height, width, button);
-	    wrefresh (dialog);
+	    wrefresh (menu);
 	    break;
 	case ' ':
 	case 's':
 	case 'y':
 	case 'n':
 	case 'm':
+	case '/':
 	    /* save scroll info */
 	    if ( (f=fopen("lxdialog.scrltmp","w")) != NULL ) {
 		fprintf(f,"%d\n",scroll);
@@ -406,6 +413,7 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
             case 'n': return 4;
             case 'm': return 5;
             case ' ': return 6;
+            case '/': return 7;
             }
 	    return 0;
 	case 'h':

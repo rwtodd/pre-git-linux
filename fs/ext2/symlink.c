@@ -17,22 +17,36 @@
  *  ext2 symlink handling code
  */
 
-#include <linux/fs.h>
-#include <linux/ext2_fs.h>
-
-static int ext2_readlink(struct dentry *dentry, char *buffer, int buflen)
-{
-	char *s = (char *)dentry->d_inode->u.ext2_i.i_data;
-	return vfs_readlink(dentry, buffer, buflen, s);
-}
+#include "ext2.h"
+#include "xattr.h"
+#include <linux/namei.h>
 
 static int ext2_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	char *s = (char *)dentry->d_inode->u.ext2_i.i_data;
-	return vfs_follow_link(nd, s);
+	struct ext2_inode_info *ei = EXT2_I(dentry->d_inode);
+	nd_set_link(nd, (char *)ei->i_data);
+	return 0;
 }
 
+struct inode_operations ext2_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= page_follow_link_light,
+	.put_link	= page_put_link,
+#ifdef CONFIG_EXT2_FS_XATTR
+	.setxattr	= generic_setxattr,
+	.getxattr	= generic_getxattr,
+	.listxattr	= ext2_listxattr,
+	.removexattr	= generic_removexattr,
+#endif
+};
+ 
 struct inode_operations ext2_fast_symlink_inode_operations = {
-	readlink:	ext2_readlink,
-	follow_link:	ext2_follow_link,
+	.readlink	= generic_readlink,
+	.follow_link	= ext2_follow_link,
+#ifdef CONFIG_EXT2_FS_XATTR
+	.setxattr	= generic_setxattr,
+	.getxattr	= generic_getxattr,
+	.listxattr	= ext2_listxattr,
+	.removexattr	= generic_removexattr,
+#endif
 };

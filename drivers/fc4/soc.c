@@ -29,10 +29,10 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/errno.h>
@@ -40,7 +40,6 @@ static char *version =
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
-#include <asm/auxio.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
 
@@ -104,7 +103,7 @@ static void soc_reset(fc_channel *fc)
 	soc_enable(s);
 }
 
-static void inline soc_solicited (struct soc *s)
+static inline void soc_solicited (struct soc *s)
 {
 	fc_hdr fchdr;
 	soc_rsp *hwrsp;
@@ -165,7 +164,7 @@ static void inline soc_solicited (struct soc *s)
 	}
 }
 
-static void inline soc_request (struct soc *s, u32 cmd)
+static inline void soc_request (struct soc *s, u32 cmd)
 {
 	SOC_SETIMASK(s, s->imask & ~(cmd & SOC_CMD_REQ_QALL));
 	SOD(("imask %08lx %08lx\n", s->imask, sbus_readl(s->regs + IMASK)));
@@ -184,7 +183,7 @@ static void inline soc_request (struct soc *s, u32 cmd)
 		s->curr_port ^= 1;
 }
 
-static void inline soc_unsolicited (struct soc *s)
+static inline void soc_unsolicited (struct soc *s)
 {
 	soc_rsp *hwrsp, *hwrspc;
 	soc_cq *sw_cq;
@@ -335,20 +334,22 @@ update_out:
 	}
 }
 
-static void soc_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t soc_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	u32 cmd;
 	unsigned long flags;
 	register struct soc *s = (struct soc *)dev_id;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(&s->lock, flags);
 	cmd = sbus_readl(s->regs + CMD);
 	for (; (cmd = SOC_INTR (s, cmd)); cmd = sbus_readl(s->regs + CMD)) {
 		if (cmd & SOC_CMD_RSP_Q1) soc_unsolicited (s);
 		if (cmd & SOC_CMD_RSP_Q0) soc_solicited (s);
 		if (cmd & SOC_CMD_REQ_QALL) soc_request (s, cmd);
 	}
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(&s->lock, flags);
+
+	return IRQ_HANDLED;
 }
 
 #define TOKEN(proto, port, token) (((proto)<<12)|(token)|(port))
@@ -559,20 +560,17 @@ static inline void soc_init(struct sbus_dev *sdev, int no)
 	if (s == NULL)
 		return;
 	memset (s, 0, sizeof(struct soc));
+	spin_lock_init(&s->lock);
 	s->soc_no = no;
 
 	SOD(("socs %08lx soc_intr %08lx soc_hw_enque %08x\n",
 	     (long)socs, (long)soc_intr, (long)soc_hw_enque))	
 	if (version_printed++ == 0)
 		printk (version);
-#ifdef MODULE
-	s->port[0].fc.module = &__this_module;
-	s->port[1].fc.module = &__this_module;
-#else
-	s->port[0].fc.module = NULL;
-	s->port[1].fc.module = NULL;
-#endif
-	                                	
+
+	s->port[0].fc.module = THIS_MODULE;
+	s->port[1].fc.module = THIS_MODULE;
+
 	s->next = socs;
 	socs = s;
 	s->port[0].fc.dev = sdev;
@@ -673,10 +671,10 @@ static inline void soc_init(struct sbus_dev *sdev, int no)
 	cq[0].address = s->req_dvma;
 	s->req[1].pool = s->req[0].pool + SOC_CQ_REQ0_SIZE;
 	
-	s->req[0].hw_cq = (soc_hw_cq *)(s->xram + SOC_CQ_REQ_OFFSET);
-	s->req[1].hw_cq = (soc_hw_cq *)(s->xram + SOC_CQ_REQ_OFFSET + sizeof(soc_hw_cq));
-	s->rsp[0].hw_cq = (soc_hw_cq *)(s->xram + SOC_CQ_RSP_OFFSET);
-	s->rsp[1].hw_cq = (soc_hw_cq *)(s->xram + SOC_CQ_RSP_OFFSET + sizeof(soc_hw_cq));
+	s->req[0].hw_cq = (soc_hw_cq __iomem *)(s->xram + SOC_CQ_REQ_OFFSET);
+	s->req[1].hw_cq = (soc_hw_cq __iomem *)(s->xram + SOC_CQ_REQ_OFFSET + sizeof(soc_hw_cq));
+	s->rsp[0].hw_cq = (soc_hw_cq __iomem *)(s->xram + SOC_CQ_RSP_OFFSET);
+	s->rsp[1].hw_cq = (soc_hw_cq __iomem *)(s->xram + SOC_CQ_RSP_OFFSET + sizeof(soc_hw_cq));
 	
 	cq[1].address = cq[0].address + (SOC_CQ_REQ0_SIZE * sizeof(soc_req));
 	cq[4].address = 1;
@@ -713,14 +711,10 @@ static inline void soc_init(struct sbus_dev *sdev, int no)
 	SOD(("Enabled SOC\n"))
 }
 
-#ifndef MODULE
-int __init soc_probe(void)
-#else
-int init_module(void)
-#endif
+static int __init soc_probe(void)
 {
 	struct sbus_bus *sbus;
-	struct sbus_dev *sdev = 0;
+	struct sbus_dev *sdev = NULL;
 	struct soc *s;
 	int cards = 0;
 
@@ -741,10 +735,7 @@ int init_module(void)
 	return 0;
 }
 
-EXPORT_NO_SYMBOLS;
-
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit soc_cleanup(void)
 {
 	struct soc *s;
 	int irq;
@@ -752,7 +743,6 @@ void cleanup_module(void)
 	
 	for_each_soc(s) {
 		irq = s->port[0].fc.irq;
-		disable_irq (irq);
 		free_irq (irq, s);
 
 		fcp_release(&(s->port[0].fc), 2);
@@ -770,4 +760,7 @@ void cleanup_module(void)
 				     s->req_cpu, s->req_dvma);
 	}
 }
-#endif
+
+module_init(soc_probe);
+module_exit(soc_cleanup);
+MODULE_LICENSE("GPL");

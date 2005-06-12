@@ -1,33 +1,23 @@
 #
 # Makefile for the linux kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-SUB_DIRS     :=
-MOD_SUB_DIRS := 
-ALL_SUB_DIRS := 
+# Object file lists.
 
-L_TARGET := tc.a
-L_OBJS   := tc.o
+obj-$(CONFIG_TC) += tc.o
+obj-$(CONFIG_ZS) += zs.o
+obj-$(CONFIG_VT) += lk201.o lk201-map.o lk201-remap.o
 
-# Nasty trick as nobody references tcsyms.o, but we still want it linked.
-# Stolen from pci Makefile
-ifeq ($(CONFIG_MODULES),y)
-O_TARGET = tc_syms.o
-OX_OBJS  = tcsyms.o
-O_OBJS   = tc.o
-L_OBJS   := tc_syms.o
-else
-L_OBJS   := tc.o
+$(obj)/lk201-map.o: $(obj)/lk201-map.c
+
+# Uncomment if you're changing the keymap and have an appropriate
+# loadkeys version for the map. By default, we'll use the shipped
+# versions.
+# GENERATE_KEYMAP := 1
+
+ifdef GENERATE_KEYMAP
+
+$(obj)/lk201-map.c: $(obj)/%.c: $(src)/%.map
+	loadkeys --mktable $< > $@
+
 endif
-
-ifdef CONFIG_ZS
-L_OBJS   += zs.o
-endif
-
-include $(TOPDIR)/Rules.make
-

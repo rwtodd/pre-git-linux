@@ -1,10 +1,10 @@
-/* $Id: nj_u.c,v 2.8.6.1 2000/11/29 16:00:14 kai Exp $ 
+/* $Id: nj_u.c,v 2.14.2.3 2004/01/13 14:31:26 keil Exp $ 
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/init.h>
 #include "hisax.h"
@@ -15,7 +15,7 @@
 #include <linux/ppp_defs.h>
 #include "netjet.h"
 
-const char *NETjet_U_revision = "$Revision: 2.8.6.1 $";
+const char *NETjet_U_revision = "$Revision: 2.14.2.3 $";
 
 static u_char dummyrr(struct IsdnCardState *cs, int chan, u_char off)
 {
@@ -26,17 +26,14 @@ static void dummywr(struct IsdnCardState *cs, int chan, u_char off, u_char value
 {
 }
 
-static void
+static irqreturn_t
 netjet_u_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val, sval;
-	long flags;
+	u_long flags;
 
-	if (!cs) {
-		printk(KERN_WARNING "NETspider-U: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	if (!((sval = bytein(cs->hw.njet.base + NETJET_IRQSTAT1)) &
 		NETJET_ISACIRQ)) {
 		val = NETjet_ReadIC(cs, ICC_ISTA);
@@ -48,8 +45,6 @@ netjet_u_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			NETjet_WriteIC(cs, ICC_MASK, 0x0);
 		}
 	}
-	save_flags(flags);
-	cli();
 	/* start new code 13/07/00 GE */
 	/* set bits in sval to indicate which page is free */
 	if (inl(cs->hw.njet.base + NETJET_DMA_WRITE_ADR) <
@@ -67,11 +62,10 @@ netjet_u_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	if (sval != cs->hw.njet.last_is0) /* we have a DMA interrupt */
 	{
 		if (test_and_set_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags)) {
-			restore_flags(flags);
-			return;
+			spin_unlock_irqrestore(&cs->lock, flags);
+			return IRQ_HANDLED;
 		}
 		cs->hw.njet.irqstat0 = sval;
-		restore_flags(flags);
 		if ((cs->hw.njet.irqstat0 & NETJET_IRQM0_READ) != 
 			(cs->hw.njet.last_is0 & NETJET_IRQM0_READ))
 			/* we have a read dma int */
@@ -82,35 +76,21 @@ netjet_u_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			write_tiger(cs);
 		/* end new code 13/07/00 GE */
 		test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
-	} else
-		restore_flags(flags);
-
-/*	if (!testcnt--) {
-		cs->hw.njet.dmactrl = 0;
-		byteout(cs->hw.njet.base + NETJET_DMACTRL,
-			cs->hw.njet.dmactrl);
-		byteout(cs->hw.njet.base + NETJET_IRQMASK0, 0);
 	}
-*/
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 static void
 reset_netjet_u(struct IsdnCardState *cs)
 {
-	long flags;
-
-	save_flags(flags);
-	sti();
 	cs->hw.njet.ctrl_reg = 0xff;  /* Reset On */
 	byteout(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);	/* Timeout 10ms */
+	mdelay(10);
 	cs->hw.njet.ctrl_reg = 0x40;  /* Reset Off and status read clear */
 	/* now edge triggered for TJ320 GE 13/07/00 */
 	byteout(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);	/* Timeout 10ms */
-	restore_flags(flags);
+	mdelay(10);
 	cs->hw.njet.auxd = 0xC0;
 	cs->hw.njet.dmactrl = 0;
 	byteout(cs->hw.njet.auxa, 0);
@@ -122,19 +102,26 @@ reset_netjet_u(struct IsdnCardState *cs)
 static int
 NETjet_U_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+
 	switch (mt) {
 		case CARD_RESET:
+			spin_lock_irqsave(&cs->lock, flags);
 			reset_netjet_u(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_RELEASE:
 			release_io_netjet(cs);
 			return(0);
 		case CARD_INIT:
+			spin_lock_irqsave(&cs->lock, flags);
 			inittiger(cs);
+			reset_netjet_u(cs);
 			clear_pending_icc_ints(cs);
 			initicc(cs);
 			/* Reenable all IRQ */
 			cs->writeisac(cs, ICC_MASK, 0);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_TEST:
 			return(0);
@@ -150,8 +137,7 @@ setup_netjet_u(struct IsdnCard *card)
 	int bytecnt;
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
-	long flags;
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 #endif
 #ifdef __BIG_ENDIAN
 #error "not running on big endian machines now"
@@ -162,18 +148,15 @@ setup_netjet_u(struct IsdnCard *card)
 		return(0);
 	test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
 
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 
 	for ( ;; )
 	{
-		if (!pci_present()) {
-			printk(KERN_ERR "Netjet: no PCI bus present\n");
-			return(0);
-		}
 		if ((dev_netjet = pci_find_device(PCI_VENDOR_ID_TIGERJET,
 			PCI_DEVICE_ID_TIGERJET_300,  dev_netjet))) {
 			if (pci_enable_device(dev_netjet))
 				return(0);
+			pci_set_master(dev_netjet);
 			cs->irq = dev_netjet->irq;
 			if (!cs->irq) {
 				printk(KERN_WARNING "NETspider-U: No IRQ for PCI card found\n");
@@ -191,23 +174,15 @@ setup_netjet_u(struct IsdnCard *card)
 
 		cs->hw.njet.auxa = cs->hw.njet.base + NETJET_AUXDATA;
 		cs->hw.njet.isac = cs->hw.njet.base | NETJET_ISAC_OFF;
-
-		save_flags(flags);
-		sti();
+		mdelay(10);
 
 		cs->hw.njet.ctrl_reg = 0xff;  /* Reset On */
 		byteout(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10*HZ)/1000);	/* Timeout 10ms */
+		mdelay(10);
 
 		cs->hw.njet.ctrl_reg = 0x00;  /* Reset Off and status read clear */
 		byteout(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10*HZ)/1000);	/* Timeout 10ms */
-
-		restore_flags(flags);
+		mdelay(10);
 
 		cs->hw.njet.auxd = 0xC0;
 		cs->hw.njet.dmactrl = 0;
@@ -243,19 +218,17 @@ setup_netjet_u(struct IsdnCard *card)
 	bytecnt = 256;
 
 	printk(KERN_INFO
-		"NETspider-U: PCI card configured at 0x%x IRQ %d\n",
+		"NETspider-U: PCI card configured at %#lx IRQ %d\n",
 		cs->hw.njet.base, cs->irq);
-	if (check_region(cs->hw.njet.base, bytecnt)) {
+	if (!request_region(cs->hw.njet.base, bytecnt, "netspider-u isdn")) {
 		printk(KERN_WARNING
-		       "HiSax: %s config port %x-%x already in use\n",
+		       "HiSax: %s config port %#lx-%#lx already in use\n",
 		       CardType[card->typ],
 		       cs->hw.njet.base,
 		       cs->hw.njet.base + bytecnt);
 		return (0);
-	} else {
-		request_region(cs->hw.njet.base, bytecnt, "netspider-u isdn");
 	}
-	reset_netjet_u(cs);
+	setup_icc(cs);
 	cs->readisac  = &NETjet_ReadIC;
 	cs->writeisac = &NETjet_WriteIC;
 	cs->readisacfifo  = &NETjet_ReadICfifo;

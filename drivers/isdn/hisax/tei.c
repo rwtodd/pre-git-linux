@@ -1,23 +1,26 @@
-/* $Id: tei.c,v 2.17 2000/11/24 17:05:38 kai Exp $
+/* $Id: tei.c,v 2.20.2.3 2004/01/13 14:31:26 keil Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
  */
-#define __NO_VERSION__
+
 #include "hisax.h"
 #include "isdnl2.h"
 #include <linux/init.h>
 #include <linux/random.h>
 
-const char *tei_revision = "$Revision: 2.17 $";
+const char *tei_revision = "$Revision: 2.20.2.3 $";
 
 #define ID_REQUEST	1
 #define ID_ASSIGNED	2
@@ -236,7 +239,7 @@ tei_id_remove(struct FsmInst *fi, int event, void *arg)
 	if ((st->l2.tei != -1) && ((tei == GROUP_TEI) || (tei == st->l2.tei))) {
 		FsmDelTimer(&st->ma.t202, 5);
 		FsmChangeState(&st->ma.tei_m, ST_TEI_NOP);
-		st->l3.l3l2(st, MDL_REMOVE | REQUEST, 0);
+		st->l3.l3l2(st, MDL_REMOVE | REQUEST, NULL);
 		cs = (struct IsdnCardState *) st->l1.hardware;
 		cs->cardmsg(cs, MDL_REMOVE | REQUEST, NULL);
 	}
@@ -272,7 +275,7 @@ tei_id_req_tout(struct FsmInst *fi, int event, void *arg)
 		FsmAddTimer(&st->ma.t202, st->ma.T202, EV_T202, NULL, 3);
 	} else {
 		st->ma.tei_m.printdebug(&st->ma.tei_m, "assign req failed");
-		st->l3.l3l2(st, MDL_ERROR | RESPONSE, 0);
+		st->l3.l3l2(st, MDL_ERROR | RESPONSE, NULL);
 		cs = (struct IsdnCardState *) st->l1.hardware;
 		cs->cardmsg(cs, MDL_REMOVE | REQUEST, NULL);
 		FsmChangeState(fi, ST_TEI_NOP);
@@ -295,7 +298,7 @@ tei_id_ver_tout(struct FsmInst *fi, int event, void *arg)
 	} else {
 		st->ma.tei_m.printdebug(&st->ma.tei_m,
 			"verify req for tei %d failed", st->l2.tei);
-		st->l3.l3l2(st, MDL_REMOVE | REQUEST, 0);
+		st->l3.l3l2(st, MDL_REMOVE | REQUEST, NULL);
 		cs = (struct IsdnCardState *) st->l1.hardware;
 		cs->cardmsg(cs, MDL_REMOVE | REQUEST, NULL);
 		FsmChangeState(fi, ST_TEI_NOP);
@@ -446,14 +449,14 @@ static struct FsmNode TeiFnList[] __initdata =
 
 #define TEI_FN_COUNT (sizeof(TeiFnList)/sizeof(struct FsmNode))
 
-void __init
+int __init
 TeiNew(void)
 {
 	teifsm.state_count = TEI_STATE_COUNT;
 	teifsm.event_count = TEI_EVENT_COUNT;
 	teifsm.strEvent = strTeiEvent;
 	teifsm.strState = strTeiState;
-	FsmNew(&teifsm, TeiFnList, TEI_FN_COUNT);
+	return FsmNew(&teifsm, TeiFnList, TEI_FN_COUNT);
 }
 
 void

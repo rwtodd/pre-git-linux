@@ -11,9 +11,9 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/mm.h>
-#include <linux/kd.h>
 #include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/interrupt.h>
@@ -22,6 +22,7 @@
 #include <linux/delay.h>
 /* keyb */
 #include <linux/init.h>
+#include <linux/vt_kern.h>
 
 #define BOOTINFO_COMPAT_1_0
 #include <asm/setup.h>
@@ -31,6 +32,7 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/pgtable.h>
+#include <asm/rtc.h>
 #include <asm/machdep.h>
 
 #include <asm/macintosh.h>
@@ -44,8 +46,10 @@
 
 /* Mac bootinfo struct */
 
-struct mac_booter_data mac_bi_data = {0,};
+struct mac_booter_data mac_bi_data;
 int mac_bisize = sizeof mac_bi_data;
+
+struct mac_hw_present mac_hw_present;
 
 /* New m68k bootinfo stuff and videobase */
 
@@ -62,24 +66,20 @@ void *mac_env;		/* Loaded by the boot asm */
 unsigned long mac_orig_videoaddr;
 
 /* Mac specific timer functions */
-extern void mac_gettod (int *, int *, int *, int *, int *, int *);
 extern unsigned long mac_gettimeoffset (void);
-extern int mac_hwclk (int, struct hwclk_time *);
+extern int mac_hwclk (int, struct rtc_time *);
 extern int mac_set_clock_mmss (unsigned long);
-extern int mac_get_irq_list(char *);
+extern int show_mac_interrupts(struct seq_file *, void *);
 extern void iop_preinit(void);
 extern void iop_init(void);
 extern void via_init(void);
-extern void via_init_clock(void (*func)(int, void *, struct pt_regs *));
+extern void via_init_clock(irqreturn_t (*func)(int, void *, struct pt_regs *));
 extern void via_flush_cache(void);
 extern void oss_init(void);
 extern void psc_init(void);
 extern void baboon_init(void);
 
-extern void (*kd_mksound)(unsigned int, unsigned int);
 extern void mac_mksound(unsigned int, unsigned int);
-extern int mac_floppy_init(void);
-extern void mac_floppy_setup(char *,int *);
 
 extern void nubus_sweep_video(void);
 
@@ -87,30 +87,15 @@ extern void nubus_sweep_video(void);
 extern void mac_debug_init(void);
 extern void mac_debugging_long(int, long);
 
-extern void (*kd_mksound)(unsigned int, unsigned int);
-
-extern int mackbd_init_hw(void);
-extern void mackbd_leds(unsigned int leds);
-extern int mackbd_translate(unsigned char keycode, unsigned char *keycodep, char raw_mode);
-
-extern void mac_hid_init_hw(void);
-extern int mac_hid_kbd_translate(unsigned char scancode, unsigned char *keycode, char raw_mode);
-
-#ifdef CONFIG_MAGIC_SYSRQ
-extern unsigned char mac_hid_kbd_sysrq_xlate[128];
-extern unsigned char pckbd_sysrq_xlate[128];
-extern unsigned char mackbd_sysrq_xlate[128];
-#endif /* CONFIG_MAGIC_SYSRQ */
-
 static void mac_get_model(char *str);
 
 void mac_bang(int irq, void *vector, struct pt_regs *p)
 {
-	printk("Resetting ...\n");
+	printk(KERN_INFO "Resetting ...\n");
 	mac_reset();
 }
 
-static void mac_sched_init(void (*vector)(int, void *, struct pt_regs *))
+static void mac_sched_init(irqreturn_t (*vector)(int, void *, struct pt_regs *))
 {
 	via_init_clock(vector);
 }
@@ -122,11 +107,9 @@ void mac_waitbut (void)
 }
 #endif
 
-extern struct fb_info *mac_fb_init(long *);
+extern irqreturn_t mac_default_handler(int, void *, struct pt_regs *);
 
-extern void mac_default_handler(int, void *, struct pt_regs *);
-
-void (*mac_handlers[8])(int, void *, struct pt_regs *)=
+irqreturn_t (*mac_handlers[8])(int, void *, struct pt_regs *)=
 {
 	mac_default_handler,
 	mac_default_handler,
@@ -193,49 +176,23 @@ int __init mac_parse_bootinfo(const struct bi_record *record)
 
 /*
  * Flip into 24bit mode for an instant - flushes the L2 cache card. We
- * have to disable interrupts for this. Our IRQ handlers will crap 
+ * have to disable interrupts for this. Our IRQ handlers will crap
  * themselves if they take an IRQ in 24bit mode!
  */
 
 static void mac_cache_card_flush(int writeback)
 {
-	unsigned long cpu_flags;
-	save_flags(cpu_flags);
-	cli();
+	unsigned long flags;
+	local_irq_save(flags);
 	via_flush_cache();
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 }
 
 void __init config_mac(void)
 {
 	if (!MACH_IS_MAC) {
-	  printk("ERROR: no Mac, but config_mac() called!! \n");
+	  printk(KERN_ERR "ERROR: no Mac, but config_mac() called!! \n");
 	}
-	
-#ifdef CONFIG_VT
-#ifdef CONFIG_INPUT_ADBHID
-	mach_keyb_init       = mac_hid_init_hw;
-	mach_kbd_translate   = mac_hid_kbd_translate;
-#ifdef CONFIG_MAGIC_SYSRQ
-#ifdef CONFIG_MAC_ADBKEYCODES
-	if (!keyboard_sends_linux_keycodes) {
-		mach_sysrq_xlate = mac_hid_kbd_sysrq_xlate;
-		SYSRQ_KEY = 0x69;
-	} else
-#endif /* CONFIG_MAC_ADBKEYCODES */
-	{
-		mach_sysrq_xlate = pckbd_sysrq_xlate;
-		SYSRQ_KEY = 0x54;
-	}
-#endif /* CONFIG_MAGIC_SYSRQ */
-#elif defined(CONFIG_ADB_KEYBOARD)
-	mach_keyb_init       = mackbd_init_hw;
-	mach_kbd_leds        = mackbd_leds;
-	mach_kbd_translate   = mackbd_translate;
-	mach_sysrq_xlate     = mackbd_sysrq_xlate;
-	SYSRQ_KEY = 0x69;
-#endif /* CONFIG_INPUT_ADBHID */
-#endif /* CONFIG_VT */
 
 	mach_sched_init      = mac_sched_init;
 	mach_init_IRQ        = mac_init_IRQ;
@@ -245,23 +202,26 @@ void __init config_mac(void)
 	disable_irq          = mac_disable_irq;
 	mach_get_model	 = mac_get_model;
 	mach_default_handler = &mac_handlers;
-	mach_get_irq_list    = mac_get_irq_list;
+	mach_get_irq_list    = show_mac_interrupts;
 	mach_gettimeoffset   = mac_gettimeoffset;
-	mach_gettod          = mac_gettod;
-	mach_hwclk           = mac_hwclk;
-	mach_set_clock_mmss	 = mac_set_clock_mmss;
+#warning move to adb/via init
 #if 0
-	mach_mksound         = mac_mksound;
+	mach_hwclk           = mac_hwclk;
 #endif
+	mach_set_clock_mmss	 = mac_set_clock_mmss;
 	mach_reset           = mac_reset;
 	mach_halt            = mac_poweroff;
 	mach_power_off       = mac_poweroff;
+#ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp	         = &dummy_con;
+#endif
 	mach_max_dma_address = 0xffffffff;
 #if 0
 	mach_debug_init	 = mac_debug_init;
 #endif
-	kd_mksound		 = mac_mksound;
+#if defined(CONFIG_INPUT_M68K_BEEP) || defined(CONFIG_INPUT_M68K_BEEP_MODULE)
+        mach_beep            = mac_mksound;
+#endif
 #ifdef CONFIG_HEARTBEAT
 #if 0
 	mach_heartbeat = mac_heartbeat;
@@ -272,10 +232,10 @@ void __init config_mac(void)
 	/*
 	 * Determine hardware present
 	 */
-     
+
 	mac_identify();
 	mac_report_hardware();
-    
+
 	/* AFAIK only the IIci takes a cache card.  The IIfx has onboard
 	   cache ... someone needs to figure out how to tell if it's on or
 	   not. */
@@ -284,10 +244,6 @@ void __init config_mac(void)
 	    || macintosh_config->ident == MAC_MODEL_IIFX) {
 		mach_l2_flush = mac_cache_card_flush;
 	}
-#ifdef MAC_DEBUG_SOUND
-	/* goes on forever if timers broken */
-	mac_mksound(1000,10);
-#endif
 
 	/*
 	 * Check for machine specific fixups.
@@ -296,22 +252,23 @@ void __init config_mac(void)
 #ifdef OLD_NUBUS_CODE
 	 nubus_sweep_video();
 #endif
-}	
+}
 
 
 /*
- *	Macintosh Table: hardcoded model configuration data. 
+ *	Macintosh Table: hardcoded model configuration data.
  *
- *	Much of this was defined by Alan, based on who knows what docs. 
- *	I've added a lot more, and some of that was pure guesswork based 
- *	on hardware pages present on the Mac web site. Possibly wildly 
+ *	Much of this was defined by Alan, based on who knows what docs.
+ *	I've added a lot more, and some of that was pure guesswork based
+ *	on hardware pages present on the Mac web site. Possibly wildly
  *	inaccurate, so look here if a new Mac model won't run. Example: if
  *	a Mac crashes immediately after the VIA1 registers have been dumped
- *	to the screen, it probably died attempting to read DirB on a RBV. 
+ *	to the screen, it probably died attempting to read DirB on a RBV.
  *	Meaning it should have MAC_VIA_IIci here :-)
  */
- 
+
 struct mac_model *macintosh_config;
+EXPORT_SYMBOL(macintosh_config);
 
 static struct mac_model mac_data_table[]=
 {
@@ -319,18 +276,55 @@ static struct mac_model mac_data_table[]=
 	 *	We'll pretend to be a Macintosh II, that's pretty safe.
 	 */
 
-	{	MAC_MODEL_II,	"Unknown",	MAC_ADB_II,	MAC_VIA_II,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
+	{
+		.ident		= MAC_MODEL_II,
+		.name		= "Unknown",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_II,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	},
 
 	/*
 	 *	Original MacII hardware
-	 *	
+	 *
 	 */
-	 
-	{	MAC_MODEL_II,	"II",		MAC_ADB_II,	MAC_VIA_II,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_IIX,	"IIx",		MAC_ADB_II,	MAC_VIA_II,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_IICX,	"IIcx",		MAC_ADB_II,	MAC_VIA_II,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_SE30, "SE/30",	MAC_ADB_II,	MAC_VIA_II,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	
+
+	{
+		.ident		= MAC_MODEL_II,
+		.name		= "II",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_II,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_IIX,
+		.name		= "IIx",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_II,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_IICX,
+		.name		= "IIcx",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_II,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_SE30,
+		.name		= "SE/30",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_II,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	},
+
 	/*
 	 *	Weirdified MacII hardware - all subtley different. Gee thanks
 	 *	Apple. All these boxes seem to have VIA2 in a different place to
@@ -338,72 +332,318 @@ static struct mac_model mac_data_table[]=
 	 * CSA: see http://developer.apple.com/technotes/hw/hw_09.html
 	 */
 
-	{	MAC_MODEL_IICI,	"IIci",	MAC_ADB_II,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_IIFX,	"IIfx",	MAC_ADB_IOP,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_IOP,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_IISI, "IIsi",	MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_IIVI,	"IIvi",	MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_IIVX,	"IIvx",	MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	
+	{
+		.ident		= MAC_MODEL_IICI,
+		.name		= "IIci",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_IIFX,
+		.name		= "IIfx",
+		.adb_type	= MAC_ADB_IOP,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_IOP,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_IISI,
+		.name		= "IIsi",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_IIVI,
+		.name		= "IIvi",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_IIVX,
+		.name		= "IIvx",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	},
+
 	/*
 	 *	Classic models (guessing: similar to SE/30 ?? Nope, similar to LC ...)
 	 */
 
-	{	MAC_MODEL_CLII, "Classic II",		MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,     MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_CCL,  "Color Classic",	MAC_ADB_CUDA,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,     MAC_ETHER_NONE,	MAC_NUBUS},
+	{
+		.ident		= MAC_MODEL_CLII,
+		.name		= "Classic II",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_CCL,
+		.name		= "Color Classic",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS},
 
 	/*
 	 *	Some Mac LC machines. Basically the same as the IIci, ADB like IIsi
 	 */
-	
-	{	MAC_MODEL_LC,	"LC",	  MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_LCII,	"LC II",  MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_LCIII,"LC III", MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
+
+	{
+		.ident		= MAC_MODEL_LC,
+		.name		= "LC",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_LCII,
+		.name		= "LC II",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_LCIII,
+		.name		= "LC III",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	},
 
 	/*
-	 *	Quadra. Video is at 0xF9000000, via is like a MacII. We label it differently 
-	 *	as some of the stuff connected to VIA2 seems different. Better SCSI chip and 
-	 *	onboard ethernet using a NatSemi SONIC except the 660AV and 840AV which use an 
+	 *	Quadra. Video is at 0xF9000000, via is like a MacII. We label it differently
+	 *	as some of the stuff connected to VIA2 seems different. Better SCSI chip and
+	 *	onboard ethernet using a NatSemi SONIC except the 660AV and 840AV which use an
 	 *	AMD 79C940 (MACE).
 	 *	The 700, 900 and 950 have some I/O chips in the wrong place to
 	 *	confuse us. The 840AV has a SCSI location of its own (same as
 	 *	the 660AV).
-	 */	 
-	 
-	{	MAC_MODEL_Q605, "Quadra 605", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE,   MAC_SCC_QUADRA,	MAC_ETHER_NONE,		MAC_NUBUS},
-	{	MAC_MODEL_Q610, "Quadra 610", MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE,   MAC_SCC_QUADRA,	MAC_ETHER_SONIC,	MAC_NUBUS},
-	{	MAC_MODEL_Q630, "Quadra 630", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_QUADRA, MAC_SCC_QUADRA,	MAC_ETHER_SONIC,	MAC_NUBUS},
- 	{	MAC_MODEL_Q650, "Quadra 650", MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE,   MAC_SCC_QUADRA,	MAC_ETHER_SONIC,	MAC_NUBUS},
-	/*	The Q700 does have a NS Sonic */
-	{	MAC_MODEL_Q700, "Quadra 700", MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA2, MAC_IDE_NONE,   MAC_SCC_QUADRA2,	MAC_ETHER_SONIC,	MAC_NUBUS},
-	{	MAC_MODEL_Q800, "Quadra 800", MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE,   MAC_SCC_QUADRA,	MAC_ETHER_SONIC,	MAC_NUBUS},
-	{	MAC_MODEL_Q840, "Quadra 840AV", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA3, MAC_IDE_NONE, MAC_SCC_II,	MAC_ETHER_MACE,		MAC_NUBUS},
-	{	MAC_MODEL_Q900, "Quadra 900", MAC_ADB_IOP, MAC_VIA_QUADRA, MAC_SCSI_QUADRA2, MAC_IDE_NONE,   MAC_SCC_IOP,	MAC_ETHER_SONIC,	MAC_NUBUS},
-	{	MAC_MODEL_Q950, "Quadra 950", MAC_ADB_IOP, MAC_VIA_QUADRA, MAC_SCSI_QUADRA2, MAC_IDE_NONE,   MAC_SCC_IOP,	MAC_ETHER_SONIC,	MAC_NUBUS},
+	 */
 
-	/* 
+	{
+		.ident		= MAC_MODEL_Q605,
+		.name		= "Quadra 605",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q605_ACC,
+		.name		= "Quadra 605",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q610,
+		.name		= "Quadra 610",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q630,
+		.name		= "Quadra 630",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.ide_type	= MAC_IDE_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q650,
+		.name		= "Quadra 650",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	},
+	/*	The Q700 does have a NS Sonic */
+	{
+		.ident		= MAC_MODEL_Q700,
+		.name		= "Quadra 700",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA2,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q800,
+		.name		= "Quadra 800",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q840,
+		.name		= "Quadra 840AV",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA3,
+		.scc_type	= MAC_SCC_PSC,
+		.ether_type	= MAC_ETHER_MACE,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q900,
+		.name		= "Quadra 900",
+		.adb_type	= MAC_ADB_IOP,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA2,
+		.scc_type	= MAC_SCC_IOP,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_Q950,
+		.name		= "Quadra 950",
+		.adb_type	= MAC_ADB_IOP,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA2,
+		.scc_type	= MAC_SCC_IOP,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	},
+
+	/*
 	 *	Performa - more LC type machines
 	 */
 
-	{	MAC_MODEL_P460,  "Performa 460", MAC_ADB_IISI, MAC_VIA_IIci,   MAC_SCSI_OLD, 	MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_P475,  "Performa 475", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA, MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE, MAC_NUBUS},
-	{	MAC_MODEL_P475F, "Performa 475", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA, MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE, MAC_NUBUS},
-	{	MAC_MODEL_P520,  "Performa 520", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA, MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-
-	{	MAC_MODEL_P550,  "Performa 550", MAC_ADB_CUDA, MAC_VIA_IIci,   MAC_SCSI_OLD,    MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_P575,  "Performa 575", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA, MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE, MAC_NUBUS},
+	{
+		.ident		= MAC_MODEL_P460,
+		.name		=  "Performa 460",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_P475,
+		.name		=  "Performa 475",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_P475F,
+		.name		=  "Performa 475",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_P520,
+		.name		=  "Performa 520",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_P550,
+		.name		=  "Performa 550",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	},
 	/* These have the comm slot, and therefore the possibility of SONIC ethernet */
-	{	MAC_MODEL_P588,  "Performa 588", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA, MAC_IDE_QUADRA, MAC_SCC_II,	MAC_ETHER_SONIC, MAC_NUBUS},
-	{	MAC_MODEL_TV,    "TV",           MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_OLD,	MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_P600,  "Performa 600", MAC_ADB_IISI, MAC_VIA_IIci,   MAC_SCSI_OLD,	MAC_IDE_NONE,   MAC_SCC_II,	MAC_ETHER_NONE,	MAC_NUBUS},
+	{
+		.ident		= MAC_MODEL_P575,
+		.name		= "Performa 575",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_II,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_P588,
+		.name		= "Performa 588",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.ide_type	= MAC_IDE_QUADRA,
+		.scc_type	= MAC_SCC_II,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_TV,
+		.name		= "TV",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_P600,
+		.name		= "Performa 600",
+		.adb_type	= MAC_ADB_IISI,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_II,
+		.nubus_type	= MAC_NUBUS
+	},
 
 	/*
 	 *	Centris - just guessing again; maybe like Quadra
 	 */
 
 	/* The C610 may or may not have SONIC.  We probe to make sure */
-	{	MAC_MODEL_C610, "Centris 610",   MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_SONIC,	MAC_NUBUS},
-	{	MAC_MODEL_C650, "Centris 650",   MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_SONIC,	MAC_NUBUS},
-	{	MAC_MODEL_C660, "Centris 660AV", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA3, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_MACE,		MAC_NUBUS},
+	{
+		.ident		= MAC_MODEL_C610,
+		.name		= "Centris 610",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_C650,
+		.name		= "Centris 650",
+		.adb_type	= MAC_ADB_II,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_C660,
+		.name		= "Centris 660AV",
+		.adb_type	= MAC_ADB_CUDA,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_QUADRA3,
+		.scc_type	= MAC_SCC_PSC,
+		.ether_type	= MAC_ETHER_MACE,
+		.nubus_type	= MAC_NUBUS
+	},
 
 	/*
 	 * The PowerBooks all the same "Combo" custom IC for SCSI and SCC
@@ -411,17 +651,98 @@ static struct mac_model mac_data_table[]=
 	 * Quadra-style VIAs. A few models also have IDE from hell.
 	 */
 
-	{	MAC_MODEL_PB140,  "PowerBook 140",   MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB145,  "PowerBook 145",   MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB150,  "PowerBook 150",   MAC_ADB_PB1, MAC_VIA_IIci,   MAC_SCSI_OLD,  MAC_IDE_PB,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB160,  "PowerBook 160",   MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB165,  "PowerBook 165",   MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB165C, "PowerBook 165c",  MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB170,  "PowerBook 170",   MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB180,  "PowerBook 180",   MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB180C, "PowerBook 180c",  MAC_ADB_PB1, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB190,  "PowerBook 190",   MAC_ADB_PB2, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_BABOON, MAC_SCC_QUADRA, MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB520,  "PowerBook 520",   MAC_ADB_PB2, MAC_VIA_QUADRA, MAC_SCSI_OLD,  MAC_IDE_NONE,	 MAC_SCC_QUADRA, MAC_ETHER_SONIC, MAC_NUBUS},
+	{
+		.ident		= MAC_MODEL_PB140,
+		.name		= "PowerBook 140",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB145,
+		.name		= "PowerBook 145",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB150,
+		.name		= "PowerBook 150",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.ide_type	= MAC_IDE_PB,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB160,
+		.name		= "PowerBook 160",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB165,
+		.name		= "PowerBook 165",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB165C,
+		.name		= "PowerBook 165c",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB170,
+		.name		= "PowerBook 170",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB180,
+		.name		= "PowerBook 180",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB180C,
+		.name		= "PowerBook 180c",
+		.adb_type	= MAC_ADB_PB1,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB190,
+		.name		= "PowerBook 190",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.ide_type	= MAC_IDE_BABOON,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB520,
+		.name		= "PowerBook 520",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_QUADRA,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.ether_type	= MAC_ETHER_SONIC,
+		.nubus_type	= MAC_NUBUS
+	},
 
 	/*
 	 * PowerBook Duos are pretty much like normal PowerBooks
@@ -433,33 +754,78 @@ static struct mac_model mac_data_table[]=
 	 * the other PowerBooks which would imply MAC_VIA_QUADRA.
 	 */
 
-	{	MAC_MODEL_PB210,  "PowerBook Duo 210",  MAC_ADB_PB2,  MAC_VIA_IIci, MAC_SCSI_OLD, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB230,  "PowerBook Duo 230",  MAC_ADB_PB2,  MAC_VIA_IIci, MAC_SCSI_OLD, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB250,  "PowerBook Duo 250",  MAC_ADB_PB2,  MAC_VIA_IIci, MAC_SCSI_OLD, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB270C, "PowerBook Duo 270c", MAC_ADB_PB2,  MAC_VIA_IIci, MAC_SCSI_OLD, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB280,  "PowerBook Duo 280",  MAC_ADB_PB2,  MAC_VIA_IIci, MAC_SCSI_OLD, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_PB280C, "PowerBook Duo 280c", MAC_ADB_PB2,  MAC_VIA_IIci, MAC_SCSI_OLD, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
+	{
+		.ident		= MAC_MODEL_PB210,
+		.name		= "PowerBook Duo 210",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB230,
+		.name		= "PowerBook Duo 230",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB250,
+		.name		= "PowerBook Duo 250",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB270C,
+		.name		= "PowerBook Duo 270c",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB280,
+		.name		= "PowerBook Duo 280",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	}, {
+		.ident		= MAC_MODEL_PB280C,
+		.name		= "PowerBook Duo 280c",
+		.adb_type	= MAC_ADB_PB2,
+		.via_type	= MAC_VIA_IIci,
+		.scsi_type	= MAC_SCSI_OLD,
+		.scc_type	= MAC_SCC_QUADRA,
+		.nubus_type	= MAC_NUBUS
+	},
 
 	/*
 	 *	Other stuff ??
 	 */
-	{	-1, NULL, 0,0,0,}
+	{
+		.ident		= -1
+	}
 };
 
 void mac_identify(void)
 {
 	struct mac_model *m;
 
-	/* Penguin data useful? */	
+	/* Penguin data useful? */
 	int model = mac_bi_data.id;
 	if (!model) {
 		/* no bootinfo model id -> NetBSD booter was used! */
 		/* XXX FIXME: breaks for model > 31 */
 		model=(mac_bi_data.cpuid>>2)&63;
-		printk ("No bootinfo model ID, using cpuid instead (hey, use Penguin!)\n");
+		printk (KERN_WARNING "No bootinfo model ID, using cpuid instead (hey, use Penguin!)\n");
 	}
 
-	macintosh_config = mac_data_table; 
+	macintosh_config = mac_data_table;
 	for (m = macintosh_config ; m->ident != -1 ; m++) {
 		if (m->ident == model) {
 			macintosh_config = m;
@@ -474,25 +840,25 @@ void mac_identify(void)
 	iop_preinit();
 	mac_debug_init();
 
-	printk ("Detected Macintosh model: %d \n", model);
+	printk (KERN_INFO "Detected Macintosh model: %d \n", model);
 
 	/*
 	 * Report booter data:
 	 */
-	printk (" Penguin bootinfo data:\n");
-	printk (" Video: addr 0x%lx row 0x%lx depth %lx dimensions %ld x %ld\n", 
-		mac_bi_data.videoaddr, mac_bi_data.videorow, 
-		mac_bi_data.videodepth, mac_bi_data.dimensions & 0xFFFF, 
-		mac_bi_data.dimensions >> 16); 
-	printk (" Videological 0x%lx phys. 0x%lx, SCC at 0x%lx \n",
-		mac_bi_data.videological, mac_orig_videoaddr, 
-		mac_bi_data.sccbase); 
-	printk (" Boottime: 0x%lx GMTBias: 0x%lx \n",
-		mac_bi_data.boottime, mac_bi_data.gmtbias); 
-	printk (" Machine ID: %ld CPUid: 0x%lx memory size: 0x%lx \n",
-		mac_bi_data.id, mac_bi_data.cpuid, mac_bi_data.memsize); 
+	printk (KERN_DEBUG " Penguin bootinfo data:\n");
+	printk (KERN_DEBUG " Video: addr 0x%lx row 0x%lx depth %lx dimensions %ld x %ld\n",
+		mac_bi_data.videoaddr, mac_bi_data.videorow,
+		mac_bi_data.videodepth, mac_bi_data.dimensions & 0xFFFF,
+		mac_bi_data.dimensions >> 16);
+	printk (KERN_DEBUG " Videological 0x%lx phys. 0x%lx, SCC at 0x%lx \n",
+		mac_bi_data.videological, mac_orig_videoaddr,
+		mac_bi_data.sccbase);
+	printk (KERN_DEBUG " Boottime: 0x%lx GMTBias: 0x%lx \n",
+		mac_bi_data.boottime, mac_bi_data.gmtbias);
+	printk (KERN_DEBUG " Machine ID: %ld CPUid: 0x%lx memory size: 0x%lx \n",
+		mac_bi_data.id, mac_bi_data.cpuid, mac_bi_data.memsize);
 #if 0
-	printk ("Ramdisk: addr 0x%lx size 0x%lx\n", 
+	printk ("Ramdisk: addr 0x%lx size 0x%lx\n",
 		m68k_ramdisk.addr, m68k_ramdisk.size);
 #endif
 
@@ -512,7 +878,7 @@ void mac_identify(void)
 	    MACHW_SET(MAC_SCSI_96_2);
 	  break;
 	default:
-	  printk("config.c: wtf: unknown scsi, using 53c80\n");
+	  printk(KERN_WARNING "config.c: wtf: unknown scsi, using 53c80\n");
 	  MACHW_SET(MAC_SCSI_80);
 	  break;
 
@@ -526,7 +892,7 @@ void mac_identify(void)
 
 void mac_report_hardware(void)
 {
-	printk("Apple Macintosh %s\n", macintosh_config->name);
+	printk(KERN_INFO "Apple Macintosh %s\n", macintosh_config->name);
 }
 
 static void mac_get_model(char *str)

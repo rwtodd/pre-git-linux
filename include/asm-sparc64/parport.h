@@ -1,4 +1,4 @@
-/* $Id: parport.h,v 1.9 2000/03/16 07:47:27 davem Exp $
+/* $Id: parport.h,v 1.11 2001/05/11 07:54:24 davem Exp $
  * parport.h: sparc64 specific parport initialization and dma.
  *
  * Copyright (C) 1999  Eddie C. Dost  (ecd@skynet.be)
@@ -8,95 +8,111 @@
 #define _ASM_SPARC64_PARPORT_H 1
 
 #include <asm/ebus.h>
+#include <asm/isa.h>
 #include <asm/ns87303.h>
 
 #define PARPORT_PC_MAX_PORTS	PARPORT_MAX
 
-static struct linux_ebus_dma *sparc_ebus_dmas[PARPORT_PC_MAX_PORTS];
+static struct sparc_ebus_info {
+	struct ebus_dma_info info;
+	unsigned int addr;
+	unsigned int count;
+} sparc_ebus_dmas[PARPORT_PC_MAX_PORTS];
 
-static __inline__ void
-reset_dma(unsigned int dmanr)
+static __inline__ void enable_dma(unsigned int dmanr)
 {
-	unsigned int dcsr;
+	if (ebus_dma_request(&sparc_ebus_dmas[dmanr].info,
+			     sparc_ebus_dmas[dmanr].addr,
+			     sparc_ebus_dmas[dmanr].count))
+		BUG();
 
-	writel(EBUS_DCSR_RESET, &sparc_ebus_dmas[dmanr]->dcsr);
-	udelay(1);
-	dcsr = EBUS_DCSR_BURST_SZ_16 | EBUS_DCSR_TCI_DIS |
-	       EBUS_DCSR_EN_CNT | EBUS_DCSR_INT_EN;
-	writel(dcsr, &sparc_ebus_dmas[dmanr]->dcsr);
+	ebus_dma_enable(&sparc_ebus_dmas[dmanr].info, 1);
 }
 
-static __inline__ void
-enable_dma(unsigned int dmanr)
+static __inline__ void disable_dma(unsigned int dmanr)
 {
-	unsigned int dcsr;
-
-	dcsr = readl(&sparc_ebus_dmas[dmanr]->dcsr);
-	dcsr |= EBUS_DCSR_EN_DMA;
-	writel(dcsr, &sparc_ebus_dmas[dmanr]->dcsr);
+	ebus_dma_enable(&sparc_ebus_dmas[dmanr].info, 0);
 }
 
-static __inline__ void
-disable_dma(unsigned int dmanr)
-{
-	unsigned int dcsr;
-
-	dcsr = readl(&sparc_ebus_dmas[dmanr]->dcsr);
-	if (dcsr & EBUS_DCSR_EN_DMA) {
-		while (dcsr & EBUS_DCSR_DRAIN) {
-			udelay(1);
-			dcsr = readl(&sparc_ebus_dmas[dmanr]->dcsr);
-		}
-		dcsr &= ~(EBUS_DCSR_EN_DMA);
-		writel(dcsr, &sparc_ebus_dmas[dmanr]->dcsr);
-
-		dcsr = readl(&sparc_ebus_dmas[dmanr]->dcsr);
-		if (dcsr & EBUS_DCSR_ERR_PEND)
-			reset_dma(dmanr);
-	}
-}
-
-static __inline__ void
-clear_dma_ff(unsigned int dmanr)
+static __inline__ void clear_dma_ff(unsigned int dmanr)
 {
 	/* nothing */
 }
 
-static __inline__ void
-set_dma_mode(unsigned int dmanr, char mode)
+static __inline__ void set_dma_mode(unsigned int dmanr, char mode)
 {
-	unsigned int dcsr;
-
-	dcsr = readl(&sparc_ebus_dmas[dmanr]->dcsr);
-	dcsr |= EBUS_DCSR_EN_CNT | EBUS_DCSR_TC;
-	if (mode == DMA_MODE_WRITE)
-		dcsr &= ~(EBUS_DCSR_WRITE);
-	else
-		dcsr |= EBUS_DCSR_WRITE;
-	writel(dcsr, &sparc_ebus_dmas[dmanr]->dcsr);
+	ebus_dma_prepare(&sparc_ebus_dmas[dmanr].info, (mode != DMA_MODE_WRITE));
 }
 
-static __inline__ void
-set_dma_addr(unsigned int dmanr, unsigned int addr)
+static __inline__ void set_dma_addr(unsigned int dmanr, unsigned int addr)
 {
-	writel(addr, &sparc_ebus_dmas[dmanr]->dacr);
+	sparc_ebus_dmas[dmanr].addr = addr;
 }
 
-static __inline__ void
-set_dma_count(unsigned int dmanr, unsigned int count)
+static __inline__ void set_dma_count(unsigned int dmanr, unsigned int count)
 {
-	writel(count, &sparc_ebus_dmas[dmanr]->dbcr);
+	sparc_ebus_dmas[dmanr].count = count;
 }
 
-static __inline__ int
-get_dma_residue(unsigned int dmanr)
+static __inline__ unsigned int get_dma_residue(unsigned int dmanr)
 {
-	int res;
+	return ebus_dma_residue(&sparc_ebus_dmas[dmanr].info);
+}
 
-	res = readl(&sparc_ebus_dmas[dmanr]->dbcr);
-	if (res != 0)
-		reset_dma(dmanr);
-	return res;
+static int ebus_ecpp_p(struct linux_ebus_device *edev)
+{
+	if (!strcmp(edev->prom_name, "ecpp"))
+		return 1;
+	if (!strcmp(edev->prom_name, "parallel")) {
+		char compat[19];
+		prom_getstring(edev->prom_node,
+			       "compatible",
+			       compat, sizeof(compat));
+		compat[18] = '\0';
+		if (!strcmp(compat, "ecpp"))
+			return 1;
+		if (!strcmp(compat, "ns87317-ecpp") &&
+		    !strcmp(compat + 13, "ecpp"))
+			return 1;
+	}
+	return 0;
+}
+
+static int parport_isa_probe(int count)
+{
+	struct sparc_isa_bridge *isa_br;
+	struct sparc_isa_device *isa_dev;
+
+	for_each_isa(isa_br) {
+		for_each_isadev(isa_dev, isa_br) {
+			struct sparc_isa_device *child;
+			unsigned long base;
+
+			if (strcmp(isa_dev->prom_name, "dma"))
+				continue;
+
+			child = isa_dev->child;
+			while (child) {
+				if (!strcmp(child->prom_name, "parallel"))
+					break;
+				child = child->next;
+			}
+			if (!child)
+				continue;
+
+			base = child->resource.start;
+
+			/* No DMA, see commentary in
+			 * asm-sparc64/floppy.h:isa_floppy_init()
+			 */
+			if (parport_pc_probe_port(base, base + 0x400,
+						  child->irq, PARPORT_DMA_NOFIFO,
+						  child->bus->self))
+				count++;
+		}
+	}
+
+	return count;
 }
 
 static int parport_pc_find_nonpci_ports (int autoirq, int autodma)
@@ -105,19 +121,29 @@ static int parport_pc_find_nonpci_ports (int autoirq, int autodma)
 	struct linux_ebus_device *edev;
 	int count = 0;
 
-	if (!pci_present())
-		return 0;
-
 	for_each_ebus(ebus) {
 		for_each_ebusdev(edev, ebus) {
-			if (!strcmp(edev->prom_name, "ecpp")) {
+			if (ebus_ecpp_p(edev)) {
 				unsigned long base = edev->resource[0].start;
 				unsigned long config = edev->resource[1].start;
+				unsigned long d_base = edev->resource[2].start;
+				unsigned long d_len;
 
-				sparc_ebus_dmas[count] =
-						(struct linux_ebus_dma *)
-							edev->resource[2].start;
-				reset_dma(count);
+				spin_lock_init(&sparc_ebus_dmas[count].info.lock);
+				d_len = (edev->resource[2].end -
+					 d_base) + 1;
+				sparc_ebus_dmas[count].info.regs =
+					ioremap(d_base, d_len);
+				if (!sparc_ebus_dmas[count].info.regs)
+					continue;
+				sparc_ebus_dmas[count].info.flags = 0;
+				sparc_ebus_dmas[count].info.callback = NULL;
+				sparc_ebus_dmas[count].info.client_cookie = NULL;
+				sparc_ebus_dmas[count].info.irq = 0xdeadbeef;
+				strcpy(sparc_ebus_dmas[count].info.name, "parport");
+				if (ebus_dma_register(&sparc_ebus_dmas[count].info))
+					continue;
+				ebus_dma_irq_enable(&sparc_ebus_dmas[count].info, 1);
 
 				/* Configure IRQ to Push Pull, Level Low */
 				/* Enable ECP, set bit 2 of the CTR first */
@@ -140,6 +166,8 @@ static int parport_pc_find_nonpci_ports (int autoirq, int autodma)
 			}
 		}
 	}
+
+	count = parport_isa_probe(count);
 
 	return count;
 }

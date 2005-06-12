@@ -1,4 +1,4 @@
-/* $Id: display7seg.c,v 1.4 2000/11/08 05:08:23 davem Exp $
+/* $Id: display7seg.c,v 1.6 2002/01/08 16:00:16 davem Exp $
  *
  * display7seg - Driver implementation for the 7-segment display
  * present on Sun Microsystems CP1400 and CP1500
@@ -9,13 +9,13 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/major.h>
 #include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/ioport.h>		/* request_region, check_region */
+#include <asm/atomic.h>
 #include <asm/ebus.h>			/* EBus device					*/
 #include <asm/oplib.h>			/* OpenProm Library 			*/
 #include <asm/uaccess.h>		/* put_/get_user			*/
@@ -29,7 +29,6 @@
 static int sol_compat = 0;		/* Solaris compatibility mode	*/
 
 #ifdef MODULE
-EXPORT_NO_SYMBOLS;
 
 /* Solaris compatibility flag -
  * The Solaris implementation omits support for several
@@ -45,8 +44,8 @@ EXPORT_NO_SYMBOLS;
  * If you wish the device to operate as under Solaris,
  * omitting above features, set this parameter to non-zero.
  */
-MODULE_PARM
-	(sol_compat, "1i");
+module_param
+	(sol_compat, int, 0);
 MODULE_PARM_DESC
 	(sol_compat, 
 	 "Disables documented functionality omitted from Solaris driver");
@@ -55,6 +54,7 @@ MODULE_AUTHOR
 	("Eric Brower <ebrower@usa.net>");
 MODULE_DESCRIPTION
 	("7-Segment Display driver for Sun Microsystems CP1400/1500");
+MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE
 	("d7s");
 #endif /* ifdef MODULE */
@@ -70,7 +70,7 @@ MODULE_SUPPORTED_DEVICE
  * FLIP		- Inverts display for upside-down mounted board
  * bits 0-4	- 7-segment display contents
  */
-volatile u8* d7s_regs = 0;
+static void __iomem* d7s_regs;
 
 static inline void d7s_free(void)
 {
@@ -86,27 +86,23 @@ static inline int d7s_obpflipped(void)
 	return ((-1 != prom_getintdefault(opt_node, "d7s-flipped?", -1)) ? 0 : 1);
 }
 
+static atomic_t d7s_users = ATOMIC_INIT(0);
+
 static int d7s_open(struct inode *inode, struct file *f)
 {
-	if (D7S_MINOR != MINOR(inode->i_rdev))
+	if (D7S_MINOR != iminor(inode))
 		return -ENODEV;
-
-	MOD_INC_USE_COUNT;
+	atomic_inc(&d7s_users);
 	return 0;
 }
 
 static int d7s_release(struct inode *inode, struct file *f)
 {
-	if (D7S_MINOR != MINOR(inode->i_rdev))
-		return -ENODEV;
-	
-	MOD_DEC_USE_COUNT;
-
 	/* Reset flipped state to OBP default only if
 	 * no other users have the device open and we
 	 * are not operating in solaris-compat mode
 	 */
-	if (0 == MOD_IN_USE && 0 == sol_compat) {
+	if (atomic_dec_and_test(&d7s_users) && !sol_compat) {
 		int regval = 0;
 
 		regval = readb(d7s_regs);
@@ -124,7 +120,7 @@ static int d7s_ioctl(struct inode *inode, struct file *f,
 	__u8 regs = readb(d7s_regs);
 	__u8 ireg = 0;
 
-	if (D7S_MINOR != MINOR(inode->i_rdev))
+	if (D7S_MINOR != iminor(inode))
 		return -ENODEV;
 
 	switch (cmd) {
@@ -132,7 +128,7 @@ static int d7s_ioctl(struct inode *inode, struct file *f,
 		/* assign device register values
 		 * we mask-out D7S_FLIP if in sol_compat mode
 		 */
-		if (get_user(ireg, (int *) arg))
+		if (get_user(ireg, (int __user *) arg))
 			return -EFAULT;
 		if (0 != sol_compat) {
 			(regs & D7S_FLIP) ? 
@@ -148,7 +144,7 @@ static int d7s_ioctl(struct inode *inode, struct file *f,
 		 * This driver will not misinform you about the state
 		 * of your hardware while in sol_compat mode
 		 */
-		if (put_user(regs, (int *) arg))
+		if (put_user(regs, (int __user *) arg))
 			return -EFAULT;
 		break;
 
@@ -164,10 +160,10 @@ static int d7s_ioctl(struct inode *inode, struct file *f,
 }
 
 static struct file_operations d7s_fops = {
-	owner:		THIS_MODULE,
-	ioctl:		d7s_ioctl,
-	open:		d7s_open,
-	release:	d7s_release,
+	.owner =	THIS_MODULE,
+	.ioctl =	d7s_ioctl,
+	.open =		d7s_open,
+	.release =	d7s_release,
 };
 
 static struct miscdevice d7s_miscdev = { D7S_MINOR, D7S_DEVNAME, &d7s_fops };
@@ -197,6 +193,7 @@ ebus_done:
 	if (0 != iTmp) {
 		printk("%s: unable to acquire miscdevice minor %i\n",
 		       D7S_DEVNAME, D7S_MINOR);
+		iounmap(d7s_regs);
 		return iTmp;
 	}
 

@@ -1,4 +1,4 @@
-/* $Id: mostek.h,v 1.12 1999/08/31 18:51:41 davem Exp $
+/* $Id: mostek.h,v 1.13 2001/01/11 15:07:09 davem Exp $
  * mostek.h:  Describes the various Mostek time of day clock registers.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -11,6 +11,7 @@
 
 #include <linux/config.h>
 #include <asm/idprom.h>
+#include <asm/io.h>
 
 /*       M48T02 Register Map (adapted from Sun NVRAM/Hostid FAQ)
  *
@@ -38,8 +39,8 @@
  * other than the control register are in binary coded decimal. Some
  * control bits also live outside the control register.
  */
-#define mostek_read(_addr)		(*((volatile u8 *)(_addr)))
-#define mostek_write(_addr,_val)	((*((volatile u8 *)(_addr))) = (_val))
+#define mostek_read(_addr)		readb(_addr)
+#define mostek_write(_addr,_val)	writeb(_val, _addr)
 #define MOSTEK_EEPROM		0x0000UL
 #define MOSTEK_IDPROM		0x07d8UL
 #define MOSTEK_CREG		0x07f8UL
@@ -64,7 +65,8 @@ struct mostek48t02 {
 	volatile unsigned char year;	/* Year (0-99) */
 };
 
-extern unsigned long mstk48t02_regs;
+extern spinlock_t mostek_lock;
+extern void __iomem *mstk48t02_regs;
 
 /* Control register values. */
 #define	MSTK_CREG_WRITE	0x80	/* Must set this before placing values. */

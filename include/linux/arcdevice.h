@@ -25,7 +25,6 @@
 #define bool int
 #endif
 
-
 /*
  * RECON_THRESHOLD is the maximum number of RECON messages to receive
  * within one minute before printing a "cabling problem" warning. The
@@ -74,6 +73,7 @@
 #define D_SKB		1024	/* show skb's                             */
 #define D_SKB_SIZE	2048	/* show skb sizes			  */
 #define D_TIMING	4096	/* show time needed to copy buffers to card */
+#define D_DEBUG         8192    /* Very detailed debug line for line */
 
 #ifndef ARCNET_DEBUG_MAX
 #define ARCNET_DEBUG_MAX (127)	/* change to ~0 if you want detailed debugging */
@@ -135,6 +135,7 @@ extern int arcnet_debug;
 #define TXACKflag       0x02	/* transmitted msg. ackd */
 #define RECONflag       0x04	/* network reconfigured */
 #define TESTflag        0x08	/* test flag */
+#define EXCNAKflag      0x08    /* excesive nak flag */
 #define RESETflag       0x10	/* power-on-reset */
 #define RES1flag        0x20	/* reserved - usually set by jumper */
 #define RES2flag        0x40	/* reserved - usually set by jumper */
@@ -162,6 +163,8 @@ extern int arcnet_debug;
 #define RESETclear      0x08	/* power-on-reset */
 #define CONFIGclear     0x10	/* system reconfigured */
 
+#define EXCNAKclear     0x0E    /* Clear and acknowledge the excive nak bit */
+
 /* flags for "load test flags" command */
 #define TESTload        0x08	/* test flag (diagnostic) */
 
@@ -187,19 +190,22 @@ extern int arcnet_debug;
 struct ArcProto {
 	char suffix;		/* a for RFC1201, e for ether-encap, etc. */
 	int mtu;		/* largest possible packet */
+	int is_ip;              /* This is a ip plugin - not a raw thing */
 
 	void (*rx) (struct net_device * dev, int bufnum,
 		    struct archdr * pkthdr, int length);
-	int (*build_header) (struct sk_buff * skb, unsigned short ethproto,
-			     uint8_t daddr);
+	int (*build_header) (struct sk_buff * skb, struct net_device *dev,
+			     unsigned short ethproto, uint8_t daddr);
 
 	/* these functions return '1' if the skb can now be freed */
 	int (*prepare_tx) (struct net_device * dev, struct archdr * pkt, int length,
 			   int bufnum);
 	int (*continue_tx) (struct net_device * dev, int bufnum);
+	int (*ack_tx) (struct net_device * dev, int acked);
 };
 
-extern struct ArcProto *arc_proto_map[256], *arc_proto_default, *arc_bcast_proto;
+extern struct ArcProto *arc_proto_map[256], *arc_proto_default,
+	*arc_bcast_proto, *arc_raw_proto;
 extern struct ArcProto arc_proto_null;
 
 
@@ -251,6 +257,10 @@ struct arcnet_local {
 	char *card_name;	/* card ident string */
 	int card_flags;		/* special card features */
 
+
+	/* On preemtive and SMB a lock is needed */
+	spinlock_t lock;
+
 	/*
 	 * Buffer management: an ARCnet card has 4 x 512-byte buffers, each of
 	 * which can be used for either sending or receiving.  The new dynamic
@@ -279,6 +289,8 @@ struct arcnet_local {
 	int num_recons;		/* number of RECONs between first and last. */
 	bool network_down;	/* do we think the network is down? */
 
+	bool excnak_pending;    /* We just got an excesive nak interrupt */
+
 	struct {
 		uint16_t sequence;	/* sequence number (incs with each packet) */
 		uint16_t aborted_seq;
@@ -291,12 +303,13 @@ struct arcnet_local {
 
 	/* hardware-specific functions */
 	struct {
+		struct module *owner;
 		void (*command) (struct net_device * dev, int cmd);
 		int (*status) (struct net_device * dev);
 		void (*intmask) (struct net_device * dev, int mask);
 		bool (*reset) (struct net_device * dev, bool really_reset);
-		void (*open_close) (struct net_device * dev, bool open);
-		void (*open_close_ll) (struct net_device * dev, bool open);
+		void (*open) (struct net_device * dev);
+		void (*close) (struct net_device * dev);
 
 		void (*copy_to_card) (struct net_device * dev, int bufnum, int offset,
 				      void *buf, int count);
@@ -304,7 +317,7 @@ struct arcnet_local {
 					void *buf, int count);
 	} hw;
 
-	void *mem_start;	/* pointer to ioremap'ed MMIO */
+	void __iomem *mem_start;	/* pointer to ioremap'ed MMIO */
 };
 
 
@@ -312,7 +325,6 @@ struct arcnet_local {
 #define ACOMMAND(x)  (lp->hw.command(dev, (x)))
 #define ASTATUS()    (lp->hw.status(dev))
 #define AINTMASK(x)  (lp->hw.intmask(dev, (x)))
-#define ARCOPEN(x)   (lp->hw.open_close(dev, (x)))
 
 
 
@@ -323,24 +335,16 @@ void arcnet_dump_skb(struct net_device *dev, struct sk_buff *skb, char *desc);
 #endif
 
 #if (ARCNET_DEBUG_MAX & D_RX) || (ARCNET_DEBUG_MAX & D_TX)
-void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc);
+void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc,
+			int take_arcnet_lock);
 #else
-#define arcnet_dump_packet(dev, bufnum, desc) ;
+#define arcnet_dump_packet(dev, bufnum, desc,take_arcnet_lock) ;
 #endif
 
 void arcnet_unregister_proto(struct ArcProto *proto);
-void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-void arcdev_setup(struct net_device *dev);
+irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+struct net_device *alloc_arcdev(char *name);
 void arcnet_rx(struct net_device *dev, int bufnum);
 
-void arcnet_init(void);
-
-void arcnet_rfc1201_init(void);
-void arcnet_rfc1051_init(void);
-void arcnet_raw_init(void);
-
-int com90xx_probe(struct net_device *dev);
-
 #endif				/* __KERNEL__ */
-
 #endif				/* _LINUX_ARCDEVICE_H */

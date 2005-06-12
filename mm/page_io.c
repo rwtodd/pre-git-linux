@@ -12,132 +12,149 @@
 
 #include <linux/mm.h>
 #include <linux/kernel_stat.h>
+#include <linux/pagemap.h>
 #include <linux/swap.h>
-#include <linux/locks.h>
-#include <linux/swapctl.h>
-
+#include <linux/bio.h>
+#include <linux/swapops.h>
+#include <linux/writeback.h>
 #include <asm/pgtable.h>
 
-/*
- * Reads or writes a swap page.
- * wait=1: start I/O and wait for completion. wait=0: start asynchronous I/O.
- *
- * Important prevention of race condition: the caller *must* atomically 
- * create a unique swap cache entry for this swap page before calling
- * rw_swap_page, and must lock that page.  By ensuring that there is a
- * single page of memory reserved for the swap entry, the normal VM page
- * lock on that page also doubles as a lock on swap entries.  Having only
- * one lock to deal with per swap entry (rather than locking swap and memory
- * independently) also makes it easier to make certain swapping operations
- * atomic, which is particularly important when we are trying to ensure 
- * that shared pages stay shared while being swapped.
- */
-
-static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int wait)
+static struct bio *get_swap_bio(int gfp_flags, pgoff_t index,
+				struct page *page, bio_end_io_t end_io)
 {
-	unsigned long offset;
-	int zones[PAGE_SIZE/512];
-	int zones_used;
-	kdev_t dev = 0;
-	int block_size;
-	struct inode *swapf = 0;
+	struct bio *bio;
 
-	/* Don't allow too many pending pages in flight.. */
-	if ((rw == WRITE) && atomic_read(&nr_async_pages) >
-			pager_daemon.swap_cluster * (1 << page_cluster))
-		wait = 1;
+	bio = bio_alloc(gfp_flags, 1);
+	if (bio) {
+		struct swap_info_struct *sis;
+		swp_entry_t entry = { .val = index, };
 
-	if (rw == READ) {
-		ClearPageUptodate(page);
-		kstat.pswpin++;
-	} else
-		kstat.pswpout++;
-
-	get_swaphandle_info(entry, &offset, &dev, &swapf);
-	if (dev) {
-		zones[0] = offset;
-		zones_used = 1;
-		block_size = PAGE_SIZE;
-	} else if (swapf) {
-		int i, j;
-		unsigned int block = offset
-			<< (PAGE_SHIFT - swapf->i_sb->s_blocksize_bits);
-
-		block_size = swapf->i_sb->s_blocksize;
-		for (i=0, j=0; j< PAGE_SIZE ; i++, j += block_size)
-			if (!(zones[i] = bmap(swapf,block++))) {
-				printk("rw_swap_page: bad swap file\n");
-				return 0;
-			}
-		zones_used = i;
-		dev = swapf->i_dev;
-	} else {
-		return 0;
+		sis = get_swap_info_struct(swp_type(entry));
+		bio->bi_sector = map_swap_page(sis, swp_offset(entry)) *
+					(PAGE_SIZE >> 9);
+		bio->bi_bdev = sis->bdev;
+		bio->bi_io_vec[0].bv_page = page;
+		bio->bi_io_vec[0].bv_len = PAGE_SIZE;
+		bio->bi_io_vec[0].bv_offset = 0;
+		bio->bi_vcnt = 1;
+		bio->bi_idx = 0;
+		bio->bi_size = PAGE_SIZE;
+		bio->bi_end_io = end_io;
 	}
- 	if (!wait) {
- 		SetPageDecrAfter(page);
- 		atomic_inc(&nr_async_pages);
- 	}
+	return bio;
+}
 
- 	/* block_size == PAGE_SIZE/zones_used */
- 	brw_page(rw, page, dev, zones, block_size);
+static int end_swap_bio_write(struct bio *bio, unsigned int bytes_done, int err)
+{
+	const int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
+	struct page *page = bio->bi_io_vec[0].bv_page;
 
- 	/* Note! For consistency we do all of the logic,
- 	 * decrementing the page count, and unlocking the page in the
- 	 * swap lock map - in the IO completion handler.
- 	 */
- 	if (!wait)
- 		return 1;
+	if (bio->bi_size)
+		return 1;
 
- 	wait_on_page(page);
-	/* This shouldn't happen, but check to be sure. */
-	if (page_count(page) == 0)
-		printk(KERN_ERR "rw_swap_page: page unused while waiting!\n");
+	if (!uptodate)
+		SetPageError(page);
+	end_page_writeback(page);
+	bio_put(bio);
+	return 0;
+}
 
-	return 1;
+static int end_swap_bio_read(struct bio *bio, unsigned int bytes_done, int err)
+{
+	const int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
+	struct page *page = bio->bi_io_vec[0].bv_page;
+
+	if (bio->bi_size)
+		return 1;
+
+	if (!uptodate) {
+		SetPageError(page);
+		ClearPageUptodate(page);
+	} else {
+		SetPageUptodate(page);
+	}
+	unlock_page(page);
+	bio_put(bio);
+	return 0;
 }
 
 /*
- * A simple wrapper so the base function doesn't need to enforce
- * that all swap pages go through the swap cache! We verify that:
- *  - the page is locked
- *  - it's marked as being swap-cache
- *  - it's associated with the swap inode
+ * We may have stale swap cache pages in memory: notice
+ * them here and get rid of the unnecessary final write.
  */
-void rw_swap_page(int rw, struct page *page, int wait)
+int swap_writepage(struct page *page, struct writeback_control *wbc)
 {
-	swp_entry_t entry;
+	struct bio *bio;
+	int ret = 0, rw = WRITE;
 
-	entry.val = page->index;
-
-	if (!PageLocked(page))
-		PAGE_BUG(page);
-	if (!PageSwapCache(page))
-		PAGE_BUG(page);
-	if (page->mapping != &swapper_space)
-		PAGE_BUG(page);
-	if (!rw_swap_page_base(rw, entry, page, wait))
-		UnlockPage(page);
+	if (remove_exclusive_swap_page(page)) {
+		unlock_page(page);
+		goto out;
+	}
+	bio = get_swap_bio(GFP_NOIO, page->private, page, end_swap_bio_write);
+	if (bio == NULL) {
+		set_page_dirty(page);
+		unlock_page(page);
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (wbc->sync_mode == WB_SYNC_ALL)
+		rw |= (1 << BIO_RW_SYNC);
+	inc_page_state(pswpout);
+	set_page_writeback(page);
+	unlock_page(page);
+	submit_bio(rw, bio);
+out:
+	return ret;
 }
 
+int swap_readpage(struct file *file, struct page *page)
+{
+	struct bio *bio;
+	int ret = 0;
+
+	BUG_ON(!PageLocked(page));
+	ClearPageUptodate(page);
+	bio = get_swap_bio(GFP_KERNEL, page->private, page, end_swap_bio_read);
+	if (bio == NULL) {
+		unlock_page(page);
+		ret = -ENOMEM;
+		goto out;
+	}
+	inc_page_state(pswpin);
+	submit_bio(READ, bio);
+out:
+	return ret;
+}
+
+#if defined(CONFIG_SOFTWARE_SUSPEND) || defined(CONFIG_PM_DISK)
 /*
- * The swap lock map insists that pages be in the page cache!
- * Therefore we can't use it.  Later when we can remove the need for the
- * lock map and we can reduce the number of functions exported.
+ * A scruffy utility function to read or write an arbitrary swap page
+ * and wait on the I/O.  The caller must have a ref on the page.
+ *
+ * We use end_swap_bio_read() even for writes, because it happens to do what
+ * we want.
  */
-void rw_swap_page_nolock(int rw, swp_entry_t entry, char *buf, int wait)
+int rw_swap_page_sync(int rw, swp_entry_t entry, struct page *page)
 {
-	struct page *page = virt_to_page(buf);
-	
-	if (!PageLocked(page))
-		PAGE_BUG(page);
-	if (PageSwapCache(page))
-		PAGE_BUG(page);
-	if (page->mapping)
-		PAGE_BUG(page);
-	/* needs sync_page to wait I/O completation */
-	page->mapping = &swapper_space;
-	if (!rw_swap_page_base(rw, entry, page, wait))
-		UnlockPage(page);
-	page->mapping = NULL;
+	struct bio *bio;
+	int ret = 0;
+
+	lock_page(page);
+
+	bio = get_swap_bio(GFP_KERNEL, entry.val, page, end_swap_bio_read);
+	if (bio == NULL) {
+		unlock_page(page);
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	submit_bio(rw | (1 << BIO_RW_SYNC), bio);
+	wait_on_page_locked(page);
+
+	if (!PageUptodate(page) || PageError(page))
+		ret = -EIO;
+out:
+	return ret;
 }
+#endif

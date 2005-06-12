@@ -16,18 +16,19 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_cia.h>
 #include <asm/core_lca.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -42,7 +43,7 @@ static inline void
 cabriolet_update_irq_hw(unsigned int irq, unsigned long mask)
 {
 	int ofs = (irq - 16) / 8;
-	outb(mask >> (16 + ofs*3), 0x804 + ofs);
+	outb(mask >> (16 + ofs * 8), 0x804 + ofs);
 }
 
 static inline void
@@ -72,13 +73,13 @@ cabriolet_end_irq(unsigned int irq)
 }
 
 static struct hw_interrupt_type cabriolet_irq_type = {
-	typename:	"CABRIOLET",
-	startup:	cabriolet_startup_irq,
-	shutdown:	cabriolet_disable_irq,
-	enable:		cabriolet_enable_irq,
-	disable:	cabriolet_disable_irq,
-	ack:		cabriolet_disable_irq,
-	end:		cabriolet_end_irq,
+	.typename	= "CABRIOLET",
+	.startup	= cabriolet_startup_irq,
+	.shutdown	= cabriolet_disable_irq,
+	.enable		= cabriolet_enable_irq,
+	.disable	= cabriolet_disable_irq,
+	.ack		= cabriolet_disable_irq,
+	.end		= cabriolet_end_irq,
 };
 
 static void 
@@ -106,12 +107,12 @@ cabriolet_device_interrupt(unsigned long v, struct pt_regs *r)
 }
 
 static void __init
-cabriolet_init_irq(void)
+common_init_irq(void (*srm_dev_int)(unsigned long v, struct pt_regs *r))
 {
 	init_i8259a_irqs();
 
 	if (alpha_using_srm) {
-		alpha_mv.device_interrupt = srm_device_interrupt;
+		alpha_mv.device_interrupt = srm_dev_int;
 		init_srm_irqs(35, 0);
 	}
 	else {
@@ -131,28 +132,48 @@ cabriolet_init_irq(void)
 	setup_irq(16+4, &isa_cascade_irqaction);
 }
 
+#ifndef CONFIG_ALPHA_PC164
+static void __init
+cabriolet_init_irq(void)
+{
+	common_init_irq(srm_device_interrupt);
+}
+#endif
+
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_PC164)
+/* In theory, the PC164 has the same interrupt hardware as the other
+   Cabriolet based systems.  However, something got screwed up late
+   in the development cycle which broke the interrupt masking hardware.
+   Repeat, it is not possible to mask and ack interrupts.  At all.
+
+   In an attempt to work around this, while processing interrupts,
+   we do not allow the IPL to drop below what it is currently.  This
+   prevents the possibility of recursion.  
+
+   ??? Another option might be to force all PCI devices to use edge
+   triggered rather than level triggered interrupts.  That might be
+   too invasive though.  */
+
+static void
+pc164_srm_device_interrupt(unsigned long v, struct pt_regs *r)
+{
+	__min_ipl = getipl();
+	srm_device_interrupt(v, r);
+	__min_ipl = 0;
+}
+
 static void
 pc164_device_interrupt(unsigned long v, struct pt_regs *r)
 {
-	/* In theory, the PC164 has the same interrupt hardware as
-	   the other Cabriolet based systems.  However, something 
-	   got screwed up late in the development cycle which broke
-	   the interrupt masking hardware.  Repeat, it is not 
-	   possible to mask and ack interrupts.  At all.
-
-	   In an attempt to work around this, while processing 
-	   interrupts, we do not allow the IPL to drop below what
-	   it is currently.  This prevents the possibility of
-	   recursion.  
-
-	   ??? Another option might be to force all PCI devices
-	   to use edge triggered rather than level triggered
-	   interrupts.  That might be too invasive though.  */
-
 	__min_ipl = getipl();
 	cabriolet_device_interrupt(v, r);
 	__min_ipl = 0;
+}
+
+static void __init
+pc164_init_irq(void)
+{
+	common_init_irq(pc164_srm_device_interrupt);
 }
 #endif
 
@@ -302,26 +323,24 @@ alphapc164_init_pci(void)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_CABRIOLET)
 struct alpha_machine_vector cabriolet_mv __initmv = {
-	vector_name:		"Cabriolet",
+	.vector_name		= "Cabriolet",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_APECS_IO,
-	DO_APECS_BUS,
-	machine_check:		apecs_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= apecs_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		35,
-	device_interrupt:	cabriolet_device_interrupt,
+	.nr_irqs		= 35,
+	.device_interrupt	= cabriolet_device_interrupt,
 
-	init_arch:		apecs_init_arch,
-	init_irq:		cabriolet_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		cabriolet_init_pci,
-	kill_arch:		NULL,
-	pci_map_irq:		cabriolet_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= apecs_init_arch,
+	.init_irq		= cabriolet_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= cabriolet_init_pci,
+	.pci_map_irq		= cabriolet_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 #ifndef CONFIG_ALPHA_EB64P
 ALIAS_MV(cabriolet)
@@ -330,100 +349,100 @@ ALIAS_MV(cabriolet)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_EB164)
 struct alpha_machine_vector eb164_mv __initmv = {
-	vector_name:		"EB164",
+	.vector_name		= "EB164",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_CIA_IO,
-	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	CIA_DEFAULT_MEM_BASE,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= CIA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		35,
-	device_interrupt:	cabriolet_device_interrupt,
+	.nr_irqs		= 35,
+	.device_interrupt	= cabriolet_device_interrupt,
 
-	init_arch:		cia_init_arch,
-	init_irq:		cabriolet_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		cia_cab_init_pci,
-	pci_map_irq:		cabriolet_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= cia_init_arch,
+	.init_irq		= cabriolet_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= cia_cab_init_pci,
+	.kill_arch		= cia_kill_arch,
+	.pci_map_irq		= cabriolet_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(eb164)
 #endif
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_EB66P)
 struct alpha_machine_vector eb66p_mv __initmv = {
-	vector_name:		"EB66+",
+	.vector_name		= "EB66+",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_LCA_IO,
-	DO_LCA_BUS,
-	machine_check:		lca_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= lca_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		35,
-	device_interrupt:	cabriolet_device_interrupt,
+	.nr_irqs		= 35,
+	.device_interrupt	= cabriolet_device_interrupt,
 
-	init_arch:		lca_init_arch,
-	init_irq:		cabriolet_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		cabriolet_init_pci,
-	pci_map_irq:		eb66p_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= lca_init_arch,
+	.init_irq		= cabriolet_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= cabriolet_init_pci,
+	.pci_map_irq		= eb66p_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(eb66p)
 #endif
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_LX164)
 struct alpha_machine_vector lx164_mv __initmv = {
-	vector_name:		"LX164",
+	.vector_name		= "LX164",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
-	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= PYXIS_DAC_OFFSET,
 
-	nr_irqs:		35,
-	device_interrupt:	cabriolet_device_interrupt,
+	.nr_irqs		= 35,
+	.device_interrupt	= cabriolet_device_interrupt,
 
-	init_arch:		pyxis_init_arch,
-	init_irq:		cabriolet_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		alphapc164_init_pci,
-	pci_map_irq:		alphapc164_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= pyxis_init_arch,
+	.init_irq		= cabriolet_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= alphapc164_init_pci,
+	.kill_arch		= cia_kill_arch,
+	.pci_map_irq		= alphapc164_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(lx164)
 #endif
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_PC164)
 struct alpha_machine_vector pc164_mv __initmv = {
-	vector_name:		"PC164",
+	.vector_name		= "PC164",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_CIA_IO,
-	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	CIA_DEFAULT_MEM_BASE,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= CIA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		35,
-	device_interrupt:	pc164_device_interrupt,
+	.nr_irqs		= 35,
+	.device_interrupt	= pc164_device_interrupt,
 
-	init_arch:		cia_init_arch,
-	init_irq:		cabriolet_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		alphapc164_init_pci,
-	pci_map_irq:		alphapc164_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= cia_init_arch,
+	.init_irq		= pc164_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= alphapc164_init_pci,
+	.kill_arch		= cia_kill_arch,
+	.pci_map_irq		= alphapc164_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(pc164)
 #endif

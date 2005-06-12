@@ -1,4 +1,4 @@
-/* $Id: types.h,v 1.3 2000/01/28 13:43:15 jj Exp $ */
+/* $Id: types.h,v 1.4 2001/10/09 02:24:35 davem Exp $ */
 #ifndef _SPARC64_TYPES_H
 #define _SPARC64_TYPES_H
 
@@ -9,6 +9,8 @@
  * not a major issue.  However, for interoperability, libraries still
  * need to be careful to avoid a name clashes.
  */
+
+#ifndef __ASSEMBLY__
 
 typedef unsigned short umode_t;
 
@@ -29,7 +31,13 @@ typedef unsigned int __u32;
 typedef __signed__ long __s64;
 typedef unsigned long __u64;
 
+#endif /* __ASSEMBLY__ */
+
 #ifdef __KERNEL__
+
+#define BITS_PER_LONG 64
+
+#ifndef __ASSEMBLY__
 
 typedef __signed__ char s8;
 typedef unsigned char u8;
@@ -43,11 +51,14 @@ typedef unsigned int u32;
 typedef __signed__ long s64;
 typedef unsigned long u64;
 
-#define BITS_PER_LONG 64
-
-/* Dma addresses are 32-bits wide for now.  */
+/* Dma addresses come in generic and 64-bit flavours.  */
 
 typedef u32 dma_addr_t;
+typedef u64 dma64_addr_t;
+
+typedef unsigned short kmem_bufctl_t;
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* __KERNEL__ */
 

@@ -2,39 +2,42 @@
 #define _IP_CONNTRACK_FTP_H
 /* FTP tracking. */
 
-#ifndef __KERNEL__
-#error Only in kernel.
-#endif
+#ifdef __KERNEL__
 
-#include <linux/netfilter_ipv4/lockhelp.h>
+#define FTP_PORT	21
 
-/* Protects ftp part of conntracks */
-DECLARE_LOCK_EXTERN(ip_ftp_lock);
+#endif /* __KERNEL__ */
 
 enum ip_ct_ftp_type
 {
 	/* PORT command from client */
-	IP_CT_FTP_PORT = IP_CT_DIR_ORIGINAL,
+	IP_CT_FTP_PORT,
 	/* PASV response from server */
-	IP_CT_FTP_PASV = IP_CT_DIR_REPLY
+	IP_CT_FTP_PASV,
+	/* EPRT command from client */
+	IP_CT_FTP_EPRT,
+	/* EPSV response from server */
+	IP_CT_FTP_EPSV,
 };
 
-/* We record seq number and length of ftp ip/port text here: all in
-   host order. */
-struct ip_ct_ftp
-{
-	/* This tells NAT that this is an ftp connection */
-	int is_ftp;
-	u_int32_t seq;
-	/* 0 means not found yet */
-	u_int32_t len;
-	enum ip_ct_ftp_type ftptype;
-	/* Port that was to be used */
-	u_int16_t port;
-	/* Next valid seq position for cmd matching after newline */
-	u_int32_t seq_aft_nl[IP_CT_DIR_MAX];
+#define NUM_SEQ_TO_REMEMBER 2
+/* This structure exists only once per master */
+struct ip_ct_ftp_master {
+	/* Valid seq positions for cmd matching after newline */
+	u_int32_t seq_aft_nl[IP_CT_DIR_MAX][NUM_SEQ_TO_REMEMBER];
 	/* 0 means seq_match_aft_nl not set */
-	int seq_aft_nl_set[IP_CT_DIR_MAX];
+	int seq_aft_nl_num[IP_CT_DIR_MAX];
 };
 
+struct ip_conntrack_expect;
+
+/* For NAT to hook in when we find a packet which describes what other
+ * connection we should expect. */
+extern unsigned int (*ip_nat_ftp_hook)(struct sk_buff **pskb,
+				       enum ip_conntrack_info ctinfo,
+				       enum ip_ct_ftp_type type,
+				       unsigned int matchoff,
+				       unsigned int matchlen,
+				       struct ip_conntrack_expect *exp,
+				       u32 *seq);
 #endif /* _IP_CONNTRACK_FTP_H */

@@ -2,6 +2,7 @@
 #define __ALPHA_TITAN__H__
 
 #include <linux/types.h>
+#include <linux/pci.h>
 #include <asm/compiler.h>
 
 /*
@@ -293,13 +294,15 @@ union TPAchipAGPERR {
  * 		2 - pachip 0 / A Port
  *      	3 - pachip 1 / A Port
  */
-#define TITAN_HOSE(h)		(((unsigned long)(h)) << 33)
+#define TITAN_HOSE_SHIFT       (33) 
+#define TITAN_HOSE(h)		(((unsigned long)(h)) << TITAN_HOSE_SHIFT)
 #define TITAN_BASE		(IDENT_ADDR + TI_BIAS)
 #define TITAN_MEM(h)	     	(TITAN_BASE+TITAN_HOSE(h)+0x000000000UL)
 #define _TITAN_IACK_SC(h)    	(TITAN_BASE+TITAN_HOSE(h)+0x1F8000000UL)
 #define TITAN_IO(h)	     	(TITAN_BASE+TITAN_HOSE(h)+0x1FC000000UL)
 #define TITAN_CONF(h)	     	(TITAN_BASE+TITAN_HOSE(h)+0x1FE000000UL)
 
+#define TITAN_HOSE_MASK		TITAN_HOSE(3)
 #define TITAN_IACK_SC	     	_TITAN_IACK_SC(0) /* hack! */
 
 /* 
@@ -308,14 +311,18 @@ union TPAchipAGPERR {
  * devices can use their familiar numbers and have them map to bus 0.
  */
 
-#define TITAN_IO_BIAS          TITAN_IO(0)
-#define TITAN_MEM_BIAS         TITAN_MEM(0)
+#define TITAN_IO_BIAS		TITAN_IO(0)
+#define TITAN_MEM_BIAS		TITAN_MEM(0)
 
 /* The IO address space is larger than 0xffff */
 #define TITAN_IO_SPACE		(TITAN_CONF(0) - TITAN_IO(0))
 
 /* TIG Space */
 #define TITAN_TIG_SPACE		(TITAN_BASE + 0x100000000UL)
+
+/* Offset between ram physical addresses and pci64 DAC bus addresses.  */
+/* ??? Just a guess.  Ought to confirm it hasn't been moved.  */
+#define TITAN_DAC_OFFSET	(1UL << 40)
 
 /*
  * Data structure for handling TITAN machine checks:
@@ -370,150 +377,33 @@ struct el_PRIVATEER_envdata_mcheck {
  * can only use linear accesses to get at PCI/AGP memory and I/O spaces.
  */
 
-#define vucp	volatile unsigned char *
-#define vusp	volatile unsigned short *
-#define vuip	volatile unsigned int *
-#define vulp	volatile unsigned long *
-
-__EXTERN_INLINE unsigned int titan_inb(unsigned long addr)
-{
-	/* ??? I wish I could get rid of this.  But there's no ioremap
-	   equivalent for I/O space.  PCI I/O can be forced into the
-	   correct hose's I/O region, but that doesn't take care of
-	   legacy ISA crap.  */
-
-	addr += TITAN_IO_BIAS;
-	return __kernel_ldbu(*(vucp)addr);
-}
-
-__EXTERN_INLINE void titan_outb(unsigned char b, unsigned long addr)
-{
-	addr += TITAN_IO_BIAS;
-	__kernel_stb(b, *(vucp)addr);
-	mb();
-}
-
-__EXTERN_INLINE unsigned int titan_inw(unsigned long addr)
-{
-	addr += TITAN_IO_BIAS;
-	return __kernel_ldwu(*(vusp)addr);
-}
-
-__EXTERN_INLINE void titan_outw(unsigned short b, unsigned long addr)
-{
-	addr += TITAN_IO_BIAS;
-	__kernel_stw(b, *(vusp)addr);
-	mb();
-}
-
-__EXTERN_INLINE unsigned int titan_inl(unsigned long addr)
-{
-	addr += TITAN_IO_BIAS;
-	return *(vuip)addr;
-}
-
-__EXTERN_INLINE void titan_outl(unsigned int b, unsigned long addr)
-{
-	addr += TITAN_IO_BIAS;
-	*(vuip)addr = b;
-	mb();
-}
-
 /*
  * Memory functions.  all accesses are done through linear space.
  */
 
-__EXTERN_INLINE unsigned long titan_ioremap(unsigned long addr)
+__EXTERN_INLINE void __iomem *titan_ioportmap(unsigned long addr)
 {
-	return addr + TITAN_MEM_BIAS;
+	return (void __iomem *)(addr + TITAN_IO_BIAS);
 }
+
+extern void __iomem *titan_ioremap(unsigned long addr, unsigned long size);
+extern void titan_iounmap(volatile void __iomem *addr);
 
 __EXTERN_INLINE int titan_is_ioaddr(unsigned long addr)
 {
 	return addr >= TITAN_BASE;
 }
 
-__EXTERN_INLINE unsigned long titan_readb(unsigned long addr)
-{
-	return __kernel_ldbu(*(vucp)addr);
-}
+extern int titan_is_mmio(const volatile void __iomem *addr);
 
-__EXTERN_INLINE unsigned long titan_readw(unsigned long addr)
-{
-	return __kernel_ldwu(*(vusp)addr);
-}
-
-__EXTERN_INLINE unsigned long titan_readl(unsigned long addr)
-{
-	return *(vuip)addr;
-}
-
-__EXTERN_INLINE unsigned long titan_readq(unsigned long addr)
-{
-	return *(vulp)addr;
-}
-
-__EXTERN_INLINE void titan_writeb(unsigned char b, unsigned long addr)
-{
-	__kernel_stb(b, *(vucp)addr);
-}
-
-__EXTERN_INLINE void titan_writew(unsigned short b, unsigned long addr)
-{
-	__kernel_stw(b, *(vusp)addr);
-}
-
-__EXTERN_INLINE void titan_writel(unsigned int b, unsigned long addr)
-{
-	*(vuip)addr = b;
-}
-
-__EXTERN_INLINE void titan_writeq(unsigned long b, unsigned long addr)
-{
-	*(vulp)addr = b;
-}
-
-#undef vucp
-#undef vusp
-#undef vuip
-#undef vulp
-
-#ifdef __WANT_IO_DEF
-
-#define __inb		titan_inb
-#define __inw		titan_inw
-#define __inl		titan_inl
-#define __outb		titan_outb
-#define __outw		titan_outw
-#define __outl		titan_outl
-#define __readb		titan_readb
-#define __readw		titan_readw
-#define __writeb	titan_writeb
-#define __writew	titan_writew
-#define __readl		titan_readl
-#define __readq		titan_readq
-#define __writel	titan_writel
-#define __writeq	titan_writeq
-#define __ioremap	titan_ioremap
-#define __is_ioaddr	titan_is_ioaddr
-
-#define inb(port) 	__inb((port))
-#define inw(port) 	__inw((port))
-#define inl(port) 	__inl((port))
-#define outb(v, port) 	__outb((v),(port))
-#define outw(v, port) 	__outw((v),(port))
-#define outl(v, port) 	__outl((v),(port))
-
-#define __raw_readb(a)		__readb((unsigned long)(a))
-#define __raw_readw(a)		__readw((unsigned long)(a))
-#define __raw_readl(a)		__readl((unsigned long)(a))
-#define __raw_readq(a)		__readq((unsigned long)(a))
-#define __raw_writeb(v,a)	__writeb((v),(unsigned long)(a))
-#define __raw_writew(v,a)	__writew((v),(unsigned long)(a))
-#define __raw_writel(v,a)	__writel((v),(unsigned long)(a))
-#define __raw_writeq(v,a)	__writeq((v),(unsigned long)(a))
-
-#endif /* __WANT_IO_DEF */
+#undef __IO_PREFIX
+#define __IO_PREFIX		titan
+#define titan_trivial_rw_bw	1
+#define titan_trivial_rw_lq	1
+#define titan_trivial_io_bw	1
+#define titan_trivial_io_lq	1
+#define titan_trivial_iounmap	0
+#include <asm/io_trivial.h>
 
 #ifdef __IO_EXTERN_INLINE
 #undef __EXTERN_INLINE

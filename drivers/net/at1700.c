@@ -6,11 +6,12 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	This is a device driver for the Allied Telesis AT1700, and
         Fujitsu FMV-181/182/181A/182A/183/184/183A/184A, which are
@@ -33,35 +34,38 @@
 	only is it difficult to detect, it also moves around in I/O space in
 	response to inb()s from other device probes!
 */
-
-static const char *version =
-	"at1700.c:v1.15 4/7/98  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
+/*
+	99/03/03  Allied Telesis RE1000 Plus support by T.Hagawa
+	99/12/30	port to 2.3.35 by K.Takai
+*/
 
 #include <linux/config.h>
+#include <linux/errno.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/mca-legacy.h>
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
+#include <linux/bitops.h>
+
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <linux/errno.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
+static char version[] __initdata =
+	"at1700.c:v1.15 4/7/98  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
-#include <linux/mca.h>
+#define DRV_NAME "at1700"
 
 /* Tunable parameters. */
 
@@ -70,7 +74,7 @@ static const char *version =
 
 /* These unusual address orders are used to verify the CONFIG register. */
 
-static int fmv18x_probe_list[] = {
+static int fmv18x_probe_list[] __initdata = {
 	0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x300, 0x340, 0
 };
 
@@ -78,23 +82,23 @@ static int fmv18x_probe_list[] = {
  *	ISA
  */
 
-static int at1700_probe_list[] = {
+static unsigned at1700_probe_list[] __initdata = {
 	0x260, 0x280, 0x2a0, 0x240, 0x340, 0x320, 0x380, 0x300, 0
 };
 
 /*
  *	MCA
  */
-#ifdef CONFIG_MCA	
-static int at1700_ioaddr_pattern[] = {
+#ifdef CONFIG_MCA_LEGACY
+static int at1700_ioaddr_pattern[] __initdata = {
 	0x00, 0x04, 0x01, 0x05, 0x02, 0x06, 0x03, 0x07
 };
 
-static int at1700_mca_probe_list[] = {
+static int at1700_mca_probe_list[] __initdata = {
 	0x400, 0x1400, 0x2400, 0x3400, 0x4400, 0x5400, 0x6400, 0x7400, 0
 };
 
-static int at1700_irq_pattern[] = {
+static int at1700_irq_pattern[] __initdata = {
 	0x00, 0x00, 0x00, 0x30, 0x70, 0xb0, 0x00, 0x00,
 	0x00, 0xf0, 0x34, 0x74, 0xb4, 0x00, 0x00, 0xf4, 0x00
 };
@@ -138,6 +142,7 @@ struct net_local {
 #define TX_START		10
 #define COL16CNTL		11		/* Controll Reg for 16 collisions */
 #define MODE13			13
+#define RX_CTRL			14
 /* Configuration registers only on the '865A/B chips. */
 #define EEPROM_Ctrl 	16
 #define EEPROM_Data 	17
@@ -146,21 +151,22 @@ struct net_local {
 #define IOCONFIG		18		/* Either read the jumper, or move the I/O. */
 #define IOCONFIG1		19
 #define	SAPROM			20		/* The station address PROM, if no EEPROM. */
+#define MODE24			24
 #define RESET			31		/* Write to reset some parts of the chip. */
 #define AT1700_IO_EXTENT	32
+#define PORT_OFFSET(o) (o)
+
 
 #define TX_TIMEOUT		10
 
 
 /* Index to functions, as function prototypes. */
 
-extern int at1700_probe(struct net_device *dev);
-
 static int at1700_probe1(struct net_device *dev, int ioaddr);
-static int read_eeprom(int ioaddr, int location);
+static int read_eeprom(long ioaddr, int location);
 static int net_open(struct net_device *dev);
 static int	net_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void net_rx(struct net_device *dev);
 static int net_close(struct net_device *dev);
 static struct net_device_stats *net_get_stats(struct net_device *dev);
@@ -168,17 +174,17 @@ static void set_rx_mode(struct net_device *dev);
 static void net_tx_timeout (struct net_device *dev);
 
 
-#ifdef CONFIG_MCA
+#ifdef CONFIG_MCA_LEGACY
 struct at1720_mca_adapters_struct {
 	char* name;
 	int id;
 };
 /* rEnE : maybe there are others I don't know off... */
 
-struct at1720_mca_adapters_struct at1720_mca_adapters[] = {
+static struct at1720_mca_adapters_struct at1720_mca_adapters[] __initdata = {
 	{ "Allied Telesys AT1720AT",	0x6410 },
 	{ "Allied Telesys AT1720BT", 	0x6413 },
-	{ "Allied Telesys AT1720T",		0x6416 },
+	{ "Allied Telesys AT1720T",	0x6416 },
 	{ NULL, 0 },
 };
 #endif
@@ -190,24 +196,66 @@ struct at1720_mca_adapters_struct at1720_mca_adapters[] = {
    (detachable devices only).
    */
 
-int __init at1700_probe(struct net_device *dev)
+static int io = 0x260;
+
+static int irq;
+
+static void cleanup_card(struct net_device *dev)
 {
-	int i;
-	int base_addr = dev->base_addr;
+#ifdef CONFIG_MCA_LEGACY
+	struct net_local *lp = netdev_priv(dev);
+	if (lp->mca_slot >= 0)
+		mca_mark_as_unused(lp->mca_slot);
+#endif	
+	free_irq(dev->irq, NULL);
+	release_region(dev->base_addr, AT1700_IO_EXTENT);
+}
+
+struct net_device * __init at1700_probe(int unit)
+{
+	struct net_device *dev = alloc_etherdev(sizeof(struct net_local));
+	unsigned *port;
+	int err = 0;
+
+	if (!dev)
+		return ERR_PTR(-ENODEV);
+
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+		io = dev->base_addr;
+		irq = dev->irq;
+	} else {
+		dev->base_addr = io;
+		dev->irq = irq;
+	}
 
 	SET_MODULE_OWNER(dev);
 
-	if (base_addr > 0x1ff)		/* Check a single specified location. */
-		return at1700_probe1(dev, base_addr);
-	else if (base_addr != 0)	/* Don't probe at all. */
-		return -ENXIO;
-
-	for (i = 0; at1700_probe_list[i]; i++) {
-		int ioaddr = at1700_probe_list[i];
-		if (at1700_probe1(dev, ioaddr) == 0)
-			return 0;
+	if (io > 0x1ff) {	/* Check a single specified location. */
+		err = at1700_probe1(dev, io);
+	} else if (io != 0) {	/* Don't probe at all. */
+		err = -ENXIO;
+	} else {
+		for (port = at1700_probe_list; *port; port++) {
+			if (at1700_probe1(dev, *port) == 0)
+				break;
+			dev->irq = irq;
+		}
+		if (!*port)
+			err = -ENODEV;
 	}
-	return -ENODEV;
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	cleanup_card(dev);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
 
 /* The Fujitsu datasheet suggests that the NIC be probed for by checking its
@@ -218,28 +266,29 @@ int __init at1700_probe(struct net_device *dev)
    that can be done is checking a few bits and then diving right into an
    EEPROM read. */
 
-static int at1700_probe1(struct net_device *dev, int ioaddr)
+static int __init at1700_probe1(struct net_device *dev, int ioaddr)
 {
 	char fmv_irqmap[4] = {3, 7, 10, 15};
 	char fmv_irqmap_pnp[8] = {3, 4, 5, 7, 9, 10, 11, 15};
 	char at1700_irqmap[8] = {3, 4, 5, 9, 10, 11, 14, 15};
 	unsigned int i, irq, is_fmv18x = 0, is_at1700 = 0;
 	int slot, ret = -ENODEV;
-	struct net_local *lp;
-	
-	if (!request_region(ioaddr, AT1700_IO_EXTENT, dev->name))
+	struct net_local *lp = netdev_priv(dev);
+
+	if (!request_region(ioaddr, AT1700_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
 
-		/* Resetting the chip doesn't reset the ISA interface, so don't bother.
-	   That means we have to be careful with the register values we probe for.
-	   */
+	/* Resetting the chip doesn't reset the ISA interface, so don't bother.
+	   That means we have to be careful with the register values we probe
+	   for.
+	 */
 #ifdef notdef
 	printk("at1700 probe at %#x, eeprom is %4.4x %4.4x %4.4x ctrl %4.4x.\n",
 		   ioaddr, read_eeprom(ioaddr, 4), read_eeprom(ioaddr, 5),
 		   read_eeprom(ioaddr, 6), inw(ioaddr + EEPROM_Ctrl));
 #endif
 
-#ifdef CONFIG_MCA
+#ifdef CONFIG_MCA_LEGACY
 	/* rEnE (rene@bss.lu): got this from 3c509 driver source , adapted for AT1720 */
 
     /* Based on Erik Nygren's (nygren@mit.edu) 3c529 patch, heavily
@@ -277,15 +326,13 @@ static int at1700_probe1(struct net_device *dev, int ioaddr)
 						break;
 
 					/* probing for a card at a particular IO/IRQ */
-				if (dev &&
-					((dev->irq && dev->irq != irq) ||
-					 (dev->base_addr && dev->base_addr != ioaddr))) {
+				if ((dev->irq && dev->irq != irq) ||
+				    (dev->base_addr && dev->base_addr != ioaddr)) {
 				  	slot++;		/* probing next slot */
 				  	continue;
 				}
 
-				if (dev)
-					dev->irq = irq;
+				dev->irq = irq;
 				
 				/* claim the slot */
 				mca_set_adapter_name( slot, at1720_mca_adapters[j].name );
@@ -309,21 +356,20 @@ static int at1700_probe1(struct net_device *dev, int ioaddr)
 		&& inb(ioaddr + SAPROM + 2) == 0x0e)
 		is_fmv18x = 1;
 	else {
-		ret = -ENODEV;
 		goto err_out;
 	}
 			
-#ifdef CONFIG_MCA
+#ifdef CONFIG_MCA_LEGACY
 found:
 #endif
 
 		/* Reset the internal state machines. */
 	outb(0, ioaddr + RESET);
 
-	if (is_at1700)
+	if (is_at1700) {
 		irq = at1700_irqmap[(read_eeprom(ioaddr, 12)&0x04)
 						   | (read_eeprom(ioaddr, 0)>>14)];
-	else {
+	} else {
 		/* Check PnP mode for FMV-183/184/183A/184A. */
 		/* This PnP routine is very poor. IO and IRQ should be known. */
 		if (inb(ioaddr + CARDSTATUS1) & 0x20) {
@@ -333,12 +379,11 @@ found:
 					break;
 			}
 			if (i == 8) {
-				goto err_out;
-				ret = -ENODEV;
+				goto err_mca;
 			}
 		} else {
 			if (fmv18x_probe_list[inb(ioaddr + IOCONFIG) & 0x07] != ioaddr)
-				return -ENODEV;
+				goto err_mca;
 			irq = fmv_irqmap[(inb(ioaddr + IOCONFIG)>>6) & 0x03];
 		}
 	}
@@ -396,12 +441,12 @@ found:
 	/* Set the station address in bank zero. */
 	outb(0x00, ioaddr + CONFIG_1);
 	for (i = 0; i < 6; i++)
-		outb(dev->dev_addr[i], ioaddr + 8 + i);
+		outb(dev->dev_addr[i], ioaddr + PORT_OFFSET(8 + i));
 
 	/* Switch to bank 1 and set the multicast table to accept none. */
 	outb(0x04, ioaddr + CONFIG_1);
 	for (i = 0; i < 8; i++)
-		outb(0x00, ioaddr + 8 + i);
+		outb(0x00, ioaddr + PORT_OFFSET(8 + i));
 
 
 	/* Switch to bank 2 */
@@ -413,13 +458,7 @@ found:
 	if (net_debug)
 		printk(version);
 
-	/* Initialize the device structure. */
-	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	if (dev->priv == NULL) {
-		ret = -ENOMEM;
-		goto err_out;
-	}
-	memset(dev->priv, 0, sizeof(struct net_local));
+	memset(lp, 0, sizeof(struct net_local));
 
 	dev->open		= net_open;
 	dev->stop		= net_close;
@@ -429,27 +468,25 @@ found:
 	dev->tx_timeout = net_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
-	lp = (struct net_local *)dev->priv;
-	lp->lock = SPIN_LOCK_UNLOCKED;
-
-	/* Fill in the fields of 'dev' with ethernet-generic values. */
-	ether_setup(dev);
+	spin_lock_init(&lp->lock);
 
 	lp->jumpered = is_fmv18x;
 	lp->mca_slot = slot;
 	/* Snarf the interrupt vector now. */
-	ret = request_irq(irq, &net_interrupt, 0, dev->name, dev);
+	ret = request_irq(irq, &net_interrupt, 0, DRV_NAME, dev);
 	if (ret) {
 		printk ("  AT1700 at %#3x is unusable due to a conflict on"
 				"IRQ %d.\n", ioaddr, irq);
-		goto err_out_priv;
+		goto err_mca;
 	}
 
 	return 0;
 
-err_out_priv:
-	kfree(dev->priv);
-	dev->priv = NULL;
+err_mca:
+#ifdef CONFIG_MCA_LEGACY
+	if (slot >= 0)
+		mca_mark_as_unused(slot);
+#endif
 err_out:
 	release_region(ioaddr, AT1700_IO_EXTENT);
 	return ret;
@@ -462,20 +499,17 @@ err_out:
 #define EE_DATA_WRITE	0x80	/* EEPROM chip data in, in reg. 17. */
 #define EE_DATA_READ	0x80	/* EEPROM chip data out, in reg. 17. */
 
-/* Delay between EEPROM clock transitions. */
-#define eeprom_delay()	do {} while (0);
-
 /* The EEPROM commands include the alway-set leading bit. */
 #define EE_WRITE_CMD	(5 << 6)
 #define EE_READ_CMD		(6 << 6)
 #define EE_ERASE_CMD	(7 << 6)
 
-static int read_eeprom(int ioaddr, int location)
+static int __init read_eeprom(long ioaddr, int location)
 {
 	int i;
 	unsigned short retval = 0;
-	int ee_addr = ioaddr + EEPROM_Ctrl;
-	int ee_daddr = ioaddr + EEPROM_Data;
+	long ee_addr = ioaddr + EEPROM_Ctrl;
+	long ee_daddr = ioaddr + EEPROM_Data;
 	int read_cmd = location | EE_READ_CMD;
 
 	/* Shift the read command bits out. */
@@ -483,22 +517,17 @@ static int read_eeprom(int ioaddr, int location)
 		short dataval = (read_cmd & (1 << i)) ? EE_DATA_WRITE : 0;
 		outb(EE_CS, ee_addr);
 		outb(dataval, ee_daddr);
-		eeprom_delay();
 		outb(EE_CS | EE_SHIFT_CLK, ee_addr);	/* EEPROM clock tick. */
-		eeprom_delay();
 	}
 	outb(EE_DATA_WRITE, ee_daddr);
 	for (i = 16; i > 0; i--) {
 		outb(EE_CS, ee_addr);
-		eeprom_delay();
 		outb(EE_CS | EE_SHIFT_CLK, ee_addr);
-		eeprom_delay();
 		retval = (retval << 1) | ((inb(ee_daddr) & EE_DATA_READ) ? 1 : 0);
 	}
 
 	/* Terminate the EEPROM access. */
 	outb(EE_CS, ee_addr);
-	eeprom_delay();
 	outb(EE_SHIFT_CLK, ee_addr);
 	outb(0, ee_addr);
 	return retval;
@@ -508,7 +537,7 @@ static int read_eeprom(int ioaddr, int location)
 
 static int net_open(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
 	/* Set the configuration register 0 to 32K 100ns. byte-wide memory, 16 bit
@@ -539,19 +568,19 @@ static int net_open(struct net_device *dev)
 
 static void net_tx_timeout (struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
 	printk ("%s: transmit timed out with status %04x, %s?\n", dev->name,
 		inw (ioaddr + STATUS), inb (ioaddr + TX_STATUS) & 0x80
 		? "IRQ conflict" : "network cable problem");
 	printk ("%s: timeout registers: %04x %04x %04x %04x %04x %04x %04x %04x.\n",
-	 dev->name, inw (ioaddr + 0), inw (ioaddr + 2), inw (ioaddr + 4),
-		inw (ioaddr + 6), inw (ioaddr + 8), inw (ioaddr + 10),
-		inw (ioaddr + 12), inw (ioaddr + 14));
+	 dev->name, inw(ioaddr + TX_STATUS), inw(ioaddr + TX_INTR), inw(ioaddr + TX_MODE),
+		inw(ioaddr + CONFIG_0), inw(ioaddr + DATAPORT), inw(ioaddr + TX_START),
+		inw(ioaddr + MODE13 - 1), inw(ioaddr + RX_CTRL));
 	lp->stats.tx_errors++;
 	/* ToDo: We should try to restart the adaptor... */
-	outw (0xffff, ioaddr + 24);
+	outw(0xffff, ioaddr + MODE24);
 	outw (0xffff, ioaddr + TX_STATUS);
 	outb (0x5a, ioaddr + CONFIG_0);
 	outb (0xe8, ioaddr + CONFIG_1);
@@ -573,10 +602,12 @@ static void net_tx_timeout (struct net_device *dev)
 
 static int net_send_packet (struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *) dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	short len = skb->len;
 	unsigned char *buf = skb->data;
+	static u8 pad[ETH_ZLEN];
 
 	netif_stop_queue (dev);
 
@@ -588,7 +619,16 @@ static int net_send_packet (struct sk_buff *skb, struct net_device *dev)
 	lp->tx_queue_ready = 0;
 	{
 		outw (length, ioaddr + DATAPORT);
-		outsw (ioaddr + DATAPORT, buf, (length + 1) >> 1);
+		/* Packet data */
+		outsw (ioaddr + DATAPORT, buf, len >> 1);
+		/* Check for dribble byte */
+		if (len & 1) {
+			outw(skb->data[skb->len-1], ioaddr + DATAPORT);
+			len++;
+		}
+		/* Check for packet padding */
+		if (length != skb->len)
+			outsw(ioaddr + DATAPORT, pad, (length - len + 1) >> 1);
 
 		lp->tx_queue++;
 		lp->tx_queue_len += length + 2;
@@ -613,20 +653,21 @@ static int net_send_packet (struct sk_buff *skb, struct net_device *dev)
 
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
-static void
+static irqreturn_t
 net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status;
+	int handled = 0;
 
 	if (dev == NULL) {
 		printk ("at1700_interrupt(): irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	ioaddr = dev->base_addr;
-	lp = (struct net_local *)dev->priv;
+	lp = netdev_priv(dev);
 	
 	spin_lock (&lp->lock);
 	
@@ -643,6 +684,7 @@ net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		   Tx interrupt. Thus we flag on rx_started, so that we prevent
 		   the interrupt routine (net_interrupt) to dive into net_rx
 		   again. */
+		handled = 1;
 		lp->rx_started = 1;
 		outb(0x00, ioaddr + RX_INTR);	/* Disable RX intr. */
 		net_rx(dev);
@@ -650,6 +692,7 @@ net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		lp->rx_started = 0;
 	}
 	if (status & 0x00ff) {
+		handled = 1;
 		if (status & 0x02) {
 			/* More than 16 collisions occurred */
 			if (net_debug > 4)
@@ -677,14 +720,14 @@ net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 
 	spin_unlock (&lp->lock);
-	return;
+	return IRQ_RETVAL(handled);
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */
 static void
 net_rx(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 	int boguscount = 5;
 
@@ -697,7 +740,7 @@ net_rx(struct net_device *dev)
 				   dev->name, inb(ioaddr + RX_MODE), status);
 #ifndef final_version
 		if (status == 0) {
-			outb(0x05, ioaddr + 14);
+			outb(0x05, ioaddr + RX_CTRL);
 			break;
 		}
 #endif
@@ -717,7 +760,7 @@ net_rx(struct net_device *dev)
 					   dev->name, pkt_len);
 				/* Prime the FIFO and then flush the packet. */
 				inw(ioaddr + DATAPORT); inw(ioaddr + DATAPORT);
-				outb(0x05, ioaddr + 14);
+				outb(0x05, ioaddr + RX_CTRL);
 				lp->stats.rx_errors++;
 				break;
 			}
@@ -727,7 +770,7 @@ net_rx(struct net_device *dev)
 					   dev->name, pkt_len);
 				/* Prime the FIFO and then flush the packet. */
 				inw(ioaddr + DATAPORT); inw(ioaddr + DATAPORT);
-				outb(0x05, ioaddr + 14);
+				outb(0x05, ioaddr + RX_CTRL);
 				lp->stats.rx_dropped++;
 				break;
 			}
@@ -737,7 +780,9 @@ net_rx(struct net_device *dev)
 			insw(ioaddr + DATAPORT, skb_put(skb,pkt_len), (pkt_len + 1) >> 1);
 			skb->protocol=eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 		}
 		if (--boguscount <= 0)
 			break;
@@ -752,7 +797,7 @@ net_rx(struct net_device *dev)
 			if ((inb(ioaddr + RX_MODE) & 0x40) == 0x40)
 				break;
 			inw(ioaddr + DATAPORT);				/* dummy status read */
-			outb(0x05, ioaddr + 14);
+			outb(0x05, ioaddr + RX_CTRL);
 		}
 
 		if (net_debug > 5)
@@ -765,7 +810,7 @@ net_rx(struct net_device *dev)
 /* The inverse routine to net_open(). */
 static int net_close(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
 	netif_stop_queue(dev);
@@ -793,7 +838,7 @@ static int net_close(struct net_device *dev)
 static struct net_device_stats *
 net_get_stats(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	return &lp->stats;
 }
 
@@ -801,34 +846,13 @@ net_get_stats(struct net_device *dev)
   Set the multicast/promiscuous mode for this adaptor.
 */
 
-/* The little-endian AUTODIN II ethernet CRC calculation.
-   N.B. Do not use for bulk data, use a table-based routine instead.
-   This is common code and should be moved to net/core/crc.c */
-static unsigned const ethernet_polynomial_le = 0xedb88320U;
-static inline unsigned ether_crc_le(int length, unsigned char *data)
-{
-	unsigned int crc = 0xffffffff;	/* Initial value. */
-	while(--length >= 0) {
-		unsigned char current_octet = *data++;
-		int bit;
-		for (bit = 8; --bit >= 0; current_octet >>= 1) {
-			if ((crc ^ current_octet) & 1) {
-				crc >>= 1;
-				crc ^= ethernet_polynomial_le;
-			} else
-				crc >>= 1;
-		}
-	}
-	return crc;
-}
-
 static void
 set_rx_mode(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	unsigned char mc_filter[8];		 /* Multicast hash filter */
-	long flags;
+	unsigned long flags;
 	int i;
 
 	if (dev->flags & IFF_PROMISC) {
@@ -850,68 +874,58 @@ set_rx_mode(struct net_device *dev)
 
 		memset(mc_filter, 0, sizeof(mc_filter));
 		for (i = 0, mclist = dev->mc_list; mclist && i < dev->mc_count;
-			 i++, mclist = mclist->next)
-			set_bit(ether_crc_le(ETH_ALEN, mclist->dmi_addr) >> 26,
-					mc_filter);
+			 i++, mclist = mclist->next) {
+			unsigned int bit =
+				ether_crc_le(ETH_ALEN, mclist->dmi_addr) >> 26;
+			mc_filter[bit >> 3] |= (1 << bit);
+		}
+		outb(0x02, ioaddr + RX_MODE);	/* Use normal mode. */
 	}
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave (&lp->lock, flags);
 	if (memcmp(mc_filter, lp->mc_filter, sizeof(mc_filter))) {
 		int saved_bank = inw(ioaddr + CONFIG_0);
 		/* Switch to bank 1 and set the multicast table. */
 		outw((saved_bank & ~0x0C00) | 0x0480, ioaddr + CONFIG_0);
 		for (i = 0; i < 8; i++)
-			outb(mc_filter[i], ioaddr + 8 + i);
+			outb(mc_filter[i], ioaddr + PORT_OFFSET(8 + i));
 		memcpy(lp->mc_filter, mc_filter, sizeof(mc_filter));
 		outw(saved_bank, ioaddr + CONFIG_0);
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore (&lp->lock, flags);
 	return;
 }
 
 #ifdef MODULE
-static struct net_device dev_at1700;
-static int io = 0x260;
-static int irq;
+static struct net_device *dev_at1700;
 
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(net_debug, "i");
+module_param(io, int, 0);
+module_param(irq, int, 0);
+module_param(net_debug, int, 0);
+MODULE_PARM_DESC(io, "AT1700/FMV18X I/O base address");
+MODULE_PARM_DESC(irq, "AT1700/FMV18X IRQ number");
+MODULE_PARM_DESC(net_debug, "AT1700/FMV18X debug level (0-6)");
 
 int init_module(void)
 {
 	if (io == 0)
 		printk("at1700: You should not use auto-probing with insmod!\n");
-	dev_at1700.base_addr = io;
-	dev_at1700.irq       = irq;
-	dev_at1700.init      = at1700_probe;
-	if (register_netdev(&dev_at1700) != 0) {
-		printk("at1700: register_netdev() returned non-zero.\n");
-		return -EIO;
-	}
+	dev_at1700 = at1700_probe(-1);
+	if (IS_ERR(dev_at1700))
+		return PTR_ERR(dev_at1700);
 	return 0;
 }
 
 void
 cleanup_module(void)
 {
-#ifdef CONFIG_MCA	
-	struct net_local *lp = dev_at1700.priv;
-	if(lp->mca_slot)
-	{
-		mca_mark_as_unused(lp->mca_slot);
-	}
-#endif	
-	unregister_netdev(&dev_at1700);
-	kfree(dev_at1700.priv);
-	dev_at1700.priv = NULL;
-
-	/* If we don't do this, we can't re-insmod it later. */
-	free_irq(dev_at1700.irq, NULL);
-	release_region(dev_at1700.base_addr, AT1700_IO_EXTENT);
+	unregister_netdev(dev_at1700);
+	cleanup_card(dev_at1700);
+	free_netdev(dev_at1700);
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

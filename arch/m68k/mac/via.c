@@ -23,14 +23,13 @@
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-
 #include <linux/ide.h>
 
 #include <asm/traps.h>
-#include <asm/bootinfo.h> 
-#include <asm/macintosh.h> 
+#include <asm/bootinfo.h>
+#include <asm/macintosh.h>
 #include <asm/macints.h>
-#include <asm/machw.h> 
+#include <asm/machw.h>
 #include <asm/mac_via.h>
 #include <asm/mac_psc.h>
 
@@ -48,7 +47,7 @@ __u8 rbv_clear;
  * just hit the combined register (ie, vIER|rIER) but that seems to
  * break on AV Macs...probably because they actually decode more than
  * eight address bits. Why can't Apple engineers at least be
- * _consistantly_ lazy?                          - 1999-05-21 (jmt)
+ * _consistently_ lazy?                          - 1999-05-21 (jmt)
  */
 
 static int gIER,gIFR,gBufA,gBufB;
@@ -62,18 +61,18 @@ static int gIER,gIFR,gBufA,gBufB;
 #define MAC_CLOCK_LOW		(MAC_CLOCK_TICK&0xFF)
 #define MAC_CLOCK_HIGH		(MAC_CLOCK_TICK>>8)
 
-static int  nubus_active = 0;
+static int  nubus_active;
 
 void via_debug_dump(void);
-void via1_irq(int, void *, struct pt_regs *);
-void via2_irq(int, void *, struct pt_regs *);
-void via_nubus_irq(int, void *, struct pt_regs *);
+irqreturn_t via1_irq(int, void *, struct pt_regs *);
+irqreturn_t via2_irq(int, void *, struct pt_regs *);
+irqreturn_t via_nubus_irq(int, void *, struct pt_regs *);
 void via_irq_enable(int irq);
 void via_irq_disable(int irq);
 void via_irq_clear(int irq);
 
-extern void mac_bang(int, void *, struct pt_regs *);
-extern void mac_scc_dispatch(int, void *, struct pt_regs *);
+extern irqreturn_t mac_bang(int, void *, struct pt_regs *);
+extern irqreturn_t mac_scc_dispatch(int, void *, struct pt_regs *);
 extern int oss_present;
 
 /*
@@ -94,7 +93,7 @@ void __init via_init(void)
 
 		/* IIci, IIsi, IIvx, IIvi (P6xx), LC series */
 
-		case MAC_VIA_IIci:	
+		case MAC_VIA_IIci:
 			via1 = (void *) VIA1_BASE;
 			if (macintosh_config->ident == MAC_MODEL_IIFX) {
 				via2 = NULL;
@@ -137,15 +136,15 @@ void __init via_init(void)
 			panic("UNKNOWN VIA TYPE");
 	}
 
-	printk("VIA1 at %p is a 6522 or clone\n", via1);
+	printk(KERN_INFO "VIA1 at %p is a 6522 or clone\n", via1);
 
-	printk("VIA2 at %p is ", via2);
+	printk(KERN_INFO "VIA2 at %p is ", via2);
 	if (rbv_present) {
-		printk("an RBV\n");
+		printk(KERN_INFO "an RBV\n");
 	} else if (oss_present) {
-		printk("an OSS\n");
+		printk(KERN_INFO "an OSS\n");
 	} else {
-		printk("a 6522 or clone\n");
+		printk(KERN_INFO "a 6522 or clone\n");
 	}
 
 #ifdef DEBUG_VIA
@@ -167,7 +166,7 @@ void __init via_init(void)
 	via1[vT2CH] = 0;
 	via1[vACR] &= 0x3F;
 
-	/* 
+	/*
 	 * SE/30: disable video IRQ
 	 * XXX: testing for SE/30 VBL
 	 */
@@ -175,8 +174,8 @@ void __init via_init(void)
 	if (macintosh_config->ident == MAC_MODEL_SE30) {
 		via1[vDirB] |= 0x40;
 		via1[vBufB] |= 0x40;
-	} 
-	
+	}
+
 	/*
 	 * Set the RTC bits to a known state: all lines to outputs and
 	 * RTC disabled (yes that's 0 to enable and 1 to disable).
@@ -243,8 +242,8 @@ void __init via_init(void)
  * Start the 100 Hz clock
  */
 
-void __init via_init_clock(void (*func)(int, void *, struct pt_regs *))
-{	
+void __init via_init_clock(irqreturn_t (*func)(int, void *, struct pt_regs *))
+{
 	via1[vACR] |= 0x40;
 	via1[vT1LL] = MAC_CLOCK_LOW;
 	via1[vT1LH] = MAC_CLOCK_HIGH;
@@ -261,24 +260,27 @@ void __init via_init_clock(void (*func)(int, void *, struct pt_regs *))
 void __init via_register_interrupts(void)
 {
 	if (via_alt_mapping) {
-		sys_request_irq(IRQ_AUTO_1, via1_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
-				"software", (void *) via1);
-		sys_request_irq(IRQ_AUTO_6, via1_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
-				"via1", (void *) via1);
+		cpu_request_irq(IRQ_AUTO_1, via1_irq,
+				IRQ_FLG_LOCK|IRQ_FLG_FAST, "software",
+				(void *) via1);
+		cpu_request_irq(IRQ_AUTO_6, via1_irq,
+				IRQ_FLG_LOCK|IRQ_FLG_FAST, "via1",
+				(void *) via1);
 	} else {
-		sys_request_irq(IRQ_AUTO_1, via1_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
-				"via1", (void *) via1);
+		cpu_request_irq(IRQ_AUTO_1, via1_irq,
+				IRQ_FLG_LOCK|IRQ_FLG_FAST, "via1",
+				(void *) via1);
 #if 0 /* interferes with serial on some machines */
 		if (!psc_present) {
-			sys_request_irq(IRQ_AUTO_6, mac_bang, IRQ_FLG_LOCK,
+			cpu_request_irq(IRQ_AUTO_6, mac_bang, IRQ_FLG_LOCK,
 					"Off Switch", mac_bang);
 		}
 #endif
 	}
-	sys_request_irq(IRQ_AUTO_2, via2_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
+	cpu_request_irq(IRQ_AUTO_2, via2_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
 			"via2", (void *) via2);
 	if (!psc_present) {
-		sys_request_irq(IRQ_AUTO_4, mac_scc_dispatch, IRQ_FLG_LOCK,
+		cpu_request_irq(IRQ_AUTO_4, mac_scc_dispatch, IRQ_FLG_LOCK,
 				"scc", mac_scc_dispatch);
 	}
 	request_irq(IRQ_MAC_NUBUS, via_nubus_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
@@ -291,22 +293,22 @@ void __init via_register_interrupts(void)
 
 void via_debug_dump(void)
 {
-	printk("VIA1: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
+	printk(KERN_DEBUG "VIA1: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
 		(uint) via1[vDirA], (uint) via1[vDirB], (uint) via1[vACR]);
-	printk("         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
+	printk(KERN_DEBUG "         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
 		(uint) via1[vPCR], (uint) via1[vIFR], (uint) via1[vIER]);
 	if (oss_present) {
-		printk("VIA2: <OSS>\n");
+		printk(KERN_DEBUG "VIA2: <OSS>\n");
 	} else if (rbv_present) {
-		printk("VIA2:  IFR = 0x%02X  IER = 0x%02X\n",
+		printk(KERN_DEBUG "VIA2:  IFR = 0x%02X  IER = 0x%02X\n",
 			(uint) via2[rIFR], (uint) via2[rIER]);
-		printk("      SIFR = 0x%02X SIER = 0x%02X\n",
+		printk(KERN_DEBUG "      SIFR = 0x%02X SIER = 0x%02X\n",
 			(uint) via2[rSIFR], (uint) via2[rSIER]);
 	} else {
-		printk("VIA2: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
+		printk(KERN_DEBUG "VIA2: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
 			(uint) via2[vDirA], (uint) via2[vDirB],
 			(uint) via2[vACR]);
-		printk("         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
+		printk(KERN_DEBUG "         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
 			(uint) via2[vPCR],
 			(uint) via2[vIFR], (uint) via2[vIER]);
 	}
@@ -374,7 +376,10 @@ void __init via_nubus_init(void)
 
 	if (!rbv_present) {
 		/* set the line to be an output on non-RBV machines */
-		via2[vDirB] |= 0x02;
+		if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
+		   (macintosh_config->adb_type != MAC_ADB_PB2)) {
+			via2[vDirB] |= 0x02;
+		}
 	}
 
 	/* this seems to be an ADB bit on PMU machines */
@@ -390,8 +395,23 @@ void __init via_nubus_init(void)
 		via2[rSIER] = 0x7F;
 		via2[rSIER] = nubus_active | 0x80;
 	} else {
-		via2[vBufA] = 0xFF;
-		via2[vDirA] = ~nubus_active;
+		/* These are ADB bits on PMU */
+		if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
+		   (macintosh_config->adb_type != MAC_ADB_PB2)) {
+			switch(macintosh_config->ident)
+			{
+				case MAC_MODEL_II:
+				case MAC_MODEL_IIX:
+				case MAC_MODEL_IICX:
+				case MAC_MODEL_SE30:
+					via2[vBufA] |= 0x3F;
+					via2[vDirA] = ~nubus_active | 0xc0;
+					break;
+				default:
+					via2[vBufA] = 0xFF;
+					via2[vDirA] = ~nubus_active;
+			}
+		}
 	}
 }
 
@@ -405,15 +425,14 @@ void __init via_nubus_init(void)
  * the machspec interrupt number after clearing the interrupt.
  */
 
-void via1_irq(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t via1_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int irq_bit, i;
 	unsigned char events, mask;
 
-	irq -= VEC_SPUR;
-
 	mask = via1[vIER] & 0x7F;
-	if (!(events = via1[vIFR] & mask)) return;
+	if (!(events = via1[vIFR] & mask))
+		return IRQ_NONE;
 
 	for (i = 0, irq_bit = 1 ; i < 7 ; i++, irq_bit <<= 1)
 		if (events & irq_bit) {
@@ -423,6 +442,7 @@ void via1_irq(int irq, void *dev_id, struct pt_regs *regs)
 			via1[vIER] = irq_bit | 0x80;
 		}
 
+#if 0 /* freakin' pmu is doing weird stuff */
 	if (!oss_present) {
 		/* This (still) seems to be necessary to get IDE
 		   working.  However, if you enable VBL interrupts,
@@ -435,17 +455,18 @@ void via1_irq(int irq, void *dev_id, struct pt_regs *regs)
 		mac_do_irq_list(IRQ_MAC_NUBUS, regs);
 		via_irq_enable(IRQ_MAC_NUBUS);
 	}
+#endif
+	return IRQ_HANDLED;
 }
 
-void via2_irq(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t via2_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int irq_bit, i;
 	unsigned char events, mask;
 
-	irq -= VEC_SPUR;
-
 	mask = via2[gIER] & 0x7F;
-	if (!(events = via2[gIFR] & mask)) return;
+	if (!(events = via2[gIFR] & mask))
+		return IRQ_NONE;
 
 	for (i = 0, irq_bit = 1 ; i < 7 ; i++, irq_bit <<= 1)
 		if (events & irq_bit) {
@@ -454,6 +475,7 @@ void via2_irq(int irq, void *dev_id, struct pt_regs *regs)
 			via2[gIFR] = irq_bit | rbv_clear;
 			via2[gIER] = irq_bit | 0x80;
 		}
+	return IRQ_HANDLED;
 }
 
 /*
@@ -461,12 +483,13 @@ void via2_irq(int irq, void *dev_id, struct pt_regs *regs)
  * VIA2 dispatcher as a fast interrupt handler.
  */
 
-void via_nubus_irq(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t via_nubus_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int irq_bit, i;
 	unsigned char events;
 
-	if (!(events = ~via2[gBufA] & nubus_active)) return;
+	if (!(events = ~via2[gBufA] & nubus_active))
+		return IRQ_NONE;
 
 	for (i = 0, irq_bit = 1 ; i < 7 ; i++, irq_bit <<= 1) {
 		if (events & irq_bit) {
@@ -475,6 +498,7 @@ void via_nubus_irq(int irq, void *dev_id, struct pt_regs *regs)
 			via_irq_enable(NUBUS_SOURCE_BASE + i);
 		}
 	}
+	return IRQ_HANDLED;
 }
 
 void via_irq_enable(int irq) {
@@ -483,7 +507,7 @@ void via_irq_enable(int irq) {
 	int irq_bit	= 1 << irq_idx;
 
 #ifdef DEBUG_IRQUSE
-	printk("via_irq_enable(%d)\n", irq);
+	printk(KERN_DEBUG "via_irq_enable(%d)\n", irq);
 #endif
 
 	if (irq_src == 1) {
@@ -510,7 +534,21 @@ void via_irq_enable(int irq) {
 			via2[rSIER] = IER_SET_BIT(irq_idx);
 		} else {
 			/* Make sure the bit is an input, to enable the irq */
-			via2[vDirA] &= ~irq_bit;
+			/* But not on PowerBooks, that's ADB... */
+			if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
+			   (macintosh_config->adb_type != MAC_ADB_PB2)) {
+				switch(macintosh_config->ident)
+				{
+					case MAC_MODEL_II:
+					case MAC_MODEL_IIX:
+					case MAC_MODEL_IICX:
+					case MAC_MODEL_SE30:
+						via2[vDirA] &= (~irq_bit | 0xc0);
+						break;
+					default:
+						via2[vDirA] &= ~irq_bit;
+				}
+			}
 		}
 		nubus_active |= irq_bit;
 	}
@@ -522,7 +560,7 @@ void via_irq_disable(int irq) {
 	int irq_bit	= 1 << irq_idx;
 
 #ifdef DEBUG_IRQUSE
-	printk("via_irq_disable(%d)\n", irq);
+	printk(KERN_DEBUG "via_irq_disable(%d)\n", irq);
 #endif
 
 	if (irq_src == 1) {
@@ -535,7 +573,11 @@ void via_irq_disable(int irq) {
 			via2[rSIER] = IER_CLR_BIT(irq_idx);
 		} else {
 			/* disable the nubus irq by changing dir to output */
-			via2[vDirA] |= irq_bit;
+			/* except on PMU */
+			if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
+			   (macintosh_config->adb_type != MAC_ADB_PB2)) {
+				via2[vDirA] |= irq_bit;
+			}
 		}
 		nubus_active &= ~irq_bit;
 	}

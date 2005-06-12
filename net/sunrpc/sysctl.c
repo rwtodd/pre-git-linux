@@ -1,26 +1,25 @@
 /*
  * linux/net/sunrpc/sysctl.c
  *
- * Sysctl interface to sunrpc module. This is for debugging only now.
+ * Sysctl interface to sunrpc module.
  *
  * I would prefer to register the sunrpc table below sys/net, but that's
  * impossible at the moment.
  */
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/linkage.h>
 #include <linux/ctype.h>
 #include <linux/fs.h>
 #include <linux/sysctl.h>
-#define __NO_VERSION__
 #include <linux/module.h>
 
 #include <asm/uaccess.h>
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/sched.h>
 #include <linux/sunrpc/stats.h>
+#include <linux/sunrpc/xprt.h>
 
 /*
  * Declare the debug flags here
@@ -59,13 +58,14 @@ rpc_unregister_sysctl(void)
 
 static int
 proc_dodebug(ctl_table *table, int write, struct file *file,
-				void *buffer, size_t *lenp)
+				void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	char		tmpbuf[20], *p, c;
+	char		tmpbuf[20], c, *s;
+	char __user *p;
 	unsigned int	value;
-	int		left, len;
+	size_t		left, len;
 
-	if ((file->f_pos && !write) || !*lenp) {
+	if ((*ppos && !write) || !*lenp) {
 		*lenp = 0;
 		return 0;
 	}
@@ -75,7 +75,7 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 	if (write) {
 		if (!access_ok(VERIFY_READ, buffer, left))
 			return -EFAULT;
-		p = (char *) buffer;
+		p = buffer;
 		while (left && __get_user(c, p) >= 0 && isspace(c))
 			left--, p++;
 		if (!left)
@@ -83,15 +83,16 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 
 		if (left > sizeof(tmpbuf) - 1)
 			return -EINVAL;
-		copy_from_user(tmpbuf, p, left);
+		if (copy_from_user(tmpbuf, p, left))
+			return -EFAULT;
 		tmpbuf[left] = '\0';
 
-		for (p = tmpbuf, value = 0; '0' <= *p && *p <= '9'; p++, left--)
-			value = 10 * value + (*p - '0');
-		if (*p && !isspace(*p))
+		for (s = tmpbuf, value = 0; '0' <= *s && *s <= '9'; s++, left--)
+			value = 10 * value + (*s - '0');
+		if (*s && !isspace(*s))
 			return -EINVAL;
-		while (left && isspace(*p))
-			left--, p++;
+		while (left && isspace(*s))
+			left--, s++;
 		*(unsigned int *) table->data = value;
 		/* Display the RPC tasks on writing to rpc_debug */
 		if (table->ctl_name == CTL_RPCDEBUG) {
@@ -103,36 +104,90 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 		len = sprintf(tmpbuf, "%d", *(unsigned int *) table->data);
 		if (len > left)
 			len = left;
-		copy_to_user(buffer, tmpbuf, len);
+		if (__copy_to_user(buffer, tmpbuf, len))
+			return -EFAULT;
 		if ((left -= len) > 0) {
-			put_user('\n', (char *)buffer + len);
+			if (put_user('\n', (char __user *)buffer + len))
+				return -EFAULT;
 			left--;
 		}
 	}
 
 done:
 	*lenp -= left;
-	file->f_pos += *lenp;
+	*ppos += *lenp;
 	return 0;
 }
 
-#define DIRENTRY(nam1, nam2, child)	\
-	{CTL_##nam1, #nam2, NULL, 0, 0555, child }
-#define DBGENTRY(nam1, nam2)	\
-	{CTL_##nam1##DEBUG, #nam2 "_debug", &nam2##_debug, sizeof(int),\
-	 0644, NULL, &proc_dodebug}
+static unsigned int min_slot_table_size = RPC_MIN_SLOT_TABLE;
+static unsigned int max_slot_table_size = RPC_MAX_SLOT_TABLE;
 
-static ctl_table		debug_table[] = {
-	DBGENTRY(RPC,  rpc),
-	DBGENTRY(NFS,  nfs),
-	DBGENTRY(NFSD, nfsd),
-	DBGENTRY(NLM,  nlm),
-	{0}
+static ctl_table debug_table[] = {
+	{
+		.ctl_name	= CTL_RPCDEBUG,
+		.procname	= "rpc_debug",
+		.data		= &rpc_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{
+		.ctl_name	= CTL_NFSDEBUG,
+		.procname	= "nfs_debug",
+		.data		= &nfs_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{
+		.ctl_name	= CTL_NFSDDEBUG,
+		.procname	= "nfsd_debug",
+		.data		= &nfsd_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{
+		.ctl_name	= CTL_NLMDEBUG,
+		.procname	= "nlm_debug",
+		.data		= &nlm_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{
+		.ctl_name	= CTL_SLOTTABLE_UDP,
+		.procname	= "udp_slot_table_entries",
+		.data		= &xprt_udp_slot_table_entries,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &min_slot_table_size,
+		.extra2		= &max_slot_table_size
+	},
+	{
+		.ctl_name	= CTL_SLOTTABLE_TCP,
+		.procname	= "tcp_slot_table_entries",
+		.data		= &xprt_tcp_slot_table_entries,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &min_slot_table_size,
+		.extra2		= &max_slot_table_size
+	},
+	{ .ctl_name = 0 }
 };
 
-static ctl_table		sunrpc_table[] = {
-	DIRENTRY(SUNRPC, sunrpc, debug_table),
-	{0}
+static ctl_table sunrpc_table[] = {
+	{
+		.ctl_name	= CTL_SUNRPC,
+		.procname	= "sunrpc",
+		.mode		= 0555,
+		.child		= debug_table
+	},
+	{ .ctl_name = 0 }
 };
 
 #endif

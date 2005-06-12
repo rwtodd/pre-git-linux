@@ -1,3 +1,6 @@
+#ifndef __PCILYNX_H__
+#define __PCILYNX_H__
+
 #include <linux/config.h>
 
 #define PCILYNX_DRIVER_NAME      "pcilynx"
@@ -25,6 +28,8 @@
 #define CHANNEL_ASYNC_SEND       3
 #define CHANNEL_ISO_SEND         4
 
+#define PCILYNX_CONFIG_ROM_LENGTH   1024
+
 typedef int pcl_t;
 
 struct ti_lynx {
@@ -41,14 +46,14 @@ struct ti_lynx {
         } phyic;
 
         enum { clear, have_intr, have_aux_buf, have_pcl_mem,
-               have_1394_buffers, have_iomappings } state;
-        
-        /* remapped memory spaces */
-        void *registers;
-        void *local_rom;
-        void *local_ram;
-        void *aux_port;
+               have_1394_buffers, have_iomappings, is_host } state;
 
+        /* remapped memory spaces */
+        void __iomem *registers;
+        void __iomem *local_rom;
+        void __iomem *local_ram;
+        void __iomem *aux_port;
+	quadlet_t bus_info_block[5];
 
 #ifdef CONFIG_IEEE1394_PCILYNX_PORTS
         atomic_t aux_intr_seen;
@@ -61,9 +66,9 @@ struct ti_lynx {
 #endif
 
         /*
-         * use local RAM of LOCALRAM_SIZE bytes for PCLs, which allows for 
+         * use local RAM of LOCALRAM_SIZE bytes for PCLs, which allows for
          * LOCALRAM_SIZE * 8 PCLs (each sized 128 bytes);
-         * the following is an allocation bitmap 
+         * the following is an allocation bitmap
          */
         u8 pcl_bmap[LOCALRAM_SIZE / 1024];
 
@@ -80,6 +85,8 @@ struct ti_lynx {
         struct hpsb_host *host;
 
         int phyid, isroot;
+        int selfid_size;
+        int phy_reg0;
 
         spinlock_t phy_reg_lock;
 
@@ -90,7 +97,8 @@ struct ti_lynx {
 
         struct lynx_send_data {
                 pcl_t pcl_start, pcl;
-                struct hpsb_packet *queue, *queue_last;
+                struct list_head queue;
+                struct list_head pcl_queue; /* this queue contains at most one packet */
                 spinlock_t queue_lock;
                 dma_addr_t header_dma, data_dma;
                 int channel;
@@ -104,9 +112,11 @@ struct ti_lynx {
                 pcl_t pcl_start;
                 int chan_count;
                 int next, last, used, running;
-                struct tq_struct tq;
+                struct tasklet_struct tq;
                 spinlock_t lock;
         } iso_rcv;
+
+	u32 i2c_driven_state; /* the state we currently drive the Serial EEPROM Control register */
 };
 
 /* the per-file data structure for mem space access */
@@ -123,23 +133,23 @@ struct memdata {
 /*
  * Register read and write helper functions.
  */
-inline static void reg_write(const struct ti_lynx *lynx, int offset, u32 data)
+static inline void reg_write(const struct ti_lynx *lynx, int offset, u32 data)
 {
         writel(data, lynx->registers + offset);
 }
 
-inline static u32 reg_read(const struct ti_lynx *lynx, int offset)
+static inline u32 reg_read(const struct ti_lynx *lynx, int offset)
 {
         return readl(lynx->registers + offset);
 }
 
-inline static void reg_set_bits(const struct ti_lynx *lynx, int offset,
+static inline void reg_set_bits(const struct ti_lynx *lynx, int offset,
                                 u32 mask)
 {
         reg_write(lynx, offset, (reg_read(lynx, offset) | mask));
 }
 
-inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
+static inline void reg_clear_bits(const struct ti_lynx *lynx, int offset,
                                   u32 mask)
 {
         reg_write(lynx, offset, (reg_read(lynx, offset) & ~mask));
@@ -154,8 +164,10 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define MISC_CONTROL                      0x40
 #define MISC_CONTROL_SWRESET              (1<<0)
 
+#define SERIAL_EEPROM_CONTROL             0x44
+
 #define PCI_INT_STATUS                    0x48
-#define PCI_INT_ENABLE                    0x4c               
+#define PCI_INT_ENABLE                    0x4c
 /* status and enable have identical bit numbers */
 #define PCI_INT_INT_PEND                  (1<<31)
 #define PCI_INT_FORCED_INT                (1<<30)
@@ -187,7 +199,7 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define LBUS_ADDR_SEL_RAM                 (0x0<<16)
 #define LBUS_ADDR_SEL_ROM                 (0x1<<16)
 #define LBUS_ADDR_SEL_AUX                 (0x2<<16)
-#define LBUS_ADDR_SEL_ZV                  (0x3<<16)       
+#define LBUS_ADDR_SEL_ZV                  (0x3<<16)
 
 #define GPIO_CTRL_A                       0xb8
 #define GPIO_CTRL_B                       0xbc
@@ -196,14 +208,14 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define DMA_BREG(base, chan)              (base + chan * 0x20)
 #define DMA_SREG(base, chan)              (base + chan * 0x10)
 
-#define DMA0_PREV_PCL                     0x100               
+#define DMA0_PREV_PCL                     0x100
 #define DMA1_PREV_PCL                     0x120
 #define DMA2_PREV_PCL                     0x140
 #define DMA3_PREV_PCL                     0x160
 #define DMA4_PREV_PCL                     0x180
 #define DMA_PREV_PCL(chan)                (DMA_BREG(DMA0_PREV_PCL, chan))
 
-#define DMA0_CURRENT_PCL                  0x104            
+#define DMA0_CURRENT_PCL                  0x104
 #define DMA1_CURRENT_PCL                  0x124
 #define DMA2_CURRENT_PCL                  0x144
 #define DMA3_CURRENT_PCL                  0x164
@@ -225,14 +237,14 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define DMA_CHAN_STAT_SPECIALACK          (1<<14)
 
 
-#define DMA0_CHAN_CTRL                    0x110              
+#define DMA0_CHAN_CTRL                    0x110
 #define DMA1_CHAN_CTRL                    0x130
 #define DMA2_CHAN_CTRL                    0x150
 #define DMA3_CHAN_CTRL                    0x170
 #define DMA4_CHAN_CTRL                    0x190
 #define DMA_CHAN_CTRL(chan)               (DMA_BREG(DMA0_CHAN_CTRL, chan))
 /* CHAN_CTRL registers share bits */
-#define DMA_CHAN_CTRL_ENABLE              (1<<31)      
+#define DMA_CHAN_CTRL_ENABLE              (1<<31)
 #define DMA_CHAN_CTRL_BUSY                (1<<30)
 #define DMA_CHAN_CTRL_LINK                (1<<29)
 
@@ -248,9 +260,9 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define FIFO_SIZES                        0xa00
 
 #define FIFO_CONTROL                      0xa10
-#define GRF_FLUSH                         (1<<4)
-#define ITF_FLUSH                         (1<<3)
-#define ATF_FLUSH                         (1<<2)
+#define FIFO_CONTROL_GRF_FLUSH            (1<<4)
+#define FIFO_CONTROL_ITF_FLUSH            (1<<3)
+#define FIFO_CONTROL_ATF_FLUSH            (1<<2)
 
 #define FIFO_XMIT_THRESHOLD               0xa14
 
@@ -285,8 +297,8 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define DMA_WORD1_CMP_MATCH_OTHERBUS      (1<<15)
 #define DMA_WORD1_CMP_MATCH_BROADCAST     (1<<14)
 #define DMA_WORD1_CMP_MATCH_BUS_BCAST     (1<<13)
-#define DMA_WORD1_CMP_MATCH_NODE_BCAST    (1<<12)
-#define DMA_WORD1_CMP_MATCH_LOCAL         (1<<11)
+#define DMA_WORD1_CMP_MATCH_LOCAL_NODE    (1<<12)
+#define DMA_WORD1_CMP_MATCH_EXACT         (1<<11)
 #define DMA_WORD1_CMP_ENABLE_SELF_ID      (1<<10)
 #define DMA_WORD1_CMP_ENABLE_MASTER       (1<<8)
 
@@ -341,7 +353,7 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define LINK_INT_GRF_OVERFLOW             (1<<5)
 #define LINK_INT_ITF_UNDERFLOW            (1<<4)
 #define LINK_INT_ATF_UNDERFLOW            (1<<3)
-#define LINK_INT_ISOARB_FAILED            (1<<0) 
+#define LINK_INT_ISOARB_FAILED            (1<<0)
 
 /* PHY specifics */
 #define PHY_VENDORID_TI                 0x800028
@@ -368,7 +380,7 @@ struct ti_pcl {
 
 #ifdef CONFIG_IEEE1394_PCILYNX_LOCALRAM
 
-inline static void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            const struct ti_pcl *pcl)
 {
         int i;
@@ -376,11 +388,11 @@ inline static void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
         u32 *out = (u32 *)(lynx->local_ram + pclid * sizeof(struct ti_pcl));
 
         for (i = 0; i < 32; i++, out++, in++) {
-                writel(cpu_to_le32(*in), out);
+                writel(*in, out);
         }
 }
 
-inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            struct ti_pcl *pcl)
 {
         int i;
@@ -388,25 +400,25 @@ inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
         u32 *in = (u32 *)(lynx->local_ram + pclid * sizeof(struct ti_pcl));
 
         for (i = 0; i < 32; i++, out++, in++) {
-                *out = le32_to_cpu(readl(in));
+                *out = readl(in);
         }
 }
 
-inline static u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
+static inline u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
 {
         return pci_resource_start(lynx->dev, 1) + pclid * sizeof(struct ti_pcl);
 }
 
 #else /* CONFIG_IEEE1394_PCILYNX_LOCALRAM */
 
-inline static void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            const struct ti_pcl *pcl)
 {
         memcpy_le32((u32 *)(lynx->pcl_mem + pclid * sizeof(struct ti_pcl)),
                     (u32 *)pcl, sizeof(struct ti_pcl));
 }
 
-inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            struct ti_pcl *pcl)
 {
         memcpy_le32((u32 *)pcl,
@@ -414,7 +426,7 @@ inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                     sizeof(struct ti_pcl));
 }
 
-inline static u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
+static inline u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
 {
         return lynx->pcl_mem_dma + pclid * sizeof(struct ti_pcl);
 }
@@ -425,14 +437,14 @@ inline static u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
 #if defined (CONFIG_IEEE1394_PCILYNX_LOCALRAM) || defined (__BIG_ENDIAN)
 typedef struct ti_pcl pcltmp_t;
 
-inline static struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                                       pcltmp_t *tmp)
 {
         get_pcl(lynx, pclid, tmp);
         return tmp;
 }
 
-inline static void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                               pcltmp_t *tmp)
 {
         put_pcl(lynx, pclid, tmp);
@@ -441,20 +453,20 @@ inline static void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
 #else
 typedef int pcltmp_t; /* just a dummy */
 
-inline static struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                                       pcltmp_t *tmp)
 {
         return lynx->pcl_mem + pclid * sizeof(struct ti_pcl);
 }
 
-inline static void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                               pcltmp_t *tmp)
 {
 }
 #endif
 
 
-inline static void run_sub_pcl(const struct ti_lynx *lynx, pcl_t pclid, int idx,
+static inline void run_sub_pcl(const struct ti_lynx *lynx, pcl_t pclid, int idx,
                                int dmachan)
 {
         reg_write(lynx, DMA0_CURRENT_PCL + dmachan * 0x20,
@@ -463,7 +475,7 @@ inline static void run_sub_pcl(const struct ti_lynx *lynx, pcl_t pclid, int idx,
                   DMA_CHAN_CTRL_ENABLE | DMA_CHAN_CTRL_LINK);
 }
 
-inline static void run_pcl(const struct ti_lynx *lynx, pcl_t pclid, int dmachan)
+static inline void run_pcl(const struct ti_lynx *lynx, pcl_t pclid, int dmachan)
 {
         run_sub_pcl(lynx, pclid, 0, dmachan);
 }
@@ -501,76 +513,4 @@ inline static void run_pcl(const struct ti_lynx *lynx, pcl_t pclid, int dmachan)
 #define PCL_BIGENDIAN          (1<<16)
 #define PCL_ISOMODE            (1<<12)
 
-
-#define _(x) (__constant_cpu_to_be32(x))
-
-static quadlet_t lynx_csr_rom[] = {
-/* bus info block     offset (hex) */
-        _(0x04040000), /* info/CRC length, CRC              400  */
-        _(0x31333934), /* 1394 magic number                 404  */
-        _(0xf064a000), /* misc. settings                    408  */
-        _(0x08002850), /* vendor ID, chip ID high           40c  */
-        _(0x0000ffff), /* chip ID low                       410  */
-/* root directory */
-        _(0x00090000), /* directory length, CRC             414  */
-        _(0x03080028), /* vendor ID (Texas Instr.)          418  */
-        _(0x81000008), /* offset to textual ID              41c  */
-        _(0x0c000200), /* node capabilities                 420  */
-        _(0x8d00000e), /* offset to unique ID               424  */
-        _(0xc7000010), /* offset to module independent info 428  */
-        _(0x04000000), /* module hardware version           42c  */
-        _(0x81000014), /* offset to textual ID              430  */
-        _(0x09000000), /* node hardware version             434  */
-        _(0x81000018), /* offset to textual ID              438  */
-  /* module vendor ID textual */
-        _(0x00070000), /* CRC length, CRC                   43c  */
-        _(0x00000000), /*                                   440  */
-        _(0x00000000), /*                                   444  */
-        _(0x54455841), /* "Texas Instruments"               448  */
-        _(0x5320494e), /*                                   44c  */
-        _(0x53545255), /*                                   450  */
-        _(0x4d454e54), /*                                   454  */
-        _(0x53000000), /*                                   458  */
-/* node unique ID leaf */
-        _(0x00020000), /* CRC length, CRC                   45c  */
-        _(0x08002850), /* vendor ID, chip ID high           460  */
-        _(0x0000ffff), /* chip ID low                       464  */
-/* module dependent info */
-        _(0x00050000), /* CRC length, CRC                   468  */
-        _(0x81000012), /* offset to module textual ID       46c  */
-        _(0x81000017), /* textual descriptor                470  */
-        _(0x39010000), /* SRAM size                         474  */
-        _(0x3a010000), /* AUXRAM size                       478  */
-        _(0x3b000000), /* AUX device                        47c  */
-/* module textual ID */
-        _(0x00050000), /* CRC length, CRC                   480  */
-        _(0x00000000), /*                                   484  */
-        _(0x00000000), /*                                   488  */
-        _(0x54534231), /* "TSB12LV21"                       48c  */
-        _(0x324c5632), /*                                   490  */
-        _(0x31000000), /*                                   494  */
-/* part number */
-        _(0x00060000), /* CRC length, CRC                   498  */
-        _(0x00000000), /*                                   49c  */
-        _(0x00000000), /*                                   4a0  */
-        _(0x39383036), /* "9806000-0001"                    4a4  */
-        _(0x3030302d), /*                                   4a8  */
-        _(0x30303031), /*                                   4ac  */
-        _(0x20000001), /*                                   4b0  */
-/* module hardware version textual */
-        _(0x00050000), /* CRC length, CRC                   4b4  */
-        _(0x00000000), /*                                   4b8  */
-        _(0x00000000), /*                                   4bc  */
-        _(0x5453424b), /* "TSBKPCITST"                      4c0  */
-        _(0x50434954), /*                                   4c4  */
-        _(0x53540000), /*                                   4c8  */
-/* node hardware version textual */
-        _(0x00050000), /* CRC length, CRC                   4d0  */
-        _(0x00000000), /*                                   4d4  */
-        _(0x00000000), /*                                   4d8  */
-        _(0x54534232), /* "TSB21LV03"                       4dc  */
-        _(0x314c5630), /*                                   4e0  */
-        _(0x33000000)  /*                                   4e4  */
-};
-
-#undef _
+#endif

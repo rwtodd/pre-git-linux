@@ -46,11 +46,25 @@
    saved.  Notice that usp has no stack-slot and needs to be treated
    specially (see get_reg/put_reg below). */
 static int regoff[] = {
-	PT_REG(d1), PT_REG(d2), PT_REG(d3), PT_REG(d4),
-	PT_REG(d5), SW_REG(d6), SW_REG(d7), PT_REG(a0),
-	PT_REG(a1), PT_REG(a2), SW_REG(a3), SW_REG(a4),
-	SW_REG(a5), SW_REG(a6), PT_REG(d0), -1,
-	PT_REG(orig_d0), PT_REG(sr), PT_REG(pc),
+	[0]	= PT_REG(d1),
+	[1]	= PT_REG(d2),
+	[2]	= PT_REG(d3),
+	[3]	= PT_REG(d4),
+	[4]	= PT_REG(d5),
+	[5]	= SW_REG(d6),
+	[6]	= SW_REG(d7),
+	[7]	= PT_REG(a0),
+	[8]	= PT_REG(a1),
+	[9]	= PT_REG(a2),
+	[10]	= SW_REG(a3),
+	[11]	= SW_REG(a4),
+	[12]	= SW_REG(a5),
+	[13]	= SW_REG(a6),
+	[14]	= PT_REG(d0),
+	[15]	= -1,
+	[16]	= PT_REG(orig_d0),
+	[17]	= PT_REG(sr),
+	[18]	= PT_REG(pc),
 };
 
 /*
@@ -87,10 +101,24 @@ static inline int put_reg(struct task_struct *task, int regno,
 	return 0;
 }
 
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure the single step bit is not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{
+	unsigned long tmp;
+	/* make sure the single step bit is not set. */
+	tmp = get_reg(child, PT_SR) & ~(TRACE_BITS << 16);
+	put_reg(child, PT_SR, tmp);
+	child->thread.work.delayed_trace = 0;
+	child->thread.work.syscall_trace = 0;
+}
+
 asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
-	unsigned long flags;
 	int ret;
 
 	lock_kernel();
@@ -107,54 +135,28 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	ret = -ESRCH;
 	read_lock(&tasklist_lock);
 	child = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!!! */
+	if (child)
+		get_task_struct(child);
+	read_unlock(&tasklist_lock);
 	if (!child)
 		goto out;
+
 	ret = -EPERM;
 	if (pid == 1)		/* you may not mess with init */
-		goto out;
+		goto out_tsk;
+
 	if (request == PTRACE_ATTACH) {
-		if (child == current)
-			goto out;
-		if ((!child->dumpable ||
-		    (current->uid != child->euid) ||
-		    (current->uid != child->suid) ||
-		    (current->uid != child->uid) ||
-	 	    (current->gid != child->egid) ||
-		    (current->gid != child->sgid) ||
-	 	    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
-	 	    (current->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
-			goto out;
-		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED)
-			goto out;
-		child->ptrace |= PT_PTRACED;
-
-		write_lock_irqsave(&tasklist_lock, flags);
-		if (child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		write_unlock_irqrestore(&tasklist_lock, flags);
-
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
-		goto out;
+		ret = ptrace_attach(child);
+		goto out_tsk;
 	}
-	ret = -ESRCH;
-	if (!(child->ptrace & PT_PTRACED))
-		goto out;
-	if (child->state != TASK_STOPPED) {
-		if (request != PTRACE_KILL)
-			goto out;
-	}
-	if (child->p_pptr != current)
-		goto out;
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL);
+	if (ret < 0)
+		goto out_tsk;
 
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
-		case PTRACE_PEEKTEXT: /* read word at location addr. */ 
+		case PTRACE_PEEKTEXT: /* read word at location addr. */
 		case PTRACE_PEEKDATA: {
 			unsigned long tmp;
 			int copied;
@@ -162,19 +164,20 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
 			ret = -EIO;
 			if (copied != sizeof(tmp))
-				goto out;
+				break;
 			ret = put_user(tmp,(unsigned long *) data);
-			goto out;
+			break;
 		}
 
 	/* read the word at location addr in the USER area. */
 		case PTRACE_PEEKUSR: {
 			unsigned long tmp;
-			
+
 			ret = -EIO;
-			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
-				goto out;
-			
+			if ((addr & 3) || addr < 0 ||
+			    addr > sizeof(struct user) - 3)
+				break;
+
 			tmp = 0;  /* Default return condition */
 			addr = addr >> 2; /* temporary hack. */
 			ret = -EIO;
@@ -193,9 +196,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 					      ((tmp & 0x0000ffff) << 16);
 #endif
 			} else
-				goto out;
+				break;
 			ret = put_user(tmp,(unsigned long *) data);
-			goto out;
+			break;
 		}
 
       /* when I and D space are separate, this will have to be fixed. */
@@ -203,17 +206,18 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		case PTRACE_POKEDATA:
 			ret = 0;
 			if (access_process_vm(child, addr, &data, sizeof(data), 1) == sizeof(data))
-				goto out;
+				break;
 			ret = -EIO;
-			goto out;
+			break;
 
 		case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
 			ret = -EIO;
-			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
-				goto out;
+			if ((addr & 3) || addr < 0 ||
+			    addr > sizeof(struct user) - 3)
+				break;
 
 			addr = addr >> 2; /* temporary hack. */
-			    
+
 			if (addr == PT_SR) {
 				data &= SR_MASK;
 				data <<= 16;
@@ -221,9 +225,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			}
 			if (addr < 19) {
 				if (put_reg(child, addr, data))
-					goto out;
+					break;
 				ret = 0;
-				goto out;
+				break;
 			}
 			if (addr >= 21 && addr < 48)
 			{
@@ -240,7 +244,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				child->thread.fp[addr - 21] = data;
 				ret = 0;
 			}
-			goto out;
+			break;
 
 		case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 		case PTRACE_CONT: { /* restart after signal. */
@@ -248,37 +252,40 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 			ret = -EIO;
 			if ((unsigned long) data > _NSIG)
-				goto out;
-			if (request == PTRACE_SYSCALL)
-				child->ptrace |= PT_TRACESYS;
-			else
-				child->ptrace &= ~PT_TRACESYS;
+				break;
+			if (request == PTRACE_SYSCALL) {
+					child->thread.work.syscall_trace = ~0;
+			} else {
+					child->thread.work.syscall_trace = 0;
+			}
 			child->exit_code = data;
 			/* make sure the single step bit is not set. */
 			tmp = get_reg(child, PT_SR) & ~(TRACE_BITS << 16);
 			put_reg(child, PT_SR, tmp);
+			child->thread.work.delayed_trace = 0;
 			wake_up_process(child);
 			ret = 0;
-			goto out;
+			break;
 		}
 
 /*
- * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it wants to 
+ * make the child exit.  Best I can do is send it a sigkill.
+ * perhaps it should be put in the status that it wants to
  * exit.
  */
 		case PTRACE_KILL: {
 			long tmp;
 
 			ret = 0;
-			if (child->state == TASK_ZOMBIE) /* already dead */
-				goto out;
+			if (child->exit_state == EXIT_ZOMBIE) /* already dead */
+				break;
 			child->exit_code = SIGKILL;
 	/* make sure the single step bit is not set. */
 			tmp = get_reg(child, PT_SR) & ~(TRACE_BITS << 16);
 			put_reg(child, PT_SR, tmp);
+			child->thread.work.delayed_trace = 0;
 			wake_up_process(child);
-			goto out;
+			break;
 		}
 
 		case PTRACE_SINGLESTEP: {  /* set the trap flag. */
@@ -286,41 +293,25 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 			ret = -EIO;
 			if ((unsigned long) data > _NSIG)
-				goto out;
-			child->ptrace &= ~PT_TRACESYS;
+				break;
+			child->thread.work.syscall_trace = 0;
 			tmp = get_reg(child, PT_SR) | (TRACE_BITS << 16);
 			put_reg(child, PT_SR, tmp);
+			child->thread.work.delayed_trace = 1;
 
 			child->exit_code = data;
 	/* give it a chance to run. */
 			wake_up_process(child);
 			ret = 0;
-			goto out;
+			break;
 		}
 
-		case PTRACE_DETACH: { /* detach a process that was attached. */
-			long tmp;
-
-			ret = -EIO;
-			if ((unsigned long) data > _NSIG)
-				goto out;
-			child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
-			child->exit_code = data;
-			write_lock_irqsave(&tasklist_lock, flags);
-			REMOVE_LINKS(child);
-			child->p_pptr = child->p_opptr;
-			SET_LINKS(child);
-			write_unlock_irqrestore(&tasklist_lock, flags);
-			/* make sure the single step bit is not set. */
-			tmp = get_reg(child, PT_SR) & ~(TRACE_BITS << 16);
-			put_reg(child, PT_SR, tmp);
-			wake_up_process(child);
-			ret = 0;
-			goto out;
-		}
+		case PTRACE_DETACH:	/* detach a process that was attached. */
+			ret = ptrace_detach(child, data);
+			break;
 
 		case PTRACE_GETREGS: { /* Get all gp regs from the child. */
-		  	int i;
+			int i;
 			unsigned long tmp;
 			for (i = 0; i < 19; i++) {
 			    tmp = get_reg(child, i);
@@ -328,12 +319,12 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				tmp >>= 16;
 			    if (put_user(tmp, (unsigned long *) data)) {
 				ret = -EFAULT;
-				goto out;
+				break;
 			    }
 			    data += sizeof(long);
 			}
 			ret = 0;
-			goto out;
+			break;
 		}
 
 		case PTRACE_SETREGS: { /* Set all gp regs in the child. */
@@ -342,7 +333,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			for (i = 0; i < 19; i++) {
 			    if (get_user(tmp, (unsigned long *) data)) {
 				ret = -EFAULT;
-				goto out;
+				break;
 			    }
 			    if (i == PT_SR) {
 				tmp &= SR_MASK;
@@ -353,7 +344,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			    data += sizeof(long);
 			}
 			ret = 0;
-			goto out;
+			break;
 		}
 
 		case PTRACE_GETFPREGS: { /* Get the child FPU state. */
@@ -361,7 +352,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			if (copy_to_user((void *)data, &child->thread.fp,
 					 sizeof(struct user_m68kfp_struct)))
 				ret = -EFAULT;
-			goto out;
+			break;
 		}
 
 		case PTRACE_SETFPREGS: { /* Set the child FPU state. */
@@ -369,13 +360,15 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			if (copy_from_user(&child->thread.fp, (void *)data,
 					   sizeof(struct user_m68kfp_struct)))
 				ret = -EFAULT;
-			goto out;
+			break;
 		}
 
 		default:
-			ret = -EIO;
-			goto out;
+			ret = ptrace_request(child, request, addr, data);
+			break;
 	}
+out_tsk:
+	put_task_struct(child);
 out:
 	unlock_kernel();
 	return ret;
@@ -383,14 +376,11 @@ out:
 
 asmlinkage void syscall_trace(void)
 {
-	lock_kernel();
-	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
-			!= (PT_PTRACED|PT_TRACESYS))
-		goto out;
-	current->exit_code = SIGTRAP;
-	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
-	schedule();
+	if (!current->thread.work.delayed_trace &&
+	    !current->thread.work.syscall_trace)
+		return;
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+				 ? 0x80 : 0));
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the
@@ -400,6 +390,4 @@ asmlinkage void syscall_trace(void)
 		send_sig(current->exit_code, current, 1);
 		current->exit_code = 0;
 	}
-out:
-	unlock_kernel();
 }

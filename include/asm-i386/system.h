@@ -4,32 +4,30 @@
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <asm/segment.h>
+#include <asm/cpufeature.h>
 #include <linux/bitops.h> /* for LOCK_PREFIX */
 
 #ifdef __KERNEL__
 
 struct task_struct;	/* one of the stranger aspects of C forward declarations.. */
-extern void FASTCALL(__switch_to(struct task_struct *prev, struct task_struct *next));
+extern struct task_struct * FASTCALL(__switch_to(struct task_struct *prev, struct task_struct *next));
 
-#define prepare_to_switch()	do { } while(0)
 #define switch_to(prev,next,last) do {					\
-	asm volatile("pushl %%esi\n\t"					\
-		     "pushl %%edi\n\t"					\
+	unsigned long esi,edi;						\
+	asm volatile("pushfl\n\t"					\
 		     "pushl %%ebp\n\t"					\
 		     "movl %%esp,%0\n\t"	/* save ESP */		\
-		     "movl %3,%%esp\n\t"	/* restore ESP */	\
+		     "movl %5,%%esp\n\t"	/* restore ESP */	\
 		     "movl $1f,%1\n\t"		/* save EIP */		\
-		     "pushl %4\n\t"		/* restore EIP */	\
+		     "pushl %6\n\t"		/* restore EIP */	\
 		     "jmp __switch_to\n"				\
 		     "1:\t"						\
 		     "popl %%ebp\n\t"					\
-		     "popl %%edi\n\t"					\
-		     "popl %%esi\n\t"					\
+		     "popfl"						\
 		     :"=m" (prev->thread.esp),"=m" (prev->thread.eip),	\
-		      "=b" (last)					\
+		      "=a" (last),"=S" (esi),"=D" (edi)			\
 		     :"m" (next->thread.esp),"m" (next->thread.eip),	\
-		      "a" (prev), "d" (next),				\
-		      "b" (prev));					\
+		      "2" (prev), "d" (next));				\
 } while (0)
 
 #define _set_base(addr,base) do { unsigned long __pr; \
@@ -98,6 +96,12 @@ static inline unsigned long _get_base(char * addr)
 		: :"m" (*(unsigned int *)&(value)))
 
 /*
+ * Save a segment register away
+ */
+#define savesegment(seg, value) \
+	asm volatile("movl %%" #seg ",%0":"=m" (*(int *)&(value)))
+
+/*
  * Clear and set 'TS' bit respectively
  */
 #define clts() __asm__ __volatile__ ("clts")
@@ -110,9 +114,22 @@ static inline unsigned long _get_base(char * addr)
 })
 #define write_cr0(x) \
 	__asm__("movl %0,%%cr0": :"r" (x));
+
+#define read_cr4() ({ \
+	unsigned int __dummy; \
+	__asm__( \
+		"movl %%cr4,%0\n\t" \
+		:"=r" (__dummy)); \
+	__dummy; \
+})
+#define write_cr4(x) \
+	__asm__("movl %0,%%cr4": :"r" (x));
 #define stts() write_cr0(8 | read_cr0())
 
 #endif	/* __KERNEL__ */
+
+#define wbinvd() \
+	__asm__ __volatile__ ("wbinvd": : :"memory");
 
 static inline unsigned long get_limit(unsigned long segment)
 {
@@ -140,23 +157,29 @@ struct __xchg_dummy { unsigned long a[100]; };
  * to do an SIMD/3DNOW!/MMX/FPU 64-bit store here, but that
  * might have an implicit FPU-save as a cost, so it's not
  * clear which path to go.)
+ *
+ * cmpxchg8b must be used with the lock prefix here to allow
+ * the instruction to be executed atomically, see page 3-102
+ * of the instruction set reference 24319102.pdf. We need
+ * the reader side to see the coherent 64bit value.
  */
-extern inline void __set_64bit (unsigned long long * ptr,
+static inline void __set_64bit (unsigned long long * ptr,
 		unsigned int low, unsigned int high)
 {
-__asm__ __volatile__ (
-	"1:	movl (%0), %%eax;
-		movl 4(%0), %%edx;
-		cmpxchg8b (%0);
-		jnz 1b"
-	::		"D"(ptr),
+	__asm__ __volatile__ (
+		"\n1:\t"
+		"movl (%0), %%eax\n\t"
+		"movl 4(%0), %%edx\n\t"
+		"lock cmpxchg8b (%0)\n\t"
+		"jnz 1b"
+		: /* no outputs */
+		:	"D"(ptr),
 			"b"(low),
 			"c"(high)
-	:
-			"ax","dx","memory");
+		:	"ax","dx","memory");
 }
 
-extern void inline __set_64bit_constant (unsigned long long *ptr,
+static inline void __set_64bit_constant (unsigned long long *ptr,
 						 unsigned long long value)
 {
 	__set_64bit(ptr,(unsigned int)(value), (unsigned int)((value)>>32ULL));
@@ -164,7 +187,7 @@ extern void inline __set_64bit_constant (unsigned long long *ptr,
 #define ll_low(x)	*(((unsigned int*)&(x))+0)
 #define ll_high(x)	*(((unsigned int*)&(x))+1)
 
-extern void inline __set_64bit_var (unsigned long long *ptr,
+static inline void __set_64bit_var (unsigned long long *ptr,
 			 unsigned long long value)
 {
 	__set_64bit(ptr,ll_low(value), ll_high(value));
@@ -218,6 +241,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 
 #ifdef CONFIG_X86_CMPXCHG
 #define __HAVE_ARCH_CMPXCHG 1
+#endif
 
 static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 				      unsigned long new, int size)
@@ -250,9 +274,66 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 	((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),\
 					(unsigned long)(n),sizeof(*(ptr))))
     
-#else
-/* Compiling for a 386 proper.	Is it worth implementing via cli/sti?  */
+#ifdef __KERNEL__
+struct alt_instr { 
+	__u8 *instr; 		/* original instruction */
+	__u8 *replacement;
+	__u8  cpuid;		/* cpuid bit set for replacement */
+	__u8  instrlen;		/* length of original instruction */
+	__u8  replacementlen; 	/* length of new instruction, <= instrlen */ 
+	__u8  pad;
+}; 
 #endif
+
+/* 
+ * Alternative instructions for different CPU types or capabilities.
+ * 
+ * This allows to use optimized instructions even on generic binary
+ * kernels.
+ * 
+ * length of oldinstr must be longer or equal the length of newinstr
+ * It can be padded with nops as needed.
+ * 
+ * For non barrier like inlines please define new variants
+ * without volatile and memory clobber.
+ */
+#define alternative(oldinstr, newinstr, feature) 	\
+	asm volatile ("661:\n\t" oldinstr "\n662:\n" 		     \
+		      ".section .altinstructions,\"a\"\n"     	     \
+		      "  .align 4\n"				       \
+		      "  .long 661b\n"            /* label */          \
+		      "  .long 663f\n"		  /* new instruction */ 	\
+		      "  .byte %c0\n"             /* feature bit */    \
+		      "  .byte 662b-661b\n"       /* sourcelen */      \
+		      "  .byte 664f-663f\n"       /* replacementlen */ \
+		      ".previous\n"						\
+		      ".section .altinstr_replacement,\"ax\"\n"			\
+		      "663:\n\t" newinstr "\n664:\n"   /* replacement */    \
+		      ".previous" :: "i" (feature) : "memory")  
+
+/*
+ * Alternative inline assembly with input.
+ * 
+ * Pecularities:
+ * No memory clobber here. 
+ * Argument numbers start with 1.
+ * Best is to use constraints that are fixed size (like (%1) ... "r")
+ * If you use variable sized constraints like "m" or "g" in the 
+ * replacement maake sure to pad to the worst case length.
+ */
+#define alternative_input(oldinstr, newinstr, feature, input...)		\
+	asm volatile ("661:\n\t" oldinstr "\n662:\n"				\
+		      ".section .altinstructions,\"a\"\n"			\
+		      "  .align 4\n"						\
+		      "  .long 661b\n"            /* label */			\
+		      "  .long 663f\n"		  /* new instruction */ 	\
+		      "  .byte %c0\n"             /* feature bit */		\
+		      "  .byte 662b-661b\n"       /* sourcelen */		\
+		      "  .byte 664f-663f\n"       /* replacementlen */ 		\
+		      ".previous\n"						\
+		      ".section .altinstr_replacement,\"ax\"\n"			\
+		      "663:\n\t" newinstr "\n664:\n"   /* replacement */ 	\
+		      ".previous" :: "i" (feature), ##input)
 
 /*
  * Force strict CPU ordering.
@@ -268,63 +349,114 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
  * but I'd also expect them to finally get their act together
  * and add some real memory barriers if so.
  *
- * The Pentium III does add a real memory barrier with the
- * sfence instruction, so we use that where appropriate.
+ * Some non intel clones support out of order store. wmb() ceases to be a
+ * nop for these.
  */
-#ifndef CONFIG_X86_XMM
-#define mb() 	__asm__ __volatile__ ("lock; addl $0,0(%%esp)": : :"memory")
+ 
+
+/* 
+ * Actually only lfence would be needed for mb() because all stores done 
+ * by the kernel should be already ordered. But keep a full barrier for now. 
+ */
+
+#define mb() alternative("lock; addl $0,0(%%esp)", "mfence", X86_FEATURE_XMM2)
+#define rmb() alternative("lock; addl $0,0(%%esp)", "lfence", X86_FEATURE_XMM2)
+
+/**
+ * read_barrier_depends - Flush all pending reads that subsequents reads
+ * depend on.
+ *
+ * No data-dependent reads from memory-like regions are ever reordered
+ * over this barrier.  All reads preceding this primitive are guaranteed
+ * to access memory (but not necessarily other CPUs' caches) before any
+ * reads following this primitive that depend on the data return by
+ * any of the preceding reads.  This primitive is much lighter weight than
+ * rmb() on most CPUs, and is never heavier weight than is
+ * rmb().
+ *
+ * These ordering constraints are respected by both the local CPU
+ * and the compiler.
+ *
+ * Ordering is not guaranteed by anything other than these primitives,
+ * not even by data dependencies.  See the documentation for
+ * memory_barrier() for examples and URLs to more information.
+ *
+ * For example, the following code would force ordering (the initial
+ * value of "a" is zero, "b" is one, and "p" is "&a"):
+ *
+ * <programlisting>
+ *	CPU 0				CPU 1
+ *
+ *	b = 2;
+ *	memory_barrier();
+ *	p = &b;				q = p;
+ *					read_barrier_depends();
+ *					d = *q;
+ * </programlisting>
+ *
+ * because the read of "*q" depends on the read of "p" and these
+ * two reads are separated by a read_barrier_depends().  However,
+ * the following code, with the same initial values for "a" and "b":
+ *
+ * <programlisting>
+ *	CPU 0				CPU 1
+ *
+ *	a = 2;
+ *	memory_barrier();
+ *	b = 3;				y = b;
+ *					read_barrier_depends();
+ *					x = a;
+ * </programlisting>
+ *
+ * does not enforce ordering, since there is no data dependency between
+ * the read of "a" and the read of "b".  Therefore, on some CPUs, such
+ * as Alpha, "y" could be set to 3 and "x" to 0.  Use rmb()
+ * in cases like thiswhere there are no data dependencies.
+ **/
+
+#define read_barrier_depends()	do { } while(0)
+
+#ifdef CONFIG_X86_OOSTORE
+/* Actually there are no OOO store capable CPUs for now that do SSE, 
+   but make it already an possibility. */
+#define wmb() alternative("lock; addl $0,0(%%esp)", "sfence", X86_FEATURE_XMM)
 #else
-#define mb()	__asm__ __volatile__ ("sfence": : :"memory")
-#endif
-#define rmb()	mb()
 #define wmb()	__asm__ __volatile__ ("": : :"memory")
+#endif
 
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
 #define smp_wmb()	wmb()
+#define smp_read_barrier_depends()	read_barrier_depends()
+#define set_mb(var, value) do { xchg(&var, value); } while (0)
 #else
 #define smp_mb()	barrier()
 #define smp_rmb()	barrier()
 #define smp_wmb()	barrier()
+#define smp_read_barrier_depends()	do { } while(0)
+#define set_mb(var, value) do { var = value; barrier(); } while (0)
 #endif
 
-#define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
 /* interrupt control.. */
-#define __save_flags(x)		__asm__ __volatile__("pushfl ; popl %0":"=g" (x): /* no input */)
-#define __restore_flags(x) 	__asm__ __volatile__("pushl %0 ; popfl": /* no output */ :"g" (x):"memory")
-#define __cli() 		__asm__ __volatile__("cli": : :"memory")
-#define __sti()			__asm__ __volatile__("sti": : :"memory")
+#define local_save_flags(x)	do { typecheck(unsigned long,x); __asm__ __volatile__("pushfl ; popl %0":"=g" (x): /* no input */); } while (0)
+#define local_irq_restore(x) 	do { typecheck(unsigned long,x); __asm__ __volatile__("pushl %0 ; popfl": /* no output */ :"g" (x):"memory", "cc"); } while (0)
+#define local_irq_disable() 	__asm__ __volatile__("cli": : :"memory")
+#define local_irq_enable()	__asm__ __volatile__("sti": : :"memory")
 /* used in the idle loop; sti takes one instruction cycle to complete */
 #define safe_halt()		__asm__ __volatile__("sti; hlt": : :"memory")
 
+#define irqs_disabled()			\
+({					\
+	unsigned long flags;		\
+	local_save_flags(flags);	\
+	!(flags & (1<<9));		\
+})
+
 /* For spinlocks etc */
 #define local_irq_save(x)	__asm__ __volatile__("pushfl ; popl %0 ; cli":"=g" (x): /* no input */ :"memory")
-#define local_irq_restore(x)	__restore_flags(x)
-#define local_irq_disable()	__cli()
-#define local_irq_enable()	__sti()
-
-#ifdef CONFIG_SMP
-
-extern void __global_cli(void);
-extern void __global_sti(void);
-extern unsigned long __global_save_flags(void);
-extern void __global_restore_flags(unsigned long);
-#define cli() __global_cli()
-#define sti() __global_sti()
-#define save_flags(x) ((x)=__global_save_flags())
-#define restore_flags(x) __global_restore_flags(x)
-
-#else
-
-#define cli() __cli()
-#define sti() __sti()
-#define save_flags(x) __save_flags(x)
-#define restore_flags(x) __restore_flags(x)
-
-#endif
 
 /*
  * disable hlt during certain critical i/o operations
@@ -332,5 +464,8 @@ extern void __global_restore_flags(unsigned long);
 #define HAVE_DISABLE_HLT
 void disable_hlt(void);
 void enable_hlt(void);
+
+extern int es7000_plat;
+void cpu_idle_wait(void);
 
 #endif

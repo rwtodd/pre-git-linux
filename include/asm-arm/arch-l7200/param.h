@@ -1,5 +1,5 @@
 /*
- * linux/include/asm-arm/arch-l7200/param.h
+ *  linux/include/asm-arm/arch-l7200/param.h
  *
  * Copyright (C) 2000 Rob Scott (rscott@mtrob.fdns.net)
  *                    Steve Hill (sjhill@cotw.com)
@@ -12,12 +12,8 @@
  *   04-25-2000 SJH     Cleaned up file
  *   05-03-2000 SJH     Change comments and rate
  */
-#ifndef __ASM_ARCH_PARAM_H
-#define __ASM_ARCH_PARAM_H
 
 /*
  * See 'time.h' for how the RTC HZ rate is set
  */
 #define HZ 128
-
-#endif

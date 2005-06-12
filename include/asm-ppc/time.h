@@ -1,31 +1,43 @@
 /*
- * $Id: time.h,v 1.12 1999/08/27 04:21:23 cort Exp $
  * Common time prototypes and such for all ppc machines.
  *
- * Written by Cort Dougan (cort@cs.nmt.edu) to merge
+ * Written by Cort Dougan (cort@fsmlabs.com) to merge
  * Paul Mackerras' version and mine for PReP and Pmac.
  */
 
 #ifdef __KERNEL__
-#include <linux/config.h>
-#include <linux/mc146818rtc.h>
+#ifndef __ASM_TIME_H__
+#define __ASM_TIME_H__
 
-#include <asm/processor.h>
+#include <linux/config.h>
+#include <linux/types.h>
+#include <linux/rtc.h>
+#include <linux/threads.h>
+
+#include <asm/reg.h>
 
 /* time.c */
 extern unsigned tb_ticks_per_jiffy;
 extern unsigned tb_to_us;
 extern unsigned tb_last_stamp;
+extern unsigned long disarm_decr[NR_CPUS];
 
 extern void to_tm(int tim, struct rtc_time * tm);
 extern time_t last_rtc_update;
 
+extern void set_dec_cpu6(unsigned int val);
+
 int via_calibrate_decr(void);
 
-/* Accessor functions for the decrementer register. */
+/* Accessor functions for the decrementer register.
+ * The 4xx doesn't even have a decrementer.  I tried to use the
+ * generic timer interrupt code, which seems OK, with the 4xx PIT
+ * in auto-reload mode.  The problem is PIT stops counting when it
+ * hits zero.  If it would wrap, we could use it just like a decrementer.
+ */
 static __inline__ unsigned int get_dec(void)
 {
-#if defined(CONFIG_4xx)
+#if defined(CONFIG_40x)
 	return (mfspr(SPRN_PIT));
 #else
 	return (mfspr(SPRN_DEC));
@@ -34,14 +46,12 @@ static __inline__ unsigned int get_dec(void)
 
 static __inline__ void set_dec(unsigned int val)
 {
-#if defined(CONFIG_4xx)
-	mtspr(SPRN_PIT, val);
-#else
-#ifdef CONFIG_8xx_CPU6
+#if defined(CONFIG_40x)
+	return;		/* Have to let it auto-reload */
+#elif defined(CONFIG_8xx_CPU6)
 	set_dec_cpu6(val);
 #else
 	mtspr(SPRN_DEC, val);
-#endif
 #endif
 }
 
@@ -57,14 +67,42 @@ extern __inline__ int const __USE_RTC(void) {
 
 extern __inline__ unsigned long get_tbl(void) {
 	unsigned long tbl;
+#if defined(CONFIG_403GCX)
+	asm volatile("mfspr %0, 0x3dd" : "=r" (tbl));
+#else
 	asm volatile("mftb %0" : "=r" (tbl));
+#endif
 	return tbl;
+}
+
+extern __inline__ unsigned long get_tbu(void) {
+	unsigned long tbl;
+#if defined(CONFIG_403GCX)
+	asm volatile("mfspr %0, 0x3dc" : "=r" (tbl));
+#else
+	asm volatile("mftbu %0" : "=r" (tbl));
+#endif
+	return tbl;
+}
+
+extern __inline__ void set_tb(unsigned int upper, unsigned int lower)
+{
+	mtspr(SPRN_TBWL, 0);
+	mtspr(SPRN_TBWU, upper);
+	mtspr(SPRN_TBWL, lower);
 }
 
 extern __inline__ unsigned long get_rtcl(void) {
 	unsigned long rtcl;
 	asm volatile("mfrtcl %0" : "=r" (rtcl));
 	return rtcl;
+}
+
+extern __inline__ unsigned long get_rtcu(void)
+{
+	unsigned long rtcu;
+	asm volatile("mfrtcu %0" : "=r" (rtcu));
+	return rtcu;
 }
 
 extern __inline__ unsigned get_native_tbl(void) {
@@ -110,8 +148,10 @@ extern __inline__ unsigned binary_tbl(void) {
 #endif
 
 /* Use mulhwu to scale processor timebase to timeval */
+/* Specifically, this computes (x * y) / 2^32.  -- paulus */
 #define mulhwu(x,y) \
 ({unsigned z; asm ("mulhwu %0,%1,%2" : "=r" (z) : "r" (x), "r" (y)); z;})
 
 unsigned mulhwu_scale_factor(unsigned, unsigned);
+#endif /* __ASM_TIME_H__ */
 #endif /* __KERNEL__ */

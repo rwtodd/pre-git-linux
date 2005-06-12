@@ -1,5 +1,5 @@
 /*
- *  asm-ppc/hydra.h -- Mac I/O `Hydra' definitions
+ *  include/asm-ppc/hydra.h -- Mac I/O `Hydra' definitions
  *
  *  Copyright (C) 1997 Geert Uytterhoeven
  *

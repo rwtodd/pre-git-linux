@@ -1,8 +1,6 @@
 #ifndef __ASM_SH_USER_H
 #define __ASM_SH_USER_H
 
-#include <linux/types.h>
-#include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
 
@@ -31,7 +29,7 @@
 
 struct user_fpu_struct {
 	unsigned long fp_regs[16];
-	unsigned long long xd_regs[8];
+	unsigned long xfp_regs[16];
 	unsigned long fpscr;
 	unsigned long fpul;
 };

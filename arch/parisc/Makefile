@@ -16,76 +16,99 @@
 # Modified for PA-RISC Linux by Paul Lahaie, Alex deVries, 
 # Mike Shaver, Helge Deller and Martin K. Petersen
 #
+NM		= sh $(srctree)/arch/parisc/nm
+ifdef CONFIG_PARISC64
+CROSS_COMPILE	:= hppa64-linux-
+UTS_MACHINE	:= parisc64
+else
+MACHINE := $(subst 64,,$(shell uname -m))
+ifneq ($(MACHINE),parisc)
+CROSS_COMPILE	:= hppa-linux-
+endif
+endif
 
 FINAL_LD=$(CROSS_COMPILE)ld --warn-common --warn-section-align 
 
-CPP=$(CC) -E
-OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
-LDFLAGS =
-LINKFLAGS =-T $(TOPDIR)/arch/parisc/vmlinux.lds $(LDFLAGS)
+OBJCOPY_FLAGS =-O binary -R .note -R .comment -S
 
-CFLAGS_PIPE := -pipe
-CFLAGS_NSR  := -fno-strength-reduce
-CFLAGS := $(CFLAGS) -D__linux__ $(CFLAGS_PIPE) $(CFLAGS_NSR)
+cflags-y	:= -pipe
 
-# These should be on for older toolchains or SOM toolchains that don't
-# enable them by default.
-CFLAGS += -mno-space-regs -mfast-indirect-calls
+# These flags should be implied by an hppa-linux configuration, but they
+# are not in gcc 3.2.
+cflags-y	+= -mno-space-regs -mfast-indirect-calls
 
-# If we become able to compile for specific platforms, this should be
-# conditional on that.
-CFLAGS += -mschedule=7200
+# Currently we save and restore fpregs on all kernel entry/interruption paths.
+# If that gets optimized, we might need to disable the use of fpregs in the
+# kernel.
+#cflags-y	+= -mdisable-fpregs
 
-# No fixed-point multiply
-CFLAGS += -mdisable-fpregs
+# Without this, "ld -r" results in .text sections that are too big
+# (> 0x40000) for branches to reach stubs.
+cflags-y	+= -ffunction-sections
 
-HEAD = arch/parisc/kernel/head.o 
+# select which processor to optimise for
+cflags-$(CONFIG_PA7100)		+= -march=1.1 -mschedule=7100
+cflags-$(CONFIG_PA7200)		+= -march=1.1 -mschedule=7200
+cflags-$(CONFIG_PA7100LC)	+= -march=1.1 -mschedule=7100LC
+cflags-$(CONFIG_PA7300LC)	+= -march=1.1 -mschedule=7300
+cflags-$(CONFIG_PA8X00)		+= -march=2.0 -mschedule=8000
 
-SUBDIRS := $(SUBDIRS) $(addprefix arch/parisc/, tools kernel mm lib hpux)
-CORE_FILES :=  $(addprefix arch/parisc/, kernel/pdc_cons.o kernel/process.o \
-	lib/lib.a mm/mm.o kernel/kernel.o hpux/hpux.o) \
-	$(CORE_FILES) arch/parisc/kernel/init_task.o
-LIBS := `$(CC) -print-libgcc-file-name` $(TOPDIR)/arch/parisc/lib/lib.a $(LIBS) 
+head-y			:= arch/parisc/kernel/head.o 
 
-ifdef CONFIG_MATH_EMULATION
-SUBDIRS := $(SUBDIRS) arch/parisc/math-emu
-DRIVERS := $(DRIVERS) arch/parisc/math-emu/math.a
-endif
+CFLAGS	+= $(cflags-y)
 
-ifdef CONFIG_KWDB
-SUBDIRS := $(SUBDIRS) arch/parisc/kdb
-DRIVERS := $(DRIVERS) arch/parisc/kdb/kdb.o
+kernel-y			:= mm/ kernel/ math-emu/ kernel/init_task.o
+kernel-$(CONFIG_HPUX)		+= hpux/
 
-arch/parisc/kdb: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/parisc/kdb
-endif
+core-y	+= $(addprefix arch/parisc/, $(kernel-y))
+libs-y	+= arch/parisc/lib/ `$(CC) -print-libgcc-file-name`
 
-arch/parisc/kernel: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/parisc/kernel
-
-arch/parisc/mm: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/parisc/mm
+drivers-$(CONFIG_OPROFILE)		+= arch/parisc/oprofile/
 
 palo: vmlinux
-	export TOPDIR=`pwd`; export CONFIG_STI_CONSOLE=$(CONFIG_STI_CONSOLE); \
+	@if [ $$(palo -f /dev/null >/dev/null 2>&1 ; echo $$?) != 2 ]; then \
+		echo 'ERROR: Please install palo first (apt-get install palo)';\
+		echo 'or build it from source and install it somewhere in your $$PATH';\
+		false; \
+	fi
+	@if [ ! -f ./palo.conf ]; then \
+		cp arch/parisc/defpalo.conf palo.conf; \
+		echo 'A generic palo config file (./palo.conf) has been created for you.'; \
+		echo 'You should check it and re-run "make palo".'; \
+		echo 'WARNING: the "lifimage" file is now placed in this directory by default!'; \
+		false; \
+	fi
+	palo -f ./palo.conf
+
+oldpalo: vmlinux
+	export TOPDIR=`pwd`; \
 	unset STRIP LDFLAGS CPP CPPFLAGS AFLAGS CFLAGS CC LD; cd ../palo && make lifimage
 
-Image: palo
+# Shorthands for known targets not supported by parisc, use palo as default
+Image zImage bzImage: palo
 
-Image-clean:
+kernel_install: vmlinux
+	sh $(src)/arch/parisc/install.sh \
+			$(KERNELRELEASE) $< System.map "$(INSTALL_PATH)"
 
-ramdisk.o:
+install: kernel_install modules_install
 
-zImage: palo
+prepare: include/asm-parisc/offsets.h
 
-bzImage: palo
+arch/parisc/kernel/asm-offsets.s: include/asm include/linux/version.h \
+				   include/config/MARKER
 
-compressed: zImage
+include/asm-parisc/offsets.h: arch/parisc/kernel/asm-offsets.s
+	$(call filechk,gen-asm-offsets)
 
-install: 
+CLEAN_FILES	+= lifimage include/asm-parisc/offsets.h
+MRPROPER_FILES	+= palo.conf
 
-archclean:
-
-archmrproper:
-
-archdep:
+define archhelp
+	@echo  '* vmlinux	- Uncompressed kernel image (./vmlinux)'
+	@echo  '  palo		- Bootable image (./lifimage)'
+	@echo  '  install	- Install kernel using'
+	@echo  '		  (your) ~/bin/installkernel or'
+	@echo  '		  (distribution) /sbin/installkernel or'
+	@echo  '		  copy to $$(INSTALL_PATH)'
+endef

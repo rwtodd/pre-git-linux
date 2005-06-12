@@ -8,18 +8,12 @@
  *  http://www.linux-sna.org
  *
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  *  The following modules are currently available for card support:
  *	- tmspci (Generic PCI card support)
  *	- abyss (Madge PCI support)
- *  
- *  The following cards are currently lacking support, even
- *  though they were supported in previous versions, because
- *  their code did not get migrated into a seperate module:
- *	- SysKonnect TR4/16(+) ISA	(SK-4190)
- *  They are no longer supported by this driver, at least until
- *  a module gets written for them.
+ *      - tmsisa (SysKonnect TR4/16 ISA)
  *
  *  Sources:
  *  	- The hardware related parts of this driver are take from
@@ -34,10 +28,11 @@
  *  	- Various Madge employees
  *
  *  Maintainer(s):
- *    JS	Jay Schulist		jschlst@turbolinux.com
+ *    JS	Jay Schulist		jschlst@samba.org
  *    CG	Christoph Goos		cgoos@syskonnect.de
  *    AF	Adam Fritzler		mid@auk.cx
  *    MLP       Mike Phillips           phillim@amtrak.com
+ *    JF	Jochen Friedrich	jochen@scram.de
  *     
  *  Modification History:
  *	29-Aug-97	CG	Created
@@ -57,10 +52,20 @@
  *	30-Dec-99	AF	Turned tms380tr into a library ala 8390.
  *				Madge support is provided in the abyss module
  *				Generic PCI support is in the tmspci module.
- *
+ *	30-Nov-00	JF	Updated PCI code to support IO MMU via
+ *				pci_map_static(). Alpha uses this MMU for ISA
+ *				as well.
+ *      14-Jan-01	JF	Fix DMA on ifdown/ifup sequences. Some 
+ *      			cleanup.
+ *	13-Jan-02	JF	Add spinlock to fix race condition.
+ *	09-Nov-02	JF	Fixed printks to not SPAM the console during
+ *				normal operation.
+ *	30-Dec-02	JF	Removed incorrect __init from 
+ *				tms380tr_init_card.
+ *      			
  *  To do:
  *    1. Multi/Broadcast packet handling (this may have fixed itself)
- *    2. Write a sktrisa module that includes the old ISA support
+ *    2. Write a sktrisa module that includes the old ISA support (done)
  *    3. Allow modules to load their own microcode
  *    4. Speed up the BUD process -- freezing the kernel for 3+sec is
  *         quite unacceptable.
@@ -68,43 +73,38 @@
  */
 
 #ifdef MODULE
-static const char *version = "tms380tr.c: v1.07 21/01/2000 by Christoph Goos, Adam Fritzler\n";
+static const char version[] = "tms380tr.c: v1.10 30/12/2002 by Christoph Goos, Adam Fritzler\n";
 #endif
 
-#ifdef MODULE
 #include <linux/module.h>
-#include <linux/version.h>
-#endif
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/time.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <asm/irq.h>
-#include <asm/uaccess.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/trdevice.h>
+#include <linux/firmware.h>
+#include <linux/bitops.h>
+
+#include <asm/system.h>
+#include <asm/io.h>
+#include <asm/dma.h>
+#include <asm/irq.h>
+#include <asm/uaccess.h>
 
 #include "tms380tr.h"		/* Our Stuff */
-#include "tms380tr_microcode.h"	/* TI microcode for COMMprocessor */
 
 /* Use 0 for production, 1 for verification, 2 for debug, and
  * 3 for very verbose debug.
@@ -113,6 +113,8 @@ static const char *version = "tms380tr.c: v1.07 21/01/2000 by Christoph Goos, Ad
 #define TMS380TR_DEBUG 0
 #endif
 static unsigned int tms380tr_debug = TMS380TR_DEBUG;
+
+static struct device tms_device;
 
 /* Index to functions, as function prototypes.
  * Alphabetical by function name.
@@ -125,9 +127,6 @@ static int      tms380tr_bringup_diags(struct net_device *dev);
 static void	tms380tr_cancel_tx_queue(struct net_local* tp);
 static int 	tms380tr_chipset_init(struct net_device *dev);
 static void 	tms380tr_chk_irq(struct net_device *dev);
-#if 0
-static unsigned char tms380tr_chk_frame(struct net_device *dev, unsigned char *Addr);
-#endif
 static void 	tms380tr_chk_outstanding_cmds(struct net_device *dev);
 static void 	tms380tr_chk_src_addr(unsigned char *frame, unsigned char *hw_addr);
 static unsigned char tms380tr_chk_ssb(struct net_local *tp, unsigned short IrqType);
@@ -146,15 +145,13 @@ static void 	tms380tr_exec_sifcmd(struct net_device *dev, unsigned int WriteValu
 /* "G" */
 static struct net_device_stats *tms380tr_get_stats(struct net_device *dev);
 /* "H" */
-static void 	tms380tr_hardware_send_packet(struct net_device *dev,
-			struct net_local* tp);
+static int 	tms380tr_hardware_send_packet(struct sk_buff *skb,
+			struct net_device *dev);
 /* "I" */
 static int 	tms380tr_init_adapter(struct net_device *dev);
-static int 	tms380tr_init_card(struct net_device *dev);
 static void 	tms380tr_init_ipb(struct net_local *tp);
 static void 	tms380tr_init_net_local(struct net_device *dev);
 static void 	tms380tr_init_opb(struct net_device *dev);
-void	 	tms380tr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 /* "M" */
 /* "O" */
 int		tms380tr_open(struct net_device *dev);
@@ -191,7 +188,7 @@ static void 	tms380tr_write_tpl_status(TPL *tpl, unsigned int Status);
 
 
 
-#if TMS380TR_DEBUG > 0
+#if 0 /* TMS380TR_DEBUG > 0 */
 static int madgemc_sifprobe(struct net_device *dev)
 {
         unsigned char old, chk1, chk2;
@@ -236,15 +233,6 @@ static int madgemc_sifprobe(struct net_device *dev)
 }
 #endif
 
-/* Dummy function */
-static int __init tms380tr_init_card(struct net_device *dev)
-{
-	if(tms380tr_debug > 3)
-		printk("%s: tms380tr_init_card\n", dev->name);
-
-	return (0);
-}
-
 /*
  * Open/initialize the board. This is called sometime after
  * booting when the 'ifconfig' program is run.
@@ -255,10 +243,26 @@ static int __init tms380tr_init_card(struct net_device *dev)
  */
 int tms380tr_open(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	int err;
 	
+	/* init the spinlock */
+	spin_lock_init(&tp->lock);
+	init_timer(&tp->timer);
+
 	/* Reset the hardware here. Don't forget to set the station address. */
+
+#ifdef CONFIG_ISA
+	if(dev->dma > 0) 
+	{
+		unsigned long flags=claim_dma_lock();
+		disable_dma(dev->dma);
+		set_dma_mode(dev->dma, DMA_MODE_CASCADE);
+		enable_dma(dev->dma);
+		release_dma_lock(flags);
+	}
+#endif
+	
 	err = tms380tr_chipset_init(dev);
   	if(err)
 	{
@@ -267,14 +271,14 @@ int tms380tr_open(struct net_device *dev)
 		return (-1);
 	}
 
-	init_timer(&tp->timer);
 	tp->timer.expires	= jiffies + 30*HZ;
 	tp->timer.function	= tms380tr_timer_end_wait;
 	tp->timer.data		= (unsigned long)dev;
 	add_timer(&tp->timer);
 
-	printk(KERN_INFO "%s: Adapter RAM size: %dK\n", 
+	printk(KERN_DEBUG "%s: Adapter RAM size: %dK\n", 
 	       dev->name, tms380tr_read_ptr(dev));
+
 	tms380tr_enable_interrupts(dev);
 	tms380tr_open_adapter(dev);
 
@@ -311,7 +315,7 @@ int tms380tr_open(struct net_device *dev)
 static void tms380tr_timer_end_wait(unsigned long data)
 {
 	struct net_device *dev = (struct net_device*)data;
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	if(tp->Sleeping)
 	{
@@ -327,25 +331,33 @@ static void tms380tr_timer_end_wait(unsigned long data)
  */
 static int tms380tr_chipset_init(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	int err;
 
 	tms380tr_init_ipb(tp);
 	tms380tr_init_opb(dev);
 	tms380tr_init_net_local(dev);
 
+	if(tms380tr_debug > 3)
+		printk(KERN_DEBUG "%s: Resetting adapter...\n", dev->name);
 	err = tms380tr_reset_adapter(dev);
 	if(err < 0)
 		return (-1);
 
+	if(tms380tr_debug > 3)
+		printk(KERN_DEBUG "%s: Bringup diags...\n", dev->name);
 	err = tms380tr_bringup_diags(dev);
 	if(err < 0)
 		return (-1);
 
+	if(tms380tr_debug > 3)
+		printk(KERN_DEBUG "%s: Init adapter...\n", dev->name);
 	err = tms380tr_init_adapter(dev);
 	if(err < 0)
 		return (-1);
 
+	if(tms380tr_debug > 3)
+		printk(KERN_DEBUG "%s: Done!\n", dev->name);
 	return (0);
 }
 
@@ -354,8 +366,9 @@ static int tms380tr_chipset_init(struct net_device *dev)
  */
 static void tms380tr_init_net_local(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	int i;
+	dma_addr_t dmabuf;
 
 	tp->scb.CMD	= 0;
 	tp->scb.Parm[0] = 0;
@@ -379,13 +392,10 @@ static void tms380tr_init_net_local(struct net_device *dev)
 	tp->LastOpenStatus	= 0;
 	tp->MaxPacketSize	= DEFAULT_PACKET_SIZE;
 
-	skb_queue_head_init(&tp->SendSkbQueue);
-	tp->QueueSkb = MAX_TX_QUEUE;
-	
 	/* Create circular chain of transmit lists */
 	for (i = 0; i < TPL_NUM; i++)
 	{
-		tp->Tpl[i].NextTPLAddr = htonl((unsigned long) virt_to_bus(&tp->Tpl[(i+1) % TPL_NUM]));
+		tp->Tpl[i].NextTPLAddr = htonl(((char *)(&tp->Tpl[(i+1) % TPL_NUM]) - (char *)tp) + tp->dmabuffer); /* DMA buffer may be MMU driven */
 		tp->Tpl[i].Status	= 0;
 		tp->Tpl[i].FrameSize	= 0;
 		tp->Tpl[i].FragList[0].DataCount	= 0;
@@ -393,6 +403,7 @@ static void tms380tr_init_net_local(struct net_device *dev)
 		tp->Tpl[i].NextTPLPtr	= &tp->Tpl[(i+1) % TPL_NUM];
 		tp->Tpl[i].MData	= NULL;
 		tp->Tpl[i].TPLIndex	= i;
+		tp->Tpl[i].DMABuff	= 0;
 		tp->Tpl[i].BusyFlag	= 0;
 	}
 
@@ -401,19 +412,20 @@ static void tms380tr_init_net_local(struct net_device *dev)
 	/* Create circular chain of receive lists */
 	for (i = 0; i < RPL_NUM; i++)
 	{
-		tp->Rpl[i].NextRPLAddr = htonl((unsigned long) virt_to_bus(&tp->Rpl[(i+1) % RPL_NUM]));
+		tp->Rpl[i].NextRPLAddr = htonl(((char *)(&tp->Rpl[(i+1) % RPL_NUM]) - (char *)tp) + tp->dmabuffer); /* DMA buffer may be MMU driven */
 		tp->Rpl[i].Status = (RX_VALID | RX_START_FRAME | RX_END_FRAME | RX_FRAME_IRQ);
 		tp->Rpl[i].FrameSize = 0;
 		tp->Rpl[i].FragList[0].DataCount = cpu_to_be16((unsigned short)tp->MaxPacketSize);
 
 		/* Alloc skb and point adapter to data area */
 		tp->Rpl[i].Skb = dev_alloc_skb(tp->MaxPacketSize);
+			tp->Rpl[i].DMABuff = 0;
 
 		/* skb == NULL ? then use local buffer */
 		if(tp->Rpl[i].Skb == NULL)
 		{
 			tp->Rpl[i].SkbStat = SKB_UNAVAILABLE;
-			tp->Rpl[i].FragList[0].DataAddr = htonl(virt_to_bus(tp->LocalRxBuffers[i]));
+			tp->Rpl[i].FragList[0].DataAddr = htonl(((char *)tp->LocalRxBuffers[i] - (char *)tp) + tp->dmabuffer);
 			tp->Rpl[i].MData = tp->LocalRxBuffers[i];
 		}
 		else	/* SKB != NULL */
@@ -422,17 +434,19 @@ static void tms380tr_init_net_local(struct net_device *dev)
 			skb_put(tp->Rpl[i].Skb, tp->MaxPacketSize);
 
 			/* data unreachable for DMA ? then use local buffer */
-			if(tp->dmalimit && virt_to_bus(tp->Rpl[i].Skb->data) + tp->MaxPacketSize > tp->dmalimit)
+			dmabuf = pci_map_single(tp->pdev, tp->Rpl[i].Skb->data, tp->MaxPacketSize, PCI_DMA_FROMDEVICE);
+			if(tp->dmalimit && (dmabuf + tp->MaxPacketSize > tp->dmalimit))
 			{
 				tp->Rpl[i].SkbStat = SKB_DATA_COPY;
-				tp->Rpl[i].FragList[0].DataAddr = htonl(virt_to_bus(tp->LocalRxBuffers[i]));
+				tp->Rpl[i].FragList[0].DataAddr = htonl(((char *)tp->LocalRxBuffers[i] - (char *)tp) + tp->dmabuffer);
 				tp->Rpl[i].MData = tp->LocalRxBuffers[i];
 			}
 			else	/* DMA directly in skb->data */
 			{
 				tp->Rpl[i].SkbStat = SKB_DMA_DIRECT;
-				tp->Rpl[i].FragList[0].DataAddr = htonl(virt_to_bus(tp->Rpl[i].Skb->data));
+				tp->Rpl[i].FragList[0].DataAddr = htonl(dmabuf);
 				tp->Rpl[i].MData = tp->Rpl[i].Skb->data;
+				tp->Rpl[i].DMABuff = dmabuf;
 			}
 		}
 
@@ -480,7 +494,7 @@ static void tms380tr_init_opb(struct net_device *dev)
 	unsigned short BufferSize = BUFFER_SIZE;
 	int i;
 
-	tp = (struct net_local *)dev->priv;
+	tp = netdev_priv(dev);
 
 	tp->ocpl.OPENOptions 	 = 0;
 	tp->ocpl.OPENOptions 	|= ENABLE_FULL_DUPLEX_SELECTION;
@@ -506,7 +520,7 @@ static void tms380tr_init_opb(struct net_device *dev)
 	tp->ocpl.TXBufMin	 = TX_BUF_MIN;
 	tp->ocpl.TXBufMax	 = TX_BUF_MAX;
 
-	Addr = htonl(virt_to_bus(tp->ProductID));
+	Addr = htonl(((char *)tp->ProductID - (char *)tp) + tp->dmabuffer);
 
 	tp->ocpl.ProdIDAddr[0]	 = LOWORD(Addr);
 	tp->ocpl.ProdIDAddr[1]	 = HIWORD(Addr);
@@ -519,7 +533,7 @@ static void tms380tr_init_opb(struct net_device *dev)
  */
 static void tms380tr_open_adapter(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	if(tp->OpenCommandIssued)
 		return;
@@ -557,7 +571,7 @@ static void tms380tr_enable_interrupts(struct net_device *dev)
  */
 static void tms380tr_exec_cmd(struct net_device *dev, unsigned short Command)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	tp->CMDqueue |= Command;
 	tms380tr_chk_outstanding_cmds(dev);
@@ -584,100 +598,88 @@ static void tms380tr_timeout(struct net_device *dev)
  */
 static int tms380tr_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
+	int err;
 
-	/*
-	 * Block transmits from overlapping. 
-	 */
-	 
-	netif_stop_queue(dev);
-	
-	if(tp->QueueSkb == 0)
-		return (1);	/* Return with tbusy set: queue full */
-
-	tp->QueueSkb--;
-	skb_queue_tail(&tp->SendSkbQueue, skb);
-	tms380tr_hardware_send_packet(dev, tp);
-	if(tp->QueueSkb > 0)
-		netif_wake_queue(dev);
-	return (0);
+	err = tms380tr_hardware_send_packet(skb, dev);
+	if(tp->TplFree->NextTPLPtr->BusyFlag)
+		netif_stop_queue(dev);
+	return (err);
 }
 
 /*
- * Move frames from internal skb queue into adapter tx queue
+ * Move frames into adapter tx queue
  */
-static void tms380tr_hardware_send_packet(struct net_device *dev, struct net_local* tp)
+static int tms380tr_hardware_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	TPL *tpl;
 	short length;
-	unsigned char *buf, *newbuf;
-	struct sk_buff *skb;
+	unsigned char *buf;
+	unsigned long flags;
 	int i;
-    
-	for(;;)
-	{
-		/* Try to get a free TPL from the chain.
-		 *
-		 * NOTE: We *must* always leave one unused TPL in the chain, 
-		 * because otherwise the adapter might send frames twice.
-		 */
-		if(tp->TplFree->NextTPLPtr->BusyFlag)	/* No free TPL */
-		{
-			if (tms380tr_debug > 0)
-				printk(KERN_INFO "%s: No free TPL\n", dev->name);
-			return;
-		}
-
-		/* Send first buffer from queue */
-		skb = skb_dequeue(&tp->SendSkbQueue);
-		if(skb == NULL)
-			return;
-
-		tp->QueueSkb++;
-		/* Is buffer reachable for Busmaster-DMA? */
-		if(tp->dmalimit && virt_to_bus((void*)(((long) skb->data) + skb->len)) > tp->dmalimit)
-		{
-			/* Copy frame to local buffer */
-			i 	= tp->TplFree->TPLIndex;
-			length 	= skb->len;
-			buf 	= tp->LocalTxBuffers[i];
-			memcpy(buf, skb->data, length);
-			newbuf 	= buf;
-		}
-		else
-		{
-			/* Send direct from skb->data */
-			length = skb->len;
-			newbuf = skb->data;
-		}
-
-		/* Source address in packet? */
-		tms380tr_chk_src_addr(newbuf, dev->dev_addr);
-
-		tp->LastSendTime	= jiffies;
-		tpl 			= tp->TplFree;	/* Get the "free" TPL */
-		tpl->BusyFlag 		= 1;		/* Mark TPL as busy */
-		tp->TplFree 		= tpl->NextTPLPtr;
-    
-		/* Save the skb for delayed return of skb to system */
-		tpl->Skb = skb;
-		tpl->FragList[0].DataCount = cpu_to_be16((unsigned short)length);
-		tpl->FragList[0].DataAddr  = htonl(virt_to_bus(newbuf));
-
-		/* Write the data length in the transmit list. */
-		tpl->FrameSize 	= cpu_to_be16((unsigned short)length);
-		tpl->MData 	= newbuf;
-
-		/* Transmit the frame and set the status values. */
-		tms380tr_write_tpl_status(tpl, TX_VALID | TX_START_FRAME
-					| TX_END_FRAME | TX_PASS_SRC_ADDR
-					| TX_FRAME_IRQ);
-
-		/* Let adapter send the frame. */
-		tms380tr_exec_sifcmd(dev, CMD_TX_VALID);
+	dma_addr_t dmabuf, newbuf;
+	struct net_local *tp = netdev_priv(dev);
+   
+	/* Try to get a free TPL from the chain.
+	 *
+	 * NOTE: We *must* always leave one unused TPL in the chain,
+	 * because otherwise the adapter might send frames twice.
+	 */
+	spin_lock_irqsave(&tp->lock, flags);
+	if(tp->TplFree->NextTPLPtr->BusyFlag)  { /* No free TPL */
+		if (tms380tr_debug > 0)
+			printk(KERN_DEBUG "%s: No free TPL\n", dev->name);
+		spin_unlock_irqrestore(&tp->lock, flags);
+		return 1;
 	}
 
-	return;
+	dmabuf = 0;
+
+	/* Is buffer reachable for Busmaster-DMA? */
+
+	length	= skb->len;
+	dmabuf = pci_map_single(tp->pdev, skb->data, length, PCI_DMA_TODEVICE);
+	if(tp->dmalimit && (dmabuf + length > tp->dmalimit)) {
+		/* Copy frame to local buffer */
+		pci_unmap_single(tp->pdev, dmabuf, length, PCI_DMA_TODEVICE);
+		dmabuf  = 0;
+		i 	= tp->TplFree->TPLIndex;
+		buf 	= tp->LocalTxBuffers[i];
+		memcpy(buf, skb->data, length);
+		newbuf 	= ((char *)buf - (char *)tp) + tp->dmabuffer;
+	}
+	else {
+		/* Send direct from skb->data */
+		newbuf	= dmabuf;
+		buf	= skb->data;
+	}
+	/* Source address in packet? */
+	tms380tr_chk_src_addr(buf, dev->dev_addr);
+	tp->LastSendTime	= jiffies;
+	tpl 			= tp->TplFree;	/* Get the "free" TPL */
+	tpl->BusyFlag 		= 1;		/* Mark TPL as busy */
+	tp->TplFree 		= tpl->NextTPLPtr;
+    
+	/* Save the skb for delayed return of skb to system */
+	tpl->Skb = skb;
+	tpl->DMABuff = dmabuf;
+	tpl->FragList[0].DataCount = cpu_to_be16((unsigned short)length);
+	tpl->FragList[0].DataAddr  = htonl(newbuf);
+
+	/* Write the data length in the transmit list. */
+	tpl->FrameSize 	= cpu_to_be16((unsigned short)length);
+	tpl->MData 	= buf;
+
+	/* Transmit the frame and set the status values. */
+	tms380tr_write_tpl_status(tpl, TX_VALID | TX_START_FRAME
+				| TX_END_FRAME | TX_PASS_SRC_ADDR
+				| TX_FRAME_IRQ);
+
+	/* Let adapter send the frame. */
+	tms380tr_exec_sifcmd(dev, CMD_TX_VALID);
+	spin_unlock_irqrestore(&tp->lock, flags);
+
+	return 0;
 }
 
 /*
@@ -715,16 +717,16 @@ static void tms380tr_chk_src_addr(unsigned char *frame, unsigned char *hw_addr)
 static void tms380tr_timer_chk(unsigned long data)
 {
 	struct net_device *dev = (struct net_device*)data;
-	struct net_local *tp = (struct net_local*)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	if(tp->HaltInProgress)
 		return;
 
 	tms380tr_chk_outstanding_cmds(dev);
 	if(time_before(tp->LastSendTime + SEND_TIMEOUT, jiffies)
-		&& (tp->QueueSkb < MAX_TX_QUEUE || tp->TplFree != tp->TplBusy))
+		&& (tp->TplFree != tp->TplBusy))
 	{
-		/* Anything to send, but stalled to long */
+		/* Anything to send, but stalled too long */
 		tp->LastSendTime = jiffies;
 		tms380tr_exec_cmd(dev, OC_CLOSE);	/* Does reopen automatically */
 	}
@@ -743,26 +745,28 @@ static void tms380tr_timer_chk(unsigned long data)
 /*
  * The typical workload of the driver: Handle the network interface interrupts.
  */
-void tms380tr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t tms380tr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct net_local *tp;
 	unsigned short irq_type;
+	int handled = 0;
 
 	if(dev == NULL) {
-		printk("%s: irq %d for unknown device.\n", dev->name, irq);
-		return;
+		printk(KERN_INFO "%s: irq %d for unknown device.\n", dev->name, irq);
+		return IRQ_NONE;
 	}
 
-	tp = (struct net_local *)dev->priv;
+	tp = netdev_priv(dev);
 
 	irq_type = SIFREADW(SIFSTS);
 
 	while(irq_type & STS_SYSTEM_IRQ) {
+		handled = 1;
 		irq_type &= STS_IRQ_MASK;
 
 		if(!tms380tr_chk_ssb(tp, irq_type)) {
-			printk(KERN_INFO "%s: DATA LATE occurred\n", dev->name);
+			printk(KERN_DEBUG "%s: DATA LATE occurred\n", dev->name);
 			break;
 		}
 
@@ -820,7 +824,7 @@ void tms380tr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			break;
 			
 		default:
-			printk(KERN_INFO "Unknown Token Ring IRQ (0x%04x)\n", irq_type);
+			printk(KERN_DEBUG "Unknown Token Ring IRQ (0x%04x)\n", irq_type);
 			break;
 		}
 
@@ -833,7 +837,7 @@ void tms380tr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		irq_type = SIFREADW(SIFSTS);
 	}
 
-	return;
+	return IRQ_RETVAL(handled);
 }
 
 /*
@@ -841,7 +845,7 @@ void tms380tr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
  */
 static void tms380tr_reset_interrupt(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	SSB *ssb = &tp->ssb;
 
 	/*
@@ -927,7 +931,7 @@ static unsigned char tms380tr_chk_ssb(struct net_local *tp, unsigned short IrqTy
  */
 static void tms380tr_cmd_status_irq(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	unsigned short ssb_cmd, ssb_parm_0;
 	unsigned short ssb_parm_1;
 	char *open_err = "Open error -";
@@ -1124,7 +1128,7 @@ static void tms380tr_cmd_status_irq(struct net_device *dev)
  */
 int tms380tr_close(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	netif_stop_queue(dev);
 	
 	del_timer(&tp->timer);
@@ -1147,17 +1151,20 @@ int tms380tr_close(struct net_device *dev)
 	del_timer(&tp->timer);
 	tms380tr_disable_interrupts(dev);
    
+#ifdef CONFIG_ISA
 	if(dev->dma > 0) 
 	{
 		unsigned long flags=claim_dma_lock();
 		disable_dma(dev->dma);
 		release_dma_lock(flags);
 	}
+#endif
 	
 	SIFWRITEW(0xFF00, SIFCMD);
+#if 0
 	if(dev->dma > 0) /* what the? */
 		SIFWRITEB(0xff, POSREG);
-
+#endif
 	tms380tr_cancel_tx_queue(tp);
 
 	return (0);
@@ -1169,7 +1176,7 @@ int tms380tr_close(struct net_device *dev)
  */
 static struct net_device_stats *tms380tr_get_stats(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	return ((struct net_device_stats *)&tp->MacStat);
 }
@@ -1179,7 +1186,7 @@ static struct net_device_stats *tms380tr_get_stats(struct net_device *dev)
  */
 static void tms380tr_set_multicast_list(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	unsigned int OpenOptions;
 	
 	OpenOptions = tp->ocpl.OPENOptions &
@@ -1272,9 +1279,21 @@ static void tms380tr_exec_sifcmd(struct net_device *dev, unsigned int WriteValue
  */
 static int tms380tr_reset_adapter(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
-	unsigned short *fw_ptr = (unsigned short *)&tms380tr_code;
-	unsigned short count, c;
+	struct net_local *tp = netdev_priv(dev);
+	unsigned short *fw_ptr;
+	unsigned short count, c, count2;
+	const struct firmware *fw_entry = NULL;
+
+	strncpy(tms_device.bus_id,dev->name, BUS_ID_SIZE);
+
+	if (request_firmware(&fw_entry, "tms380tr.bin", &tms_device) != 0) {
+		printk(KERN_ALERT "%s: firmware %s is missing, cannot start.\n",
+			dev->name, "tms380tr.bin");
+		return (-1);
+	}
+
+	fw_ptr = (unsigned short *)fw_entry->data;
+	count2 = fw_entry->size / 2;
 
 	/* Hardware adapter reset */
 	SIFWRITEW(ACL_ARESET, SIFACL);
@@ -1301,23 +1320,31 @@ static int tms380tr_reset_adapter(struct net_device *dev)
 	SIFWRITEW(c, SIFACL);
 	tms380tr_wait(40);
 
+	count = 0;
 	/* Download firmware via DIO interface: */
 	do {
+		if (count2 < 3) continue;
+
 		/* Download first address part */
 		SIFWRITEW(*fw_ptr, SIFADX);
 		fw_ptr++;
-
+		count2--;
 		/* Download second address part */
 		SIFWRITEW(*fw_ptr, SIFADD);
 		fw_ptr++;
+		count2--;
 
 		if((count = *fw_ptr) != 0)	/* Load loop counter */
 		{
 			fw_ptr++;	/* Download block data */
+			count2--;
+			if (count > count2) continue;
+
 			for(; count > 0; count--)
 			{
 				SIFWRITEW(*fw_ptr, SIFINC);
 				fw_ptr++;
+				count2--;
 			}
 		}
 		else	/* Stop, if last block downloaded */
@@ -1327,10 +1354,15 @@ static int tms380tr_reset_adapter(struct net_device *dev)
 
 			/* Clear CPHALT and start BUD */
 			SIFWRITEW(c, SIFACL);
+			if (fw_entry)
+				release_firmware(fw_entry);
 			return (1);
 		}
 	} while(count == 0);
 
+	if (fw_entry)
+		release_firmware(fw_entry);
+	printk(KERN_INFO "%s: Adapter Download Failed\n", dev->name);
 	return (-1);
 }
 
@@ -1352,7 +1384,7 @@ static int tms380tr_bringup_diags(struct net_device *dev)
 	do {
 		retry_cnt--;
 		if(tms380tr_debug > 3)
-			printk(KERN_INFO "BUD-Status: ");
+			printk(KERN_DEBUG "BUD-Status: ");
 		loop_cnt = BUD_MAX_LOOPCNT;	/* maximum: three seconds*/
 		do {			/* Inspect BUD results */
 			loop_cnt--;
@@ -1361,7 +1393,7 @@ static int tms380tr_bringup_diags(struct net_device *dev)
 			Status &= STS_MASK;
 
 			if(tms380tr_debug > 3)
-				printk(KERN_INFO " %04X \n", Status);
+				printk(KERN_DEBUG " %04X \n", Status);
 			/* BUD successfully completed */
 			if(Status == STS_INITIALIZE)
 				return (1);
@@ -1381,6 +1413,7 @@ static int tms380tr_bringup_diags(struct net_device *dev)
 
 	Status = SIFREADW(SIFSTS);
 	
+	printk(KERN_INFO "%s: Hardware error\n", dev->name);
 	/* Hardware error occurred! */
 	Status &= 0x001f;
 	if (Status & 0x0010)
@@ -1399,7 +1432,7 @@ static int tms380tr_bringup_diags(struct net_device *dev)
  */
 static int tms380tr_init_adapter(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	const unsigned char SCB_Test[6] = {0x00, 0x00, 0xC1, 0xE2, 0xD4, 0x8B};
 	const unsigned char SSB_Test[8] = {0xFF, 0xFF, 0xD1, 0xD7,
@@ -1412,9 +1445,16 @@ static int tms380tr_init_adapter(struct net_device *dev)
 	int i, loop_cnt, retry_cnt;
 
 	/* Normalize: byte order low/high, word order high/low! (only IPB!) */
-	tp->ipb.SCB_Addr = SWAPW(virt_to_bus(&tp->scb));
-	tp->ipb.SSB_Addr = SWAPW(virt_to_bus(&tp->ssb));
+	tp->ipb.SCB_Addr = SWAPW(((char *)&tp->scb - (char *)tp) + tp->dmabuffer);
+	tp->ipb.SSB_Addr = SWAPW(((char *)&tp->ssb - (char *)tp) + tp->dmabuffer);
 
+	if(tms380tr_debug > 3)
+	{
+		printk(KERN_DEBUG "%s: buffer (real): %lx\n", dev->name, (long) &tp->scb);
+		printk(KERN_DEBUG "%s: buffer (virt): %lx\n", dev->name, (long) ((char *)&tp->scb - (char *)tp) + (long) tp->dmabuffer);
+		printk(KERN_DEBUG "%s: buffer (DMA) : %lx\n", dev->name, (long) tp->dmabuffer);
+		printk(KERN_DEBUG "%s: buffer (tp)  : %lx\n", dev->name, (long) tp);
+	}
 	/* Maximum: three initialization retries */
 	retry_cnt = INIT_MAX_RETRIES;
 
@@ -1454,8 +1494,11 @@ static int tms380tr_init_adapter(struct net_device *dev)
 			i = 0;
 			do {	/* Test if contents of SCB is valid */
 				if(SCB_Test[i] != *(cb_ptr + i))
+				{
+					printk(KERN_INFO "%s: DMA failed\n", dev->name);
 					/* DMA data error: wrong data in SCB */
 					return (-1);
+				}
 				i++;
 			} while(i < 6);
 
@@ -1477,6 +1520,7 @@ static int tms380tr_init_adapter(struct net_device *dev)
 				Status = SIFREADW(SIFSTS);
 				Status &= STS_ERROR_MASK;
 				/* ShowInitialisationErrorCode(Status); */
+				printk(KERN_INFO "%s: Status error: %d\n", dev->name, Status);
 				return (-1); /* Unrecoverable error */
 			}
 			else
@@ -1491,6 +1535,7 @@ static int tms380tr_init_adapter(struct net_device *dev)
 		}
 	} while(retry_cnt > 0);
 
+	printk(KERN_INFO "%s: Retry exceeded\n", dev->name);
 	return (-1);
 }
 
@@ -1500,7 +1545,7 @@ static int tms380tr_init_adapter(struct net_device *dev)
  */
 static void tms380tr_chk_outstanding_cmds(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	unsigned long Addr = 0;
 
 	if(tp->CMDqueue == 0)
@@ -1520,7 +1565,7 @@ static void tms380tr_chk_outstanding_cmds(struct net_device *dev)
 			/* Execute OPEN command	*/
 			tp->CMDqueue ^= OC_OPEN;
 
-			Addr = htonl(virt_to_bus(&tp->ocpl));
+			Addr = htonl(((char *)&tp->ocpl - (char *)tp) + tp->dmabuffer);
 			tp->scb.Parm[0] = LOWORD(Addr);
 			tp->scb.Parm[1] = HIWORD(Addr);
 			tp->scb.CMD = OPEN;
@@ -1554,7 +1599,7 @@ static void tms380tr_chk_outstanding_cmds(struct net_device *dev)
 			if(tp->CMDqueue & OC_RECEIVE)
 			{
 				tp->CMDqueue ^= OC_RECEIVE;
-				Addr = htonl(virt_to_bus(tp->RplHead));
+				Addr = htonl(((char *)tp->RplHead - (char *)tp) + tp->dmabuffer);
 				tp->scb.Parm[0] = LOWORD(Addr);
 				tp->scb.Parm[1] = HIWORD(Addr);
 				tp->scb.CMD = RECEIVE;
@@ -1595,7 +1640,7 @@ static void tms380tr_chk_outstanding_cmds(struct net_device *dev)
 
 						tp->CMDqueue ^= OC_TRANSMIT;
 						tms380tr_cancel_tx_queue(tp);
-						Addr = htonl(virt_to_bus(tp->TplBusy));
+						Addr = htonl(((char *)tp->TplBusy - (char *)tp) + tp->dmabuffer);
 						tp->scb.Parm[0] = LOWORD(Addr);
 						tp->scb.Parm[1] = HIWORD(Addr);
 						tp->scb.CMD = TRANSMIT;
@@ -1634,7 +1679,7 @@ static void tms380tr_chk_outstanding_cmds(struct net_device *dev)
 									if(tp->CMDqueue & OC_READ_ERROR_LOG)
 									{
 										tp->CMDqueue ^= OC_READ_ERROR_LOG;
-										Addr = htonl(virt_to_bus(&tp->errorlogtable));
+										Addr = htonl(((char *)&tp->errorlogtable - (char *)tp) + tp->dmabuffer);
 										tp->scb.Parm[0] = LOWORD(Addr);
 										tp->scb.Parm[1] = HIWORD(Addr);
 										tp->scb.CMD = READ_ERROR_LOG;
@@ -1672,7 +1717,7 @@ static void tms380tr_chk_outstanding_cmds(struct net_device *dev)
  */
 static void tms380tr_ring_status_irq(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	tp->CurrentRingStatus = be16_to_cpu((unsigned short)tp->ssb.Parm[0]);
 
@@ -1727,8 +1772,8 @@ static void tms380tr_ring_status_irq(struct net_device *dev)
 	if(tp->ssb.Parm[0] & ADAPTER_CLOSED)
 	{
 		printk(KERN_INFO "%s: Adapter closed (Reopening)," 
-			"QueueSkb %d, CurrentRingStat %x\n",
-			dev->name, tp->QueueSkb, tp->CurrentRingStatus);
+			"CurrentRingStat %x\n",
+			dev->name, tp->CurrentRingStatus);
 		tp->AdapterOpenFlag = 0;
 		tms380tr_open_adapter(dev);
 	}
@@ -1744,7 +1789,7 @@ static void tms380tr_chk_irq(struct net_device *dev)
 {
 	int i;
 	unsigned short AdapterCheckBlock[4];
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 
 	tp->AdapterOpenFlag = 0;	/* Adapter closed now */
 
@@ -1759,7 +1804,7 @@ static void tms380tr_chk_irq(struct net_device *dev)
 
 	if(tms380tr_debug > 3)
 	{
-		printk("%s: AdapterCheckBlock: ", dev->name);
+		printk(KERN_DEBUG "%s: AdapterCheckBlock: ", dev->name);
 		for (i = 0; i < 4; i++)
 			printk("%04X", AdapterCheckBlock[i]);
 		printk("\n");
@@ -1836,52 +1881,52 @@ static void tms380tr_chk_irq(struct net_device *dev)
 			break;
 
 		case ILLEGAL_OP_CODE:
-			printk("%s: Illegal operation code in firmware\n",
+			printk(KERN_INFO "%s: Illegal operation code in firmware\n",
 				dev->name);
 			/* Parm[0-3]: adapter internal register R13-R15 */
 			break;
 
 		case PARITY_ERRORS:
-			printk("%s: Adapter internal bus parity error\n",
+			printk(KERN_INFO "%s: Adapter internal bus parity error\n",
 				dev->name);
 			/* Parm[0-3]: adapter internal register R13-R15 */
 			break;
 
 		case RAM_DATA_ERROR:
-			printk("%s: RAM data error\n", dev->name);
+			printk(KERN_INFO "%s: RAM data error\n", dev->name);
 			/* Parm[0-1]: MSW/LSW address of RAM location. */
 			break;
 
 		case RAM_PARITY_ERROR:
-			printk("%s: RAM parity error\n", dev->name);
+			printk(KERN_INFO "%s: RAM parity error\n", dev->name);
 			/* Parm[0-1]: MSW/LSW address of RAM location. */
 			break;
 
 		case RING_UNDERRUN:
-			printk("%s: Internal DMA underrun detected\n",
+			printk(KERN_INFO "%s: Internal DMA underrun detected\n",
 				dev->name);
 			break;
 
 		case INVALID_IRQ:
-			printk("%s: Unrecognized interrupt detected\n",
+			printk(KERN_INFO "%s: Unrecognized interrupt detected\n",
 				dev->name);
 			/* Parm[0-3]: adapter internal register R13-R15 */
 			break;
 
 		case INVALID_ERROR_IRQ:
-			printk("%s: Unrecognized error interrupt detected\n",
+			printk(KERN_INFO "%s: Unrecognized error interrupt detected\n",
 				dev->name);
 			/* Parm[0-3]: adapter internal register R13-R15 */
 			break;
 
 		case INVALID_XOP:
-			printk("%s: Unrecognized XOP request detected\n",
+			printk(KERN_INFO "%s: Unrecognized XOP request detected\n",
 				dev->name);
 			/* Parm[0-3]: adapter internal register R13-R15 */
 			break;
 
 		default:
-			printk("%s: Unknown status", dev->name);
+			printk(KERN_INFO "%s: Unknown status", dev->name);
 			break;
 	}
 
@@ -1900,7 +1945,7 @@ static void tms380tr_chk_irq(struct net_device *dev)
  */
 static int tms380tr_read_ptr(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	unsigned short adapterram;
 
 	tms380tr_read_ram(dev, (unsigned char *)&tp->intptrs.BurnedInAddrPtr,
@@ -1956,7 +2001,6 @@ static void tms380tr_read_ram(struct net_device *dev, unsigned char *Data,
 static void tms380tr_cancel_tx_queue(struct net_local* tp)
 {
 	TPL *tpl;
-	struct sk_buff *skb;
 
 	/*
 	 * NOTE: There must not be an active TRANSMIT command pending, when
@@ -1976,17 +2020,9 @@ static void tms380tr_cancel_tx_queue(struct net_local* tp)
 		tpl->BusyFlag = 0;		/* "free" TPL */
 
 		printk(KERN_INFO "Cancel tx (%08lXh).\n", (unsigned long)tpl);
-
-		dev_kfree_skb(tpl->Skb);
-	}
-
-	for(;;)
-	{
-		skb = skb_dequeue(&tp->SendSkbQueue);
-		if(skb == NULL)
-			break;
-		tp->QueueSkb++;
-		dev_kfree_skb(skb);
+		if (tpl->DMABuff)
+			pci_unmap_single(tp->pdev, tpl->DMABuff, tpl->Skb->len, PCI_DMA_TODEVICE);
+		dev_kfree_skb_any(tpl->Skb);
 	}
 
 	return;
@@ -1999,7 +2035,7 @@ static void tms380tr_cancel_tx_queue(struct net_local* tp)
  */
 static void tms380tr_tx_status_irq(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	unsigned char HighByte, HighAc, LowAc;
 	TPL *tpl;
 
@@ -2031,14 +2067,14 @@ static void tms380tr_tx_status_irq(struct net_device *dev)
 
 			if((HighAc != LowAc) || (HighAc == AC_NOT_RECOGNIZED))
 			{
-				printk(KERN_INFO "%s: (DA=%08lX not recognized)",
+				printk(KERN_DEBUG "%s: (DA=%08lX not recognized)\n",
 					dev->name,
 					*(unsigned long *)&tpl->MData[2+2]);
 			}
 			else
 			{
 				if(tms380tr_debug > 3)
-					printk("%s: Directed frame tx'd\n", 
+					printk(KERN_DEBUG "%s: Directed frame tx'd\n", 
 						dev->name);
 			}
 		}
@@ -2047,19 +2083,20 @@ static void tms380tr_tx_status_irq(struct net_device *dev)
 			if(!DIRECTED_FRAME(tpl))
 			{
 				if(tms380tr_debug > 3)
-					printk("%s: Broadcast frame tx'd\n",
+					printk(KERN_DEBUG "%s: Broadcast frame tx'd\n",
 						dev->name);
 			}
 		}
 
 		tp->MacStat.tx_packets++;
-		dev_kfree_skb(tpl->Skb);
+		if (tpl->DMABuff)
+			pci_unmap_single(tp->pdev, tpl->DMABuff, tpl->Skb->len, PCI_DMA_TODEVICE);
+		dev_kfree_skb_irq(tpl->Skb);
 		tpl->BusyFlag = 0;	/* "free" TPL */
 	}
 
-	netif_wake_queue(dev);
-	if(tp->QueueSkb < MAX_TX_QUEUE)
-		tms380tr_hardware_send_packet(dev, tp);
+	if(!tp->TplFree->NextTPLPtr->BusyFlag)
+		netif_wake_queue(dev);
 	return;
 }
 
@@ -2069,12 +2106,13 @@ static void tms380tr_tx_status_irq(struct net_device *dev)
  */
 static void tms380tr_rcv_status_irq(struct net_device *dev)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	unsigned char *ReceiveDataPtr;
 	struct sk_buff *skb;
 	unsigned int Length, Length2;
 	RPL *rpl;
 	RPL *SaveHead;
+	dma_addr_t dmabuf;
 
 	/* NOTE: At this point the SSB from RECEIVE STATUS is no longer
 	 * available, because the CLEAR SSB command has already been issued.
@@ -2118,81 +2156,69 @@ static void tms380tr_rcv_status_irq(struct net_device *dev)
 				tp->RplHead = SaveHead;
 				break;	/* Return to tms380tr_interrupt */
 			}
-#if 0  		/* This might happen for multicast or broadcast packets.
-		   The upper layers are expected to handle this, not here */
-
-			/* Drop frames sent by myself */
-			if(tms380tr_chk_frame(dev, rpl->MData))
+			tms380tr_update_rcv_stats(tp,ReceiveDataPtr,Length);
+			  
+			if(tms380tr_debug > 3)
+				printk(KERN_DEBUG "%s: Packet Length %04X (%d)\n",
+					dev->name, Length, Length);
+			  
+			/* Indicate the received frame to system the
+			 * adapter does the Source-Routing padding for 
+			 * us. See: OpenOptions in tms380tr_init_opb()
+			 */
+			skb = rpl->Skb;
+			if(rpl->SkbStat == SKB_UNAVAILABLE)
 			{
-				printk(KERN_INFO "%s: Received my own frame\n",
-					dev->name);
-				if(rpl->Skb != NULL)
-					dev_kfree_skb(rpl->Skb);
+				/* Try again to allocate skb */
+				skb = dev_alloc_skb(tp->MaxPacketSize);
+				if(skb == NULL)
+				{
+					/* Update Stats ?? */
+				}
+				else
+				{
+					skb->dev	= dev;
+					skb_put(skb, tp->MaxPacketSize);
+					rpl->SkbStat 	= SKB_DATA_COPY;
+					ReceiveDataPtr 	= rpl->MData;
+				}
 			}
-			else
-#endif
+
+			if(skb && (rpl->SkbStat == SKB_DATA_COPY
+				|| rpl->SkbStat == SKB_DMA_DIRECT))
 			{
-			  tms380tr_update_rcv_stats(tp,ReceiveDataPtr,Length);
-			  
-			  if(tms380tr_debug > 3)
-			    printk("%s: Packet Length %04X (%d)\n",
-				   dev->name, Length, Length);
-			  
-				/* Indicate the received frame to system the
-				 * adapter does the Source-Routing padding for 
-				 * us. See: OpenOptions in tms380tr_init_opb()
-				 */
-				skb = rpl->Skb;
-				if(rpl->SkbStat == SKB_UNAVAILABLE)
-				{
-					/* Try again to allocate skb */
-					skb = dev_alloc_skb(tp->MaxPacketSize);
-					if(skb == NULL)
-					{
-						/* Update Stats ?? */
-					}
-					else
-					{
-						skb->dev	= dev;
-						skb_put(skb, tp->MaxPacketSize);
-						rpl->SkbStat 	= SKB_DATA_COPY;
-						ReceiveDataPtr 	= rpl->MData;
-					}
-				}
+				if(rpl->SkbStat == SKB_DATA_COPY)
+					memcpy(skb->data, ReceiveDataPtr, Length);
 
-				if(rpl->SkbStat == SKB_DATA_COPY
-					|| rpl->SkbStat == SKB_DMA_DIRECT)
-				{
-					if(rpl->SkbStat == SKB_DATA_COPY)
-						memmove(skb->data, ReceiveDataPtr, Length);
-
-					/* Deliver frame to system */
-					rpl->Skb = NULL;
-					skb_trim(skb,Length);
-					skb->protocol = tr_type_trans(skb,dev);
-					netif_rx(skb);
-				}
+				/* Deliver frame to system */
+				rpl->Skb = NULL;
+				skb_trim(skb,Length);
+				skb->protocol = tr_type_trans(skb,dev);
+				netif_rx(skb);
+				dev->last_rx = jiffies;
 			}
 		}
 		else	/* Invalid frame */
 		{
 			if(rpl->Skb != NULL)
-				dev_kfree_skb(rpl->Skb);
+				dev_kfree_skb_irq(rpl->Skb);
 
 			/* Skip list. */
 			if(rpl->Status & RX_START_FRAME)
 				/* Frame start bit is set -> overflow. */
 				tp->MacStat.rx_errors++;
 		}
+		if (rpl->DMABuff)
+			pci_unmap_single(tp->pdev, rpl->DMABuff, tp->MaxPacketSize, PCI_DMA_TODEVICE);
+		rpl->DMABuff = 0;
 
 		/* Allocate new skb for rpl */
 		rpl->Skb = dev_alloc_skb(tp->MaxPacketSize);
-
 		/* skb == NULL ? then use local buffer */
 		if(rpl->Skb == NULL)
 		{
 			rpl->SkbStat = SKB_UNAVAILABLE;
-			rpl->FragList[0].DataAddr = htonl(virt_to_bus(tp->LocalRxBuffers[rpl->RPLIndex]));
+			rpl->FragList[0].DataAddr = htonl(((char *)tp->LocalRxBuffers[rpl->RPLIndex] - (char *)tp) + tp->dmabuffer);
 			rpl->MData = tp->LocalRxBuffers[rpl->RPLIndex];
 		}
 		else	/* skb != NULL */
@@ -2201,18 +2227,20 @@ static void tms380tr_rcv_status_irq(struct net_device *dev)
 			skb_put(rpl->Skb, tp->MaxPacketSize);
 
 			/* Data unreachable for DMA ? then use local buffer */
-			if(tp->dmalimit && virt_to_bus(rpl->Skb->data) + tp->MaxPacketSize > tp->dmalimit)
+			dmabuf = pci_map_single(tp->pdev, rpl->Skb->data, tp->MaxPacketSize, PCI_DMA_FROMDEVICE);
+			if(tp->dmalimit && (dmabuf + tp->MaxPacketSize > tp->dmalimit))
 			{
 				rpl->SkbStat = SKB_DATA_COPY;
-				rpl->FragList[0].DataAddr = htonl(virt_to_bus(tp->LocalRxBuffers[rpl->RPLIndex]));
+				rpl->FragList[0].DataAddr = htonl(((char *)tp->LocalRxBuffers[rpl->RPLIndex] - (char *)tp) + tp->dmabuffer);
 				rpl->MData = tp->LocalRxBuffers[rpl->RPLIndex];
 			}
 			else
 			{
 				/* DMA directly in skb->data */
 				rpl->SkbStat = SKB_DMA_DIRECT;
-				rpl->FragList[0].DataAddr = htonl(virt_to_bus(rpl->Skb->data));
+				rpl->FragList[0].DataAddr = htonl(dmabuf);
 				rpl->MData = rpl->Skb->data;
+				rpl->DMABuff = dmabuf;
 			}
 		}
 
@@ -2267,32 +2295,9 @@ static void tms380tr_update_rcv_stats(struct net_local *tp, unsigned char DataPt
 	return;
 }
 
-#if 0
-/*
- * Check if it is a frame of myself. Compare source address with my current
- * address in reverse direction, and mask out the TR_RII.
- */
-static unsigned char tms380tr_chk_frame(struct net_device *dev, unsigned char *Addr)
-{
-	int i;
-
-	for(i = 5; i > 0; i--)
-	{
-		if(Addr[8 + i] != dev->dev_addr[i])
-			return (0);
-	}
-
-	/* Mask out RIF bit. */
-	if((Addr[8] & ~TR_RII) != (unsigned char)(dev->dev_addr[0]))
-		return (0);
-
-	return (1);  /* It is my frame. */
-}
-#endif
-
 static int tms380tr_set_mac_address(struct net_device *dev, void *addr)
 {
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	struct sockaddr *saddr = addr;
 	
 	if (tp->AdapterOpenFlag || tp->AdapterVirtOpenFlag) {
@@ -2322,22 +2327,36 @@ static void tms380tr_dump(unsigned char *Data, int length)
 }
 #endif
 
-int tmsdev_init(struct net_device *dev)
+void tmsdev_term(struct net_device *dev)
 {
-	if (dev->priv == NULL)
+	struct net_local *tp;
+
+	tp = netdev_priv(dev);
+	pci_unmap_single(tp->pdev, tp->dmabuffer, sizeof(struct net_local),
+		PCI_DMA_BIDIRECTIONAL);
+}
+
+int tmsdev_init(struct net_device *dev, unsigned long dmalimit, 
+		struct pci_dev *pdev)
+{
+	struct net_local *tms_local;
+
+	memset(dev->priv, 0, sizeof(struct net_local));
+	tms_local = netdev_priv(dev);
+	init_waitqueue_head(&tms_local->wait_for_tok_int);
+	tms_local->dmalimit = dmalimit;
+	tms_local->pdev = pdev;
+	tms_local->dmabuffer = pci_map_single(pdev, (void *)tms_local,
+	    sizeof(struct net_local), PCI_DMA_BIDIRECTIONAL);
+	if (tms_local->dmabuffer + sizeof(struct net_local) > dmalimit)
 	{
-		struct net_local *tms_local;
-		
-		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL | GFP_DMA);
-		if (dev->priv == NULL)
-			return -ENOMEM;
-		memset(dev->priv, 0, sizeof(struct net_local));
-		tms_local = (struct net_local *)dev->priv;
-		init_waitqueue_head(&tms_local->wait_for_tok_int);
+		printk(KERN_INFO "%s: Memory not accessible for DMA\n",
+			dev->name);
+		tmsdev_term(dev);
+		return -ENOMEM;
 	}
 	
 	/* These can be overridden by the card driver if needed */
-	dev->init		= tms380tr_init_card;
 	dev->open		= tms380tr_open;
 	dev->stop		= tms380tr_close;
 	dev->do_ioctl		= NULL; 
@@ -2357,13 +2376,14 @@ EXPORT_SYMBOL(tms380tr_open);
 EXPORT_SYMBOL(tms380tr_close);
 EXPORT_SYMBOL(tms380tr_interrupt);
 EXPORT_SYMBOL(tmsdev_init);
+EXPORT_SYMBOL(tmsdev_term);
 EXPORT_SYMBOL(tms380tr_wait);
 
 struct module *TMS380_module = NULL;
 
 int init_module(void)
 {
-	printk("%s", version);
+	printk(KERN_DEBUG "%s", version);
 	
 	TMS380_module = &__this_module;
 	return 0;
@@ -2374,6 +2394,8 @@ void cleanup_module(void)
 	TMS380_module = NULL;
 }
 #endif
+
+MODULE_LICENSE("GPL");
 
 
 /*

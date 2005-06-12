@@ -1,15 +1,17 @@
-/* $Id: sportster.c,v 1.14 2000/11/24 17:05:38 kai Exp $
+/* $Id: sportster.c,v 1.16.2.4 2004/01/13 23:48:39 keil Exp $
  *
- * sportster.c     low level stuff for USR Sportster internal TA
+ * low level stuff for USR Sportster internal TA
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * Thanks to Christian "naddy" Weisgerber (3Com, US Robotics) for documentation
  *
- * This file is (c) under GNU PUBLIC LICENSE
  *
  */
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
@@ -17,7 +19,7 @@
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *sportster_revision = "$Revision: 1.14 $";
+const char *sportster_revision = "$Revision: 1.16.2.4 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -96,16 +98,14 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 
 #include "hscx_irq.c"
 
-static void
+static irqreturn_t
 sportster_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
+	u_long flags;
 
-	if (!cs) {
-		printk(KERN_WARNING "Sportster: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	val = READHSCX(cs, 1, HSCX_ISTA);
       Start_HSCX:
 	if (val)
@@ -128,6 +128,8 @@ sportster_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	/* get a new irq impulse if there any pending */
 	bytein(cs->hw.spt.cfg_reg + SPORTSTER_RES_IRQ +1);
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 void
@@ -145,36 +147,36 @@ release_io_sportster(struct IsdnCardState *cs)
 void
 reset_sportster(struct IsdnCardState *cs)
 {
-	long flags;
-
 	cs->hw.spt.res_irq |= SPORTSTER_RESET; /* Reset On */
 	byteout(cs->hw.spt.cfg_reg + SPORTSTER_RES_IRQ, cs->hw.spt.res_irq);
-	save_flags(flags);
-	sti();
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);
+	mdelay(10);
 	cs->hw.spt.res_irq &= ~SPORTSTER_RESET; /* Reset Off */
 	byteout(cs->hw.spt.cfg_reg + SPORTSTER_RES_IRQ, cs->hw.spt.res_irq);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);
-	restore_flags(flags);
+	mdelay(10);
 }
 
 static int
 Sportster_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+
 	switch (mt) {
 		case CARD_RESET:
+			spin_lock_irqsave(&cs->lock, flags);
 			reset_sportster(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_RELEASE:
 			release_io_sportster(cs);
 			return(0);
 		case CARD_INIT:
+			spin_lock_irqsave(&cs->lock, flags);
+			reset_sportster(cs);
 			inithscxisac(cs, 1);
 			cs->hw.spt.res_irq |= SPORTSTER_INTE; /* IRQ On */
 			byteout(cs->hw.spt.cfg_reg + SPORTSTER_RES_IRQ, cs->hw.spt.res_irq);
 			inithscxisac(cs, 2);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_TEST:
 			return(0);
@@ -189,13 +191,12 @@ get_io_range(struct IsdnCardState *cs)
 	
 	for (i=0;i<64;i++) {
 		adr = cs->hw.spt.cfg_reg + i *1024;
-		if (check_region(adr, 8)) {
+		if (!request_region(adr, 8, "sportster")) {
 			printk(KERN_WARNING
 				"HiSax: %s config port %x-%x already in use\n",
 				CardType[cs->typ], adr, adr + 8);
 			break;
-		} else
-			request_region(adr, 8, "sportster");
+		} 
 	}
 	if (i==64)
 		return(1);
@@ -246,12 +247,9 @@ setup_sportster(struct IsdnCard *card)
 			printk(KERN_WARNING "Sportster: wrong IRQ\n");
 			return(0);
 	}
-	reset_sportster(cs);
-	printk(KERN_INFO
-	       "HiSax: %s config irq:%d cfg:0x%X\n",
-	       CardType[cs->typ], cs->irq,
-	       cs->hw.spt.cfg_reg);
-
+	printk(KERN_INFO "HiSax: %s config irq:%d cfg:0x%X\n",
+		CardType[cs->typ], cs->irq, cs->hw.spt.cfg_reg);
+	setup_isac(cs);
 	cs->readisac = &ReadISAC;
 	cs->writeisac = &WriteISAC;
 	cs->readisacfifo = &ReadISACfifo;

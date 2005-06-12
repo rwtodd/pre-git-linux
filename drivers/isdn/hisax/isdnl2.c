@@ -1,22 +1,25 @@
-/* $Id: isdnl2.c,v 2.25 2000/11/24 17:05:38 kai Exp $
+/* $Id: isdnl2.c,v 2.30.2.4 2004/02/11 13:21:34 keil Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
  */
-#define __NO_VERSION__
+
 #include <linux/init.h>
 #include "hisax.h"
 #include "isdnl2.h"
 
-const char *l2_revision = "$Revision: 2.25 $";
+const char *l2_revision = "$Revision: 2.30.2.4 $";
 
 static void l2m_debug(struct FsmInst *fi, char *fmt, ...);
 
@@ -401,7 +404,9 @@ setva(struct PStack *st, unsigned int nr)
 {
 	struct Layer2 *l2 = &st->l2;
 	int len;
+	u_long flags;
 
+	spin_lock_irqsave(&l2->lock, flags);
 	while (l2->va != nr) {
 		(l2->va)++;
 		if(test_bit(FLG_MOD128, &l2->flag))
@@ -414,9 +419,12 @@ setva(struct PStack *st, unsigned int nr)
 		dev_kfree_skb(l2->windowar[l2->sow]);
 		l2->windowar[l2->sow] = NULL;
 		l2->sow = (l2->sow + 1) % l2->window;
-		if (st->lli.l2writewakeup && (len >=0))
-			st->lli.l2writewakeup(st, len);
+		spin_unlock_irqrestore(&l2->lock, flags);
+		if (test_bit(FLG_LLI_L2WAKEUP, &st->lli.flag) && (len >=0))
+			lli_writewakeup(st, len);
+		spin_lock_irqsave(&l2->lock, flags);
 	}
+	spin_unlock_irqrestore(&l2->lock, flags);
 }
 
 static void
@@ -649,7 +657,7 @@ l2_discard_i_setl3(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.i_queue);
 	test_and_set_bit(FLG_L3_INIT, &st->l2.flag);
 	test_and_clear_bit(FLG_PEND_REL, &st->l2.flag);
 }
@@ -659,7 +667,7 @@ l2_l3_reestablish(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.i_queue);
 	establishlink(fi);
 	test_and_set_bit(FLG_L3_INIT, &st->l2.flag);
 }
@@ -685,7 +693,7 @@ l2_disconnect(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.i_queue);
 	freewin(st);
 	FsmChangeState(fi, ST_L2_6);
 	st->l2.rc = 0;
@@ -745,7 +753,7 @@ l2_restart_multi(struct FsmInst *fi, int event, void *arg)
 	st->ma.layer(st, MDL_ERROR | INDICATION, (void *) 'F');
 
 	if (st->l2.vs != st->l2.va) {
-		discard_queue(&st->l2.i_queue);
+		skb_queue_purge(&st->l2.i_queue);
 		est = 1;
 	}
 
@@ -778,7 +786,7 @@ l2_stop_multi(struct FsmInst *fi, int event, void *arg)
 
 	send_uframe(st, UA | get_PollFlagFree(st, skb), RSP);
 
-	discard_queue(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.i_queue);
 	freewin(st);
 	lapb_dl_release_l2l3(st, INDICATION);
 }
@@ -802,7 +810,7 @@ l2_connected(struct FsmInst *fi, int event, void *arg)
 	if (test_and_clear_bit(FLG_L3_INIT, &st->l2.flag)) {
 		pr = DL_ESTABLISH | CONFIRM;
 	} else if (st->l2.vs != st->l2.va) {
-		discard_queue(&st->l2.i_queue);
+		skb_queue_purge(&st->l2.i_queue);
 		pr = DL_ESTABLISH | INDICATION;
 	}
 
@@ -860,7 +868,7 @@ l2_st5_dm_release(struct FsmInst *fi, int event, void *arg)
 	if (get_PollFlagFree(st, skb)) {
 		stop_t200(st, 7);
 	 	if (!test_bit(FLG_L3_INIT, &st->l2.flag))
-			discard_queue(&st->l2.i_queue);
+			skb_queue_purge(&st->l2.i_queue);
 		if (test_bit(FLG_LAPB, &st->l2.flag))
 			st->l2.l2l1(st, PH_DEACTIVATE | REQUEST, NULL);
 		st5_dl_release_l2l3(st);
@@ -940,8 +948,10 @@ static void
 invoke_retransmission(struct PStack *st, unsigned int nr)
 {
 	struct Layer2 *l2 = &st->l2;
-	unsigned int p1;
+	u_int p1;
+	u_long flags;
 
+	spin_lock_irqsave(&l2->lock, flags);
 	if (l2->vs != nr) {
 		while (l2->vs != nr) {
 			(l2->vs)--;
@@ -958,8 +968,11 @@ invoke_retransmission(struct PStack *st, unsigned int nr)
 			skb_queue_head(&l2->i_queue, l2->windowar[p1]);
 			l2->windowar[p1] = NULL;
 		}
+		spin_unlock_irqrestore(&l2->lock, flags);
 		st->l2.l2l1(st, PH_PULL | REQUEST, NULL);
+		return;
 	}
+	spin_unlock_irqrestore(&l2->lock, flags);
 }
 
 static void
@@ -1156,7 +1169,7 @@ l2_st5_tout_200(struct FsmInst *fi, int event, void *arg)
 	} else if (st->l2.rc == st->l2.N200) {
 		FsmChangeState(fi, ST_L2_4);
 		test_and_clear_bit(FLG_T200_RUN, &st->l2.flag);
-		discard_queue(&st->l2.i_queue);
+		skb_queue_purge(&st->l2.i_queue);
 		st->ma.layer(st, MDL_ERROR | INDICATION, (void *) 'G');
 		if (test_bit(FLG_LAPB, &st->l2.flag))
 			st->l2.l2l1(st, PH_DEACTIVATE | REQUEST, NULL);
@@ -1253,7 +1266,7 @@ l2_pull_iqueue(struct FsmInst *fi, int event, void *arg)
 	u_char header[MAX_HEADER_LEN];
 	int i;
 	int unsigned p1;
-	long flags;
+	u_long flags;
 
 	if (!cansend(st))
 		return;
@@ -1262,8 +1275,7 @@ l2_pull_iqueue(struct FsmInst *fi, int event, void *arg)
 	if (!skb)
 		return;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&l2->lock, flags);
 	if(test_bit(FLG_MOD128, &l2->flag))
 		p1 = (l2->vs - l2->va) % 128;
 	else
@@ -1286,8 +1298,7 @@ l2_pull_iqueue(struct FsmInst *fi, int event, void *arg)
 		header[i++] = (l2->vr << 5) | (l2->vs << 1);
 		l2->vs = (l2->vs + 1) % 8;
 	}
-	restore_flags(flags);
-
+	spin_unlock_irqrestore(&l2->lock, flags);
 	p1 = skb->data - skb->head;
 	if (p1 >= i)
 		memcpy(skb_push(skb, i), header, i);
@@ -1388,7 +1399,7 @@ l2_st24_tei_remove(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	st->l2.tei = -1;
 	FsmChangeState(fi, ST_L2_1);
 }
@@ -1398,7 +1409,7 @@ l2_st3_tei_remove(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	st->l2.tei = -1;
 	st->l2.l2l3(st, DL_RELEASE | INDICATION, NULL);
 	FsmChangeState(fi, ST_L2_1);
@@ -1409,8 +1420,8 @@ l2_st5_tei_remove(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.i_queue);
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	freewin(st);
 	st->l2.tei = -1;
 	stop_t200(st, 17);
@@ -1423,7 +1434,7 @@ l2_st6_tei_remove(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	st->l2.tei = -1;
 	stop_t200(st, 18);
 	st->l2.l2l3(st, DL_RELEASE | CONFIRM, NULL);
@@ -1435,8 +1446,8 @@ l2_tei_remove(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.i_queue);
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	freewin(st);
 	st->l2.tei = -1;
 	stop_t200(st, 17);
@@ -1450,8 +1461,8 @@ l2_st14_persistant_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 	
-	discard_queue(&st->l2.i_queue);
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	if (test_and_clear_bit(FLG_ESTAB_PEND, &st->l2.flag))
 		st->l2.l2l3(st, DL_RELEASE | INDICATION, NULL);
 }
@@ -1461,8 +1472,8 @@ l2_st5_persistant_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.i_queue);
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	freewin(st);
 	stop_t200(st, 19);
 	st5_dl_release_l2l3(st);
@@ -1474,7 +1485,7 @@ l2_st6_persistant_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	stop_t200(st, 20);
 	st->l2.l2l3(st, DL_RELEASE | CONFIRM, NULL);
 	FsmChangeState(fi, ST_L2_4);
@@ -1485,8 +1496,8 @@ l2_persistant_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	discard_queue(&st->l2.i_queue);
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	freewin(st);
 	stop_t200(st, 19);
 	FsmDelTimer(&st->l2.t203, 19);
@@ -1761,8 +1772,8 @@ releasestack_isdnl2(struct PStack *st)
 {
 	FsmDelTimer(&st->l2.t200, 21);
 	FsmDelTimer(&st->l2.t203, 16);
-	discard_queue(&st->l2.i_queue);
-	discard_queue(&st->l2.ui_queue);
+	skb_queue_purge(&st->l2.i_queue);
+	skb_queue_purge(&st->l2.ui_queue);
 	ReleaseWin(&st->l2);
 }
 
@@ -1780,6 +1791,7 @@ l2m_debug(struct FsmInst *fi, char *fmt, ...)
 void
 setstack_isdnl2(struct PStack *st, char *debug_id)
 {
+	spin_lock_init(&st->l2.lock);
 	st->l1.l1l2 = isdnl2_l1l2;
 	st->l3.l3l2 = isdnl2_l3l2;
 
@@ -1831,14 +1843,14 @@ releasestack_transl2(struct PStack *st)
 {
 }
 
-void __init
+int __init
 Isdnl2New(void)
 {
 	l2fsm.state_count = L2_STATE_COUNT;
 	l2fsm.event_count = L2_EVENT_COUNT;
 	l2fsm.strEvent = strL2Event;
 	l2fsm.strState = strL2State;
-	FsmNew(&l2fsm, L2FnList, L2_FN_COUNT);
+	return FsmNew(&l2fsm, L2FnList, L2_FN_COUNT);
 }
 
 void

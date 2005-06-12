@@ -1,31 +1,17 @@
-all: s390-block.o
+#
+# S/390 block devices
+#
 
-CFLAGS += 
-O_TARGET := s390-block.o
-O_OBJS   :=         
-M_OBJS   :=
+dasd_eckd_mod-objs := dasd_eckd.o dasd_3990_erp.o dasd_9343_erp.o
+dasd_fba_mod-objs  := dasd_fba.o dasd_3370_erp.o dasd_9336_erp.o
+dasd_diag_mod-objs := dasd_diag.o
+dasd_mod-objs      := dasd.o dasd_ioctl.o dasd_proc.o dasd_devmap.o \
+			dasd_genhd.o dasd_erp.o
 
-ifeq ($(CONFIG_DASD),y)
-  O_OBJS += dasd.o dasd_ccwstuff.o dasd_erp.o
-  ifeq ($(CONFIG_PROC_FS),y)
-   O_OBJS += dasd_proc.o dasd_profile.o
-  endif 
-  ifeq ($(CONFIG_DASD_ECKD),y)
-   O_OBJS += dasd_eckd.o
-  endif 
-  ifeq ($(CONFIG_DASD_MDSK),y)
-   O_OBJS += dasd_mdsk.o
-  endif 
-#  ifeq ($(CONFIG_DASD_CKD),y)
-#   O_OBJS += dasd_ckd.o
-#  endif 
-endif
-
-ifeq ($(CONFIG_MDISK),y)
-  O_OBJS += mdisk.o
-endif
-
-dasd_mod.o: $(D_OBJS)
-	$(LD) $(LD_RFLAG) -r -o $@ $+
-
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_DASD) += dasd_mod.o
+obj-$(CONFIG_DASD_DIAG) += dasd_diag_mod.o
+obj-$(CONFIG_DASD_ECKD) += dasd_eckd_mod.o
+obj-$(CONFIG_DASD_FBA)  += dasd_fba_mod.o
+obj-$(CONFIG_DASD_CMB)  += dasd_cmb.o
+obj-$(CONFIG_BLK_DEV_XPRAM) += xpram.o
+obj-$(CONFIG_DCSSBLK) += dcssblk.o

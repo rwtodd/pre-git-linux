@@ -23,7 +23,7 @@
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/personality.h>
 #include <linux/init.h>
@@ -49,7 +49,9 @@ static void set_brk(unsigned long start, unsigned long end)
 	end = PAGE_ALIGN(end);
 	if (end <= start)
 		return;
+	down_write(&current->mm->mmap_sem);
 	do_brk(start, end - start);
+	up_write(&current->mm->mmap_sem);
 }
 
 /*
@@ -77,7 +79,7 @@ if (file->f_op->llseek) { \
  * Currently only a stub-function.
  *
  * Note that setuid/setgid files won't make a core-dump if the uid/gid
- * changed due to the set[u|g]id. It's enforced by the "current->dumpable"
+ * changed due to the set[u|g]id. It's enforced by the "current->mm->dumpable"
  * field, which also makes sure the core-dumps won't be recursive if the
  * dumping of the process results in another error..
  */
@@ -95,26 +97,26 @@ static int aout32_core_dump(long signr, struct pt_regs *regs, struct file *file)
 	set_fs(KERNEL_DS);
 	has_dumped = 1;
 	current->flags |= PF_DUMPCORE;
-       	strncpy(dump.u_comm, current->comm, sizeof(current->comm));
+       	strncpy(dump.u_comm, current->comm, sizeof(dump.u_comm));
 	dump.signal = signr;
 	dump_thread(regs, &dump);
 
 /* If the size of the dump file exceeds the rlimit, then see what would happen
    if we wrote the stack, but not the data area.  */
 	if ((dump.u_dsize+dump.u_ssize) >
-	    current->rlim[RLIMIT_CORE].rlim_cur)
+	    current->signal->rlim[RLIMIT_CORE].rlim_cur)
 		dump.u_dsize = 0;
 
 /* Make sure we have enough room to write the stack and data areas. */
 	if ((dump.u_ssize) >
-	    current->rlim[RLIMIT_CORE].rlim_cur)
+	    current->signal->rlim[RLIMIT_CORE].rlim_cur)
 		dump.u_ssize = 0;
 
 /* make sure we actually have a data and stack area to dump */
 	set_fs(USER_DS);
-	if (verify_area(VERIFY_READ, (void *) START_DATA(dump), dump.u_dsize))
+	if (verify_area(VERIFY_READ, (void __user *) START_DATA(dump), dump.u_dsize))
 		dump.u_dsize = 0;
-	if (verify_area(VERIFY_READ, (void *) START_STACK(dump), dump.u_ssize))
+	if (verify_area(VERIFY_READ, (void __user *) START_STACK(dump), dump.u_ssize))
 		dump.u_ssize = 0;
 
 	set_fs(KERNEL_DS);
@@ -147,31 +149,31 @@ end_coredump:
  * memory and creates the pointer tables from them, and puts their
  * addresses on the "stack", returning the new stack pointer value.
  */
-#define A(__x) ((unsigned long)(__x))
 
-static u32 *create_aout32_tables(char * p, struct linux_binprm * bprm)
+static u32 __user *create_aout32_tables(char __user *p, struct linux_binprm *bprm)
 {
-	u32 *argv, *envp;
-	u32 *sp;
+	u32 __user *argv;
+	u32 __user *envp;
+	u32 __user *sp;
 	int argc = bprm->argc;
 	int envc = bprm->envc;
 
-	sp = (u32 *) ((-(unsigned long)sizeof(char *)) & (unsigned long) p);
+	sp = (u32 __user *)((-(unsigned long)sizeof(char *))&(unsigned long)p);
 
 	/* This imposes the proper stack alignment for a new process. */
-	sp = (u32 *) (((unsigned long) sp) & ~7);
+	sp = (u32 __user *) (((unsigned long) sp) & ~7);
 	if ((envc+argc+3)&1)
 		--sp;
 
 	sp -= envc+1;
-	envp = (u32 *) sp;
+	envp = sp;
 	sp -= argc+1;
-	argv = (u32 *) sp;
+	argv = sp;
 	put_user(argc,--sp);
 	current->mm->arg_start = (unsigned long) p;
 	while (argc-->0) {
 		char c;
-		put_user(((u32)A(p)),argv++);
+		put_user(((u32)(unsigned long)(p)),argv++);
 		do {
 			get_user(c,p++);
 		} while (c);
@@ -180,7 +182,7 @@ static u32 *create_aout32_tables(char * p, struct linux_binprm * bprm)
 	current->mm->arg_end = current->mm->env_start = (unsigned long) p;
 	while (envc-->0) {
 		char c;
-		put_user(((u32)A(p)),envp++);
+		put_user(((u32)(unsigned long)(p)),envp++);
 		do {
 			get_user(c,p++);
 		} while (c);
@@ -201,6 +203,7 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	unsigned long error;
 	unsigned long fd_offset;
 	unsigned long rlim;
+	unsigned long orig_thr_flags;
 	int retval;
 
 	ex = *((struct exec *) bprm->buf);		/* exec-header */
@@ -217,7 +220,7 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	 * size limits imposed on them by creating programs with large
 	 * arrays in the data or bss.
 	 */
-	rlim = current->rlim[RLIMIT_DATA].rlim_cur;
+	rlim = current->signal->rlim[RLIMIT_DATA].rlim_cur;
 	if (rlim >= RLIM_INFINITY)
 		rlim = ~0;
 	if (ex.a_data + ex.a_bss > rlim)
@@ -245,20 +248,26 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	if (N_MAGIC(ex) == NMAGIC) {
 		loff_t pos = fd_offset;
 		/* Fuck me plenty... */
+		down_write(&current->mm->mmap_sem);	
 		error = do_brk(N_TXTADDR(ex), ex.a_text);
-		bprm->file->f_op->read(bprm->file, (char *) N_TXTADDR(ex),
+		up_write(&current->mm->mmap_sem);
+		bprm->file->f_op->read(bprm->file, (char __user *)N_TXTADDR(ex),
 			  ex.a_text, &pos);
+		down_write(&current->mm->mmap_sem);
 		error = do_brk(N_DATADDR(ex), ex.a_data);
-		bprm->file->f_op->read(bprm->file, (char *) N_DATADDR(ex),
+		up_write(&current->mm->mmap_sem);
+		bprm->file->f_op->read(bprm->file, (char __user *)N_DATADDR(ex),
 			  ex.a_data, &pos);
 		goto beyond_if;
 	}
 
 	if (N_MAGIC(ex) == OMAGIC) {
 		loff_t pos = fd_offset;
+		down_write(&current->mm->mmap_sem);
 		do_brk(N_TXTADDR(ex) & PAGE_MASK,
 			ex.a_text+ex.a_data + PAGE_SIZE - 1);
-		bprm->file->f_op->read(bprm->file, (char *) N_TXTADDR(ex),
+		up_write(&current->mm->mmap_sem);
+		bprm->file->f_op->read(bprm->file, (char __user *)N_TXTADDR(ex),
 			  ex.a_text+ex.a_data, &pos);
 	} else {
 		static unsigned long error_time;
@@ -271,30 +280,33 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 		if (!bprm->file->f_op->mmap) {
 			loff_t pos = fd_offset;
+			down_write(&current->mm->mmap_sem);
 			do_brk(0, ex.a_text+ex.a_data);
-			bprm->file->f_op->read(bprm->file,(char *)N_TXTADDR(ex),
+			up_write(&current->mm->mmap_sem);
+			bprm->file->f_op->read(bprm->file,
+				  (char __user *)N_TXTADDR(ex),
 				  ex.a_text+ex.a_data, &pos);
 			goto beyond_if;
 		}
 
-	        down(&current->mm->mmap_sem);
+	        down_write(&current->mm->mmap_sem);
 		error = do_mmap(bprm->file, N_TXTADDR(ex), ex.a_text,
 			PROT_READ | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 			fd_offset);
-	        up(&current->mm->mmap_sem);
+	        up_write(&current->mm->mmap_sem);
 
 		if (error != N_TXTADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
 
-	        down(&current->mm->mmap_sem);
+	        down_write(&current->mm->mmap_sem);
  		error = do_mmap(bprm->file, N_DATADDR(ex), ex.a_data,
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
-	        up(&current->mm->mmap_sem);
+	        up_write(&current->mm->mmap_sem);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
@@ -305,24 +317,29 @@ beyond_if:
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 
-	retval = setup_arg_pages(bprm);
+	/* Make sure STACK_TOP returns the right thing.  */
+	orig_thr_flags = current_thread_info()->flags;
+	current_thread_info()->flags |= _TIF_32BIT;
+
+	retval = setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
 	if (retval < 0) { 
+		current_thread_info()->flags = orig_thr_flags;
+
 		/* Someone check-me: is this error path enough? */ 
 		send_sig(SIGKILL, current, 0); 
 		return retval;
 	}
 
 	current->mm->start_stack =
-		(unsigned long) create_aout32_tables((char *)bprm->p, bprm);
-	if (!(current->thread.flags & SPARC_FLAG_32BIT)) {
-		unsigned long pgd_cache;
+		(unsigned long) create_aout32_tables((char __user *)bprm->p, bprm);
+	if (!(orig_thr_flags & _TIF_32BIT)) {
+		unsigned long pgd_cache = get_pgd_cache(current->mm->pgd);
 
-		pgd_cache = ((unsigned long)current->mm->pgd[0])<<11UL;
-		__asm__ __volatile__("stxa\t%0, [%1] %2"
+		__asm__ __volatile__("stxa\t%0, [%1] %2\n\t"
+				     "membar #Sync"
 				     : /* no outputs */
 				     : "r" (pgd_cache),
 				       "r" (TSB_REG), "i" (ASI_DMMU));
-		current->thread.flags |= SPARC_FLAG_32BIT;
 	}
 	start_thread32(regs, ex.a_entry, current->mm->start_stack);
 	if (current->ptrace & PT_PTRACED)
@@ -368,12 +385,12 @@ static int load_aout32_library(struct file *file)
 	start_addr =  ex.a_entry & 0xfffff000;
 
 	/* Now use mmap to map the library into memory. */
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
 			N_TXTOFF(ex));
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	retval = error;
 	if (error != start_addr)
 		goto out;
@@ -381,7 +398,9 @@ static int load_aout32_library(struct file *file)
 	len = PAGE_ALIGN(ex.a_text + ex.a_data);
 	bss = ex.a_text + ex.a_data + ex.a_bss;
 	if (bss > len) {
+		down_write(&current->mm->mmap_sem);
 		error = do_brk(start_addr + len, bss - len);
+		up_write(&current->mm->mmap_sem);
 		retval = error;
 		if (error != start_addr + len)
 			goto out;
@@ -400,8 +419,6 @@ static void __exit exit_aout32_binfmt(void)
 {
 	unregister_binfmt(&aout32_format);
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_aout32_binfmt);
 module_exit(exit_aout32_binfmt);

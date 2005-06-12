@@ -22,10 +22,9 @@
  * we can depend on generic_block_fdatasync() to sync the data blocks.
  */
 
-#include <linux/fs.h>
-#include <linux/ext2_fs.h>
-#include <linux/locks.h>
+#include "ext2.h"
 #include <linux/smp_lock.h>
+#include <linux/buffer_head.h>		/* for fsync_inode_buffers() */
 
 
 /*
@@ -33,22 +32,20 @@
  *	even pass file to fsync ?
  */
 
-int ext2_sync_file(struct file * file, struct dentry *dentry, int datasync)
+int ext2_sync_file(struct file *file, struct dentry *dentry, int datasync)
 {
 	struct inode *inode = dentry->d_inode;
-	return ext2_fsync_inode(inode, datasync);
-}
-
-int ext2_fsync_inode(struct inode *inode, int datasync)
-{
 	int err;
-	
-	err  = fsync_inode_buffers(inode);
+	int ret;
+
+	ret = sync_mapping_buffers(inode->i_mapping);
 	if (!(inode->i_state & I_DIRTY))
-		return err;
+		return ret;
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
-		return err;
-	
-	err |= ext2_sync_inode(inode);
-	return err ? -EIO : 0;
+		return ret;
+
+	err = ext2_sync_inode(inode);
+	if (ret == 0)
+		ret = err;
+	return ret;
 }

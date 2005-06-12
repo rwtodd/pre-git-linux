@@ -3,22 +3,6 @@
 
 #ifdef _IBM_LANA_DRIVER_
 
-/* version-dependent functions/structures */
-
-#if LINUX_VERSION_CODE >= 0x020318
-#define IBMLANA_READB(addr) isa_readb(addr)
-#define IBMLANA_TOIO(dest, src, len) isa_memcpy_toio(dest, src, len)
-#define IBMLANA_FROMIO(dest, src, len) isa_memcpy_fromio(dest, src, len)
-#define IBMLANA_SETIO(dest, val, len) isa_memset_io(dest, val, len)
-#define IBMLANA_NETDEV net_device
-#else
-#define IBMLANA_READB(addr) readb(addr)
-#define IBMLANA_TOIO(dest, src, len) memcpy_toio(dest, src, len)
-#define IBMLANA_FROMIO(dest, src, len) memcpy_fromio(dest, src, len)
-#define IBMLANA_SETIO(dest, val, len) memset_io(dest, val, len)
-#define IBMLANA_NETDEV device
-#endif
-
 /* maximum packet size */
 
 #define PKTSIZE 1524
@@ -33,25 +17,27 @@
 /* media enumeration - defined in a way that it fits onto the LAN/A's
    POS registers... */
 
-typedef enum { Media_10BaseT, Media_10Base5,
+typedef enum { 
+	Media_10BaseT, Media_10Base5,
 	Media_Unknown, Media_10Base2, Media_Count
 } ibmlana_medium;
 
 /* private structure */
 
 typedef struct {
-	unsigned int slot;	/* MCA-Slot-#                       */
+	unsigned int slot;		/* MCA-Slot-#                       */
 	struct net_device_stats stat;	/* packet statistics            */
-	int realirq;		/* memorizes actual IRQ, even when 
-				   currently not allocated          */
-	ibmlana_medium medium;	/* physical cannector               */
-	u32 tdastart, txbufstart,	/* addresses                        */
-	 rrastart, rxbufstart, rdastart, rxbufcnt, txusedcnt;
-	int nextrxdescr,	/* next rx descriptor to be used    */
-	 lastrxdescr,		/* last free rx descriptor          */
-	 nexttxdescr,		/* last tx descriptor to be used    */
-	 currtxdescr,		/* tx descriptor currently tx'ed    */
-	 txused[TXBUFCNT];	/* busy flags                       */
+	int realirq;			/* memorizes actual IRQ, even when 
+					   currently not allocated          */
+	ibmlana_medium medium;		/* physical cannector               */
+	u32 	tdastart, txbufstart,	/* addresses                        */
+		rrastart, rxbufstart, rdastart, rxbufcnt, txusedcnt;
+	int 	nextrxdescr,		/* next rx descriptor to be used    */
+		lastrxdescr,		/* last free rx descriptor          */
+		nexttxdescr,		/* last tx descriptor to be used    */
+		currtxdescr,		/* tx descriptor currently tx'ed    */
+		txused[TXBUFCNT];	/* busy flags                       */
+	spinlock_t lock;
 } ibmlana_priv;
 
 /* this card uses quite a lot of I/O ports...luckily the MCA bus decodes 
@@ -127,12 +113,12 @@ typedef struct {
 #define TCREG_POWC       0x4000	/* timer start out of window detect */
 #define TCREG_CRCI       0x2000	/* inhibit CRC generation           */
 #define TCREG_EXDIS      0x1000	/* disable excessive deferral timer */
-#define TCREG_EXD        0x0400	/* excessive deferral occured       */
-#define TCREG_DEF        0x0200	/* single deferral occured          */
+#define TCREG_EXD        0x0400	/* excessive deferral occurred       */
+#define TCREG_DEF        0x0200	/* single deferral occurred          */
 #define TCREG_NCRS       0x0100	/* no carrier detected              */
 #define TCREG_CRSL       0x0080	/* carrier lost                     */
-#define TCREG_EXC        0x0040	/* excessive collisions occured     */
-#define TCREG_OWC        0x0020	/* out of window collision occured  */
+#define TCREG_EXC        0x0040	/* excessive collisions occurred     */
+#define TCREG_OWC        0x0020	/* out of window collision occurred  */
 #define TCREG_PMB        0x0008	/* packet monitored bad             */
 #define TCREG_FU         0x0004	/* FIFO underrun                    */
 #define TCREG_BCM        0x0002	/* byte count mismatch of fragments */
@@ -141,7 +127,7 @@ typedef struct {
 /* Interrupt Mask Register */
 
 #define SONIC_IMREG      0x08
-#define IMREG_BREN       0x4000	/* interrupt when bus retry occured */
+#define IMREG_BREN       0x4000	/* interrupt when bus retry occurred */
 #define IMREG_HBLEN      0x2000	/* interrupt when heartbeat lost    */
 #define IMREG_LCDEN      0x1000	/* interrupt when CAM loaded        */
 #define IMREG_PINTEN     0x0800	/* interrupt when PINT in TDA set   */
@@ -160,7 +146,7 @@ typedef struct {
 /* Interrupt Status Register */
 
 #define SONIC_ISREG      0x0a
-#define ISREG_BR         0x4000	/* bus retry occured                */
+#define ISREG_BR         0x4000	/* bus retry occurred                */
 #define ISREG_HBL        0x2000	/* heartbeat lost                   */
 #define ISREG_LCD        0x1000	/* CAM loaded                       */
 #define ISREG_PINT       0x0800	/* PINT in TDA set                  */
@@ -288,8 +274,5 @@ typedef struct {
 } tda_t;
 
 #endif				/* _IBM_LANA_DRIVER_ */
-
-extern int ibmlana_probe(struct IBMLANA_NETDEV *);
-
 
 #endif	/* _IBM_LANA_INCLUDE_ */

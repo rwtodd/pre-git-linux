@@ -5,33 +5,45 @@
 
 #ifdef __KERNEL__
 
+#include <linux/compiler.h>
 #include <linux/wait.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <asm/uaccess.h>
 
-struct poll_table_page;
+struct poll_table_struct;
+
+/* 
+ * structures and helpers for f_op->poll implementations
+ */
+typedef void (*poll_queue_proc)(struct file *, wait_queue_head_t *, struct poll_table_struct *);
 
 typedef struct poll_table_struct {
-	int error;
-	struct poll_table_page * table;
+	poll_queue_proc qproc;
 } poll_table;
 
-extern void __pollwait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p);
-
-extern inline void poll_wait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p)
+static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p)
 {
 	if (p && wait_address)
-		__pollwait(filp, wait_address, p);
+		p->qproc(filp, wait_address, p);
 }
 
-static inline void poll_initwait(poll_table* pt)
+static inline void init_poll_funcptr(poll_table *pt, poll_queue_proc qproc)
 {
-	pt->error = 0;
-	pt->table = NULL;
+	pt->qproc = qproc;
 }
-extern void poll_freewait(poll_table* pt);
 
+/*
+ * Structures and helpers for sys_poll/sys_poll
+ */
+struct poll_wqueues {
+	poll_table pt;
+	struct poll_table_page * table;
+	int error;
+};
+
+extern void poll_initwait(struct poll_wqueues *pwq);
+extern void poll_freewait(struct poll_wqueues *pwq);
 
 /*
  * Scaleable version of the fd_set.
@@ -56,7 +68,7 @@ typedef struct {
  * Use "unsigned long" accesses to let user-mode fd_set's be long-aligned.
  */
 static inline
-int get_fd_set(unsigned long nr, void *ufdset, unsigned long *fdset)
+int get_fd_set(unsigned long nr, void __user *ufdset, unsigned long *fdset)
 {
 	nr = FDS_BYTES(nr);
 	if (ufdset) {
@@ -70,11 +82,12 @@ int get_fd_set(unsigned long nr, void *ufdset, unsigned long *fdset)
 	return 0;
 }
 
-static inline
-void set_fd_set(unsigned long nr, void *ufdset, unsigned long *fdset)
+static inline unsigned long __must_check
+set_fd_set(unsigned long nr, void __user *ufdset, unsigned long *fdset)
 {
 	if (ufdset)
-		__copy_to_user(ufdset, fdset, FDS_BYTES(nr));
+		return __copy_to_user(ufdset, fdset, FDS_BYTES(nr));
+	return 0;
 }
 
 static inline

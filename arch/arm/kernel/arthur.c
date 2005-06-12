@@ -1,7 +1,9 @@
 /*
- * Arthur personality
+ *  linux/arch/arm/kernel/arthur.c
  *
- * Copyright (C) 1998, 1999, 2000 Philip Blundell
+ *  Copyright (C) 1998, 1999, 2000, 2001 Philip Blundell
+ *
+ * Arthur personality
  */
 
 /*
@@ -15,7 +17,6 @@
 #include <linux/personality.h>
 #include <linux/stddef.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
@@ -56,19 +57,19 @@ static void arthur_lcall7(int nr, struct pt_regs *regs)
 {
 	struct siginfo info;
 	info.si_signo = SIGSWI;
-	info.si_code = nr;
+	info.si_errno = nr;
 	/* Bounce it to the emulator */
 	send_sig_info(SIGSWI, &info, current);
 }
 
 static struct exec_domain arthur_exec_domain = {
-	"Arthur",	/* name */
-	(lcall7_func)arthur_lcall7,
-	PER_RISCOS, PER_RISCOS,
-	arthur_to_linux_signals,
-	linux_to_arthur_signals,
-	THIS_MODULE,
-	NULL		/* Nothing after this in the list. */
+	.name		= "Arthur",
+	.handler	= arthur_lcall7,
+	.pers_low	= PER_RISCOS,
+	.pers_high	= PER_RISCOS,
+	.signal_map	= arthur_to_linux_signals,
+	.signal_invmap	= linux_to_arthur_signals,
+	.module		= THIS_MODULE,
 };
 
 /*
@@ -76,12 +77,12 @@ static struct exec_domain arthur_exec_domain = {
  * processes are using it.
  */
 
-int __init arthur_init(void)
+static int __init arthur_init(void)
 {
 	return register_exec_domain(&arthur_exec_domain);
 }
 
-void __exit arthur_exit(void)
+static void __exit arthur_exit(void)
 {
 	unregister_exec_domain(&arthur_exec_domain);
 }

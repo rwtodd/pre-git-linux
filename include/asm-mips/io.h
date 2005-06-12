@@ -1,5 +1,4 @@
-/* $Id: io.h,v 1.13 2000/02/24 00:13:19 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -7,38 +6,83 @@
  * Copyright (C) 1994, 1995 Waldorf GmbH
  * Copyright (C) 1994 - 2000 Ralf Baechle
  * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
+ * Copyright (C) 2004, 2005  MIPS Technologies, Inc.  All rights reserved.
+ *	Author:	Maciej W. Rozycki <macro@mips.com>
  */
 #ifndef _ASM_IO_H
 #define _ASM_IO_H
+
+#include <linux/config.h>
+#include <linux/compiler.h>
+#include <linux/kernel.h>
+#include <linux/types.h>
+
+#include <asm/addrspace.h>
+#include <asm/bug.h>
+#include <asm/byteorder.h>
+#include <asm/cpu.h>
+#include <asm/cpu-features.h>
+#include <asm/page.h>
+#include <asm/pgtable-bits.h>
+#include <asm/processor.h>
+
+#include <mangle-port.h>
 
 /*
  * Slowdown I/O port space accesses for antique hardware.
  */
 #undef CONF_SLOWDOWN_IO
 
-#include <asm/addrspace.h>
+/*
+ * Raw operations are never swapped in software.  Otoh values that raw
+ * operations are working on may or may not have been swapped by the bus
+ * hardware.  An example use would be for flash memory that's used for
+ * execute in place.
+ */
+# define __raw_ioswabb(x)	(x)
+# define __raw_ioswabw(x)	(x)
+# define __raw_ioswabl(x)	(x)
+# define __raw_ioswabq(x)	(x)
 
 /*
- * This file contains the definitions for the MIPS counterpart of the
- * x86 in/out instructions. This heap of macros and C results in much
- * better code than the approach of doing it in plain C.  The macros
- * result in code that is to fast for certain hardware.  On the other
- * side the performance of the string functions should be improved for
- * sake of certain devices like EIDE disks that do highspeed polled I/O.
- *
- *   Ralf
- *
- * This file contains the definitions for the x86 IO instructions
- * inb/inw/inl/outb/outw/outl and the "string versions" of the same
- * (insb/insw/insl/outsb/outsw/outsl). You can also use "pausing"
- * versions of the single-IO instructions (inb_p/inw_p/..).
- *
- * This file is not meant to be obfuscating: it's just complicated
- * to (a) handle it all in a way that makes gcc able to optimize it
- * as well as possible and (b) trying to avoid writing the same thing
- * over and over again with slight variations and possibly making a
- * mistake somewhere.
+ * Sane hardware offers swapping of PCI/ISA I/O space accesses in hardware;
+ * less sane hardware forces software to fiddle with this...
  */
+#if defined(CONFIG_SWAP_IO_SPACE)
+
+# define ioswabb(x)		(x)
+# ifdef CONFIG_SGI_IP22
+/*
+ * IP22 seems braindead enough to swap 16bits values in hardware, but
+ * not 32bits.  Go figure... Can't tell without documentation.
+ */
+#  define ioswabw(x)		(x)
+# else
+#  define ioswabw(x)		le16_to_cpu(x)
+# endif
+# define ioswabl(x)		le32_to_cpu(x)
+# define ioswabq(x)		le64_to_cpu(x)
+
+#else
+
+# define ioswabb(x)		(x)
+# define ioswabw(x)		(x)
+# define ioswabl(x)		(x)
+# define ioswabq(x)		(x)
+
+#endif
+
+/*
+ * Native bus accesses never swapped.
+ */
+#define bus_ioswabb(x)		(x)
+#define bus_ioswabw(x)		(x)
+#define bus_ioswabl(x)		(x)
+#define bus_ioswabq(x)		(x)
+
+#define __bus_ioswabq		bus_ioswabq
+
+#define IO_SPACE_LIMIT 0xffff
 
 /*
  * On MIPS I/O ports are memory mapped, so we access them using normal
@@ -48,7 +92,10 @@
  * instruction, so the lower 16 bits must be zero.  Should be true on
  * on any sane architecture; generic code does not use this assumption.
  */
-extern unsigned long mips_io_port_base;
+extern const unsigned long mips_io_port_base;
+
+#define set_io_port_base(base)	\
+	do { * (unsigned long *) &mips_io_port_base = (base); } while (0)
 
 /*
  * Thanks to James van Artsdalen for a better timing-fix than
@@ -78,98 +125,388 @@ extern unsigned long mips_io_port_base;
 #endif
 
 /*
- * Change virtual addresses to physical addresses and vv.
- * These are trivial on the 1:1 Linux/MIPS mapping
+ *     virt_to_phys    -       map virtual addresses to physical
+ *     @address: address to remap
+ *
+ *     The returned physical address is the physical (CPU) mapping for
+ *     the memory address given. It is only valid to use this function on
+ *     addresses directly mapped or allocated via kmalloc.
+ *
+ *     This function does not give bus mappings for DMA transfers. In
+ *     almost all conceivable cases a device driver should not be using
+ *     this function
  */
-extern inline unsigned long virt_to_phys(volatile void * address)
+static inline unsigned long virt_to_phys(volatile void * address)
 {
-	return PHYSADDR(address);
-}
-
-extern inline void * phys_to_virt(unsigned long address)
-{
-	return (void *)KSEG0ADDR(address);
-}
-
-extern void * ioremap(unsigned long phys_addr, unsigned long size);
-extern void iounmap(void *addr);
-
-/*
- * IO bus memory addresses are also 1:1 with the physical address
- */
-extern inline unsigned long virt_to_bus(volatile void * address)
-{
-	return PHYSADDR(address);
-}
-
-extern inline void * bus_to_virt(unsigned long address)
-{
-	return (void *)KSEG0ADDR(address);
+	return (unsigned long)address - PAGE_OFFSET;
 }
 
 /*
- * isa_slot_offset is the address where E(ISA) busaddress 0 is is mapped
- * for the processor.
+ *     phys_to_virt    -       map physical address to virtual
+ *     @address: address to remap
+ *
+ *     The returned virtual address is a current CPU mapping for
+ *     the memory address given. It is only valid to use this function on
+ *     addresses that have a kernel mapping
+ *
+ *     This function does not handle bus mappings for DMA transfers. In
+ *     almost all conceivable cases a device driver should not be using
+ *     this function
+ */
+static inline void * phys_to_virt(unsigned long address)
+{
+	return (void *)(address + PAGE_OFFSET);
+}
+
+/*
+ * ISA I/O bus memory addresses are 1:1 with the physical address.
+ */
+static inline unsigned long isa_virt_to_bus(volatile void * address)
+{
+	return (unsigned long)address - PAGE_OFFSET;
+}
+
+static inline void * isa_bus_to_virt(unsigned long address)
+{
+	return (void *)(address + PAGE_OFFSET);
+}
+
+#define isa_page_to_bus page_to_phys
+
+/*
+ * However PCI ones are not necessarily 1:1 and therefore these interfaces
+ * are forbidden in portable PCI drivers.
+ *
+ * Allow them for x86 for legacy drivers, though.
+ */
+#define virt_to_bus virt_to_phys
+#define bus_to_virt phys_to_virt
+
+/*
+ * isa_slot_offset is the address where E(ISA) busaddress 0 is mapped
+ * for the processor.  This implies the assumption that there is only
+ * one of these busses.
  */
 extern unsigned long isa_slot_offset;
 
 /*
- * readX/writeX() are used to access memory mapped devices. On some
- * architectures the memory mapped IO stuff needs to be accessed
- * differently. On the x86 architecture, we just read/write the
- * memory location directly.
- *
- * On MIPS, we have the whole physical address space mapped at all
- * times, so "ioremap()" and "iounmap()" do not need to do anything.
- * (This isn't true for all machines but we still handle these cases
- * with wired TLB entries anyway ...)
- *
- * We cheat a bit and always return uncachable areas until we've fixed
- * the drivers to handle caching properly.
+ * Change "struct page" to physical address.
  */
-extern inline void * ioremap(unsigned long offset, unsigned long size)
+#define page_to_phys(page)	((dma_addr_t)page_to_pfn(page) << PAGE_SHIFT)
+
+extern void * __ioremap(phys_t offset, phys_t size, unsigned long flags);
+extern void __iounmap(volatile void __iomem *addr);
+
+static inline void * __ioremap_mode(phys_t offset, unsigned long size,
+	unsigned long flags)
 {
-	return (void *) KSEG1ADDR(offset);
+	if (cpu_has_64bit_addresses) {
+		u64 base = UNCAC_BASE;
+
+		/*
+		 * R10000 supports a 2 bit uncached attribute therefore
+		 * UNCAC_BASE may not equal IO_BASE.
+		 */
+		if (flags == _CACHE_UNCACHED)
+			base = (u64) IO_BASE;
+		return (void *) (unsigned long) (base + offset);
+	}
+
+	return __ioremap(offset, size, flags);
 }
 
 /*
- * This one maps high address device memory and turns off caching for that area.
- * it's useful if some control registers are in such an area and write combining
- * or read caching is not desirable:
+ * ioremap     -   map bus memory into CPU space
+ * @offset:    bus address of the memory
+ * @size:      size of the resource to map
+ *
+ * ioremap performs a platform specific sequence of operations to
+ * make bus memory CPU accessible via the readb/readw/readl/writeb/
+ * writew/writel functions and the other mmio helpers. The returned
+ * address is not guaranteed to be usable directly as a virtual
+ * address.
  */
-extern inline void * ioremap_nocache (unsigned long offset, unsigned long size)
-{
-	return (void *) KSEG1ADDR(offset);
-}
-
-extern inline void iounmap(void *addr)
-{
-}
+#define ioremap(offset, size)						\
+	__ioremap_mode((offset), (size), _CACHE_UNCACHED)
 
 /*
- * XXX We need system specific versions of these to handle EISA address bits
- * 24-31 on SNI.
- * XXX more SNI hacks.
+ * ioremap_nocache     -   map bus memory into CPU space
+ * @offset:    bus address of the memory
+ * @size:      size of the resource to map
+ *
+ * ioremap_nocache performs a platform specific sequence of operations to
+ * make bus memory CPU accessible via the readb/readw/readl/writeb/
+ * writew/writel functions and the other mmio helpers. The returned
+ * address is not guaranteed to be usable directly as a virtual
+ * address.
+ *
+ * This version of ioremap ensures that the memory is marked uncachable
+ * on the CPU as well as honouring existing caching rules from things like
+ * the PCI bus. Note that there are other caches and buffers on many
+ * busses. In paticular driver authors should read up on PCI writes
+ *
+ * It's useful if some control registers are in such an area and
+ * write combining or read caching is not desirable:
  */
-#define readb(addr) (*(volatile unsigned char *)(addr))
-#define readw(addr) (*(volatile unsigned short *)(addr))
-#define readl(addr) (*(volatile unsigned int *)(addr))
-#define __raw_readb readb
-#define __raw_readw readw
-#define __raw_readl readl
+#define ioremap_nocache(offset, size)					\
+	__ioremap_mode((offset), (size), _CACHE_UNCACHED)
 
-#define writeb(b,addr) (*(volatile unsigned char *)(addr)) = (b)
-#define writew(b,addr) (*(volatile unsigned short *)(addr)) = (b)
-#define writel(b,addr) (*(volatile unsigned int *)(addr)) = (b)
-#define __raw_writeb writeb
-#define __raw_writew writew
-#define __raw_writel writel
+/*
+ * These two are MIPS specific ioremap variant.  ioremap_cacheable_cow
+ * requests a cachable mapping, ioremap_uncached_accelerated requests a
+ * mapping using the uncached accelerated mode which isn't supported on
+ * all processors.
+ */
+#define ioremap_cacheable_cow(offset, size)				\
+	__ioremap_mode((offset), (size), _CACHE_CACHABLE_COW)
+#define ioremap_uncached_accelerated(offset, size)			\
+	__ioremap_mode((offset), (size), _CACHE_UNCACHED_ACCELERATED)
+
+static inline void iounmap(volatile void __iomem *addr)
+{
+	if (cpu_has_64bit_addresses)
+		return;
+
+	__iounmap(addr);
+}
+
+
+#define __BUILD_MEMORY_SINGLE(pfx, bwlq, type, irq)			\
+									\
+static inline void pfx##write##bwlq(type val,				\
+				    volatile void __iomem *mem)		\
+{									\
+	volatile type *__mem;						\
+	type __val;							\
+									\
+	__mem = (void *)__swizzle_addr_##bwlq((unsigned long)(mem));	\
+									\
+	__val = pfx##ioswab##bwlq(val);					\
+									\
+	if (sizeof(type) != sizeof(u64) || sizeof(u64) == sizeof(long))	\
+		*__mem = __val;						\
+	else if (cpu_has_64bits) {					\
+		unsigned long __flags;					\
+		type __tmp;						\
+									\
+		if (irq)						\
+			local_irq_save(__flags);			\
+		__asm__ __volatile__(					\
+			".set	mips3"		"\t\t# __writeq""\n\t"	\
+			"dsll32	%L0, %L0, 0"			"\n\t"	\
+			"dsrl32	%L0, %L0, 0"			"\n\t"	\
+			"dsll32	%M0, %M0, 0"			"\n\t"	\
+			"or	%L0, %L0, %M0"			"\n\t"	\
+			"sd	%L0, %2"			"\n\t"	\
+			".set	mips0"				"\n"	\
+			: "=r" (__tmp)					\
+			: "0" (__val), "m" (*__mem));			\
+		if (irq)						\
+			local_irq_restore(__flags);			\
+	} else								\
+		BUG();							\
+}									\
+									\
+static inline type pfx##read##bwlq(volatile void __iomem *mem)		\
+{									\
+	volatile type *__mem;						\
+	type __val;							\
+									\
+	__mem = (void *)__swizzle_addr_##bwlq((unsigned long)(mem));	\
+									\
+	if (sizeof(type) != sizeof(u64) || sizeof(u64) == sizeof(long))	\
+		__val = *__mem;						\
+	else if (cpu_has_64bits) {					\
+		unsigned long __flags;					\
+									\
+		local_irq_save(__flags);				\
+		__asm__ __volatile__(					\
+			".set	mips3"		"\t\t# __readq"	"\n\t"	\
+			"ld	%L0, %1"			"\n\t"	\
+			"dsra32	%M0, %L0, 0"			"\n\t"	\
+			"sll	%L0, %L0, 0"			"\n\t"	\
+			".set	mips0"				"\n"	\
+			: "=r" (__val)					\
+			: "m" (*__mem));				\
+		local_irq_restore(__flags);				\
+	} else {							\
+		__val = 0;						\
+		BUG();							\
+	}								\
+									\
+	return pfx##ioswab##bwlq(__val);				\
+}
+
+#define __BUILD_IOPORT_SINGLE(pfx, bwlq, type, p, slow)			\
+									\
+static inline void pfx##out##bwlq##p(type val, unsigned long port)	\
+{									\
+	volatile type *__addr;						\
+	type __val;							\
+									\
+	port = __swizzle_addr_##bwlq(port);				\
+	__addr = (void *)(mips_io_port_base + port);			\
+									\
+	__val = pfx##ioswab##bwlq(val);					\
+									\
+	if (sizeof(type) != sizeof(u64)) {				\
+		*__addr = __val;					\
+		slow;							\
+	} else								\
+		BUILD_BUG();						\
+}									\
+									\
+static inline type pfx##in##bwlq##p(unsigned long port)			\
+{									\
+	volatile type *__addr;						\
+	type __val;							\
+									\
+	port = __swizzle_addr_##bwlq(port);				\
+	__addr = (void *)(mips_io_port_base + port);			\
+									\
+	if (sizeof(type) != sizeof(u64)) {				\
+		__val = *__addr;					\
+		slow;							\
+	} else {							\
+		__val = 0;						\
+		BUILD_BUG();						\
+	}								\
+									\
+	return pfx##ioswab##bwlq(__val);				\
+}
+
+#define __BUILD_MEMORY_PFX(bus, bwlq, type)				\
+									\
+__BUILD_MEMORY_SINGLE(bus, bwlq, type, 1)
+
+#define __BUILD_IOPORT_PFX(bus, bwlq, type)				\
+									\
+__BUILD_IOPORT_SINGLE(bus, bwlq, type, ,)				\
+__BUILD_IOPORT_SINGLE(bus, bwlq, type, _p, SLOW_DOWN_IO)
+
+#define BUILDIO(bwlq, type)						\
+									\
+__BUILD_MEMORY_PFX(, bwlq, type)					\
+__BUILD_MEMORY_PFX(__raw_, bwlq, type)					\
+__BUILD_MEMORY_PFX(bus_, bwlq, type)					\
+__BUILD_IOPORT_PFX(, bwlq, type)					\
+__BUILD_IOPORT_PFX(__raw_, bwlq, type)
+
+#define __BUILDIO(bwlq, type)						\
+									\
+__BUILD_MEMORY_SINGLE(__bus_, bwlq, type, 0)
+
+BUILDIO(b, u8)
+BUILDIO(w, u16)
+BUILDIO(l, u32)
+BUILDIO(q, u64)
+
+__BUILDIO(q, u64)
+
+#define readb_relaxed			readb
+#define readw_relaxed			readw
+#define readl_relaxed			readl
+#define readq_relaxed			readq
+
+/*
+ * Some code tests for these symbols
+ */
+#define readq				readq
+#define writeq				writeq
+
+#define __BUILD_MEMORY_STRING(bwlq, type)				\
+									\
+static inline void writes##bwlq(volatile void __iomem *mem, void *addr,	\
+				unsigned int count)			\
+{									\
+	volatile type *__addr = addr;					\
+									\
+	while (count--) {						\
+		__raw_write##bwlq(*__addr, mem);			\
+		__addr++;						\
+	}								\
+}									\
+									\
+static inline void reads##bwlq(volatile void __iomem *mem, void *addr,	\
+			       unsigned int count)			\
+{									\
+	volatile type *__addr = addr;					\
+									\
+	while (count--) {						\
+		*__addr = __raw_read##bwlq(mem);			\
+		__addr++;						\
+	}								\
+}
+
+#define __BUILD_IOPORT_STRING(bwlq, type)				\
+									\
+static inline void outs##bwlq(unsigned long port, void *addr,		\
+			      unsigned int count)			\
+{									\
+	volatile type *__addr = addr;					\
+									\
+	while (count--) {						\
+		__raw_out##bwlq(*__addr, port);				\
+		__addr++;						\
+	}								\
+}									\
+									\
+static inline void ins##bwlq(unsigned long port, void *addr,		\
+			     unsigned int count)			\
+{									\
+	volatile type *__addr = addr;					\
+									\
+	while (count--) {						\
+		*__addr = __raw_in##bwlq(port);				\
+		__addr++;						\
+	}								\
+}
+
+#define BUILDSTRING(bwlq, type)						\
+									\
+__BUILD_MEMORY_STRING(bwlq, type)					\
+__BUILD_IOPORT_STRING(bwlq, type)
+
+BUILDSTRING(b, u8)
+BUILDSTRING(w, u16)
+BUILDSTRING(l, u32)
+BUILDSTRING(q, u64)
+
+
+/* Depends on MIPS II instruction set */
+#define mmiowb() asm volatile ("sync" ::: "memory")
 
 #define memset_io(a,b,c)	memset((void *)(a),(b),(c))
 #define memcpy_fromio(a,b,c)	memcpy((a),(void *)(b),(c))
 #define memcpy_toio(a,b,c)	memcpy((void *)(a),(b),(c))
 
-/* END SNI HACKS ... */
+/*
+ * Memory Mapped I/O
+ */
+#define ioread8(addr)		readb(addr)
+#define ioread16(addr)		readw(addr)
+#define ioread32(addr)		readl(addr)
+
+#define iowrite8(b,addr)	writeb(b,addr)
+#define iowrite16(w,addr)	writew(w,addr)
+#define iowrite32(l,addr)	writel(l,addr)
+
+#define ioread8_rep(a,b,c)	readsb(a,b,c)
+#define ioread16_rep(a,b,c)	readsw(a,b,c)
+#define ioread32_rep(a,b,c)	readsl(a,b,c)
+
+#define iowrite8_rep(a,b,c)	writesb(a,b,c)
+#define iowrite16_rep(a,b,c)	writesw(a,b,c)
+#define iowrite32_rep(a,b,c)	writesl(a,b,c)
+
+/* Create a virtual mapping cookie for an IO port range */
+extern void __iomem *ioport_map(unsigned long port, unsigned int nr);
+extern void ioport_unmap(void __iomem *);
+
+/* Create a virtual mapping cookie for a PCI BAR (memory or IO) */
+struct pci_dev;
+extern void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long max);
+extern void pci_iounmap(struct pci_dev *dev, void __iomem *);
 
 /*
  * ISA space is 'always mapped' on currently supported MIPS systems, no need
@@ -179,18 +516,19 @@ extern inline void iounmap(void *addr)
  * used as the IO-area pointer (it can be iounmapped as well, so the
  * analogy with PCI is quite large):
  */
-#define __ISA_IO_base ((char *)(PAGE_OFFSET))
+#define __ISA_IO_base ((char *)(isa_slot_offset))
 
-#define isa_readb(a) readb(a)
-#define isa_readw(a) readw(a)
-#define isa_readl(a) readl(a)
-#define isa_writeb(b,a) writeb(b,a)
-#define isa_writew(w,a) writew(w,a)
-#define isa_writel(l,a) writel(l,a)
-
-#define isa_memset_io(a,b,c)     memset_io((a),(b),(c))
-#define isa_memcpy_fromio(a,b,c) memcpy_fromio((a),(b),(c))
-#define isa_memcpy_toio(a,b,c)   memcpy_toio((a),(b),(c))
+#define isa_readb(a)		readb(__ISA_IO_base + (a))
+#define isa_readw(a)		readw(__ISA_IO_base + (a))
+#define isa_readl(a)		readl(__ISA_IO_base + (a))
+#define isa_readq(a)		readq(__ISA_IO_base + (a))
+#define isa_writeb(b,a)		writeb(b,__ISA_IO_base + (a))
+#define isa_writew(w,a)		writew(w,__ISA_IO_base + (a))
+#define isa_writel(l,a)		writel(l,__ISA_IO_base + (a))
+#define isa_writeq(q,a)		writeq(q,__ISA_IO_base + (a))
+#define isa_memset_io(a,b,c)	memset_io(__ISA_IO_base + (a),(b),(c))
+#define isa_memcpy_fromio(a,b,c) memcpy_fromio((a),__ISA_IO_base + (b),(c))
+#define isa_memcpy_toio(a,b,c)	memcpy_toio(__ISA_IO_base + (a),(b),(c))
 
 /*
  * We don't have csum_partial_copy_fromio() yet, so we cheat here and
@@ -199,8 +537,18 @@ extern inline void iounmap(void *addr)
 #define eth_io_copy_and_sum(skb,src,len,unused) memcpy_fromio((skb)->data,(src),(len))
 #define isa_eth_io_copy_and_sum(a,b,c,d) eth_copy_and_sum((a),(b),(c),(d))
 
-static inline int check_signature(unsigned long io_addr,
-                                  const unsigned char *signature, int length)
+/*
+ *     check_signature         -       find BIOS signatures
+ *     @io_addr: mmio address to check
+ *     @signature:  signature block
+ *     @length: length of signature
+ *
+ *     Perform a signature comparison with the mmio address io_addr. This
+ *     address should have been obtained by ioremap.
+ *     Returns 1 on a match.
+ */
+static inline int check_signature(char __iomem *io_addr,
+	const unsigned char *signature, int length)
 {
 	int retval = 0;
 	do {
@@ -214,206 +562,6 @@ static inline int check_signature(unsigned long io_addr,
 out:
 	return retval;
 }
-#define isa_check_signature(io, s, l) check_signature(i,s,l)
-
-/*
- * Talk about misusing macros..
- */
-
-#define __OUT1(s) \
-extern inline void __out##s(unsigned int value, unsigned int port) {
-
-#define __OUT2(m) \
-__asm__ __volatile__ ("s" #m "\t%0,%1(%2)"
-
-#define __OUT(m,s) \
-__OUT1(s) __OUT2(m) : : "r" (value), "i" (0), "r" (mips_io_port_base+port)); } \
-__OUT1(s##c) __OUT2(m) : : "r" (value), "ir" (port), "r" (mips_io_port_base)); } \
-__OUT1(s##_p) __OUT2(m) : : "r" (value), "i" (0), "r" (mips_io_port_base+port)); \
-	SLOW_DOWN_IO; } \
-__OUT1(s##c_p) __OUT2(m) : : "r" (value), "ir" (port), "r" (mips_io_port_base)); \
-	SLOW_DOWN_IO; }
-
-#define __IN1(t,s) \
-extern __inline__ t __in##s(unsigned int port) { t _v;
-
-/*
- * Required nops will be inserted by the assembler
- */
-#define __IN2(m) \
-__asm__ __volatile__ ("l" #m "\t%0,%1(%2)"
-
-#define __IN(t,m,s) \
-__IN1(t,s) __IN2(m) : "=r" (_v) : "i" (0), "r" (mips_io_port_base+port)); return _v; } \
-__IN1(t,s##c) __IN2(m) : "=r" (_v) : "ir" (port), "r" (mips_io_port_base)); return _v; } \
-__IN1(t,s##_p) __IN2(m) : "=r" (_v) : "i" (0), "r" (mips_io_port_base+port)); SLOW_DOWN_IO; return _v; } \
-__IN1(t,s##c_p) __IN2(m) : "=r" (_v) : "ir" (port), "r" (mips_io_port_base)); SLOW_DOWN_IO; return _v; }
-
-#define __INS1(s) \
-extern inline void __ins##s(unsigned int port, void * addr, unsigned long count) {
-
-#define __INS2(m) \
-if (count) \
-__asm__ __volatile__ ( \
-	".set\tnoreorder\n\t" \
-	".set\tnoat\n" \
-	"1:\tl" #m "\t$1,%4(%5)\n\t" \
-	"subu\t%1,1\n\t" \
-	"s" #m "\t$1,(%0)\n\t" \
-	"bne\t$0,%1,1b\n\t" \
-	"addiu\t%0,%6\n\t" \
-	".set\tat\n\t" \
-	".set\treorder"
-
-#define __INS(m,s,i) \
-__INS1(s) __INS2(m) \
-	: "=r" (addr), "=r" (count) \
-	: "0" (addr), "1" (count), "i" (0), "r" (mips_io_port_base+port), "I" (i) \
-	: "$1");} \
-__INS1(s##c) __INS2(m) \
-	: "=r" (addr), "=r" (count) \
-	: "0" (addr), "1" (count), "ir" (port), "r" (mips_io_port_base), "I" (i) \
-	: "$1");}
-
-#define __OUTS1(s) \
-extern inline void __outs##s(unsigned int port, const void * addr, unsigned long count) {
-
-#define __OUTS2(m) \
-if (count) \
-__asm__ __volatile__ ( \
-        ".set\tnoreorder\n\t" \
-        ".set\tnoat\n" \
-        "1:\tl" #m "\t$1,(%0)\n\t" \
-        "subu\t%1,1\n\t" \
-        "s" #m "\t$1,%4(%5)\n\t" \
-        "bne\t$0,%1,1b\n\t" \
-        "addiu\t%0,%6\n\t" \
-        ".set\tat\n\t" \
-        ".set\treorder"
-
-#define __OUTS(m,s,i) \
-__OUTS1(s) __OUTS2(m) \
-	: "=r" (addr), "=r" (count) \
-	: "0" (addr), "1" (count), "i" (0), "r" (mips_io_port_base+port), "I" (i) \
-	: "$1");} \
-__OUTS1(s##c) __OUTS2(m) \
-	: "=r" (addr), "=r" (count) \
-	: "0" (addr), "1" (count), "ir" (port), "r" (mips_io_port_base), "I" (i) \
-	: "$1");}
-
-__IN(unsigned char,b,b)
-__IN(unsigned short,h,w)
-__IN(unsigned int,w,l)
-
-__OUT(b,b)
-__OUT(h,w)
-__OUT(w,l)
-
-__INS(b,b,1)
-__INS(h,w,2)
-__INS(w,l,4)
-
-__OUTS(b,b,1)
-__OUTS(h,w,2)
-__OUTS(w,l,4)
-
-/*
- * Note that due to the way __builtin_constant_p() works, you
- *  - can't use it inside an inline function (it will never be true)
- *  - you don't have to worry about side effects within the __builtin..
- */
-#define outb(val,port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outbc((val),(port)) : \
-	__outb((val),(port)))
-
-#define inb(port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inbc(port) : \
-	__inb(port))
-
-#define outb_p(val,port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outbc_p((val),(port)) : \
-	__outb_p((val),(port)))
-
-#define inb_p(port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inbc_p(port) : \
-	__inb_p(port))
-
-#define outw(val,port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outwc((val),(port)) : \
-	__outw((val),(port)))
-
-#define inw(port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inwc(port) : \
-	__inw(port))
-
-#define outw_p(val,port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outwc_p((val),(port)) : \
-	__outw_p((val),(port)))
-
-#define inw_p(port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inwc_p(port) : \
-	__inw_p(port))
-
-#define outl(val,port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outlc((val),(port)) : \
-	__outl((val),(port)))
-
-#define inl(port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inlc(port) : \
-	__inl(port))
-
-#define outl_p(val,port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outlc_p((val),(port)) : \
-	__outl_p((val),(port)))
-
-#define inl_p(port) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inlc_p(port) : \
-	__inl_p(port))
-
-
-#define outsb(port,addr,count) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outsbc((port),(addr),(count)) : \
-	__outsb ((port),(addr),(count)))
-
-#define insb(port,addr,count) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__insbc((port),(addr),(count)) : \
-	__insb((port),(addr),(count)))
-
-#define outsw(port,addr,count) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outswc((port),(addr),(count)) : \
-	__outsw ((port),(addr),(count)))
-
-#define insw(port,addr,count) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inswc((port),(addr),(count)) : \
-	__insw((port),(addr),(count)))
-
-#define outsl(port,addr,count) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__outslc((port),(addr),(count)) : \
-	__outsl ((port),(addr),(count)))
-
-#define insl(port,addr,count) \
-((__builtin_constant_p((port)) && (port) < 32768) ? \
-	__inslc((port),(addr),(count)) : \
-	__insl((port),(addr),(count)))
-
-#define IO_SPACE_LIMIT 0xffff
 
 /*
  * The caches on some architectures aren't dma-coherent and have need to
@@ -433,12 +581,39 @@ __OUTS(w,l,4)
  *    be discarded.  This operation is necessary before dma operations
  *    to the memory.
  */
+#ifdef CONFIG_DMA_NONCOHERENT
+
 extern void (*_dma_cache_wback_inv)(unsigned long start, unsigned long size);
 extern void (*_dma_cache_wback)(unsigned long start, unsigned long size);
 extern void (*_dma_cache_inv)(unsigned long start, unsigned long size);
 
-#define dma_cache_wback_inv(start,size)	_dma_cache_wback_inv(start,size)
-#define dma_cache_wback(start,size)	_dma_cache_wback(start,size)
-#define dma_cache_inv(start,size)	_dma_cache_inv(start,size)
+#define dma_cache_wback_inv(start, size)	_dma_cache_wback_inv(start,size)
+#define dma_cache_wback(start, size)		_dma_cache_wback(start,size)
+#define dma_cache_inv(start, size)		_dma_cache_inv(start,size)
+
+#else /* Sane hardware */
+
+#define dma_cache_wback_inv(start,size)	\
+	do { (void) (start); (void) (size); } while (0)
+#define dma_cache_wback(start,size)	\
+	do { (void) (start); (void) (size); } while (0)
+#define dma_cache_inv(start,size)	\
+	do { (void) (start); (void) (size); } while (0)
+
+#endif /* CONFIG_DMA_NONCOHERENT */
+
+/*
+ * Read a 32-bit register that requires a 64-bit read cycle on the bus.
+ * Avoid interrupt mucking, just adjust the address for 4-byte access.
+ * Assume the addresses are 8-byte aligned.
+ */
+#ifdef __MIPSEB__
+#define __CSR_32_ADJUST 4
+#else
+#define __CSR_32_ADJUST 0
+#endif
+
+#define csr_out32(v,a) (*(volatile u32 *)((unsigned long)(a) + __CSR_32_ADJUST) = (v))
+#define csr_in32(a)    (*(volatile u32 *)((unsigned long)(a) + __CSR_32_ADJUST))
 
 #endif /* _ASM_IO_H */

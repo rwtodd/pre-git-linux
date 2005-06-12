@@ -24,6 +24,35 @@
  *   Basic tests have been performed with minicom/zmodem transfers and
  *   modem dialing under Linux 2.4.0-test10 (for me it works fine).
  *
+ * 04-Nov-2003 Bill Marr <marr at flex dot com>
+ *   - Mimic Windows driver by sending 2 USB 'device request' messages
+ *     following normal 'baud rate change' message.  This allows data to be
+ *     transmitted to RS-232 devices which don't assert the 'CTS' signal.
+ *
+ * 10-Nov-2001 Wolfgang Grandegger
+ *   - Fixed an endianess problem with the baudrate selection for PowerPC.
+ *
+ * 06-Dec-2001 Martin Hamilton <martinh@gnu.org>
+ *	Added support for the Belkin F5U109 DB9 adaptor
+ *
+ * 30-May-2001 Greg Kroah-Hartman
+ *	switched from using spinlock to a semaphore, which fixes lots of problems.
+ *
+ * 04-May-2001 Stelian Pop
+ *   - Set the maximum bulk output size for Sitecom U232-P25 model to 16 bytes
+ *     instead of the device reported 32 (using 32 bytes causes many data
+ *     loss, Windows driver uses 16 too).
+ *
+ * 02-May-2001 Stelian Pop
+ *   - Fixed the baud calculation for Sitecom U232-P25 model
+ *
+ * 08-Apr-2001 gb
+ *   - Identify version on module load.
+ *
+ * 06-Jan-2001 Cornel Ciocirlan 
+ *   - Added support for Sitecom U232-P25 model (Product Id 0x0230)
+ *   - Added support for D-Link DU-H3SP USB BAY (Product Id 0x0200)
+ *
  * 29-Nov-2000 Greg Kroah-Hartman
  *   - Added device id table to fit with 2.4.0-test11 structure.
  *   - took out DEAL_WITH_TWO_INT_IN_ENDPOINTS #define as it's not needed
@@ -37,40 +66,27 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/signal.h>
 #include <linux/errno.h>
-#include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
-#include <linux/fcntl.h>
+#include <linux/slab.h>
+#include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
-#include <linux/tty.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-
-#ifdef CONFIG_USB_SERIAL_DEBUG
- 	#define DEBUG
-#else
- 	#undef DEBUG
-#endif
+#include <asm/uaccess.h>
 #include <linux/usb.h>
-
 #include "usb-serial.h"
 #include "mct_u232.h"
 
-
 /*
- * Some not properly written applications do not handle the return code of
- * write() correctly. This can result in character losses. A work-a-round
- * can be compiled in with the following definition. This work-a-round
- * should _NOT_ be part of an 'official' kernel release, of course!
+ * Version Information
  */
-#undef FIX_WRITE_RETURN_CODE_PROBLEM
-#ifdef FIX_WRITE_RETURN_CODE_PROBLEM
-static int write_blocking = 0; /* disabled by default */
-#endif
+#define DRIVER_VERSION "z2.0"		/* Linux in-kernel version */
+#define DRIVER_AUTHOR "Wolfgang Grandegger <wolfgang@ces.ch>"
+#define DRIVER_DESC "Magic Control Technology USB-RS232 converter driver"
+
+static int debug;
 
 /*
  * Function prototypes
@@ -81,14 +97,7 @@ static int  mct_u232_open	         (struct usb_serial_port *port,
 					  struct file *filp);
 static void mct_u232_close	         (struct usb_serial_port *port,
 					  struct file *filp);
-#ifdef FIX_WRITE_RETURN_CODE_PROBLEM
-static int  mct_u232_write	         (struct usb_serial_port *port,
-					  int from_user,
-					  const unsigned char *buf,
-					  int count);
-static void mct_u232_write_bulk_callback (struct urb *urb);
-#endif
-static void mct_u232_read_int_callback   (struct urb *urb);
+static void mct_u232_read_int_callback   (struct urb *urb, struct pt_regs *regs);
 static void mct_u232_set_termios         (struct usb_serial_port *port,
 					  struct termios * old);
 static int  mct_u232_ioctl	         (struct usb_serial_port *port,
@@ -97,44 +106,57 @@ static int  mct_u232_ioctl	         (struct usb_serial_port *port,
 					  unsigned long arg);
 static void mct_u232_break_ctl	         (struct usb_serial_port *port,
 					  int break_state );
-
+static int  mct_u232_tiocmget		 (struct usb_serial_port *port,
+					  struct file *file);
+static int  mct_u232_tiocmset		 (struct usb_serial_port *port,
+					  struct file *file, unsigned int set,
+					  unsigned int clear);
 /*
  * All of the device info needed for the MCT USB-RS232 converter.
  */
-static __devinitdata struct usb_device_id id_table [] = {
-	{ idVendor: MCT_U232_VID, idProduct: MCT_U232_PID },
-	{ }					/* Terminating entry */
+static struct usb_device_id id_table_combined [] = {
+	{ USB_DEVICE(MCT_U232_VID, MCT_U232_PID) },
+	{ USB_DEVICE(MCT_U232_VID, MCT_U232_SITECOM_PID) },
+	{ USB_DEVICE(MCT_U232_VID, MCT_U232_DU_H3SP_PID) },
+	{ USB_DEVICE(MCT_U232_BELKIN_F5U109_VID, MCT_U232_BELKIN_F5U109_PID) },
+	{ }		/* Terminating entry */
 };
 
-MODULE_DEVICE_TABLE (usb, id_table);
+MODULE_DEVICE_TABLE (usb, id_table_combined);
 
-
-struct usb_serial_device_type mct_u232_device = {
-	name:		     "Magic Control Technology USB-RS232",
-	id_table:	     id_table,
-	needs_interrupt_in:  MUST_HAVE,	 /* 2 interrupt-in endpoints */
-	needs_bulk_in:	     MUST_HAVE_NOT,   /* no bulk-in endpoint */
-	needs_bulk_out:	     MUST_HAVE,	      /* 1 bulk-out endpoint */
-	num_interrupt_in:    2,
-	num_bulk_in:	     0,
-	num_bulk_out:	     1,
-	num_ports:	     1,
-	open:		     mct_u232_open,
-	close:		     mct_u232_close,
-#ifdef FIX_WRITE_RETURN_CODE_PROBLEM
-	write:		     mct_u232_write,
-	write_bulk_callback: mct_u232_write_bulk_callback,
-#endif
-	read_int_callback:   mct_u232_read_int_callback,
-	ioctl:		     mct_u232_ioctl,
-	set_termios:	     mct_u232_set_termios,
-	break_ctl:	     mct_u232_break_ctl,
-	startup:	     mct_u232_startup,
-	shutdown:	     mct_u232_shutdown,
+static struct usb_driver mct_u232_driver = {
+	.owner =	THIS_MODULE,
+	.name =		"mct_u232",
+	.probe =	usb_serial_probe,
+	.disconnect =	usb_serial_disconnect,
+	.id_table =	id_table_combined,
 };
+
+static struct usb_serial_device_type mct_u232_device = {
+	.owner =	     THIS_MODULE,
+	.name =		     "MCT U232",
+	.short_name =	     "mct_u232",
+	.id_table =	     id_table_combined,
+	.num_interrupt_in =  2,
+	.num_bulk_in =	     0,
+	.num_bulk_out =	     1,
+	.num_ports =	     1,
+	.open =		     mct_u232_open,
+	.close =	     mct_u232_close,
+	.read_int_callback = mct_u232_read_int_callback,
+	.ioctl =	     mct_u232_ioctl,
+	.set_termios =	     mct_u232_set_termios,
+	.break_ctl =	     mct_u232_break_ctl,
+	.tiocmget =	     mct_u232_tiocmget,
+	.tiocmset =	     mct_u232_tiocmset,
+	.attach =	     mct_u232_startup,
+	.shutdown =	     mct_u232_shutdown,
+};
+
 
 struct mct_u232_private {
-	unsigned long	     control_state; /* Modem Line Setting (TIOCM) */
+	spinlock_t lock;
+	unsigned int	     control_state; /* Modem Line Setting (TIOCM) */
 	unsigned char        last_lcr;      /* Line Control Register */
 	unsigned char	     last_lsr;      /* Line Status Register */
 	unsigned char	     last_msr;      /* Modem Status Register */
@@ -146,11 +168,60 @@ struct mct_u232_private {
 
 #define WDR_TIMEOUT (HZ * 5 ) /* default urb timeout */
 
+/*
+ * Later day 2.6.0-test kernels have new baud rates like B230400 which
+ * we do not know how to support. We ignore them for the moment.
+ * XXX Rate-limit the error message, it's user triggerable.
+ */
+static int mct_u232_calculate_baud_rate(struct usb_serial *serial, int value)
+{
+	if (le16_to_cpu(serial->dev->descriptor.idProduct) == MCT_U232_SITECOM_PID
+	  || le16_to_cpu(serial->dev->descriptor.idProduct) == MCT_U232_BELKIN_F5U109_PID) {
+		switch (value) {
+		case    B300: return 0x01;
+		case    B600: return 0x02; /* this one not tested */
+		case   B1200: return 0x03;
+		case   B2400: return 0x04;
+		case   B4800: return 0x06;
+		case   B9600: return 0x08;
+		case  B19200: return 0x09;
+		case  B38400: return 0x0a;
+		case  B57600: return 0x0b;
+		case B115200: return 0x0c;
+		default:
+			err("MCT USB-RS232: unsupported baudrate request 0x%x,"
+			    " using default of B9600", value);
+			return 0x08;
+		}
+	} else {
+		switch (value) {
+		case    B300: value =     300;
+		case    B600: value =     600;
+		case   B1200: value =    1200;
+		case   B2400: value =    2400;
+		case   B4800: value =    4800;
+		case   B9600: value =    9600;
+		case  B19200: value =   19200;
+		case  B38400: value =   38400;
+		case  B57600: value =   57600;
+		case B115200: value =  115200;
+		default:
+			err("MCT USB-RS232: unsupported baudrate request 0x%x,"
+			    " using default of B9600", value);
+			value = 9600;
+		}
+		return 115200/value;
+	}
+}
+
 static int mct_u232_set_baud_rate(struct usb_serial *serial, int value)
 {
-	unsigned int divisor;
+	__le32 divisor;
         int rc;
-	divisor = MCT_U232_BAUD_RATE(value);
+        unsigned char zero_byte = 0;
+
+	divisor = cpu_to_le32(mct_u232_calculate_baud_rate(serial, value));
+
         rc = usb_control_msg(serial->dev, usb_sndctrlpipe(serial->dev, 0),
                              MCT_U232_SET_BAUD_RATE_REQUEST,
 			     MCT_U232_SET_REQUEST_TYPE,
@@ -158,7 +229,36 @@ static int mct_u232_set_baud_rate(struct usb_serial *serial, int value)
 			     WDR_TIMEOUT);
 	if (rc < 0)
 		err("Set BAUD RATE %d failed (error = %d)", value, rc);
-	dbg("set_baud_rate: 0x%x", divisor);
+	dbg("set_baud_rate: value: 0x%x, divisor: 0x%x", value, divisor);
+
+	/* Mimic the MCT-supplied Windows driver (version 1.21P.0104), which
+	   always sends two extra USB 'device request' messages after the
+	   'baud rate change' message.  The actual functionality of the
+	   request codes in these messages is not fully understood but these
+	   particular codes are never seen in any operation besides a baud
+	   rate change.  Both of these messages send a single byte of data
+	   whose value is always zero.  The second of these two extra messages
+	   is required in order for data to be properly written to an RS-232
+	   device which does not assert the 'CTS' signal. */
+
+	rc = usb_control_msg(serial->dev, usb_sndctrlpipe(serial->dev, 0),
+			     MCT_U232_SET_UNKNOWN1_REQUEST, 
+			     MCT_U232_SET_REQUEST_TYPE,
+			     0, 0, &zero_byte, MCT_U232_SET_UNKNOWN1_SIZE, 
+			     WDR_TIMEOUT);
+	if (rc < 0)
+		err("Sending USB device request code %d failed (error = %d)", 
+		    MCT_U232_SET_UNKNOWN1_REQUEST, rc);
+
+	rc = usb_control_msg(serial->dev, usb_sndctrlpipe(serial->dev, 0),
+			     MCT_U232_SET_UNKNOWN2_REQUEST, 
+			     MCT_U232_SET_REQUEST_TYPE,
+			     0, 0, &zero_byte, MCT_U232_SET_UNKNOWN2_SIZE, 
+			     WDR_TIMEOUT);
+	if (rc < 0)
+		err("Sending USB device request code %d failed (error = %d)", 
+		    MCT_U232_SET_UNKNOWN2_REQUEST, rc);
+
         return rc;
 } /* mct_u232_set_baud_rate */
 
@@ -177,7 +277,7 @@ static int mct_u232_set_line_ctrl(struct usb_serial *serial, unsigned char lcr)
 } /* mct_u232_set_line_ctrl */
 
 static int mct_u232_set_modem_ctrl(struct usb_serial *serial,
-				   unsigned long control_state)
+				   unsigned int control_state)
 {
         int rc;
 	unsigned char mcr = MCT_U232_MCR_NONE;
@@ -194,7 +294,7 @@ static int mct_u232_set_modem_ctrl(struct usb_serial *serial,
 			     WDR_TIMEOUT);
 	if (rc < 0)
 		err("Set MODEM CTRL 0x%x failed (error = %d)", mcr, rc);
-	dbg("set_modem_ctrl: state=0x%lx ==> mcr=0x%x", control_state, mcr);
+	dbg("set_modem_ctrl: state=0x%x ==> mcr=0x%x", control_state, mcr);
 
         return rc;
 } /* mct_u232_set_modem_ctrl */
@@ -215,7 +315,7 @@ static int mct_u232_get_modem_stat(struct usb_serial *serial, unsigned char *msr
         return rc;
 } /* mct_u232_get_modem_stat */
 
-static void mct_u232_msr_to_state(unsigned long *control_state, unsigned char msr)
+static void mct_u232_msr_to_state(unsigned int *control_state, unsigned char msr)
 {
  	/* Translate Control Line states */
 	if (msr & MCT_U232_MSR_DSR)
@@ -234,7 +334,7 @@ static void mct_u232_msr_to_state(unsigned long *control_state, unsigned char ms
 		*control_state |=  TIOCM_CD;
 	else
 		*control_state &= ~TIOCM_CD;
- 	dbg("msr_to_state: msr=0x%x ==> state=0x%lx", msr, *control_state);
+ 	dbg("msr_to_state: msr=0x%x ==> state=0x%x", msr, *control_state);
 } /* mct_u232_msr_to_state */
 
 /*
@@ -244,262 +344,160 @@ static void mct_u232_msr_to_state(unsigned long *control_state, unsigned char ms
 static int mct_u232_startup (struct usb_serial *serial)
 {
 	struct mct_u232_private *priv;
+	struct usb_serial_port *port, *rport;
 
-	/* allocate the private data structure */
-	serial->port->private = kmalloc(sizeof(struct mct_u232_private),
-					GFP_KERNEL);
-	if (!serial->port->private)
-		return (-1); /* error */
-	priv = (struct mct_u232_private *)serial->port->private;
-	/* set initial values for control structures */
-	priv->control_state = 0;
-	priv->last_lsr = 0;
-	priv->last_msr = 0;
+	priv = kmalloc(sizeof(struct mct_u232_private), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+	memset(priv, 0, sizeof(struct mct_u232_private));
+	spin_lock_init(&priv->lock);
+	usb_set_serial_port_data(serial->port[0], priv);
 
-	init_waitqueue_head(&serial->port->write_wait);
-	
+	init_waitqueue_head(&serial->port[0]->write_wait);
+
+	/* Puh, that's dirty */
+	port = serial->port[0];
+	rport = serial->port[1];
+	if (port->read_urb) {
+		/* No unlinking, it wasn't submitted yet. */
+		usb_free_urb(port->read_urb);
+	}
+	port->read_urb = rport->interrupt_in_urb;
+	rport->interrupt_in_urb = NULL;
+	port->read_urb->context = port;
+
 	return (0);
 } /* mct_u232_startup */
 
 
 static void mct_u232_shutdown (struct usb_serial *serial)
 {
+	struct mct_u232_private *priv;
 	int i;
 	
-	dbg (__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	/* stop reads and writes on all ports */
 	for (i=0; i < serial->num_ports; ++i) {
-		while (serial->port[i].open_count > 0) {
-			mct_u232_close (&serial->port[i], NULL);
-		}
 		/* My special items, the standard routines free my urbs */
-		if (serial->port->private)
-			kfree(serial->port->private);
+		priv = usb_get_serial_port_data(serial->port[i]);
+		if (priv) {
+			usb_set_serial_port_data(serial->port[i], NULL);
+			kfree(priv);
+		}
 	}
 } /* mct_u232_shutdown */
 
 static int  mct_u232_open (struct usb_serial_port *port, struct file *filp)
 {
-	unsigned long flags;
 	struct usb_serial *serial = port->serial;
-	struct mct_u232_private *priv = (struct mct_u232_private *)port->private;
+	struct mct_u232_private *priv = usb_get_serial_port_data(port);
+	int retval = 0;
+	unsigned int control_state;
+	unsigned long flags;
+	unsigned char last_lcr;
+	unsigned char last_msr;
 
-	dbg(__FUNCTION__" port %d", port->number);
+	dbg("%s port %d", __FUNCTION__, port->number);
 
-	spin_lock_irqsave (&port->port_lock, flags);
+	/* Compensate for a hardware bug: although the Sitecom U232-P25
+	 * device reports a maximum output packet size of 32 bytes,
+	 * it seems to be able to accept only 16 bytes (and that's what
+	 * SniffUSB says too...)
+	 */
+	if (le16_to_cpu(serial->dev->descriptor.idProduct) == MCT_U232_SITECOM_PID)
+		port->bulk_out_size = 16;
+
+	/* Do a defined restart: the normal serial device seems to 
+	 * always turn on DTR and RTS here, so do the same. I'm not
+	 * sure if this is really necessary. But it should not harm
+	 * either.
+	 */
+	spin_lock_irqsave(&priv->lock, flags);
+	if (port->tty->termios->c_cflag & CBAUD)
+		priv->control_state = TIOCM_DTR | TIOCM_RTS;
+	else
+		priv->control_state = 0;
 	
-	++port->open_count;
-	MOD_INC_USE_COUNT;
+	priv->last_lcr = (MCT_U232_DATA_BITS_8 | 
+			  MCT_U232_PARITY_NONE |
+			  MCT_U232_STOP_BITS_1);
+	control_state = priv->control_state;
+	last_lcr = priv->last_lcr;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	mct_u232_set_modem_ctrl(serial, control_state);
+	mct_u232_set_line_ctrl(serial, last_lcr);
 
-	if (!port->active) {
-		port->active = 1;
+	/* Read modem status and update control state */
+	mct_u232_get_modem_stat(serial, &last_msr);
+	spin_lock_irqsave(&priv->lock, flags);
+	priv->last_msr = last_msr;
+	mct_u232_msr_to_state(&priv->control_state, priv->last_msr);
+	spin_unlock_irqrestore(&priv->lock, flags);
 
-		/* Do a defined restart: the normal serial device seems to 
-		 * always turn on DTR and RTS here, so do the same. I'm not
-		 * sure if this is really necessary. But it should not harm
-		 * either.
-		 */
-		if (port->tty->termios->c_cflag & CBAUD)
-			priv->control_state = TIOCM_DTR | TIOCM_RTS;
-		else
-			priv->control_state = 0;
-		mct_u232_set_modem_ctrl(serial, priv->control_state);
-		
-		priv->last_lcr = (MCT_U232_DATA_BITS_8 | 
-				  MCT_U232_PARITY_NONE |
-				  MCT_U232_STOP_BITS_1);
-		mct_u232_set_line_ctrl(serial, priv->last_lcr);
-
-		/* Read modem status and update control state */
-		mct_u232_get_modem_stat(serial, &priv->last_msr);
-		mct_u232_msr_to_state(&priv->control_state, priv->last_msr);
-
-		{
-			/* Puh, that's dirty */
-			struct usb_serial_port *rport;	
-			rport = &serial->port[1];
-			rport->tty = port->tty;
-			rport->private = port->private;
-			port->read_urb = rport->interrupt_in_urb;
-		}
-
-		port->read_urb->dev = port->serial->dev;
-		if (usb_submit_urb(port->read_urb))
-			err("usb_submit_urb(read bulk) failed");
-
-		port->interrupt_in_urb->dev = port->serial->dev;
-		if (usb_submit_urb(port->interrupt_in_urb))
-			err(" usb_submit_urb(read int) failed");
-
+	port->read_urb->dev = port->serial->dev;
+	retval = usb_submit_urb(port->read_urb, GFP_KERNEL);
+	if (retval) {
+		err("usb_submit_urb(read bulk) failed pipe 0x%x err %d",
+		    port->read_urb->pipe, retval);
+		goto exit;
 	}
 
-	spin_unlock_irqrestore (&port->port_lock, flags);
-	
+	port->interrupt_in_urb->dev = port->serial->dev;
+	retval = usb_submit_urb(port->interrupt_in_urb, GFP_KERNEL);
+	if (retval)
+		err(" usb_submit_urb(read int) failed pipe 0x%x err %d",
+		    port->interrupt_in_urb->pipe, retval);
+
+exit:
 	return 0;
 } /* mct_u232_open */
 
 
 static void mct_u232_close (struct usb_serial_port *port, struct file *filp)
 {
-	unsigned long flags;
+	dbg("%s port %d", __FUNCTION__, port->number);
 
-	dbg(__FUNCTION__" port %d", port->number);
-
-	spin_lock_irqsave (&port->port_lock, flags);
-
-	--port->open_count;
-	MOD_DEC_USE_COUNT;
-
-	if (port->open_count <= 0) {
-		/* shutdown our bulk reads and writes */
-		usb_unlink_urb (port->write_urb);
-		usb_unlink_urb (port->read_urb);
-		/* wgg - do I need this? I think so. */
-		usb_unlink_urb (port->interrupt_in_urb);
-		port->active = 0;
+	if (port->serial->dev) {
+		/* shutdown our urbs */
+		usb_kill_urb(port->write_urb);
+		usb_kill_urb(port->read_urb);
+		usb_kill_urb(port->interrupt_in_urb);
 	}
-	
-	spin_unlock_irqrestore (&port->port_lock, flags);
-
 } /* mct_u232_close */
 
 
-#ifdef FIX_WRITE_RETURN_CODE_PROBLEM
-/* The generic routines work fine otherwise */
-
-static int mct_u232_write (struct usb_serial_port *port, int from_user,
-			   const unsigned char *buf, int count)
-{
-	struct usb_serial *serial = port->serial;
-	unsigned long flags;
-	int result, bytes_sent, size;
-
-	dbg(__FUNCTION__ " - port %d", port->number);
-
-	if (count == 0) {
-		dbg(__FUNCTION__ " - write request of 0 bytes");
-		return (0);
-	}
-
-	/* only do something if we have a bulk out endpoint */
-	if (!serial->num_bulk_out)
-		return(0);;
-	
-	/* another write is still pending? */
-	if (port->write_urb->status == -EINPROGRESS) {
-		dbg (__FUNCTION__ " - already writing");
-		return (0);
-	}
-		
-	bytes_sent = 0;
-	while (count > 0) {
-		
-		spin_lock_irqsave (&port->port_lock, flags);
-		
-		size = (count > port->bulk_out_size) ? port->bulk_out_size : count;
-		
-		usb_serial_debug_data (__FILE__, __FUNCTION__, size, buf);
-		
-		if (from_user) {
-			copy_from_user(port->write_urb->transfer_buffer, buf, size);
-		}
-		else {
-			memcpy (port->write_urb->transfer_buffer, buf, size);
-		}
-		
-		/* set up our urb */
-		FILL_BULK_URB(port->write_urb, serial->dev,
-			      usb_sndbulkpipe(serial->dev,
-					      port->bulk_out_endpointAddress),
-			      port->write_urb->transfer_buffer, size,
-			      ((serial->type->write_bulk_callback) ?
-			       serial->type->write_bulk_callback :
-			       mct_u232_write_bulk_callback),
-			      port);
-		
-		/* send the data out the bulk port */
-		result = usb_submit_urb(port->write_urb);
-		if (result) {
-			err(__FUNCTION__
-			    " - failed submitting write urb, error %d", result);
-			spin_unlock_irqrestore (&port->port_lock, flags);
-			return bytes_sent;
-		}
-
-		spin_unlock_irqrestore (&port->port_lock, flags);
-
-		bytes_sent += size;
-		if (write_blocking)
-			interruptible_sleep_on(&port->write_wait);
-		else
-			break;
-
-		buf += size;
-		count -= size;
-	}
-	
-	return bytes_sent;
-} /* mct_u232_write */
-
-static void mct_u232_write_bulk_callback (struct urb *urb)
+static void mct_u232_read_int_callback (struct urb *urb, struct pt_regs *regs)
 {
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
-	struct usb_serial *serial = port->serial;
-       	struct tty_struct *tty = port->tty;
-
-	dbg(__FUNCTION__ " - port %d", port->number);
-	
-	if (!serial) {
-		dbg(__FUNCTION__ " - bad serial pointer, exiting");
-		return;
-	}
-
-	if (urb->status) {
-		dbg(__FUNCTION__ " - nonzero write bulk status received: %d",
-		    urb->status);
-		return;
-	}
-
-	if (write_blocking) {
-		wake_up_interruptible(&port->write_wait);
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
-		
-	} else {
-		/* from generic_write_bulk_callback */
-		queue_task(&port->tqueue, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
-	}
-
-	return;
-} /* mct_u232_write_bulk_callback */
-#endif
-
-static void mct_u232_read_int_callback (struct urb *urb)
-{
-	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
-	struct mct_u232_private *priv = (struct mct_u232_private *)port->private;
+	struct mct_u232_private *priv = usb_get_serial_port_data(port);
 	struct usb_serial *serial = port->serial;
 	struct tty_struct *tty;
 	unsigned char *data = urb->transfer_buffer;
+	int status;
+	unsigned long flags;
 
-        dbg(__FUNCTION__ " - port %d", port->number);
+	switch (urb->status) {
+	case 0:
+		/* success */
+		break;
+	case -ECONNRESET:
+	case -ENOENT:
+	case -ESHUTDOWN:
+		/* this urb is terminated, clean up */
+		dbg("%s - urb shutting down with status: %d", __FUNCTION__, urb->status);
+		return;
+	default:
+		dbg("%s - nonzero urb status received: %d", __FUNCTION__, urb->status);
+		goto exit;
+	}
 
-	/* The urb might have been killed. */
-        if (urb->status) {
-                dbg(__FUNCTION__ " - nonzero read bulk status received: %d",
-		    urb->status);
-                return;
-        }
 	if (!serial) {
-		dbg(__FUNCTION__ " - bad serial pointer, exiting");
+		dbg("%s - bad serial pointer, exiting", __FUNCTION__);
 		return;
 	}
-	
-	usb_serial_debug_data (__FILE__, __FUNCTION__, urb->actual_length, data);
+
+        dbg("%s - port %d", __FUNCTION__, port->number);
+	usb_serial_debug_data(debug, &port->dev, __FUNCTION__, urb->actual_length, data);
 
 	/*
 	 * Work-a-round: handle the 'usual' bulk-in pipe here
@@ -513,14 +511,14 @@ static void mct_u232_read_int_callback (struct urb *urb)
 			}
 			tty_flip_buffer_push(tty);
 		}
-		/* INT urbs are automatically re-submitted */
-		return;
+		goto exit;
 	}
 	
 	/*
 	 * The interrupt-in pipe signals exceptional conditions (modem line
 	 * signal changes and errors). data[0] holds MSR, data[1] holds LSR.
 	 */
+	spin_lock_irqsave(&priv->lock, flags);
 	priv->last_msr = data[MCT_U232_MSR_INDEX];
 	
 	/* Record Control Line states */
@@ -551,135 +549,126 @@ static void mct_u232_read_int_callback (struct urb *urb)
 		}
 	}
 #endif
-
-	/* INT urbs are automatically re-submitted */
+	spin_unlock_irqrestore(&priv->lock, flags);
+exit:
+	status = usb_submit_urb (urb, GFP_ATOMIC);
+	if (status)
+		err ("%s - usb_submit_urb failed with result %d",
+		     __FUNCTION__, status);
 } /* mct_u232_read_int_callback */
-
 
 static void mct_u232_set_termios (struct usb_serial_port *port,
 				  struct termios *old_termios)
 {
 	struct usb_serial *serial = port->serial;
-	struct mct_u232_private *priv = (struct mct_u232_private *)port->private;
+	struct mct_u232_private *priv = usb_get_serial_port_data(port);
 	unsigned int iflag = port->tty->termios->c_iflag;
-	unsigned int old_iflag = old_termios->c_iflag;
 	unsigned int cflag = port->tty->termios->c_cflag;
 	unsigned int old_cflag = old_termios->c_cflag;
-	
+	unsigned long flags;
+	unsigned int control_state, new_state;
+	unsigned char last_lcr;
+
+	/* get a local copy of the current port settings */
+	spin_lock_irqsave(&priv->lock, flags);
+	control_state = priv->control_state;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	last_lcr = 0;
+
 	/*
-	 * Update baud rate
+	 * Update baud rate.
+	 * Do not attempt to cache old rates and skip settings,
+	 * disconnects screw such tricks up completely.
+	 * Premature optimization is the root of all evil.
 	 */
-	if( (cflag & CBAUD) != (old_cflag & CBAUD) ) {
-	        /* reassert DTR and (maybe) RTS on transition from B0 */
-		if( (old_cflag & CBAUD) == B0 ) {
-			dbg(__FUNCTION__ ": baud was B0");
-			priv->control_state |= TIOCM_DTR;
-			/* don't set RTS if using hardware flow control */
-			if (!(old_cflag & CRTSCTS)) {
-				priv->control_state |= TIOCM_RTS;
-			}
-			mct_u232_set_modem_ctrl(serial, priv->control_state);
+
+        /* reassert DTR and (maybe) RTS on transition from B0 */
+	if ((old_cflag & CBAUD) == B0) {
+		dbg("%s: baud was B0", __FUNCTION__);
+		control_state |= TIOCM_DTR;
+		/* don't set RTS if using hardware flow control */
+		if (!(old_cflag & CRTSCTS)) {
+			control_state |= TIOCM_RTS;
 		}
-		
-		switch(cflag & CBAUD) {
-		case B0: /* handled below */
-			break;
-		case B300: mct_u232_set_baud_rate(serial, 300);
-			break;
-		case B600: mct_u232_set_baud_rate(serial, 600);
-			break;
-		case B1200: mct_u232_set_baud_rate(serial, 1200);
-			break;
-		case B2400: mct_u232_set_baud_rate(serial, 2400);
-			break;
-		case B4800: mct_u232_set_baud_rate(serial, 4800);
-			break;
-		case B9600: mct_u232_set_baud_rate(serial, 9600);
-			break;
-		case B19200: mct_u232_set_baud_rate(serial, 19200);
-			break;
-		case B38400: mct_u232_set_baud_rate(serial, 38400);
-			break;
-		case B57600: mct_u232_set_baud_rate(serial, 57600);
-			break;
-		case B115200: mct_u232_set_baud_rate(serial, 115200);
-			break;
-		default: err("MCT USB-RS232 converter: unsupported baudrate request, using default of 9600");
-			mct_u232_set_baud_rate(serial, 9600); break;
-		}
-		if ((cflag & CBAUD) == B0 ) {
-			dbg(__FUNCTION__ ": baud is B0");
-			/* Drop RTS and DTR */
-			priv->control_state &= ~(TIOCM_DTR | TIOCM_RTS);
-        		mct_u232_set_modem_ctrl(serial, priv->control_state);
-		}
+		mct_u232_set_modem_ctrl(serial, control_state);
+	}
+
+	mct_u232_set_baud_rate(serial, cflag & CBAUD);
+
+	if ((cflag & CBAUD) == B0 ) {
+		dbg("%s: baud is B0", __FUNCTION__);
+		/* Drop RTS and DTR */
+		control_state &= ~(TIOCM_DTR | TIOCM_RTS);
+       		mct_u232_set_modem_ctrl(serial, control_state);
 	}
 
 	/*
 	 * Update line control register (LCR)
 	 */
-	if ((cflag & (PARENB|PARODD)) != (old_cflag & (PARENB|PARODD))
-	    || (cflag & CSIZE) != (old_cflag & CSIZE)
-	    || (cflag & CSTOPB) != (old_cflag & CSTOPB) ) {
-		
 
-		priv->last_lcr = 0;
+	/* set the parity */
+	if (cflag & PARENB)
+		last_lcr |= (cflag & PARODD) ?
+			MCT_U232_PARITY_ODD : MCT_U232_PARITY_EVEN;
+	else
+		last_lcr |= MCT_U232_PARITY_NONE;
 
-		/* set the parity */
-		if (cflag & PARENB)
-			priv->last_lcr |= (cflag & PARODD) ?
-				MCT_U232_PARITY_ODD : MCT_U232_PARITY_EVEN;
-		else
-			priv->last_lcr |= MCT_U232_PARITY_NONE;
-
-		/* set the number of data bits */
-		switch (cflag & CSIZE) {
-		case CS5:
-			priv->last_lcr |= MCT_U232_DATA_BITS_5; break;
-		case CS6:
-			priv->last_lcr |= MCT_U232_DATA_BITS_6; break;
-		case CS7:
-			priv->last_lcr |= MCT_U232_DATA_BITS_7; break;
-		case CS8:
-			priv->last_lcr |= MCT_U232_DATA_BITS_8; break;
-		default:
-			err("CSIZE was not CS5-CS8, using default of 8");
-			priv->last_lcr |= MCT_U232_DATA_BITS_8;
-			break;
-		}
-
-		/* set the number of stop bits */
-		priv->last_lcr |= (cflag & CSTOPB) ?
-			MCT_U232_STOP_BITS_2 : MCT_U232_STOP_BITS_1;
-
-		mct_u232_set_line_ctrl(serial, priv->last_lcr);
+	/* set the number of data bits */
+	switch (cflag & CSIZE) {
+	case CS5:
+		last_lcr |= MCT_U232_DATA_BITS_5; break;
+	case CS6:
+		last_lcr |= MCT_U232_DATA_BITS_6; break;
+	case CS7:
+		last_lcr |= MCT_U232_DATA_BITS_7; break;
+	case CS8:
+		last_lcr |= MCT_U232_DATA_BITS_8; break;
+	default:
+		err("CSIZE was not CS5-CS8, using default of 8");
+		last_lcr |= MCT_U232_DATA_BITS_8;
+		break;
 	}
-	
+
+	/* set the number of stop bits */
+	last_lcr |= (cflag & CSTOPB) ?
+		MCT_U232_STOP_BITS_2 : MCT_U232_STOP_BITS_1;
+
+	mct_u232_set_line_ctrl(serial, last_lcr);
+
 	/*
 	 * Set flow control: well, I do not really now how to handle DTR/RTS.
 	 * Just do what we have seen with SniffUSB on Win98.
 	 */
-	if( (iflag & IXOFF) != (old_iflag & IXOFF)
-	    || (iflag & IXON) != (old_iflag & IXON)
-	    ||  (cflag & CRTSCTS) != (old_cflag & CRTSCTS) ) {
-		
-		/* Drop DTR/RTS if no flow control otherwise assert */
-		if ((iflag & IXOFF) || (iflag & IXON) || (cflag & CRTSCTS) )
-			priv->control_state |= TIOCM_DTR | TIOCM_RTS;
-		else
-			priv->control_state &= ~(TIOCM_DTR | TIOCM_RTS);
-		mct_u232_set_modem_ctrl(serial, priv->control_state);
+	/* Drop DTR/RTS if no flow control otherwise assert */
+	new_state = control_state;
+	if ((iflag & IXOFF) || (iflag & IXON) || (cflag & CRTSCTS))
+		new_state |= TIOCM_DTR | TIOCM_RTS;
+	else
+		new_state &= ~(TIOCM_DTR | TIOCM_RTS);
+	if (new_state != control_state) {
+		mct_u232_set_modem_ctrl(serial, control_state);
+		control_state = new_state;
 	}
-} /* mct_u232_set_termios */
 
+	/* save off the modified port settings */
+	spin_lock_irqsave(&priv->lock, flags);
+	priv->control_state = control_state;
+	priv->last_lcr = last_lcr;
+	spin_unlock_irqrestore(&priv->lock, flags);
+} /* mct_u232_set_termios */
 
 static void mct_u232_break_ctl( struct usb_serial_port *port, int break_state )
 {
 	struct usb_serial *serial = port->serial;
-	struct mct_u232_private *priv = (struct mct_u232_private *)port->private;
-	unsigned char lcr = priv->last_lcr;
+	struct mct_u232_private *priv = usb_get_serial_port_data(port);
+	unsigned char lcr;
+	unsigned long flags;
 
-	dbg (__FUNCTION__ "state=%d", break_state);
+	dbg("%sstate=%d", __FUNCTION__, break_state);
+
+	spin_lock_irqsave(&priv->lock, flags);
+	lcr = priv->last_lcr;
+	spin_unlock_irqrestore(&priv->lock, flags);
 
 	if (break_state)
 		lcr |= MCT_U232_SET_BREAK;
@@ -688,46 +677,55 @@ static void mct_u232_break_ctl( struct usb_serial_port *port, int break_state )
 } /* mct_u232_break_ctl */
 
 
+static int mct_u232_tiocmget (struct usb_serial_port *port, struct file *file)
+{
+	struct mct_u232_private *priv = usb_get_serial_port_data(port);
+	unsigned int control_state;
+	unsigned long flags;
+	
+	dbg("%s", __FUNCTION__);
+
+	spin_lock_irqsave(&priv->lock, flags);
+	control_state = priv->control_state;
+	spin_unlock_irqrestore(&priv->lock, flags);
+
+	return control_state;
+}
+
+static int mct_u232_tiocmset (struct usb_serial_port *port, struct file *file,
+			      unsigned int set, unsigned int clear)
+{
+	struct usb_serial *serial = port->serial;
+	struct mct_u232_private *priv = usb_get_serial_port_data(port);
+	unsigned int control_state;
+	unsigned long flags;
+	
+	dbg("%s", __FUNCTION__);
+
+	spin_lock_irqsave(&priv->lock, flags);
+	control_state = priv->control_state;
+
+	if (set & TIOCM_RTS)
+		control_state |= TIOCM_RTS;
+	if (set & TIOCM_DTR)
+		control_state |= TIOCM_DTR;
+	if (clear & TIOCM_RTS)
+		control_state &= ~TIOCM_RTS;
+	if (clear & TIOCM_DTR)
+		control_state &= ~TIOCM_DTR;
+
+	priv->control_state = control_state;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	return mct_u232_set_modem_ctrl(serial, control_state);
+}
+
 static int mct_u232_ioctl (struct usb_serial_port *port, struct file * file,
 			   unsigned int cmd, unsigned long arg)
 {
-	struct usb_serial *serial = port->serial;
-	struct mct_u232_private *priv = (struct mct_u232_private *)port->private;
-	int ret, mask;
-	
-	dbg (__FUNCTION__ "cmd=0x%x", cmd);
+	dbg("%scmd=0x%x", __FUNCTION__, cmd);
 
 	/* Based on code from acm.c and others */
 	switch (cmd) {
-	case TIOCMGET:
-		return put_user(priv->control_state, (unsigned long *) arg);
-		break;
-
-	case TIOCMSET: /* Turns on and off the lines as specified by the mask */
-	case TIOCMBIS: /* turns on (Sets) the lines as specified by the mask */
-	case TIOCMBIC: /* turns off (Clears) the lines as specified by the mask */
-		if ((ret = get_user(mask, (unsigned long *) arg))) return ret;
-
-		if ((cmd == TIOCMSET) || (mask & TIOCM_RTS)) {
-			/* RTS needs set */
-			if( ((cmd == TIOCMSET) && (mask & TIOCM_RTS)) ||
-			    (cmd == TIOCMBIS) )
-				priv->control_state |=  TIOCM_RTS;
-			else
-				priv->control_state &= ~TIOCM_RTS;
-		}
-
-		if ((cmd == TIOCMSET) || (mask & TIOCM_DTR)) {
-			/* DTR needs set */
-			if( ((cmd == TIOCMSET) && (mask & TIOCM_DTR)) ||
-			    (cmd == TIOCMBIS) )
-				priv->control_state |=  TIOCM_DTR;
-			else
-				priv->control_state &= ~TIOCM_DTR;
-		}
-		mct_u232_set_modem_ctrl(serial, priv->control_state);
-		break;
-					
 	case TIOCMIWAIT:
 		/* wait for any of the 4 modem inputs (DCD,RI,DSR,CTS)*/
 		/* TODO */
@@ -739,7 +737,7 @@ static int mct_u232_ioctl (struct usb_serial_port *port, struct file * file,
 		return 0;
 
 	default:
-		dbg(__FUNCTION__ ": arg not supported - 0x%04x",cmd);
+		dbg("%s: arg not supported - 0x%04x", __FUNCTION__,cmd);
 		return(-ENOIOCTLCMD);
 		break;
 	}
@@ -749,14 +747,25 @@ static int mct_u232_ioctl (struct usb_serial_port *port, struct file * file,
 
 static int __init mct_u232_init (void)
 {
-	usb_serial_register (&mct_u232_device);
-	
+	int retval;
+	retval = usb_serial_register(&mct_u232_device);
+	if (retval)
+		goto failed_usb_serial_register;
+	retval = usb_register(&mct_u232_driver);
+	if (retval)
+		goto failed_usb_register;
+	info(DRIVER_DESC " " DRIVER_VERSION);
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&mct_u232_device);
+failed_usb_serial_register:
+	return retval;
 }
 
 
 static void __exit mct_u232_exit (void)
 {
+	usb_deregister (&mct_u232_driver);
 	usb_serial_deregister (&mct_u232_device);
 }
 
@@ -764,11 +773,9 @@ static void __exit mct_u232_exit (void)
 module_init (mct_u232_init);
 module_exit(mct_u232_exit);
 
-MODULE_AUTHOR("Wolfgang Grandegger <wolfgang@ces.ch>");
-MODULE_DESCRIPTION("Magic Control Technology USB-RS232 converter driver");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
 
-#ifdef FIX_WRITE_RETURN_CODE_PROBLEM
-MODULE_PARM(write_blocking, "i");
-MODULE_PARM_DESC(write_blocking, 
-		 "The write function will block to write out all data");
-#endif
+module_param(debug, bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(debug, "Debug enabled or not");

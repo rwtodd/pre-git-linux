@@ -1,32 +1,19 @@
-/* $Id: isdnif.h,v 1.37 2000/11/19 17:01:54 kai Exp $
-
- * Linux ISDN subsystem
+/* $Id: isdnif.h,v 1.43.2.2 2004/01/12 23:08:35 keil Exp $
  *
+ * Linux ISDN subsystem
  * Definition of the interface between the subsystem and its low-level drivers.
  *
  * Copyright 1994,95,96 by Fritz Elfert (fritz@isdn4linux.de)
  * Copyright 1995,96    Thinking Objects Software GmbH Wuerzburg
  * 
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#ifndef isdnif_h
-#define isdnif_h
+#ifndef __ISDNIF_H__
+#define __ISDNIF_H__
 
-#include <linux/config.h>
 
 /*
  * Values for general protocol-selection
@@ -67,6 +54,7 @@
 
 #ifdef __KERNEL__
 
+#include <linux/config.h>
 #include <linux/skbuff.h>
 
 /***************************************************************************/
@@ -74,7 +62,7 @@
 /*                                                                         */ 
 /* The proceed command holds a incoming call in a state to leave processes */
 /* enough time to check whether ist should be accepted.                    */
-/* The PROT_IO Command extends the interface to make protocol dependant    */
+/* The PROT_IO Command extends the interface to make protocol dependent    */
 /* features available (call diversion, call waiting...).                   */
 /*                                                                         */ 
 /* The PROT_IO Command is executed with the desired driver id and the arg  */
@@ -185,8 +173,8 @@ typedef struct
 #define ISDN_CMD_GETL2   11       /* Get B-Chan. Layer2-Parameter          */
 #define ISDN_CMD_SETL3   12       /* Set B-Chan. Layer3-Parameter          */
 #define ISDN_CMD_GETL3   13       /* Get B-Chan. Layer3-Parameter          */
-#define ISDN_CMD_LOCK    14       /* Signal usage by upper levels          */
-#define ISDN_CMD_UNLOCK  15       /* Release usage-lock                    */
+// #define ISDN_CMD_LOCK    14       /* Signal usage by upper levels          */
+// #define ISDN_CMD_UNLOCK  15       /* Release usage-lock                    */
 #define ISDN_CMD_SUSPEND 16       /* Suspend connection                    */
 #define ISDN_CMD_RESUME  17       /* Resume connection                     */
 #define ISDN_CMD_PROCEED 18       /* Proceed with call establishment       */
@@ -433,6 +421,7 @@ typedef struct {
 #ifdef CONFIG_ISDN_TTY_FAX
 		T30_s	*fax;	/* Pointer to ttys fax struct		*/
 #endif
+		ulong userdata;	/* User Data */
 	} parm;
 } isdn_ctrl;
 
@@ -447,6 +436,8 @@ typedef struct {
  *
  */
 typedef struct {
+  struct module *owner;
+
   /* Number of channels supported by this driver
    */
   int channels;
@@ -511,26 +502,18 @@ typedef struct {
    * Parameters:
    *             u_char pointer data
    *             int    length of data
-   *             int    Flag: 0 = Call form Kernel-Space (use memcpy,
-   *                              no schedule allowed) 
-   *                          1 = Data is in User-Space (use memcpy_fromfs,
-   *                              may schedule)
    *             int    driverId
    *             int    local channel-number (0 ...)
    */
-  int (*writecmd)(const u_char*, int, int, int, int);
+  int (*writecmd)(const u_char __user *, int, int, int);
 
   /* Read raw Status replies
    *             u_char pointer data (volatile)
    *             int    length of buffer
-   *             int    Flag: 0 = Call form Kernel-Space (use memcpy,
-   *                              no schedule allowed) 
-   *                          1 = Data is in User-Space (use memcpy_fromfs,
-   *                              may schedule)
    *             int    driverId
    *             int    local channel-number (0 ...)
    */
-  int (*readstat)(u_char*, int, int, int, int);
+  int (*readstat)(u_char __user *, int, int, int);
 
   char id[20];
 } isdn_if;
@@ -560,4 +543,5 @@ extern int register_isdn(isdn_if*);
 #include <asm/uaccess.h>
 
 #endif /* __KERNEL__ */
-#endif /* isdnif_h */
+
+#endif /* __ISDNIF_H__ */

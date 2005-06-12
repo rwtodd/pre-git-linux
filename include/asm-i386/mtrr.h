@@ -31,7 +31,7 @@
 struct mtrr_sentry
 {
     unsigned long base;    /*  Base address     */
-    unsigned long size;    /*  Size of region   */
+    unsigned int size;    /*  Size of region   */
     unsigned int type;     /*  Type of region   */
 };
 
@@ -39,7 +39,7 @@ struct mtrr_gentry
 {
     unsigned int regnum;   /*  Register number  */
     unsigned long base;    /*  Base address     */
-    unsigned long size;    /*  Size of region   */
+    unsigned int size;    /*  Size of region   */
     unsigned int type;     /*  Type of region   */
 };
 
@@ -65,19 +65,6 @@ struct mtrr_gentry
 #define MTRR_TYPE_WRBACK     6
 #define MTRR_NUM_TYPES       7
 
-#ifdef MTRR_NEED_STRINGS
-static char *mtrr_strings[MTRR_NUM_TYPES] =
-{
-    "uncachable",               /* 0 */
-    "write-combining",          /* 1 */
-    "?",                        /* 2 */
-    "?",                        /* 3 */
-    "write-through",            /* 4 */
-    "write-protect",            /* 5 */
-    "write-back",               /* 6 */
-};
-#endif
-
 #ifdef __KERNEL__
 
 /*  The following functions are for use by other drivers  */
@@ -88,6 +75,7 @@ extern int mtrr_add_page (unsigned long base, unsigned long size,
 		     unsigned int type, char increment);
 extern int mtrr_del (int reg, unsigned long base, unsigned long size);
 extern int mtrr_del_page (int reg, unsigned long base, unsigned long size);
+extern void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi);
 #  else
 static __inline__ int mtrr_add (unsigned long base, unsigned long size,
 				unsigned int type, char increment)
@@ -109,13 +97,9 @@ static __inline__ int mtrr_del_page (int reg, unsigned long base,
 {
     return -ENODEV;
 }
-#  endif
 
-/*  The following functions are for initialisation: don't use them!  */
-extern int mtrr_init (void);
-#  if defined(CONFIG_SMP) && defined(CONFIG_MTRR)
-extern void mtrr_init_boot_cpu (void);
-extern void mtrr_init_secondary_cpu (void);
+static __inline__ void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi) {;}
+
 #  endif
 
 #endif

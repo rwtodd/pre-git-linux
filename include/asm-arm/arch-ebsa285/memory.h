@@ -16,8 +16,8 @@
  *			Renamed to memory.h
  *			Moved PAGE_OFFSET and TASK_SIZE here
  */
-#ifndef __ASM_ARCH_MMU_H
-#define __ASM_ARCH_MMU_H
+#ifndef __ASM_ARCH_MEMORY_H
+#define __ASM_ARCH_MEMORY_H
 
 #include <linux/config.h>
 
@@ -34,9 +34,7 @@ extern unsigned long __bus_to_virt(unsigned long);
 
 #elif defined(CONFIG_FOOTBRIDGE_HOST)
 
-#define __virt_to_bus__is_a_macro
 #define __virt_to_bus(x)	((x) - 0xe0000000)
-#define __bus_to_virt__is_a_macro
 #define __bus_to_virt(x)	((x) + 0xe0000000)
 
 #else
@@ -48,13 +46,13 @@ extern unsigned long __bus_to_virt(unsigned long);
 #if defined(CONFIG_ARCH_FOOTBRIDGE)
 
 /* Task size and page offset at 3GB */
-#define TASK_SIZE		(0xc0000000UL)
+#define TASK_SIZE		(0xbf000000UL)
 #define PAGE_OFFSET		(0xc0000000UL)
 
 #elif defined(CONFIG_ARCH_CO285)
 
 /* Task size and page offset at 1.5GB */
-#define TASK_SIZE		(0x60000000UL)
+#define TASK_SIZE		(0x5f000000UL)
 #define PAGE_OFFSET		(0x60000000UL)
 
 #else
@@ -63,21 +61,15 @@ extern unsigned long __bus_to_virt(unsigned long);
 
 #endif
 
-#define TASK_SIZE_26		(0x04000000UL)
+/*
+ * Physical DRAM offset.
+ */
 #define PHYS_OFFSET		(0x00000000UL)
 
 /*
  * This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
-#define TASK_UNMAPPED_BASE (TASK_SIZE / 3)
-
-/*
- * The DRAM is always contiguous.
- */
-#define __virt_to_phys__is_a_macro
-#define __virt_to_phys(vpage) ((unsigned long)(vpage) - PAGE_OFFSET)
-#define __phys_to_virt__is_a_macro
-#define __phys_to_virt(ppage) ((unsigned long)(ppage) + PAGE_OFFSET)
+#define TASK_UNMAPPED_BASE ((TASK_SIZE + 0x01000000) / 3)
 
 #endif

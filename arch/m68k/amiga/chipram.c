@@ -13,11 +13,15 @@
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <asm/page.h>
 #include <asm/amigahw.h>
 
 unsigned long amiga_chip_size;
 
-static struct resource chipram_res = { "Chip RAM", CHIP_PHYSADDR };
+static struct resource chipram_res = {
+    .name = "Chip RAM", .start = CHIP_PHYSADDR
+};
 static unsigned long chipavail;
 
 
@@ -38,7 +42,7 @@ void __init amiga_chip_init(void)
     chipavail = amiga_chip_size;
 }
 
-    
+
 void *amiga_chip_alloc(unsigned long size, const char *name)
 {
     struct resource *res;

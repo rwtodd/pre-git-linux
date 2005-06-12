@@ -1,8 +1,9 @@
-/* $Id: l3dss1.h,v 1.10 2000/06/26 08:59:14 keil Exp $
+/* $Id: l3dss1.h,v 1.10.6.2 2001/09/23 22:24:50 kai Exp $
  *
- *  DSS1 (Euro) D-channel protocol defines
+ * DSS1 (Euro) D-channel protocol defines
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -108,7 +109,7 @@
 typedef struct
   { unsigned char invoke_id; /* used invoke id in remote ops, 0 = not active */
     ulong ll_id; /* remebered ll id */
-    u_char remote_operation; /* handled remote operation, 0 = not active */ 
+    u8 remote_operation; /* handled remote operation, 0 = not active */ 
     int proc; /* rememered procedure */  
     ulong remote_result; /* result of remote operation for statcallb */
     char uus1_data[35]; /* data send during alerting or disconnect */

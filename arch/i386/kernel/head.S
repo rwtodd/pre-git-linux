@@ -1,5 +1,5 @@
 /*
- *  linux/arch/i386/head.S -- the 32-bit startup code.
+ *  linux/arch/i386/kernel/head.S -- the 32-bit startup code.
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *
@@ -15,47 +15,118 @@
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/desc.h>
-
-#define OLD_CL_MAGIC_ADDR	0x90020
-#define OLD_CL_MAGIC		0xA33F
-#define OLD_CL_BASE_ADDR	0x90000
-#define OLD_CL_OFFSET		0x90022
-#define NEW_CL_POINTER		0x228	/* Relative to real mode data */
+#include <asm/cache.h>
+#include <asm/thread_info.h>
+#include <asm/asm_offsets.h>
+#include <asm/setup.h>
 
 /*
- * References to members of the boot_cpu_data structure.
+ * References to members of the new_cpu_data structure.
  */
 
-#define CPU_PARAMS	SYMBOL_NAME(boot_cpu_data)
-#define X86		CPU_PARAMS+0
-#define X86_VENDOR	CPU_PARAMS+1
-#define X86_MODEL	CPU_PARAMS+2
-#define X86_MASK	CPU_PARAMS+3
-#define X86_HARD_MATH	CPU_PARAMS+6
-#define X86_CPUID	CPU_PARAMS+8
-#define X86_CAPABILITY	CPU_PARAMS+12
-#define X86_VENDOR_ID	CPU_PARAMS+16
+#define X86		new_cpu_data+CPUINFO_x86
+#define X86_VENDOR	new_cpu_data+CPUINFO_x86_vendor
+#define X86_MODEL	new_cpu_data+CPUINFO_x86_model
+#define X86_MASK	new_cpu_data+CPUINFO_x86_mask
+#define X86_HARD_MATH	new_cpu_data+CPUINFO_hard_math
+#define X86_CPUID	new_cpu_data+CPUINFO_cpuid_level
+#define X86_CAPABILITY	new_cpu_data+CPUINFO_x86_capability
+#define X86_VENDOR_ID	new_cpu_data+CPUINFO_x86_vendor_id
 
 /*
- * swapper_pg_dir is the main page directory, address 0x00101000
+ * This is how much memory *in addition to the memory covered up to
+ * and including _end* we need mapped initially.  We need one bit for
+ * each possible page, but only in low memory, which means
+ * 2^32/4096/8 = 128K worst case (4G/4G split.)
  *
- * On entry, %esi points to the real-mode code as a 32-bit pointer.
+ * Modulo rounding, each megabyte assigned here requires a kilobyte of
+ * memory, which is currently unreclaimed.
+ *
+ * This should be a multiple of a page.
  */
-ENTRY(stext)
-ENTRY(_stext)
-startup_32:
+#define INIT_MAP_BEYOND_END	(128*1024)
+
+
 /*
- * Set segments to known values
+ * 32-bit kernel entrypoint; only used by the boot CPU.  On entry,
+ * %esi points to the real-mode code as a 32-bit pointer.
+ * CS and DS must be 4 GB flat segments, but we don't depend on
+ * any particular GDT layout, because we load our own as soon as we
+ * can.
+ */
+ENTRY(startup_32)
+
+/*
+ * Set segments to known values.
  */
 	cld
-	movl $(__KERNEL_DS),%eax
+	lgdt boot_gdt_descr - __PAGE_OFFSET
+	movl $(__BOOT_DS),%eax
 	movl %eax,%ds
 	movl %eax,%es
 	movl %eax,%fs
 	movl %eax,%gs
+
+/*
+ * Clear BSS first so that there are no surprises...
+ * No need to cld as DF is already clear from cld above...
+ */
+	xorl %eax,%eax
+	movl $__bss_start - __PAGE_OFFSET,%edi
+	movl $__bss_stop - __PAGE_OFFSET,%ecx
+	subl %edi,%ecx
+	shrl $2,%ecx
+	rep ; stosl
+
+/*
+ * Initialize page tables.  This creates a PDE and a set of page
+ * tables, which are located immediately beyond _end.  The variable
+ * init_pg_tables_end is set up to point to the first "safe" location.
+ * Mappings are created both at virtual address 0 (identity mapping)
+ * and PAGE_OFFSET for up to _end+sizeof(page tables)+INIT_MAP_BEYOND_END.
+ *
+ * Warning: don't use %esi or the stack in this code.  However, %esp
+ * can be used as a GPR if you really need it...
+ */
+page_pde_offset = (__PAGE_OFFSET >> 20);
+
+	movl $(pg0 - __PAGE_OFFSET), %edi
+	movl $(swapper_pg_dir - __PAGE_OFFSET), %edx
+	movl $0x007, %eax			/* 0x007 = PRESENT+RW+USER */
+10:
+	leal 0x007(%edi),%ecx			/* Create PDE entry */
+	movl %ecx,(%edx)			/* Store identity PDE entry */
+	movl %ecx,page_pde_offset(%edx)		/* Store kernel PDE entry */
+	addl $4,%edx
+	movl $1024, %ecx
+11:
+	stosl
+	addl $0x1000,%eax
+	loop 11b
+	/* End condition: we must map up to and including INIT_MAP_BEYOND_END */
+	/* bytes beyond the end of our own page tables; the +0x007 is the attribute bits */
+	leal (INIT_MAP_BEYOND_END+0x007)(%edi),%ebp
+	cmpl %ebp,%eax
+	jb 10b
+	movl %edi,(init_pg_tables_end - __PAGE_OFFSET)
+
 #ifdef CONFIG_SMP
-	orw %bx,%bx
-	jz 1f
+	xorl %ebx,%ebx				/* This is the boot CPU (BSP) */
+	jmp 3f
+
+/*
+ * Non-boot CPU entry point; entered from trampoline.S
+ * We can't lgdt here, because lgdt itself uses a data segment, but
+ * we know the trampoline has already loaded the boot_gdt_table GDT
+ * for us.
+ */
+ENTRY(startup_32_smp)
+	cld
+	movl $(__BOOT_DS),%eax
+	movl %eax,%ds
+	movl %eax,%es
+	movl %eax,%fs
+	movl %eax,%gs
 
 /*
  *	New page tables may be in 4Mbyte page mode and may
@@ -72,67 +143,56 @@ startup_32:
  *	not yet offset PAGE_OFFSET..
  */
 #define cr4_bits mmu_cr4_features-__PAGE_OFFSET
-	cmpl $0,cr4_bits
-	je 3f
+	movl cr4_bits,%edx
+	andl %edx,%edx
+	jz 6f
 	movl %cr4,%eax		# Turn on paging options (PSE,PAE,..)
-	orl cr4_bits,%eax
+	orl %edx,%eax
 	movl %eax,%cr4
-	jmp 3f
-1:
-#endif
-/*
- * Initialize page tables
- */
-	movl $pg0-__PAGE_OFFSET,%edi /* initialize page tables */
-	movl $007,%eax		/* "007" doesn't mean with right to kill, but
-				   PRESENT+RW+USER */
-2:	stosl
-	add $0x1000,%eax
-	cmp $empty_zero_page-__PAGE_OFFSET,%edi
-	jne 2b
+
+	btl $5, %eax		# check if PAE is enabled
+	jnc 6f
+
+	/* Check if extended functions are implemented */
+	movl $0x80000000, %eax
+	cpuid
+	cmpl $0x80000000, %eax
+	jbe 6f
+	mov $0x80000001, %eax
+	cpuid
+	/* Execute Disable bit supported? */
+	btl $20, %edx
+	jnc 6f
+
+	/* Setup EFER (Extended Feature Enable Register) */
+	movl $0xc0000080, %ecx
+	rdmsr
+
+	btsl $11, %eax
+	/* Make changes effective */
+	wrmsr
+
+6:
+	/* This is a secondary processor (AP) */
+	xorl %ebx,%ebx
+	incl %ebx
+
+3:
+#endif /* CONFIG_SMP */
 
 /*
  * Enable paging
  */
-3:
 	movl $swapper_pg_dir-__PAGE_OFFSET,%eax
 	movl %eax,%cr3		/* set the page table pointer.. */
 	movl %cr0,%eax
 	orl $0x80000000,%eax
 	movl %eax,%cr0		/* ..and set paging (PG) bit */
-	jmp 1f			/* flush the prefetch-queue */
-1:
-	movl $1f,%eax
-	jmp *%eax		/* make sure eip is relocated */
+	ljmp $__BOOT_CS,$1f	/* Clear prefetch and normalize %eip */
 1:
 	/* Set up the stack pointer */
 	lss stack_start,%esp
 
-#ifdef CONFIG_SMP
-	orw  %bx,%bx
-	jz  1f				/* Initial CPU cleans BSS */
-	pushl $0
-	popfl
-	jmp checkCPUtype
-1:
-#endif CONFIG_SMP
-
-/*
- * Clear BSS first so that there are no surprises...
- * No need to cld as DF is already clear from cld above...
- */
-	xorl %eax,%eax
-	movl $ SYMBOL_NAME(__bss_start),%edi
-	movl $ SYMBOL_NAME(_end),%ecx
-	subl %edi,%ecx
-	rep
-	stosb
-
-/*
- * start system 32-bit setup. We need to re-do some of the things done
- * in 16-bit mode for the "real" operations.
- */
-	call setup_idt
 /*
  * Initialize eflags.  Some BIOS's leave bits like NT set.  This would
  * confuse the debugger if this code is traced.
@@ -140,23 +200,30 @@ startup_32:
  */
 	pushl $0
 	popfl
+
+#ifdef CONFIG_SMP
+	andl %ebx,%ebx
+	jz  1f				/* Initial CPU cleans BSS */
+	jmp checkCPUtype
+1:
+#endif /* CONFIG_SMP */
+
 /*
- * Copy bootup parameters out of the way. First 2kB of
- * _empty_zero_page is for boot parameters, second 2kB
- * is for the command line.
- *
+ * start system 32-bit setup. We need to re-do some of the things done
+ * in 16-bit mode for the "real" operations.
+ */
+	call setup_idt
+
+/*
+ * Copy bootup parameters out of the way.
  * Note: %esi still has the pointer to the real-mode data.
  */
-	movl $ SYMBOL_NAME(empty_zero_page),%edi
-	movl $512,%ecx
+	movl $boot_params,%edi
+	movl $(PARAM_SIZE/4),%ecx
 	cld
 	rep
 	movsl
-	xorl %eax,%eax
-	movl $512,%ecx
-	rep
-	stosl
-	movl SYMBOL_NAME(empty_zero_page)+NEW_CL_POINTER,%esi
+	movl boot_params+NEW_CL_POINTER,%esi
 	andl %esi,%esi
 	jnz 2f			# New command line protocol
 	cmpw $(OLD_CL_MAGIC),OLD_CL_MAGIC_ADDR
@@ -164,14 +231,12 @@ startup_32:
 	movzwl OLD_CL_OFFSET,%esi
 	addl $(OLD_CL_BASE_ADDR),%esi
 2:
-	movl $ SYMBOL_NAME(empty_zero_page)+2048,%edi
-	movl $512,%ecx
+	movl $saved_command_line,%edi
+	movl $(COMMAND_LINE_SIZE/4),%ecx
 	rep
 	movsl
 1:
-#ifdef CONFIG_SMP
 checkCPUtype:
-#endif
 
 	movl $-1,X86_CPUID		#  -1 for no CPUID initially
 
@@ -182,30 +247,23 @@ checkCPUtype:
  * we don't need to preserve eflags.
  */
 
-	movl $3,X86		# at least 386
+	movb $3,X86		# at least 386
 	pushfl			# push EFLAGS
 	popl %eax		# get EFLAGS
 	movl %eax,%ecx		# save original EFLAGS
-	xorl $0x40000,%eax	# flip AC bit in EFLAGS
+	xorl $0x240000,%eax	# flip AC and ID bits in EFLAGS
 	pushl %eax		# copy to EFLAGS
 	popfl			# set EFLAGS
 	pushfl			# get new EFLAGS
 	popl %eax		# put it in eax
 	xorl %ecx,%eax		# change in flags
-	andl $0x40000,%eax	# check if AC bit changed
-	je is386
-
-	movl $4,X86		# at least 486
-	movl %ecx,%eax
-	xorl $0x200000,%eax	# check ID flag
-	pushl %eax
-	popfl			# if we are on a straight 486DX, SX, or
-	pushfl			# 487SX we can't change it
-	popl %eax
-	xorl %ecx,%eax
 	pushl %ecx		# restore original EFLAGS
 	popfl
-	andl $0x200000,%eax
+	testl $0x40000,%eax	# check if AC bit changed
+	je is386
+
+	movb $4,X86		# at least 486
+	testl $0x200000,%eax	# check if ID bit changed
 	je is486
 
 	/* get vendor info */
@@ -231,37 +289,30 @@ checkCPUtype:
 	movb %cl,X86_MASK
 	movl %edx,X86_CAPABILITY
 
-is486:
-	movl %cr0,%eax		# 486 or better
-	andl $0x80000011,%eax	# Save PG,PE,ET
-	orl $0x50022,%eax	# set AM, WP, NE and MP
+is486:	movl $0x50022,%ecx	# set AM, WP, NE and MP
 	jmp 2f
 
-is386:	pushl %ecx		# restore original EFLAGS
-	popfl
-	movl %cr0,%eax		# 386
+is386:	movl $2,%ecx		# set MP
+2:	movl %cr0,%eax
 	andl $0x80000011,%eax	# Save PG,PE,ET
-	orl $2,%eax		# set MP
-2:	movl %eax,%cr0
+	orl %ecx,%eax
+	movl %eax,%cr0
+
 	call check_x87
-#ifdef CONFIG_SMP
 	incb ready
-#endif
-	lgdt gdt_descr
+	lgdt cpu_gdt_descr
 	lidt idt_descr
 	ljmp $(__KERNEL_CS),$1f
 1:	movl $(__KERNEL_DS),%eax	# reload all the segment registers
-	movl %eax,%ds		# after changing gdt.
+	movl %eax,%ss			# after changing gdt.
+
+	movl $(__USER_DS),%eax		# DS/ES contains default USER segment
+	movl %eax,%ds
 	movl %eax,%es
+
+	xorl %eax,%eax			# Clear FS/GS and LDT
 	movl %eax,%fs
 	movl %eax,%gs
-#ifdef CONFIG_SMP
-	movl $(__KERNEL_DS), %eax
-	movl %eax,%ss		# Reload the stack pointer (segment only)
-#else
-	lss stack_start,%esp	# Load processor stack
-#endif
-	xorl %eax,%eax
 	lldt %ax
 	cld			# gcc2 wants the direction flag cleared at all times
 #ifdef CONFIG_SMP
@@ -269,18 +320,14 @@ is386:	pushl %ecx		# restore original EFLAGS
 	cmpb $1,%cl
 	je 1f			# the first CPU calls start_kernel
 				# all other CPUs call initialize_secondary
-	call SYMBOL_NAME(initialize_secondary)
+	call initialize_secondary
 	jmp L6
 1:
-#endif
-	call SYMBOL_NAME(start_kernel)
+#endif /* CONFIG_SMP */
+	call start_kernel
 L6:
 	jmp L6			# main should never return here, but
 				# just in case, we know what happens.
-
-#ifdef CONFIG_SMP
-ready:	.byte 0
-#endif
 
 /*
  * We depend on ET to be correct. This checks for 287/387.
@@ -310,6 +357,8 @@ check_x87:
  *  and the kernel moved to PAGE_OFFSET. Interrupts
  *  are enabled elsewhere, when we can be relatively
  *  sure everything is ok.
+ *
+ *  Warning: %esi is live across this function.
  */
 setup_idt:
 	lea ignore_int,%edx
@@ -317,7 +366,7 @@ setup_idt:
 	movw %dx,%ax		/* selector = 0x0010 = cs */
 	movw $0x8E00,%dx	/* interrupt gate - dpl=0, present */
 
-	lea SYMBOL_NAME(idt_table),%edi
+	lea idt_table,%edi
 	mov $256,%ecx
 rp_sidt:
 	movl %eax,(%edi)
@@ -327,13 +376,7 @@ rp_sidt:
 	jne rp_sidt
 	ret
 
-ENTRY(stack_start)
-	.long SYMBOL_NAME(init_task_union)+8192
-	.long __KERNEL_DS
-
 /* This is the default interrupt "handler" :-) */
-int_msg:
-	.asciz "Unknown interrupt\n"
 	ALIGN
 ignore_int:
 	cld
@@ -345,9 +388,13 @@ ignore_int:
 	movl $(__KERNEL_DS),%eax
 	movl %eax,%ds
 	movl %eax,%es
+	pushl 16(%esp)
+	pushl 24(%esp)
+	pushl 32(%esp)
+	pushl 40(%esp)
 	pushl $int_msg
-	call SYMBOL_NAME(printk)
-	popl %eax
+	call printk
+	addl $(5*4),%esp
 	popl %ds
 	popl %es
 	popl %edx
@@ -356,121 +403,119 @@ ignore_int:
 	iret
 
 /*
- * The interrupt descriptor table has room for 256 idt's,
- * the global descriptor table is dependent on the number
- * of tasks we can have..
+ * Real beginning of normal "text" segment
  */
-#define IDT_ENTRIES	256
-#define GDT_ENTRIES	(__TSS(NR_CPUS))
-
-
-.globl SYMBOL_NAME(idt)
-.globl SYMBOL_NAME(gdt)
-
-	ALIGN
-	.word 0
-idt_descr:
-	.word IDT_ENTRIES*8-1		# idt contains 256 entries
-SYMBOL_NAME(idt):
-	.long SYMBOL_NAME(idt_table)
-
-	.word 0
-gdt_descr:
-	.word GDT_ENTRIES*8-1
-SYMBOL_NAME(gdt):
-	.long SYMBOL_NAME(gdt_table)
+ENTRY(stext)
+ENTRY(_stext)
 
 /*
- * This is initialized to create an identity-mapping at 0-8M (for bootup
- * purposes) and another mapping of the 0-8M area at virtual address
- * PAGE_OFFSET.
+ * BSS section
  */
-.org 0x1000
+.section ".bss.page_aligned","w"
 ENTRY(swapper_pg_dir)
-	.long 0x00102007
-	.long 0x00103007
-	.fill BOOT_USER_PGD_PTRS-2,4,0
-	/* default: 766 entries */
-	.long 0x00102007
-	.long 0x00103007
-	/* default: 254 entries */
-	.fill BOOT_KERNEL_PGD_PTRS-2,4,0
-
-/*
- * The page tables are initialized to only 8MB here - the final page
- * tables are set up later depending on memory size.
- */
-.org 0x2000
-ENTRY(pg0)
-
-.org 0x3000
-ENTRY(pg1)
-
-/*
- * empty_zero_page must immediately follow the page tables ! (The
- * initialization loop counts until empty_zero_page)
- */
-
-.org 0x4000
+	.fill 1024,4,0
 ENTRY(empty_zero_page)
-
-.org 0x5000
-ENTRY(empty_bad_page)
-
-.org 0x6000
-ENTRY(empty_bad_pte_table)
-
-#if CONFIG_X86_PAE
-
- .org 0x7000
- ENTRY(empty_bad_pmd_table)
-
- .org 0x8000
-
-#else
-
- .org 0x7000
-
-#endif
+	.fill 4096,1,0
 
 /*
- * This starts the data section. Note that the above is all
- * in the text section because it has alignment requirements
- * that we cannot fulfill any other way.
+ * This starts the data section.
  */
 .data
 
-ALIGN
+ENTRY(stack_start)
+	.long init_thread_union+THREAD_SIZE
+	.long __BOOT_DS
+
+ready:	.byte 0
+
+int_msg:
+	.asciz "Unknown interrupt or fault at EIP %p %p %p\n"
+
 /*
- * This contains typically 140 quadwords, depending on NR_CPUS.
- *
- * NOTE! Make sure the gdt descriptor in head.S matches this if you
- * change anything.
+ * The IDT and GDT 'descriptors' are a strange 48-bit object
+ * only used by the lidt and lgdt instructions. They are not
+ * like usual segment descriptors - they consist of a 16-bit
+ * segment size, and 32-bit linear address value:
  */
-ENTRY(gdt_table)
+
+.globl boot_gdt_descr
+.globl idt_descr
+.globl cpu_gdt_descr
+
+	ALIGN
+# early boot GDT descriptor (must use 1:1 address mapping)
+	.word 0				# 32 bit align gdt_desc.address
+boot_gdt_descr:
+	.word __BOOT_DS+7
+	.long boot_gdt_table - __PAGE_OFFSET
+
+	.word 0				# 32-bit align idt_desc.address
+idt_descr:
+	.word IDT_ENTRIES*8-1		# idt contains 256 entries
+	.long idt_table
+
+# boot GDT descriptor (later on used by CPU#0):
+	.word 0				# 32 bit align gdt_desc.address
+cpu_gdt_descr:
+	.word GDT_ENTRIES*8-1
+	.long cpu_gdt_table
+
+	.fill NR_CPUS-1,8,0		# space for the other GDT descriptors
+
+/*
+ * The boot_gdt_table must mirror the equivalent in setup.S and is
+ * used only for booting.
+ */
+	.align L1_CACHE_BYTES
+ENTRY(boot_gdt_table)
+	.fill GDT_ENTRY_BOOT_CS,8,0
+	.quad 0x00cf9a000000ffff	/* kernel 4GB code at 0x00000000 */
+	.quad 0x00cf92000000ffff	/* kernel 4GB data at 0x00000000 */
+
+/*
+ * The Global Descriptor Table contains 28 quadwords, per-CPU.
+ */
+	.align PAGE_SIZE_asm
+ENTRY(cpu_gdt_table)
 	.quad 0x0000000000000000	/* NULL descriptor */
-	.quad 0x0000000000000000	/* not used */
-	.quad 0x00cf9a000000ffff	/* 0x10 kernel 4GB code at 0x00000000 */
-	.quad 0x00cf92000000ffff	/* 0x18 kernel 4GB data at 0x00000000 */
-	.quad 0x00cffa000000ffff	/* 0x23 user   4GB code at 0x00000000 */
-	.quad 0x00cff2000000ffff	/* 0x2b user   4GB data at 0x00000000 */
-	.quad 0x0000000000000000	/* not used */
-	.quad 0x0000000000000000	/* not used */
+	.quad 0x0000000000000000	/* 0x0b reserved */
+	.quad 0x0000000000000000	/* 0x13 reserved */
+	.quad 0x0000000000000000	/* 0x1b reserved */
+	.quad 0x0000000000000000	/* 0x20 unused */
+	.quad 0x0000000000000000	/* 0x28 unused */
+	.quad 0x0000000000000000	/* 0x33 TLS entry 1 */
+	.quad 0x0000000000000000	/* 0x3b TLS entry 2 */
+	.quad 0x0000000000000000	/* 0x43 TLS entry 3 */
+	.quad 0x0000000000000000	/* 0x4b reserved */
+	.quad 0x0000000000000000	/* 0x53 reserved */
+	.quad 0x0000000000000000	/* 0x5b reserved */
+
+	.quad 0x00cf9a000000ffff	/* 0x60 kernel 4GB code at 0x00000000 */
+	.quad 0x00cf92000000ffff	/* 0x68 kernel 4GB data at 0x00000000 */
+	.quad 0x00cffa000000ffff	/* 0x73 user 4GB code at 0x00000000 */
+	.quad 0x00cff2000000ffff	/* 0x7b user 4GB data at 0x00000000 */
+
+	.quad 0x0000000000000000	/* 0x80 TSS descriptor */
+	.quad 0x0000000000000000	/* 0x88 LDT descriptor */
+
+	/* Segments used for calling PnP BIOS */
+	.quad 0x00c09a0000000000	/* 0x90 32-bit code */
+	.quad 0x00809a0000000000	/* 0x98 16-bit code */
+	.quad 0x0080920000000000	/* 0xa0 16-bit data */
+	.quad 0x0080920000000000	/* 0xa8 16-bit data */
+	.quad 0x0080920000000000	/* 0xb0 16-bit data */
 	/*
 	 * The APM segments have byte granularity and their bases
 	 * and limits are set at run time.
 	 */
-	.quad 0x0040920000000000	/* 0x40 APM set up for bad BIOS's */
-	.quad 0x00409a0000000000	/* 0x48 APM CS    code */
-	.quad 0x00009a0000000000	/* 0x50 APM CS 16 code (16 bit) */
-	.quad 0x0040920000000000	/* 0x58 APM DS    data */
-	.fill NR_CPUS*4,8,0		/* space for TSS's and LDT's */
-		
-/*
- * This is to aid debugging, the various locking macros will be putting
- * code fragments here.  When an oops occurs we'd rather know that it's
- * inside the .text.lock section rather than as some offset from whatever
- * function happens to be last in the .text segment.
- */
-.section .text.lock
-ENTRY(stext_lock)
+	.quad 0x00409a0000000000	/* 0xb8 APM CS    code */
+	.quad 0x00009a0000000000	/* 0xc0 APM CS 16 code (16 bit) */
+	.quad 0x0040920000000000	/* 0xc8 APM DS    data */
+
+	.quad 0x0000000000000000	/* 0xd0 - unused */
+	.quad 0x0000000000000000	/* 0xd8 - unused */
+	.quad 0x0000000000000000	/* 0xe0 - unused */
+	.quad 0x0000000000000000	/* 0xe8 - unused */
+	.quad 0x0000000000000000	/* 0xf0 - unused */
+	.quad 0x0000000000000000	/* 0xf8 - GDT entry 31: double-fault TSS */
+

@@ -23,6 +23,7 @@
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -74,13 +75,13 @@ takara_end_irq(unsigned int irq)
 }
 
 static struct hw_interrupt_type takara_irq_type = {
-	typename:	"TAKARA",
-	startup:	takara_startup_irq,
-	shutdown:	takara_disable_irq,
-	enable:		takara_enable_irq,
-	disable:	takara_disable_irq,
-	ack:		takara_disable_irq,
-	end:		takara_end_irq,
+	.typename	= "TAKARA",
+	.startup	= takara_startup_irq,
+	.shutdown	= takara_disable_irq,
+	.enable		= takara_enable_irq,
+	.disable	= takara_disable_irq,
+	.ack		= takara_disable_irq,
+	.end		= takara_end_irq,
 };
 
 static void
@@ -230,8 +231,12 @@ takara_swizzle(struct pci_dev *dev, u8 *pinp)
 	int slot = PCI_SLOT(dev->devfn);
 	int pin = *pinp;
 	unsigned int ctlreg = inl(0x500);
-	unsigned int busslot = PCI_SLOT(dev->bus->self->devfn);
+	unsigned int busslot;
 
+	if (!dev->bus->self)
+		return slot;
+
+	busslot = PCI_SLOT(dev->bus->self->devfn);
 	/* Check for built-in bridges.  */
 	if (dev->bus->number != 0
 	    && busslot > 16
@@ -268,25 +273,24 @@ takara_init_pci(void)
  */
 
 struct alpha_machine_vector takara_mv __initmv = {
-	vector_name:		"Takara",
+	.vector_name		= "Takara",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_CIA_IO,
-	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	CIA_DEFAULT_MEM_BASE,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= CIA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		128,
-	device_interrupt:	takara_device_interrupt,
+	.nr_irqs		= 128,
+	.device_interrupt	= takara_device_interrupt,
 
-	init_arch:		cia_init_arch,
-	init_irq:		takara_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		takara_init_pci,
-	kill_arch:		NULL,
-	pci_map_irq:		takara_map_irq,
-	pci_swizzle:		takara_swizzle,
+	.init_arch		= cia_init_arch,
+	.init_irq		= takara_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= takara_init_pci,
+	.kill_arch		= cia_kill_arch,
+	.pci_map_irq		= takara_map_irq,
+	.pci_swizzle		= takara_swizzle,
 };
 ALIAS_MV(takara)

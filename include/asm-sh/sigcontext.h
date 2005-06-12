@@ -13,10 +13,10 @@ struct sigcontext {
 	unsigned long sc_mach;
 	unsigned long sc_macl;
 
-#if defined(__SH4__)
+#if defined(__SH4__) || defined(CONFIG_CPU_SH4)
 	/* FPU registers */
 	unsigned long sc_fpregs[16];
-	unsigned long long sc_xdregs[8];
+	unsigned long sc_xfpregs[16];
 	unsigned int sc_fpscr;
 	unsigned int sc_fpul;
 	unsigned int sc_ownedfp;

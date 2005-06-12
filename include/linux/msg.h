@@ -2,6 +2,7 @@
 #define _LINUX_MSG_H
 
 #include <linux/ipc.h>
+#include <linux/list.h>
 
 /* ipcs ctl commands */
 #define MSG_STAT 11
@@ -63,10 +64,32 @@ struct msginfo {
 
 #ifdef __KERNEL__
 
-asmlinkage long sys_msgget (key_t key, int msgflg);
-asmlinkage long sys_msgsnd (int msqid, struct msgbuf *msgp, size_t msgsz, int msgflg);
-asmlinkage long sys_msgrcv (int msqid, struct msgbuf *msgp, size_t msgsz, long msgtyp, int msgflg);
-asmlinkage long sys_msgctl (int msqid, int cmd, struct msqid_ds *buf);
+/* one msg_msg structure for each message */
+struct msg_msg {
+	struct list_head m_list; 
+	long  m_type;          
+	int m_ts;           /* message text size */
+	struct msg_msgseg* next;
+	void *security;
+	/* the actual message follows immediately */
+};
+
+/* one msq_queue structure for each present queue on the system */
+struct msg_queue {
+	struct kern_ipc_perm q_perm;
+	time_t q_stime;			/* last msgsnd time */
+	time_t q_rtime;			/* last msgrcv time */
+	time_t q_ctime;			/* last change time */
+	unsigned long q_cbytes;		/* current number of bytes on queue */
+	unsigned long q_qnum;		/* number of messages in queue */
+	unsigned long q_qbytes;		/* max number of bytes on queue */
+	pid_t q_lspid;			/* pid of last msgsnd */
+	pid_t q_lrpid;			/* last receive pid */
+
+	struct list_head q_messages;
+	struct list_head q_receivers;
+	struct list_head q_senders;
+};
 
 #endif /* __KERNEL__ */
 

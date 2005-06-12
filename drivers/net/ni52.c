@@ -2,7 +2,7 @@
  * net-3-driver for the NI5210 card (i82586 Ethernet chip)
  *
  * This is an extension to the Linux operating system, and is covered by the
- * same Gnu Public License that covers that work.
+ * same GNU General Public License that covers that work.
  *
  * Alphacode 0.82 (96/09/29) for Linux 2.0.0 (or later)
  * Copyrights (c) 1994,1995,1996 by M.Hipp (hippm@informatik.uni-tuebingen.de)
@@ -40,7 +40,7 @@
  *   The internal sysbus seems to be slow. So we often lose packets because of
  *   overruns while receiving from a fast remote host.
  *   This can slow down TCP connections. Maybe the newer ni5210 cards are better.
- *   my experience is, that if a machine sends with more then about 500-600K/s
+ *   my experience is, that if a machine sends with more than about 500-600K/s
  *   the fifo/sysbus overflows.
  *
  * IMPORTANT NOTE:
@@ -99,9 +99,9 @@
  * < 30.Sep.93: first versions
  */
 
-static int debuglevel = 0; /* debug-printk 0: off 1: a few 2: more */
-static int automatic_resume = 0; /* experimental .. better should be zero */
-static int rfdadd = 0; /* rfdadd=1 may be better for 8K MEM cards */
+static int debuglevel;	/* debug-printk 0: off 1: a few 2: more */
+static int automatic_resume; /* experimental .. better should be zero */
+static int rfdadd;	/* rfdadd=1 may be better for 8K MEM cards */
 static int fifo=0x8;	/* don't change */
 
 /* #define REALLY_SLOW_IO */
@@ -111,11 +111,11 @@ static int fifo=0x8;	/* don't change */
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <asm/io.h>
 
 #include <linux/netdevice.h>
@@ -123,6 +123,8 @@ static int fifo=0x8;	/* don't change */
 #include <linux/skbuff.h>
 
 #include "ni52.h"
+
+#define DRV_NAME "ni52"
 
 #define DEBUG       /* debug on */
 #define SYSBUSVAL 1 /* 8 Bit */
@@ -193,7 +195,7 @@ sizeof(nop_cmd) = 8;
 #define NI52_ADDR2 0x01
 
 static int     ni52_probe1(struct net_device *dev,int ioaddr);
-static void    ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr);
+static irqreturn_t ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr);
 static int     ni52_open(struct net_device *dev);
 static int     ni52_close(struct net_device *dev);
 static int     ni52_send_packet(struct sk_buff *,struct net_device *);
@@ -226,10 +228,11 @@ struct priv
 	volatile struct iscp_struct	*iscp;	/* volatile is important */
 	volatile struct scb_struct	*scb;	/* volatile is important */
 	volatile struct tbd_struct	*xmit_buffs[NUM_XMIT_BUFFS];
-	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 #if (NUM_XMIT_BUFFS == 1)
+	volatile struct transmit_cmd_struct *xmit_cmds[2];
 	volatile struct nop_cmd_struct *nop_cmds[2];
 #else
+	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 	volatile struct nop_cmd_struct *nop_cmds[NUM_XMIT_BUFFS];
 #endif
 	volatile int		nop_point,num_recv_buffs;
@@ -286,8 +289,8 @@ static int check586(struct net_device *dev,char *where,unsigned size)
 	char *iscp_addrs[2];
 	int i;
 
-	p->base = (unsigned long) bus_to_virt((unsigned long)where) + size - 0x01000000;
-	p->memtop = bus_to_virt((unsigned long)where) + size;
+	p->base = (unsigned long) isa_bus_to_virt((unsigned long)where) + size - 0x01000000;
+	p->memtop = isa_bus_to_virt((unsigned long)where) + size;
 	p->scp = (struct scp_struct *)(p->base + SCP_DEFAULT_ADDRESS);
 	memset((char *)p->scp,0, sizeof(struct scp_struct));
 	for(i=0;i<sizeof(struct scp_struct);i++) /* memory was writeable? */
@@ -297,7 +300,7 @@ static int check586(struct net_device *dev,char *where,unsigned size)
 	if(p->scp->sysbus != SYSBUSVAL)
 		return 0;
 
-	iscp_addrs[0] = bus_to_virt((unsigned long)where);
+	iscp_addrs[0] = isa_bus_to_virt((unsigned long)where);
 	iscp_addrs[1]= (char *) p->scp - sizeof(struct iscp_struct);
 
 	for(i=0;i<2;i++)
@@ -329,7 +332,7 @@ static void alloc586(struct net_device *dev)
 	DELAY(1);
 
 	p->scp	= (struct scp_struct *)	(p->base + SCP_DEFAULT_ADDRESS);
-	p->scb	= (struct scb_struct *)	bus_to_virt(dev->mem_start);
+	p->scb	= (struct scb_struct *)	isa_bus_to_virt(dev->mem_start);
 	p->iscp = (struct iscp_struct *) ((char *)p->scp - sizeof(struct iscp_struct));
 
 	memset((char *) p->iscp,0,sizeof(struct iscp_struct));
@@ -353,51 +356,77 @@ static void alloc586(struct net_device *dev)
 	memset((char *)p->scb,0,sizeof(struct scb_struct));
 }
 
+/* set: io,irq,memstart,memend or set it when calling insmod */
+static int irq=9;
+static int io=0x300;
+static long memstart;	/* e.g 0xd0000 */
+static long memend;	/* e.g 0xd4000 */
+
 /**********************************************
  * probe the ni5210-card
  */
-int __init ni52_probe(struct net_device *dev)
+struct net_device * __init ni52_probe(int unit)
 {
-#ifndef MODULE
-	int *port;
+	struct net_device *dev = alloc_etherdev(sizeof(struct priv));
 	static int ports[] = {0x300, 0x280, 0x360 , 0x320 , 0x340, 0};
-#endif
-	int base_addr = dev->base_addr;
+	int *port;
+	int err = 0;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+		io = dev->base_addr;
+		irq = dev->irq;
+		memstart = dev->mem_start;
+		memend = dev->mem_end;
+	}
 
 	SET_MODULE_OWNER(dev);
 
-	if (base_addr > 0x1ff)		/* Check a single specified location. */
-		return ni52_probe1(dev, base_addr);
-	else if (base_addr > 0)		/* Don't probe at all. */
-		return -ENXIO;
-
-#ifdef MODULE
-	printk("%s: no autoprobing allowed for modules.\n",dev->name);
-#else
-	for (port = ports; *port; port++) {
-		int ioaddr = *port;
-		dev->base_addr = ioaddr;
-		if (ni52_probe1(dev, ioaddr) == 0)
-			return 0;
-	}
-
+	if (io > 0x1ff)	{	/* Check a single specified location. */
+		err = ni52_probe1(dev, io);
+	} else if (io > 0) {		/* Don't probe at all. */
+		err = -ENXIO;
+	} else {
+		for (port = ports; *port && ni52_probe1(dev, *port) ; port++)
+			;
+		if (*port)
+			goto got_it;
 #ifdef FULL_IO_PROBE
-	for(dev->base_addr=0x200; dev->base_addr<0x400; dev->base_addr+=8)
-		if (ni52_probe1(dev, dev->base_addr) == 0)
-			return 0;
+		for (io = 0x200; io < 0x400 && ni52_probe1(dev, io); io += 8)
+			;
+		if (io < 0x400)
+			goto got_it;
 #endif
-
-#endif
-
-	dev->base_addr = base_addr;
-	return -ENODEV;
+		err = -ENODEV;
+	}
+	if (err)
+		goto out;
+got_it:
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	release_region(dev->base_addr, NI52_TOTAL_SIZE);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
 
 static int __init ni52_probe1(struct net_device *dev,int ioaddr)
 {
 	int i, size, retval;
 
-	if (!request_region(ioaddr, NI52_TOTAL_SIZE, dev->name))
+	dev->base_addr = ioaddr;
+	dev->irq = irq;
+	dev->mem_start = memstart;
+	dev->mem_end = memend;
+
+	if (!request_region(ioaddr, NI52_TOTAL_SIZE, DRV_NAME))
 		return -EBUSY;
 
 	if( !(inb(ioaddr+NI52_MAGIC1) == NI52_MAGICVAL1) ||
@@ -415,7 +444,7 @@ static int __init ni52_probe1(struct net_device *dev,int ioaddr)
 		goto out;
 	}
 
-	printk("%s: NI5210 found at %#3lx, ",dev->name,dev->base_addr);
+	printk(KERN_INFO "%s: NI5210 found at %#3lx, ",dev->name,dev->base_addr);
 
 	/*
 	 * check (or search) IO-Memory, 8K and 16K
@@ -468,17 +497,10 @@ static int __init ni52_probe1(struct net_device *dev,int ioaddr)
 	dev->mem_end = dev->mem_start + size; /* set mem_end showed by 'ifconfig' */
 #endif
 
-	dev->priv = (void *) kmalloc(sizeof(struct priv),GFP_KERNEL);
-	if(dev->priv == NULL) {
-		printk("%s: Ooops .. can't allocate private driver memory.\n",dev->name);
-		retval = -ENOMEM;
-		goto out;
-	}
-																	/* warning: we don't free it on errors */
 	memset((char *) dev->priv,0,sizeof(struct priv));
 
-	((struct priv *) (dev->priv))->memtop = bus_to_virt(dev->mem_start) + size;
-	((struct priv *) (dev->priv))->base =	(unsigned long) bus_to_virt(dev->mem_start) + size - 0x01000000;
+	((struct priv *) (dev->priv))->memtop = isa_bus_to_virt(dev->mem_start) + size;
+	((struct priv *) (dev->priv))->base =	(unsigned long) isa_bus_to_virt(dev->mem_start) + size - 0x01000000;
 	alloc586(dev);
 
 	/* set number of receive-buffs according to memsize */
@@ -491,14 +513,17 @@ static int __init ni52_probe1(struct net_device *dev,int ioaddr)
 
 	if(dev->irq < 2)
 	{
-		autoirq_setup(0);
+		unsigned long irq_mask;
+
+		irq_mask = probe_irq_on();
 		ni_reset586();
 		ni_attn586();
-		if(!(dev->irq = autoirq_report(2)))
+
+		mdelay(20);
+		dev->irq = probe_irq_off(irq_mask);
+		if(!dev->irq)
 		{
 			printk("?autoirq, Failed to detect IRQ line!\n");
-			kfree(dev->priv);
-			dev->priv = NULL;
 			retval = -EAGAIN;
 			goto out;
 		}
@@ -519,8 +544,6 @@ static int __init ni52_probe1(struct net_device *dev,int ioaddr)
 	dev->set_multicast_list = set_multicast_list;
 
 	dev->if_port 		= 0;
-
-	ether_setup(dev);
 
 	return 0;
 out:
@@ -814,7 +837,7 @@ static void *alloc_rfa(struct net_device *dev,void *ptr)
  * Interrupt Handler ...
  */
 
-static void ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
+static irqreturn_t ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
 {
 	struct net_device *dev = dev_id;
 	unsigned short stat;
@@ -823,7 +846,7 @@ static void ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
 
 	if (!dev) {
 		printk ("ni5210-interrupt: irq %d for unknown device.\n",irq);
-		return;
+		return IRQ_NONE;
 	}
 	p = (struct priv *) dev->priv;
 
@@ -882,6 +905,7 @@ static void ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
 
 	if(debuglevel > 1)
 		printk("i");
+	return IRQ_HANDLED;
 }
 
 /*******************************************************
@@ -918,7 +942,9 @@ static void ni52_rcv_int(struct net_device *dev)
 						eth_copy_and_sum(skb,(char *) p->base+(unsigned long) rbd->buffer,totlen,0);
 						skb->protocol=eth_type_trans(skb,dev);
 						netif_rx(skb);
+						dev->last_rx = jiffies;
 						p->stats.rx_packets++;
+						p->stats.rx_bytes += totlen;
 					}
 					else
 						p->stats.rx_dropped++;
@@ -1160,7 +1186,11 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 #endif
 	{
 		memcpy((char *)p->xmit_cbuffs[p->xmit_count],(char *)(skb->data),skb->len);
-		len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
+		len = skb->len;
+		if (len < ETH_ZLEN) {
+			len = ETH_ZLEN;
+			memset((char *)p->xmit_cbuffs[p->xmit_count]+skb->len, 0, len - skb->len);
+		}
 
 #if (NUM_XMIT_BUFFS == 1)
 #	ifdef NO_NOPCOMMANDS
@@ -1282,18 +1312,16 @@ static void set_multicast_list(struct net_device *dev)
 }
 
 #ifdef MODULE
-static struct net_device dev_ni52;
+static struct net_device *dev_ni52;
 
-/* set: io,irq,memstart,memend or set it when calling insmod */
-static int irq=9;
-static int io=0x300;
-static long memstart=0; /* e.g 0xd0000 */
-static long memend=0;	 /* e.g 0xd4000 */
-
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(memstart, "l");
-MODULE_PARM(memend, "l");
+module_param(io, int, 0);
+module_param(irq, int, 0);
+module_param(memstart, long, 0);
+module_param(memend, long, 0);
+MODULE_PARM_DESC(io, "NI5210 I/O base address,required");
+MODULE_PARM_DESC(irq, "NI5210 IRQ number,required");
+MODULE_PARM_DESC(memstart, "NI5210 memory base address,required");
+MODULE_PARM_DESC(memend, "NI5210 memory end address,required");
 
 int init_module(void)
 {
@@ -1301,22 +1329,17 @@ int init_module(void)
 		printk("ni52: Autoprobing not allowed for modules.\nni52: Set symbols 'io' 'irq' 'memstart' and 'memend'\n");
 		return -ENODEV;
 	}
-	dev_ni52.init = ni52_probe;
-	dev_ni52.irq = irq;
-	dev_ni52.base_addr = io;
-	dev_ni52.mem_end = memend;
-	dev_ni52.mem_start = memstart;
-	if (register_netdev(&dev_ni52) != 0)
-		return -EIO;
+	dev_ni52 = ni52_probe(-1);
+	if (IS_ERR(dev_ni52))
+		return PTR_ERR(dev_ni52);
 	return 0;
 }
 
 void cleanup_module(void)
 {
-	release_region(dev_ni52.base_addr, NI52_TOTAL_SIZE);
-	unregister_netdev(&dev_ni52);
-	kfree(dev_ni52.priv);
-	dev_ni52.priv = NULL;
+	unregister_netdev(dev_ni52);
+	release_region(dev_ni52->base_addr, NI52_TOTAL_SIZE);
+	free_netdev(dev_ni52);
 }
 #endif /* MODULE */
 
@@ -1356,6 +1379,7 @@ void ni52_dump(struct net_device *dev,void *ptr)
 	printk("\n");
 }
 #endif
+MODULE_LICENSE("GPL");
 
 /*
  * END: linux/drivers/net/ni52.c

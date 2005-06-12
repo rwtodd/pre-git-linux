@@ -1,19 +1,20 @@
 #
 # Makefile for the linux memory manager.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET := mm.o
+mmu-y			:= nommu.o
+mmu-$(CONFIG_MMU)	:= fremap.o highmem.o madvise.o memory.o mincore.o \
+			   mlock.o mmap.o mprotect.o mremap.o msync.o rmap.o \
+			   vmalloc.o
 
-obj-y	 := memory.o mmap.o filemap.o mprotect.o mlock.o mremap.o \
-	    vmalloc.o slab.o bootmem.o swap.o vmscan.o page_io.o \
-	    page_alloc.o swap_state.o swapfile.o numa.o oom_kill.o \
-	    shmem.o
+obj-y			:= bootmem.o filemap.o mempool.o oom_kill.o fadvise.o \
+			   page_alloc.o page-writeback.o pdflush.o \
+			   readahead.o slab.o swap.o truncate.o vmscan.o \
+			   prio_tree.o $(mmu-y)
 
-obj-$(CONFIG_HIGHMEM) += highmem.o
+obj-$(CONFIG_SWAP)	+= page_io.o swap_state.o swapfile.o thrash.o
+obj-$(CONFIG_HUGETLBFS)	+= hugetlb.o
+obj-$(CONFIG_NUMA) 	+= mempolicy.o
+obj-$(CONFIG_SHMEM) += shmem.o
+obj-$(CONFIG_TINY_SHMEM) += tiny-shmem.o
 
-include $(TOPDIR)/Rules.make

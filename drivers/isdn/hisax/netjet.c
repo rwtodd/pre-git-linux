@@ -1,16 +1,19 @@
-/* $Id: netjet.c,v 1.24.6.1 2000/12/06 16:59:20 kai Exp $
+/* $Id: netjet.c,v 1.29.2.4 2004/02/11 13:21:34 keil Exp $
  *
- * netjet.c     low level stuff for Traverse Technologie NETJet ISDN cards
+ * low level stuff for Traverse Technologie NETJet ISDN cards
  *
- * Author     Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Thanks to Traverse Technologie Australia for documents and informations
+ * Thanks to Traverse Technologies Australia for documents and information
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * 16-Apr-2002 - led code added - Guy Ellis (guy@traverse.com.au)
  *
  */
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
@@ -19,48 +22,32 @@
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/ppp_defs.h>
+#include <asm/io.h>
 #include "netjet.h"
 
-#ifndef bus_to_virt
-#define bus_to_virt (u_int *)
-#endif
-
-#ifndef virt_to_bus
-#define virt_to_bus (u_int)
-#endif
-
-const char *NETjet_revision = "$Revision: 1.24.6.1 $";
+const char *NETjet_revision = "$Revision: 1.29.2.4 $";
 
 /* Interface functions */
 
 u_char
 NETjet_ReadIC(struct IsdnCardState *cs, u_char offset)
 {
-	long flags;
 	u_char ret;
 	
-	save_flags(flags);
-	cli();
 	cs->hw.njet.auxd &= 0xfc;
 	cs->hw.njet.auxd |= (offset>>4) & 3;
 	byteout(cs->hw.njet.auxa, cs->hw.njet.auxd);
 	ret = bytein(cs->hw.njet.isac + ((offset & 0xf)<<2));
-	restore_flags(flags);
 	return(ret);
 }
 
 void
 NETjet_WriteIC(struct IsdnCardState *cs, u_char offset, u_char value)
 {
-	long flags;
-	
-	save_flags(flags);
-	cli();
 	cs->hw.njet.auxd &= 0xfc;
 	cs->hw.njet.auxd |= (offset>>4) & 3;
 	byteout(cs->hw.njet.auxa, cs->hw.njet.auxd);
 	byteout(cs->hw.njet.isac + ((offset & 0xf)<<2), value);
-	restore_flags(flags);
 }
 
 void
@@ -70,42 +57,6 @@ NETjet_ReadICfifo(struct IsdnCardState *cs, u_char *data, int size)
 	byteout(cs->hw.njet.auxa, cs->hw.njet.auxd);
 	insb(cs->hw.njet.isac, data, size);
 }
-
-__u16 fcstab[256] =
-{
-	0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
-	0x8c48, 0x9dc1, 0xaf5a, 0xbed3, 0xca6c, 0xdbe5, 0xe97e, 0xf8f7,
-	0x1081, 0x0108, 0x3393, 0x221a, 0x56a5, 0x472c, 0x75b7, 0x643e,
-	0x9cc9, 0x8d40, 0xbfdb, 0xae52, 0xdaed, 0xcb64, 0xf9ff, 0xe876,
-	0x2102, 0x308b, 0x0210, 0x1399, 0x6726, 0x76af, 0x4434, 0x55bd,
-	0xad4a, 0xbcc3, 0x8e58, 0x9fd1, 0xeb6e, 0xfae7, 0xc87c, 0xd9f5,
-	0x3183, 0x200a, 0x1291, 0x0318, 0x77a7, 0x662e, 0x54b5, 0x453c,
-	0xbdcb, 0xac42, 0x9ed9, 0x8f50, 0xfbef, 0xea66, 0xd8fd, 0xc974,
-	0x4204, 0x538d, 0x6116, 0x709f, 0x0420, 0x15a9, 0x2732, 0x36bb,
-	0xce4c, 0xdfc5, 0xed5e, 0xfcd7, 0x8868, 0x99e1, 0xab7a, 0xbaf3,
-	0x5285, 0x430c, 0x7197, 0x601e, 0x14a1, 0x0528, 0x37b3, 0x263a,
-	0xdecd, 0xcf44, 0xfddf, 0xec56, 0x98e9, 0x8960, 0xbbfb, 0xaa72,
-	0x6306, 0x728f, 0x4014, 0x519d, 0x2522, 0x34ab, 0x0630, 0x17b9,
-	0xef4e, 0xfec7, 0xcc5c, 0xddd5, 0xa96a, 0xb8e3, 0x8a78, 0x9bf1,
-	0x7387, 0x620e, 0x5095, 0x411c, 0x35a3, 0x242a, 0x16b1, 0x0738,
-	0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70,
-	0x8408, 0x9581, 0xa71a, 0xb693, 0xc22c, 0xd3a5, 0xe13e, 0xf0b7,
-	0x0840, 0x19c9, 0x2b52, 0x3adb, 0x4e64, 0x5fed, 0x6d76, 0x7cff,
-	0x9489, 0x8500, 0xb79b, 0xa612, 0xd2ad, 0xc324, 0xf1bf, 0xe036,
-	0x18c1, 0x0948, 0x3bd3, 0x2a5a, 0x5ee5, 0x4f6c, 0x7df7, 0x6c7e,
-	0xa50a, 0xb483, 0x8618, 0x9791, 0xe32e, 0xf2a7, 0xc03c, 0xd1b5,
-	0x2942, 0x38cb, 0x0a50, 0x1bd9, 0x6f66, 0x7eef, 0x4c74, 0x5dfd,
-	0xb58b, 0xa402, 0x9699, 0x8710, 0xf3af, 0xe226, 0xd0bd, 0xc134,
-	0x39c3, 0x284a, 0x1ad1, 0x0b58, 0x7fe7, 0x6e6e, 0x5cf5, 0x4d7c,
-	0xc60c, 0xd785, 0xe51e, 0xf497, 0x8028, 0x91a1, 0xa33a, 0xb2b3,
-	0x4a44, 0x5bcd, 0x6956, 0x78df, 0x0c60, 0x1de9, 0x2f72, 0x3efb,
-	0xd68d, 0xc704, 0xf59f, 0xe416, 0x90a9, 0x8120, 0xb3bb, 0xa232,
-	0x5ac5, 0x4b4c, 0x79d7, 0x685e, 0x1ce1, 0x0d68, 0x3ff3, 0x2e7a,
-	0xe70e, 0xf687, 0xc41c, 0xd595, 0xa12a, 0xb0a3, 0x8238, 0x93b1,
-	0x6b46, 0x7acf, 0x4854, 0x59dd, 0x2d62, 0x3ceb, 0x0e70, 0x1ff9,
-	0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330,
-	0x7bc7, 0x6a4e, 0x58d5, 0x495c, 0x3de3, 0x2c6a, 0x1ef1, 0x0f78
-};
 
 void 
 NETjet_WriteICfifo(struct IsdnCardState *cs, u_char *data, int size)
@@ -138,6 +89,7 @@ void
 mode_tiger(struct BCState *bcs, int mode, int bc)
 {
 	struct IsdnCardState *cs = bcs->cs;
+        u_char led;
 
 	if (cs->debug & L1_DEB_HSCX)
 		debugl1(cs, "Tiger mode %d bchan %d/%d",
@@ -159,6 +111,15 @@ mode_tiger(struct BCState *bcs, int mode, int bc)
 					cs->hw.njet.dmactrl);
 				byteout(cs->hw.njet.base + NETJET_IRQMASK0, 0);
 			}
+                        if (cs->typ == ISDN_CTYPE_NETJET_S)
+                        {
+                                // led off
+                                led = bc & 0x01;
+                                led = 0x01 << (6 + led); // convert to mask
+                                led = ~led;
+                                cs->hw.njet.auxd &= led;
+                                byteout(cs->hw.njet.auxa, cs->hw.njet.auxd);
+                        }
 			break;
 		case (L1_MODE_TRANS):
 			break;
@@ -184,6 +145,14 @@ mode_tiger(struct BCState *bcs, int mode, int bc)
 			bcs->hw.tiger.sendp = bcs->hw.tiger.send;
 			bcs->hw.tiger.free = NETJET_DMA_TXSIZE;
 			test_and_set_bit(BC_FLG_EMPTY, &bcs->Flag);
+                        if (cs->typ == ISDN_CTYPE_NETJET_S)
+                        {
+                                // led on
+                                led = bc & 0x01;
+                                led = 0x01 << (6 + led); // convert to mask
+                                cs->hw.njet.auxd |= led;
+                                byteout(cs->hw.njet.auxa, cs->hw.njet.auxd);
+                        }
 			break;
 	}
 	if (cs->debug & L1_DEB_HSCX)
@@ -419,9 +388,8 @@ static void got_frame(struct BCState *bcs, int count) {
 		memcpy(skb_put(skb, count), bcs->hw.tiger.rcvbuf, count);
 		skb_queue_tail(&bcs->rqueue, skb);
 	}
-	bcs->event |= 1 << B_RCVBUFREADY;
-	queue_task(&bcs->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+	test_and_set_bit(B_RCVBUFREADY, &bcs->event);
+	schedule_work(&bcs->tqueue);
 	
 	if (bcs->cs->debug & L1_DEB_RECEIVE_FRAME)
 		printframe(bcs->cs, bcs->hw.tiger.rcvbuf, count, "rec");
@@ -733,8 +701,8 @@ static void write_raw(struct BCState *bcs, u_int *buf, int cnt) {
 		}
 		bcs->hw.tiger.s_tot += s_cnt;
 		if (bcs->cs->debug & L1_DEB_HSCX)
-			debugl1(bcs->cs,"tiger write_raw: c%d %x-%x %d/%d %d %x", bcs->channel,
-				(u_int)buf, (u_int)p, s_cnt, cnt,
+			debugl1(bcs->cs,"tiger write_raw: c%d %p-%p %d/%d %d %x", bcs->channel,
+				buf, p, s_cnt, cnt,
 				bcs->hw.tiger.sendcnt, bcs->cs->hw.njet.irqstat0);
 		if (bcs->cs->debug & L1_DEB_HSCX_FIFO)
 			printframe(bcs->cs, bcs->hw.tiger.sp, s_cnt, "snd");
@@ -744,9 +712,14 @@ static void write_raw(struct BCState *bcs, u_int *buf, int cnt) {
 			if (!bcs->tx_skb) {
 				debugl1(bcs->cs,"tiger write_raw: NULL skb s_cnt %d", s_cnt);
 			} else {
-				if (bcs->st->lli.l1writewakeup &&
-					(PACKET_NOACK != bcs->tx_skb->pkt_type))
-					bcs->st->lli.l1writewakeup(bcs->st, bcs->tx_skb->len);
+				if (test_bit(FLG_LLI_L1WAKEUP,&bcs->st->lli.flag) &&
+					(PACKET_NOACK != bcs->tx_skb->pkt_type)) {
+					u_long	flags;
+					spin_lock_irqsave(&bcs->aclock, flags);
+					bcs->ackcnt += bcs->tx_skb->len;
+					spin_unlock_irqrestore(&bcs->aclock, flags);
+					schedule_event(bcs, B_ACKPENDING);
+				}
 				dev_kfree_skb_any(bcs->tx_skb);
 				bcs->tx_skb = NULL;
 			}
@@ -772,9 +745,8 @@ static void write_raw(struct BCState *bcs, u_int *buf, int cnt) {
 						debugl1(bcs->cs, "tiger write_raw: fill rest %d",
 							cnt - s_cnt);
 				}
-				bcs->event |= 1 << B_XMTBUFREADY;
-				queue_task(&bcs->tqueue, &tq_immediate);
-				mark_bh(IMMEDIATE_BH);
+				test_and_set_bit(B_XMTBUFREADY, &bcs->event);
+				schedule_work(&bcs->tqueue);
 			}
 		}
 	} else if (test_and_clear_bit(BC_FLG_NOFRAME, &bcs->Flag)) {
@@ -822,52 +794,58 @@ void write_tiger(struct IsdnCardState *cs) {
 static void
 tiger_l2l1(struct PStack *st, int pr, void *arg)
 {
+	struct BCState *bcs = st->l1.bcs;
 	struct sk_buff *skb = arg;
-	long flags;
+	u_long flags;
 
 	switch (pr) {
 		case (PH_DATA | REQUEST):
-			save_flags(flags);
-			cli();
-			if (st->l1.bcs->tx_skb) {
-				skb_queue_tail(&st->l1.bcs->squeue, skb);
-				restore_flags(flags);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			if (bcs->tx_skb) {
+				skb_queue_tail(&bcs->squeue, skb);
 			} else {
-				st->l1.bcs->tx_skb = skb;
-				st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
-				restore_flags(flags);
+				bcs->tx_skb = skb;
+				bcs->cs->BC_Send_Data(bcs);
 			}
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			break;
 		case (PH_PULL | INDICATION):
-			if (st->l1.bcs->tx_skb) {
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			if (bcs->tx_skb) {
 				printk(KERN_WARNING "tiger_l2l1: this shouldn't happen\n");
-				break;
+			} else {
+				bcs->tx_skb = skb;
+				bcs->cs->BC_Send_Data(bcs);
 			}
-			save_flags(flags);
-			cli();
-			st->l1.bcs->tx_skb = skb;
-			st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
-			restore_flags(flags);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			break;
 		case (PH_PULL | REQUEST):
-			if (!st->l1.bcs->tx_skb) {
+			if (!bcs->tx_skb) {
 				test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 				st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
 			} else
 				test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 			break;
 		case (PH_ACTIVATE | REQUEST):
-			test_and_set_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			mode_tiger(st->l1.bcs, st->l1.mode, st->l1.bc);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			test_and_set_bit(BC_FLG_ACTIV, &bcs->Flag);
+			mode_tiger(bcs, st->l1.mode, st->l1.bc);
+			/* 2001/10/04 Christoph Ersfeld, Formula-n Europe AG */
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
+			bcs->cs->cardmsg(bcs->cs, MDL_BC_ASSIGN, (void *)(&st->l1.bc));
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | REQUEST):
+			/* 2001/10/04 Christoph Ersfeld, Formula-n Europe AG */
+			bcs->cs->cardmsg(bcs->cs, MDL_BC_RELEASE, (void *)(&st->l1.bc));
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | CONFIRM):
-			test_and_clear_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			test_and_clear_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-			mode_tiger(st->l1.bcs, 0, st->l1.bc);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			test_and_clear_bit(BC_FLG_ACTIV, &bcs->Flag);
+			test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
+			mode_tiger(bcs, 0, st->l1.bc);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			st->l1.l1l2(st, PH_DEACTIVATE | CONFIRM, NULL);
 			break;
 	}
@@ -887,8 +865,8 @@ close_tigerstate(struct BCState *bcs)
 			kfree(bcs->hw.tiger.sendbuf);
 			bcs->hw.tiger.sendbuf = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;
@@ -953,8 +931,8 @@ inittiger(struct IsdnCardState *cs)
 	cs->bcs[1].hw.tiger.s_end = cs->bcs[0].hw.tiger.s_end;
 	
 	memset(cs->bcs[0].hw.tiger.send, 0xff, NETJET_DMA_TXSIZE * sizeof(unsigned int));
-	debugl1(cs, "tiger: send buf %x - %x", (u_int)cs->bcs[0].hw.tiger.send,
-		(u_int)(cs->bcs[0].hw.tiger.send + NETJET_DMA_TXSIZE - 1));
+	debugl1(cs, "tiger: send buf %p - %p", cs->bcs[0].hw.tiger.send,
+		cs->bcs[0].hw.tiger.send + NETJET_DMA_TXSIZE - 1);
 	outl(virt_to_bus(cs->bcs[0].hw.tiger.send),
 		cs->hw.njet.base + NETJET_DMA_READ_START);
 	outl(virt_to_bus(cs->bcs[0].hw.tiger.s_irq),
@@ -967,8 +945,8 @@ inittiger(struct IsdnCardState *cs)
 		       "HiSax: No memory for tiger.rec\n");
 		return;
 	}
-	debugl1(cs, "tiger: rec buf %x - %x", (u_int)cs->bcs[0].hw.tiger.rec,
-		(u_int)(cs->bcs[0].hw.tiger.rec + NETJET_DMA_RXSIZE - 1));
+	debugl1(cs, "tiger: rec buf %p - %p", cs->bcs[0].hw.tiger.rec,
+		cs->bcs[0].hw.tiger.rec + NETJET_DMA_RXSIZE - 1);
 	cs->bcs[1].hw.tiger.rec = cs->bcs[0].hw.tiger.rec;
 	memset(cs->bcs[0].hw.tiger.rec, 0xff, NETJET_DMA_RXSIZE * sizeof(unsigned int));
 	outl(virt_to_bus(cs->bcs[0].hw.tiger.rec),

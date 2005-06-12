@@ -14,54 +14,48 @@
   * Allan Cox
   *
   * This software may be used and distributed according to the terms
-  * of the GNU Public License version 2, incorporated herein by reference.
+  * of the GNU General Public License version 2, incorporated herein by reference.
   *
   * Driver for the LanMedia LMC5200, LMC5245, LMC1000, LMC1200 cards.
   */
 
-#include <linux/version.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
-#include <asm/segment.h>
-#include <asm/smp.h>
-
 #include <linux/in.h>
 #include <linux/if_arp.h>
-#include <asm/processor.h>             /* Processor type for cache alignment. */
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include "../syncppp.h"
 #include <linux/inet.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/proc_fs.h>
+#include <linux/bitops.h>
 
-#include "lmc_ver.h"
+#include <net/syncppp.h>
+
+#include <asm/processor.h>             /* Processor type for cache alignment. */
+#include <asm/io.h>
+#include <asm/dma.h>
+#include <linux/smp.h>
+
 #include "lmc.h"
 #include "lmc_var.h"
 #include "lmc_debug.h"
 #include "lmc_ioctl.h"
 #include "lmc_proto.h"
-//#include "lmc_proto_raw.h"
 
 /*
  * The compile-time variable SPPPSTUP causes the module to be
  * compiled without referencing any of the sync ppp routines.
  */
 #ifdef SPPPSTUB
-#define SYNC_PPP_init() (void)0
 #define SPPP_detach(d)	(void)0
 #define SPPP_open(d)	0
 #define SPPP_reopen(d)	(void)0
@@ -69,16 +63,6 @@
 #define SPPP_attach(d)	(void)0
 #define SPPP_do_ioctl(d,i,c)	-EOPNOTSUPP
 #else
-#if LINUX_VERSION_CODE < 0x20363
-#define SYNC_PPP_init	sync_ppp_init
-#define SPPP_attach(x)	sppp_attach((struct ppp_device *)(x)->lmc_device)
-#define SPPP_detach(x)	sppp_detach((x)->lmc_device)
-#define SPPP_open(x)	sppp_open((x)->lmc_device)
-#define SPPP_reopen(x)	sppp_reopen((x)->lmc_device)
-#define SPPP_close(x)	sppp_close((x)->lmc_device)
-#define SPPP_do_ioctl(x, y, z)	sppp_do_ioctl((x)->lmc_device, (y), (z))
-#else
-#define SYNC_PPP_init	sync_ppp_init
 #define SPPP_attach(x)	sppp_attach((x)->pd)
 #define SPPP_detach(x)	sppp_detach((x)->pd->dev)
 #define SPPP_open(x)	sppp_open((x)->pd->dev)
@@ -86,9 +70,6 @@
 #define SPPP_close(x)	sppp_close((x)->pd->dev)
 #define SPPP_do_ioctl(x, y, z)	sppp_do_ioctl((x)->pd->dev, (y), (z))
 #endif
-#endif
-
-static int lmc_first_ppp_load = 0;
 
 // init
 void lmc_proto_init(lmc_softc_t *sc) /*FOLD00*/
@@ -96,15 +77,12 @@ void lmc_proto_init(lmc_softc_t *sc) /*FOLD00*/
     lmc_trace(sc->lmc_device, "lmc_proto_init in");
     switch(sc->if_type){
     case LMC_PPP:
-        if(lmc_first_ppp_load == 0)
-#ifndef MODULE
-            SYNC_PPP_init();
-#endif
-        
-#if LINUX_VERSION_CODE >= 0x20363
         sc->pd = kmalloc(sizeof(struct ppp_device), GFP_KERNEL);
+	if (!sc->pd) {
+		printk("lmc_proto_init(): kmalloc failure!\n");
+		return;
+	}
         sc->pd->dev = sc->lmc_device;
-#endif
         sc->if_ptr = sc->pd;
         break;
     case LMC_RAW:
@@ -134,7 +112,7 @@ void lmc_proto_attach(lmc_softc_t *sc) /*FOLD00*/
              * They set a few basics because they don't use sync_ppp
              */
             dev->flags |= IFF_POINTOPOINT;
-            dev->hard_header = 0;
+            dev->hard_header = NULL;
             dev->hard_header_len = 0;
             dev->addr_len = 0;
         }
@@ -260,6 +238,7 @@ void lmc_proto_netif(lmc_softc_t *sc, struct sk_buff *skb) /*FOLD00*/
     case LMC_PPP:
     case LMC_NET:
     default:
+        skb->dev->last_rx = jiffies;
         netif_rx(skb);
         break;
     case LMC_RAW:

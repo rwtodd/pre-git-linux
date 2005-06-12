@@ -1,4 +1,4 @@
-/* $Id: string.h,v 1.35 2000/05/02 01:47:01 davem Exp $
+/* $Id: string.h,v 1.36 2001/12/21 00:54:31 davem Exp $
  * string.h: External definitions for optimized assembly string
  *           routines for the Linux Kernel.
  *
@@ -22,7 +22,6 @@ extern __kernel_size_t __memset(void *,int,__kernel_size_t);
 #ifndef EXPORT_SYMTAB_STROPS
 
 /* First the mem*() things. */
-#define __HAVE_ARCH_BCOPY
 #define __HAVE_ARCH_MEMMOVE
 #undef memmove
 #define memmove(_to, _from, _n) \
@@ -40,6 +39,9 @@ static inline void *__constant_memcpy(void *to, const void *from, __kernel_size_
 
 	if(n <= 32) {
 		__builtin_memcpy(to, from, n);
+	} else if (((unsigned int) to & 7) != 0) {
+		/* Destination is not aligned on the double-word boundary */
+		__memcpy(to, from, n);
 	} else {
 		switch(n) {
 		case PAGE_SIZE:
@@ -126,9 +128,11 @@ static inline void *__nonconstant_memset(void *s, char c, __kernel_size_t count)
 })
 
 #define __HAVE_ARCH_MEMCMP
+extern int memcmp(const void *,const void *,__kernel_size_t);
 
 /* Now the str*() stuff... */
 #define __HAVE_ARCH_STRLEN
+extern __kernel_size_t strlen(const char *);
 
 #define __HAVE_ARCH_STRNCMP
 

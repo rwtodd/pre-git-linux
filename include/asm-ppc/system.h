@@ -1,16 +1,12 @@
 /*
- * $Id: system.h,v 1.49 1999/09/11 18:37:54 cort Exp $
- *
  * Copyright (C) 1999 Cort Dougan <cort@cs.nmt.edu>
  */
-#ifdef __KERNEL__
 #ifndef __PPC_SYSTEM_H
 #define __PPC_SYSTEM_H
 
 #include <linux/config.h>
-#include <linux/kdev_t.h>
+#include <linux/kernel.h>
 
-#include <asm/processor.h>
 #include <asm/atomic.h>
 #include <asm/hw_irq.h>
 
@@ -25,6 +21,8 @@
  * mb() prevents loads and stores being reordered across this point.
  * rmb() prevents loads being reordered across this point.
  * wmb() prevents stores being reordered across this point.
+ * read_barrier_depends() prevents data-dependent loads being reordered
+ *	across this point (nop on PPC).
  *
  * We can use the eieio instruction for wmb, but since it doesn't
  * give any ordering guarantees about loads, we have to use the
@@ -33,6 +31,7 @@
 #define mb()  __asm__ __volatile__ ("sync" : : : "memory")
 #define rmb()  __asm__ __volatile__ ("sync" : : : "memory")
 #define wmb()  __asm__ __volatile__ ("eieio" : : : "memory")
+#define read_barrier_depends()  do { } while(0)
 
 #define set_mb(var, value)	do { var = value; mb(); } while (0)
 #define set_wmb(var, value)	do { var = value; wmb(); } while (0)
@@ -41,53 +40,60 @@
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
 #define smp_wmb()	wmb()
+#define smp_read_barrier_depends()	read_barrier_depends()
 #else
-#define smp_mb()	__asm__ __volatile__("": : :"memory")
-#define smp_rmb()	__asm__ __volatile__("": : :"memory")
-#define smp_wmb()	__asm__ __volatile__("": : :"memory")
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#define smp_read_barrier_depends()	do { } while(0)
 #endif /* CONFIG_SMP */
 
-extern void xmon_irq(int, void *, struct pt_regs *);
-extern void xmon(struct pt_regs *excp);
-
-
-/* Data cache block flush - write out the cache line containing the
-   specified address and then invalidate it in the cache. */
-extern __inline__ void dcbf(void *line)
-{
-	asm("dcbf %0,%1; sync" : : "r" (line), "r" (0));
-}
+#ifdef __KERNEL__
+struct task_struct;
+struct pt_regs;
 
 extern void print_backtrace(unsigned long *);
 extern void show_regs(struct pt_regs * regs);
 extern void flush_instruction_cache(void);
 extern void hard_reset_now(void);
 extern void poweroff_now(void);
-extern int _get_PVR(void);
+#ifdef CONFIG_6xx
 extern long _get_L2CR(void);
+extern long _get_L3CR(void);
 extern void _set_L2CR(unsigned long);
+extern void _set_L3CR(unsigned long);
+#else
+#define _get_L2CR()	0L
+#define _get_L3CR()	0L
+#define _set_L2CR(val)	do { } while(0)
+#define _set_L3CR(val)	do { } while(0)
+#endif
 extern void via_cuda_init(void);
 extern void pmac_nvram_init(void);
 extern void read_rtc_time(void);
 extern void pmac_find_display(void);
 extern void giveup_fpu(struct task_struct *);
 extern void enable_kernel_fp(void);
+extern void enable_kernel_altivec(void);
 extern void giveup_altivec(struct task_struct *);
 extern void load_up_altivec(struct task_struct *);
+extern void giveup_spe(struct task_struct *);
+extern void load_up_spe(struct task_struct *);
+extern int fix_alignment(struct pt_regs *);
 extern void cvt_fd(float *from, double *to, unsigned long *fpscr);
 extern void cvt_df(double *from, float *to, unsigned long *fpscr);
 extern int call_rtas(const char *, int, int, unsigned long *, ...);
-extern int abs(int);
 extern void cacheable_memzero(void *p, unsigned int nb);
+extern int do_page_fault(struct pt_regs *, unsigned long, unsigned long);
+extern void bad_page_fault(struct pt_regs *, unsigned long, int);
+extern void die(const char *, struct pt_regs *, long);
 
 struct device_node;
 extern void note_scsi_host(struct device_node *, void *);
 
-struct task_struct;
-#define prepare_to_switch()	do { } while(0)
-#define switch_to(prev,next,last) _switch_to((prev),(next),&(last))
-extern void _switch_to(struct task_struct *, struct task_struct *,
-		       struct task_struct **);
+extern struct task_struct *__switch_to(struct task_struct *,
+	struct task_struct *);
+#define switch_to(prev, next, last)	((last) = __switch_to((prev), (next)))
 
 struct thread_struct;
 extern struct task_struct *_switch(struct thread_struct *prev,
@@ -95,45 +101,15 @@ extern struct task_struct *_switch(struct thread_struct *prev,
 
 extern unsigned int rtas_data;
 
-struct pt_regs;
-extern void dump_regs(struct pt_regs *);
-
-#ifndef CONFIG_SMP
-
-#define cli()	__cli()
-#define sti()	__sti()
-#define save_flags(flags)	__save_flags(flags)
-#define restore_flags(flags)	__restore_flags(flags)
-#define save_and_cli(flags)	__save_and_cli(flags)
-
-#else /* CONFIG_SMP */
-
-extern void __global_cli(void);
-extern void __global_sti(void);
-extern unsigned long __global_save_flags(void);
-extern void __global_restore_flags(unsigned long);
-#define cli() __global_cli()
-#define sti() __global_sti()
-#define save_flags(x) ((x)=__global_save_flags())
-#define restore_flags(x) __global_restore_flags(x)
-
-#endif /* !CONFIG_SMP */
-
-#define local_irq_disable()		__cli()
-#define local_irq_enable()		__sti()
-#define local_irq_save(flags)		__save_and_cli(flags)
-#define local_irq_restore(flags)	__restore_flags(flags)
-
-#define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
-
 static __inline__ unsigned long
 xchg_u32(volatile void *p, unsigned long val)
 {
 	unsigned long prev;
 
-	__asm__ __volatile__ ("
-1:	lwarx	%0,0,%2
-	stwcx.	%3,0,%2
+	__asm__ __volatile__ ("\n\
+1:	lwarx	%0,0,%2 \n"
+	PPC405_ERR77(0,%2)
+"	stwcx.	%3,0,%2 \n\
 	bne-	1b"
 	: "=&r" (prev), "=m" (*(volatile unsigned long *)p)
 	: "r" (p), "r" (val), "m" (*(volatile unsigned long *)p)
@@ -151,14 +127,14 @@ extern void __xchg_called_with_bad_pointer(void);
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 #define tas(ptr) (xchg((ptr),1))
 
-static inline unsigned long __xchg(unsigned long x, void * ptr, int size)
+static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
 {
 	switch (size) {
 	case 4:
-		return (unsigned long )xchg_u32(ptr, x);
+		return (unsigned long) xchg_u32(ptr, x);
 #if 0	/* xchg_u64 doesn't exist on 32-bit PPC */
 	case 8:
-		return (unsigned long )xchg_u64(ptr, x);
+		return (unsigned long) xchg_u64(ptr, x);
 #endif /* 0 */
 	}
 	__xchg_called_with_bad_pointer();
@@ -180,11 +156,12 @@ __cmpxchg_u32(volatile int *p, int old, int new)
 {
 	int prev;
 
-	__asm__ __volatile__ ("
-1:	lwarx	%0,0,%2
-	cmpw	0,%0,%3
-	bne	2f
-	stwcx.	%4,0,%2
+	__asm__ __volatile__ ("\n\
+1:	lwarx	%0,0,%2 \n\
+	cmpw	0,%0,%3 \n\
+	bne	2f \n"
+	PPC405_ERR77(0,%2)
+"	stwcx.	%4,0,%2 \n\
 	bne-	1b\n"
 #ifdef CONFIG_SMP
 "	sync\n"
@@ -224,5 +201,5 @@ __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
 				    (unsigned long)_n_, sizeof(*(ptr))); \
   })
 
-#endif /* __PPC_SYSTEM_H */
 #endif /* __KERNEL__ */
+#endif /* __PPC_SYSTEM_H */

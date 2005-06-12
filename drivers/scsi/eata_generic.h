@@ -25,8 +25,6 @@
 #define FALSE 0
 #endif
 
-#define min(a,b) ((a<b)?(a):(b))
-
 #define R_LIMIT 0x20000
 
 #define MAXISA	   4
@@ -92,15 +90,9 @@
 #define WRITE            1
 #define OTHER            2
 
-#define HD(cmd)	 ((hostdata *)&(cmd->host->hostdata))
+#define HD(cmd)	 ((hostdata *)&(cmd->device->host->hostdata))
 #define CD(cmd)	 ((struct eata_ccb *)(cmd->host_scribble))
 #define SD(host) ((hostdata *)&(host->hostdata))
-
-#define DELAY(x) { ulong flags, i;                \
-                   save_flags(flags); sti();      \
-                   i = jiffies + (x * HZ);        \
-                   while (jiffies < i);           \
-                   restore_flags(flags); }
 
 /***********************************************
  *    EATA Command & Register definitions      *
@@ -325,7 +317,7 @@ struct eata_ccb {	      /* Send Command Packet structure	    */
     __u8 rw_latency;
     __u8 retries;
     __u8 status;	      /* status of this queueslot		*/
-    Scsi_Cmnd *cmd;	      /* address of cmd				*/
+    struct scsi_cmnd *cmd;    /* address of cmd				*/
     struct eata_sg_list *sg_list;
 };
 

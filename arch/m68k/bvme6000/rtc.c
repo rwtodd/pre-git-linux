@@ -9,7 +9,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <linux/init.h>
@@ -36,7 +36,7 @@
 static unsigned char days_in_mo[] =
 {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
-static char rtc_status = 0;
+static char rtc_status;
 
 static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		     unsigned long arg)
@@ -44,16 +44,16 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	volatile RtcPtr_t rtc = (RtcPtr_t)BVME_RTC_BASE;
 	unsigned char msr;
 	unsigned long flags;
-	struct rtc_time wtime; 
+	struct rtc_time wtime;
 
 	switch (cmd) {
 	case RTC_RD_TIME:	/* Read the time/date from RTC	*/
 	{
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
 		rtc->msr = 0x40;
+		memset(&wtime, 0, sizeof(struct rtc_time));
 		do {
 			wtime.tm_sec =  BCD2BIN(rtc->bcd_sec);
 			wtime.tm_min =  BCD2BIN(rtc->bcd_min);
@@ -66,7 +66,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			wtime.tm_wday = BCD2BIN(rtc->bcd_dow)-1;
 		} while (wtime.tm_sec != BCD2BIN(rtc->bcd_sec));
 		rtc->msr = msr;
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return copy_to_user((void *)arg, &wtime, sizeof wtime) ?
 								-EFAULT : 0;
 	}
@@ -76,7 +76,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		unsigned char mon, day, hrs, min, sec, leap_yr;
 		unsigned int yrs;
 
-		if (!suser())
+		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
 
 		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg,
@@ -94,7 +94,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 		leap_yr = ((!(yrs % 4) && (yrs % 100)) || !(yrs % 400));
 
-		if ((mon > 12) || (day == 0))
+		if ((mon > 12) || (mon < 1) || (day == 0))
 			return -EINVAL;
 
 		if (day > (days_in_mo[mon] + ((mon == 2) && leap_yr)))
@@ -105,9 +105,8 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 		if (yrs >= 2070)
 			return -EINVAL;
-		
-		save_flags(flags);
-		cli();
+
+		local_irq_save(flags);
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
 		rtc->msr = 0x40;
@@ -125,7 +124,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		rtc->t0cr_rtmr = yrs%4 | 0x08;
 
 		rtc->msr = msr;
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return 0;
 	}
 	default:
@@ -161,16 +160,15 @@ static int rtc_release(struct inode *inode, struct file *file)
  */
 
 static struct file_operations rtc_fops = {
-	ioctl:		rtc_ioctl,
-	open:		rtc_open,
-	release:	rtc_release,
+	.ioctl =	rtc_ioctl,
+	.open =		rtc_open,
+	.release =	rtc_release,
 };
 
-static struct miscdevice rtc_dev=
-{
-	RTC_MINOR,
-	"rtc",
-	&rtc_fops
+static struct miscdevice rtc_dev = {
+	.minor =	RTC_MINOR,
+	.name =		"rtc",
+	.fops =		&rtc_fops
 };
 
 int __init rtc_DP8570A_init(void)
@@ -179,7 +177,6 @@ int __init rtc_DP8570A_init(void)
 		return -ENODEV;
 
 	printk(KERN_INFO "DP8570A Real Time Clock Driver v%s\n", RTC_VERSION);
-	misc_register(&rtc_dev);
-	return 0;
+	return misc_register(&rtc_dev);
 }
 

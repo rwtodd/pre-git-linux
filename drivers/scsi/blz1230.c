@@ -21,15 +21,15 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
-#include <linux/blk.h>
+#include <linux/slab.h>
+#include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/interrupt.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "NCR53C9x.h"
-#include "blz1230.h"
 
 #include <linux/zorro.h>
 #include <asm/irq.h>
@@ -39,6 +39,42 @@
 #include <asm/pgtable.h>
 
 #define MKIV 1
+
+/* The controller registers can be found in the Z2 config area at these
+ * offsets:
+ */
+#define BLZ1230_ESP_ADDR 0x8000
+#define BLZ1230_DMA_ADDR 0x10000
+#define BLZ1230II_ESP_ADDR 0x10000
+#define BLZ1230II_DMA_ADDR 0x10021
+
+
+/* The Blizzard 1230 DMA interface
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * Only two things can be programmed in the Blizzard DMA:
+ *  1) The data direction is controlled by the status of bit 31 (1 = write)
+ *  2) The source/dest address (word aligned, shifted one right) in bits 30-0
+ *
+ * Program DMA by first latching the highest byte of the address/direction
+ * (i.e. bits 31-24 of the long word constructed as described in steps 1+2
+ * above). Then write each byte of the address/direction (starting with the
+ * top byte, working down) to the DMA address register.
+ *
+ * Figure out interrupt status by reading the ESP status byte.
+ */
+struct blz1230_dma_registers {
+	volatile unsigned char dma_addr; 	/* DMA address      [0x0000] */
+	unsigned char dmapad2[0x7fff];
+	volatile unsigned char dma_latch; 	/* DMA latch        [0x8000] */
+};
+
+struct blz1230II_dma_registers {
+	volatile unsigned char dma_addr; 	/* DMA address      [0x0000] */
+	unsigned char dmapad2[0xf];
+	volatile unsigned char dma_latch; 	/* DMA latch        [0x0010] */
+};
+
+#define BLZ1230_DMA_WRITE 0x80000000
 
 static int  dma_bytes_sent(struct NCR_ESP *esp, int fifo_count);
 static int  dma_can_transfer(struct NCR_ESP *esp, Scsi_Cmnd *sp);
@@ -51,9 +87,9 @@ static int  dma_irq_p(struct NCR_ESP *esp);
 static int  dma_ports_p(struct NCR_ESP *esp);
 static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write);
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
-				 * before they are transfered to the ESP chip
+				 * before they are transferred to the ESP chip
 				 * via PIO.
 				 */
 
@@ -64,6 +100,7 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 	struct zorro_dev *z = NULL;
 	unsigned long address;
 	struct ESP_regs *eregs;
+	unsigned long board;
 
 #if MKIV
 #define REAL_BLZ1230_ID		ZORRO_PROD_PHASE5_BLIZZARD_1230_IV_1260
@@ -76,7 +113,7 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 #endif
 
 	if ((z = zorro_find_device(REAL_BLZ1230_ID, z))) {
-	    unsigned long board = z->resource.start;
+	    board = z->resource.start;
 	    if (request_mem_region(board+REAL_BLZ1230_ESP_ADDR,
 				   sizeof(struct ESP_regs), "NCR53C9x")) {
 		/* Do some magic to figure out if the blizzard is
@@ -88,13 +125,8 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 
 		esp_write(eregs->esp_cfg1, (ESP_CONFIG1_PENABLE | 7));
 		udelay(5);
-		if(esp_read(eregs->esp_cfg1) != (ESP_CONFIG1_PENABLE | 7)){
-			esp_deallocate(esp);
-			scsi_unregister(esp->ehost);
-			release_mem_region(board+REAL_BLZ1230_ESP_ADDR,
-					   sizeof(struct ESP_regs));
-			return 0; /* Bail out if address did not hold data */
-		}
+		if(esp_read(eregs->esp_cfg1) != (ESP_CONFIG1_PENABLE | 7))
+			goto err_out;
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -135,13 +167,14 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 		esp->eregs = eregs;
 
 		/* Set the command buffer */
-		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
+		esp->esp_command = cmd_buffer;
+		esp->esp_command_dvma = virt_to_bus((void *)cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
 		esp->slot = board+REAL_BLZ1230_ESP_ADDR;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
-			    "Blizzard 1230 SCSI IV", esp_intr);
+		if (request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
+				 "Blizzard 1230 SCSI IV", esp->ehost))
+			goto err_out;
 
 		/* Figure out our scsi ID on the bus */
 		esp->scsi_id = 7;
@@ -156,6 +189,13 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 		return esps_in_use;
 	    }
 	}
+	return 0;
+ 
+ err_out:
+	scsi_unregister(esp->ehost);
+	esp_deallocate(esp);
+	release_mem_region(board+REAL_BLZ1230_ESP_ADDR,
+			   sizeof(struct ESP_regs));
 	return 0;
 }
 
@@ -275,12 +315,6 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 
 #define HOSTS_C
 
-#include "blz1230.h"
-
-static Scsi_Host_Template driver_template = SCSI_BLZ1230;
-
-#include "scsi_module.c"
-
 int blz1230_esp_release(struct Scsi_Host *instance)
 {
 #ifdef MODULE
@@ -292,3 +326,27 @@ int blz1230_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp-blz1230",
+	.proc_info		= esp_proc_info,
+	.name			= "Blizzard1230 SCSI IV",
+	.detect			= blz1230_esp_detect,
+	.slave_alloc		= esp_slave_alloc,
+	.slave_destroy		= esp_slave_destroy,
+	.release		= blz1230_esp_release,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= ENABLE_CLUSTERING
+};
+
+
+#include "scsi_module.c"
+
+MODULE_LICENSE("GPL");

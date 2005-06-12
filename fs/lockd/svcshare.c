@@ -6,10 +6,10 @@
  * Copyright (C) 1996 Olaf Kirch <okir@monad.swb.de>
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/unistd.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/svc.h>
@@ -71,7 +71,7 @@ nlmsvc_unshare_file(struct nlm_host *host, struct nlm_file *file,
 	struct nlm_share	*share, **shpp;
 	struct xdr_netobj	*oh = &argp->lock.oh;
 
-	for (shpp = &file->f_shares; (share = *shpp); shpp = &share->s_next) {
+	for (shpp = &file->f_shares; (share = *shpp) != 0; shpp = &share->s_next) {
 		if (share->s_host == host && nlm_cmp_owner(share, oh)) {
 			*shpp = share->s_next;
 			kfree(share);

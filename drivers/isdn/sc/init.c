@@ -1,8 +1,22 @@
+/*
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ */
+
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/delay.h>
 #include "includes.h"
 #include "hardware.h"
 #include "card.h"
 
-board *adapter[MAX_CARDS];
+MODULE_DESCRIPTION("ISDN4Linux: Driver for Spellcaster card");
+MODULE_AUTHOR("Spellcaster Telecommunications Inc.");
+MODULE_LICENSE("GPL");
+
+board *sc_adapter[MAX_CARDS];
 int cinst;
 
 static char devname[] = "scX";
@@ -16,10 +30,15 @@ static unsigned char irq[] = {0,0,0,0};
 static unsigned long ram[] = {0,0,0,0};
 static int do_reset = 0;
 
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(ram, int, NULL, 0);
+module_param(do_reset, bool, 0);
+
 static int sup_irq[] = { 11, 10, 9, 5, 12, 14, 7, 3, 4, 6 };
 #define MAX_IRQS	10
 
-extern void interrupt_handler(int, void *, struct pt_regs *);
+extern irqreturn_t interrupt_handler(int, void *, struct pt_regs *);
 extern int sndpkt(int, int, int, struct sk_buff *);
 extern int command(isdn_ctrl *);
 extern int indicate_status(int, int, ulong, char*);
@@ -37,23 +56,7 @@ int irq_supported(int irq_x)
 	return 0;
 }
 
-#ifdef MODULE
-MODULE_PARM(io, "1-4i");
-MODULE_PARM(irq, "1-4i");
-MODULE_PARM(ram, "1-4i");
-MODULE_PARM(do_reset, "i");
-#define init_sc init_module
-#else
-/*
-Initialization code for non-module version to be included
-
-void sc_setup(char *str, int *ints)
-{
-}
-*/
-#endif
-
-int init_sc(void)
+static int __init sc_init(void)
 {
 	int b = -1;
 	int i, j;
@@ -96,11 +99,12 @@ int init_sc(void)
 			 * No, I/O Base has been provided
 			 */
 			for (i = 0 ; i < MAX_IO_REGS - 1 ; i++) {
-				if(check_region(io[b] + i * 0x400, 1)) {
+				if(!request_region(io[b] + i * 0x400, 1, "sc test")) {
 					pr_debug("check_region for 0x%x failed\n", io[b] + i * 0x400);
 					io[b] = 0;
 					break;
-				}
+				} else
+					release_region(io[b] + i * 0x400, 1);
 			}
 
 			/*
@@ -135,11 +139,12 @@ int init_sc(void)
 				last_base = i + IOBASE_OFFSET;
 				pr_debug("  checking 0x%x...", i);
 				for ( j = 0 ; j < MAX_IO_REGS - 1 ; j++) {
-					if(check_region(i + j * 0x400, 1)) {
+					if(!request_region(i + j * 0x400, 1, "sc test")) {
 						pr_debug("Failed\n");
 						found_io = 0;
 						break;
-					}
+					} else
+						release_region(i + j * 0x400, 1);
 				}	
 
 				if(found_io) {
@@ -164,8 +169,7 @@ int init_sc(void)
 		if(do_reset) {
 			pr_debug("Doing a SAFE probe reset\n");
 			outb(0xFF, io[b] + RESET_OFFSET);
-			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(milliseconds(10000));
+			msleep_interruptible(10000);
 		}
 		pr_debug("RAM Base for board %d is 0x%x, %s probe\n", b, ram[b],
 			ram[b] == 0 ? "will" : "won't");
@@ -176,9 +180,10 @@ int init_sc(void)
 			 * Just look for a signature and ID the
 			 * board model
 			 */
-			if(!check_region(ram[b], SRAM_PAGESIZE)) {
-				pr_debug("check_region for RAM base 0x%x succeeded\n", ram[b]);
+			if(request_region(ram[b], SRAM_PAGESIZE, "sc test")) {
+				pr_debug("request_region for RAM base 0x%x succeeded\n", ram[b]);
 			 	model = identify_board(ram[b], io[b]);
+				release_region(ram[b], SRAM_PAGESIZE);
 			}
 		}
 		else {
@@ -188,9 +193,10 @@ int init_sc(void)
 			 */
 			for (i = SRAM_MIN ; i < SRAM_MAX ; i += SRAM_PAGESIZE) {
 				pr_debug("Checking RAM address 0x%x...\n", i);
-				if(!check_region(i, SRAM_PAGESIZE)) {
+				if(request_region(i, SRAM_PAGESIZE, "sc test")) {
 					pr_debug("  check_region succeeded\n");
 					model = identify_board(i, io[b]);
+					release_region(i, SRAM_PAGESIZE);
 					if (model >= 0) {
 						pr_debug("  Identified a %s\n",
 							boardname[model]);
@@ -200,7 +206,7 @@ int init_sc(void)
 					pr_debug("  Unidentifed or inaccessible\n");
 					continue;
 				}
-				pr_debug("  check_region failed\n");
+				pr_debug("  request failed\n");
 			}
 		}
 		/*
@@ -261,39 +267,6 @@ int init_sc(void)
 		}
 
 		pr_debug("current IRQ: %d  b: %d\n",irq[b],b);
-		/*
-		 * See if we should probe for an irq
-		 */
-		if(irq[b]) {
-			/*
-			 * No we were given one
-			 * See that it is supported and free
-			 */
-			pr_debug("Trying for IRQ: %d\n",irq[b]);
-			if (irq_supported(irq[b])) {
-				if(REQUEST_IRQ(irq[b], interrupt_handler, 
-					SA_PROBE, "sc_probe", NULL)) {
-					pr_debug("IRQ %d is already in use\n", 
-						irq[b]);
-					continue;
-				}
-				FREE_IRQ(irq[b], NULL);
-			}
-		}
-		else {
-			/*
-			 * Yes, we need to probe for an IRQ
-			 */
-			pr_debug("Probing for IRQ...\n");
-			for (i = 0; i < MAX_IRQS ; i++) {
-				if(!REQUEST_IRQ(sup_irq[i], interrupt_handler, SA_PROBE, "sc_probe", NULL)) {
-					pr_debug("Probed for and found IRQ %d\n", sup_irq[i]);
-					FREE_IRQ(sup_irq[i], NULL);
-					irq[b] = sup_irq[i];
-					break;
-				}
-			}
-		}
 
 		/*
 		 * Make sure we got an IRQ
@@ -319,6 +292,7 @@ int init_sc(void)
 		}
 		memset(interface, 0, sizeof(isdn_if));
 
+		interface->owner = THIS_MODULE;
 		interface->hl_hdrlen = 0;
 		interface->channels = channels;
 		interface->maxbufsize = BUFFER_SIZE;
@@ -332,69 +306,84 @@ int init_sc(void)
 		/*
 		 * Allocate the board structure
 		 */
-		adapter[cinst] = kmalloc(sizeof(board), GFP_KERNEL);
-		if (adapter[cinst] == NULL) {
+		sc_adapter[cinst] = kmalloc(sizeof(board), GFP_KERNEL);
+		if (sc_adapter[cinst] == NULL) {
 			/*
 			 * Oops, can't alloc memory for the board
 			 */
 			kfree(interface);
 			continue;
 		}
-		memset(adapter[cinst], 0, sizeof(board));
+		memset(sc_adapter[cinst], 0, sizeof(board));
+		spin_lock_init(&sc_adapter[cinst]->lock);
 
 		if(!register_isdn(interface)) {
 			/*
 			 * Oops, couldn't register for some reason
 			 */
 			kfree(interface);
-			kfree(adapter[cinst]);
+			kfree(sc_adapter[cinst]);
 			continue;
 		}
 
-		adapter[cinst]->card = interface;
-		adapter[cinst]->driverId = interface->channels;
-		strcpy(adapter[cinst]->devicename, interface->id);
-		adapter[cinst]->nChannels = channels;
-		adapter[cinst]->ramsize = memsize;
-		adapter[cinst]->shmem_magic = magic;
-		adapter[cinst]->shmem_pgport = pgport;
-		adapter[cinst]->StartOnReset = 1;
+		sc_adapter[cinst]->card = interface;
+		sc_adapter[cinst]->driverId = interface->channels;
+		strcpy(sc_adapter[cinst]->devicename, interface->id);
+		sc_adapter[cinst]->nChannels = channels;
+		sc_adapter[cinst]->ramsize = memsize;
+		sc_adapter[cinst]->shmem_magic = magic;
+		sc_adapter[cinst]->shmem_pgport = pgport;
+		sc_adapter[cinst]->StartOnReset = 1;
 
 		/*
 		 * Allocate channels status structures
 		 */
-		adapter[cinst]->channel = kmalloc(sizeof(bchan) * channels, GFP_KERNEL);
-		if (adapter[cinst]->channel == NULL) {
+		sc_adapter[cinst]->channel = kmalloc(sizeof(bchan) * channels, GFP_KERNEL);
+		if (sc_adapter[cinst]->channel == NULL) {
 			/*
 			 * Oops, can't alloc memory for the channels
 			 */
 			indicate_status(cinst, ISDN_STAT_UNLOAD, 0, NULL);	/* Fix me */
 			kfree(interface);
-			kfree(adapter[cinst]);
+			kfree(sc_adapter[cinst]);
 			continue;
 		}
-		memset(adapter[cinst]->channel, 0, sizeof(bchan) * channels);
+		memset(sc_adapter[cinst]->channel, 0, sizeof(bchan) * channels);
 
 		/*
 		 * Lock down the hardware resources
 		 */
-		adapter[cinst]->interrupt = irq[b];
-		REQUEST_IRQ(adapter[cinst]->interrupt, interrupt_handler, SA_INTERRUPT, 
-			interface->id, NULL);
-		adapter[cinst]->iobase = io[b];
-		for(i = 0 ; i < MAX_IO_REGS - 1 ; i++) {
-			adapter[cinst]->ioport[i] = io[b] + i * 0x400;
-			request_region(adapter[cinst]->ioport[i], 1, interface->id);
-			pr_debug("Requesting I/O Port %#x\n", adapter[cinst]->ioport[i]);
+		sc_adapter[cinst]->interrupt = irq[b];
+		if (request_irq(sc_adapter[cinst]->interrupt, interrupt_handler,
+				SA_INTERRUPT, interface->id, NULL))
+		{
+			kfree(sc_adapter[cinst]->channel);
+			indicate_status(cinst, ISDN_STAT_UNLOAD, 0, NULL);	/* Fix me */
+			kfree(interface);
+			kfree(sc_adapter[cinst]);
+			continue;
+			
 		}
-		adapter[cinst]->ioport[IRQ_SELECT] = io[b] + 0x2;
-		request_region(adapter[cinst]->ioport[IRQ_SELECT], 1, interface->id);
-		pr_debug("Requesting I/O Port %#x\n", adapter[cinst]->ioport[IRQ_SELECT]);
-		adapter[cinst]->rambase = ram[b];
-		request_region(adapter[cinst]->rambase, SRAM_PAGESIZE, interface->id);
+		sc_adapter[cinst]->iobase = io[b];
+		for(i = 0 ; i < MAX_IO_REGS - 1 ; i++) {
+			sc_adapter[cinst]->ioport[i] = io[b] + i * 0x400;
+			request_region(sc_adapter[cinst]->ioport[i], 1,
+					interface->id);
+			pr_debug("Requesting I/O Port %#x\n",
+				sc_adapter[cinst]->ioport[i]);
+		}
+		sc_adapter[cinst]->ioport[IRQ_SELECT] = io[b] + 0x2;
+		request_region(sc_adapter[cinst]->ioport[IRQ_SELECT], 1,
+				interface->id);
+		pr_debug("Requesting I/O Port %#x\n",
+				sc_adapter[cinst]->ioport[IRQ_SELECT]);
+		sc_adapter[cinst]->rambase = ram[b];
+		request_region(sc_adapter[cinst]->rambase, SRAM_PAGESIZE,
+				interface->id);
 
 		pr_info("  %s (%d) - %s %d channels IRQ %d, I/O Base 0x%x, RAM Base 0x%lx\n", 
-			adapter[cinst]->devicename, adapter[cinst]->driverId, 
+			sc_adapter[cinst]->devicename,
+			sc_adapter[cinst]->driverId,
 			boardname[model], channels, irq[b], io[b], ram[b]);
 		
 		/*
@@ -410,8 +399,7 @@ int init_sc(void)
 	return status;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit sc_exit(void)
 {
 	int i, j;
 
@@ -420,8 +408,8 @@ void cleanup_module(void)
 		/*
 		 * kill the timers
 		 */
-		del_timer(&(adapter[i]->reset_timer));
-		del_timer(&(adapter[i]->stat_timer));
+		del_timer(&(sc_adapter[i]->reset_timer));
+		del_timer(&(sc_adapter[i]->stat_timer));
 
 		/*
 		 * Tell I4L we're toast
@@ -432,38 +420,39 @@ void cleanup_module(void)
 		/*
 		 * Release shared RAM
 		 */
-		release_region(adapter[i]->rambase, SRAM_PAGESIZE);
+		release_region(sc_adapter[i]->rambase, SRAM_PAGESIZE);
 
 		/*
 		 * Release the IRQ
 		 */
-		FREE_IRQ(adapter[i]->interrupt, NULL);
+		FREE_IRQ(sc_adapter[i]->interrupt, NULL);
 
 		/*
 		 * Reset for a clean start
 		 */
-		outb(0xFF, adapter[i]->ioport[SFT_RESET]);
+		outb(0xFF, sc_adapter[i]->ioport[SFT_RESET]);
 
 		/*
 		 * Release the I/O Port regions
 		 */
 		for(j = 0 ; j < MAX_IO_REGS - 1; j++) {
-			release_region(adapter[i]->ioport[j], 1);
-			pr_debug("Releasing I/O Port %#x\n", adapter[i]->ioport[j]);
+			release_region(sc_adapter[i]->ioport[j], 1);
+			pr_debug("Releasing I/O Port %#x\n",
+				sc_adapter[i]->ioport[j]);
 		}
-		release_region(adapter[i]->ioport[IRQ_SELECT], 1);
-		pr_debug("Releasing I/O Port %#x\n", adapter[i]->ioport[IRQ_SELECT]);
+		release_region(sc_adapter[i]->ioport[IRQ_SELECT], 1);
+		pr_debug("Releasing I/O Port %#x\n",
+			sc_adapter[i]->ioport[IRQ_SELECT]);
 
 		/*
 		 * Release any memory we alloced
 		 */
-		kfree(adapter[i]->channel);
-		kfree(adapter[i]->card);
-		kfree(adapter[i]);
+		kfree(sc_adapter[i]->channel);
+		kfree(sc_adapter[i]->card);
+		kfree(sc_adapter[i]);
 	}
 	pr_info("SpellCaster ISA ISDN Adapter Driver Unloaded.\n");
 }
-#endif
 
 int identify_board(unsigned long rambase, unsigned int iobase) 
 {
@@ -512,8 +501,7 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 	 * Try to identify a PRI card
 	 */
 	outb(PRI_BASEPG_VAL, pgport);
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout(HZ);
+	msleep_interruptible(1000);
 	sig = readl(rambase + SIG_OFFSET);
 	pr_debug("Looking for a signature, got 0x%x\n", sig);
 	if(sig == SIGNATURE)
@@ -523,8 +511,7 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 	 * Try to identify a PRI card
 	 */
 	outb(BRI_BASEPG_VAL, pgport);
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout(HZ);
+	msleep_interruptible(1000);
 	sig = readl(rambase + SIG_OFFSET);
 	pr_debug("Looking for a signature, got 0x%x\n", sig);
 	if(sig == SIGNATURE)
@@ -579,3 +566,6 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 		
 	return -1;
 }
+
+module_init(sc_init);
+module_exit(sc_exit);

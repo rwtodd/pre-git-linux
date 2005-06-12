@@ -34,10 +34,10 @@
 static char *_riocmd_c_sccs_ = "@(#)riocmd.c	1.2";
 #endif
 
-#define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/tty.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/string.h>
@@ -46,7 +46,6 @@ static char *_riocmd_c_sccs_ = "@(#)riocmd.c	1.2";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 #include "linux_compat.h"
@@ -97,7 +96,7 @@ struct Map *	MapP;
 
 	if ( !CmdBlkP ) {
 		rio_dprintk (RIO_DEBUG_CMD, "FOAD RTA: GetCmdBlk failed\n");
-		return ENXIO;
+		return -ENXIO;
 	}
 
 	CmdBlkP->Packet.dest_unit = MapP->ID;
@@ -112,7 +111,7 @@ struct Map *	MapP;
 
 	if ( RIOQueueCmdBlk( HostP, MapP->ID-1, CmdBlkP) == RIO_FAIL ) {
 		rio_dprintk (RIO_DEBUG_CMD, "FOAD RTA: Failed to queue foad command\n");
-		return EIO;
+		return -EIO;
 	}
 	return 0;
 }
@@ -130,7 +129,7 @@ struct Map *	MapP;
 
 	if ( !CmdBlkP ) {
 		rio_dprintk (RIO_DEBUG_CMD, "ZOMBIE RTA: GetCmdBlk failed\n");
-		return ENXIO;
+		return -ENXIO;
 	}
 
 	CmdBlkP->Packet.dest_unit = MapP->ID;
@@ -145,7 +144,7 @@ struct Map *	MapP;
 
 	if ( RIOQueueCmdBlk( HostP, MapP->ID-1, CmdBlkP) == RIO_FAIL ) {
 		rio_dprintk (RIO_DEBUG_CMD, "ZOMBIE RTA: Failed to queue zombie command\n");
-		return EIO;
+		return -EIO;
 	}
 	return 0;
 }
@@ -191,7 +190,7 @@ int (* func)( struct Host *HostP, struct Map *MapP );
 			}
 		}
 	}
-	return ENXIO;
+	return -ENXIO;
 }
 
 
@@ -205,7 +204,7 @@ caddr_t arg;
 	if ( copyin( (int)arg, (caddr_t)&IdRta, sizeof(IdRta) ) == COPYFAIL ) {
 		rio_dprintk (RIO_DEBUG_CMD, "RIO_IDENTIFY_RTA copy failed\n");
 		p->RIOError.Error = COPYIN_FAILED;
-		return EFAULT;
+		return -EFAULT;
 	}
 
 	for ( Host = 0 ; Host < p->RIONumHosts; Host++ ) {
@@ -237,7 +236,7 @@ caddr_t arg;
 
 						if ( !CmdBlkP ) {
 							rio_dprintk (RIO_DEBUG_CMD, "IDENTIFY RTA: GetCmdBlk failed\n");
-							return ENXIO;
+							return -ENXIO;
 						}
 		
 						CmdBlkP->Packet.dest_unit = MapP->ID;
@@ -251,7 +250,7 @@ caddr_t arg;
 		
 						if ( RIOQueueCmdBlk( HostP, MapP->ID-1, CmdBlkP) == RIO_FAIL ) {
 							rio_dprintk (RIO_DEBUG_CMD, "IDENTIFY RTA: Failed to queue command\n");
-							return EIO;
+							return -EIO;
 						}
 						return 0;
 					}
@@ -259,7 +258,7 @@ caddr_t arg;
 			}
 		}
 	} 
-	return ENOENT;
+	return -ENOENT;
 }
 
 
@@ -278,17 +277,17 @@ caddr_t arg;
 	if ( copyin( (int)arg, (caddr_t)&KillUnit, sizeof(KillUnit) ) == COPYFAIL ) {
 		rio_dprintk (RIO_DEBUG_CMD, "RIO_KILL_NEIGHBOUR copy failed\n");
 		p->RIOError.Error = COPYIN_FAILED;
-		return EFAULT;
+		return -EFAULT;
 	}
 
 	if ( KillUnit.Link > 3 )
-		return ENXIO;
+		return -ENXIO;
  
 	CmdBlkP = RIOGetCmdBlk();
 
 	if ( !CmdBlkP ) {
 		rio_dprintk (RIO_DEBUG_CMD, "UFOAD: GetCmdBlk failed\n");
-		return ENXIO;
+		return -ENXIO;
 	}
 
 	CmdBlkP->Packet.dest_unit = 0;
@@ -309,7 +308,7 @@ caddr_t arg;
 			if ( RIOQueueCmdBlk( HostP, RTAS_PER_HOST+KillUnit.Link,
 							CmdBlkP) == RIO_FAIL ) {
 				rio_dprintk (RIO_DEBUG_CMD, "UFOAD: Failed queue command\n");
-				return EIO;
+				return -EIO;
 			}
 			return 0;
 		}
@@ -319,14 +318,14 @@ caddr_t arg;
 				CmdBlkP->Packet.dest_unit = ID+1;
 				if ( RIOQueueCmdBlk( HostP, ID, CmdBlkP) == RIO_FAIL ) {
 					rio_dprintk (RIO_DEBUG_CMD, "UFOAD: Failed queue command\n");
-					return EIO;
+					return -EIO;
 				}
 				return 0;
 			}
 		}
 	}
 	RIOFreeCmdBlk( CmdBlkP );
-	return ENXIO;
+	return -ENXIO;
 }
 
 int
@@ -343,7 +342,7 @@ int Link;
 
 	if ( !CmdBlkP ) {
 		rio_dprintk (RIO_DEBUG_CMD, "SUSPEND BOOT ON RTA: GetCmdBlk failed\n");
-		return ENXIO;
+		return -ENXIO;
 	}
 
 	CmdBlkP->Packet.dest_unit = ID;
@@ -358,7 +357,7 @@ int Link;
 
 	if ( RIOQueueCmdBlk( HostP, ID - 1, CmdBlkP) == RIO_FAIL ) {
 		rio_dprintk (RIO_DEBUG_CMD, "SUSPEND BOOT ON RTA: Failed to queue iwait command\n");
-		return EIO;
+		return -EIO;
 	}
 	return 0;
 }
@@ -398,7 +397,7 @@ struct rio_info *	p;
 /*
 ** Incoming command on the COMMAND_RUP to be processed.
 */
-int
+static int
 RIOCommandRup(p, Rup, HostP, PacketP)
 struct rio_info *	p;
 uint Rup;
@@ -461,8 +460,8 @@ PKT *PacketP;
 		rio_dprintk (RIO_DEBUG_CMD, "PACKET information: Length	  0x%x (%d)\n", PacketP->len,PacketP->len );
 		rio_dprintk (RIO_DEBUG_CMD, "PACKET information: Control	 0x%x (%d)\n", PacketP->control, PacketP->control);
 		rio_dprintk (RIO_DEBUG_CMD, "PACKET information: Check	   0x%x (%d)\n", PacketP->csum, PacketP->csum );
-		rio_dprintk (RIO_DEBUG_CMD, "COMMAND information: Host Port Number 0x%x, 
-					Command Code 0x%x\n", PktCmdP->PhbNum, PktCmdP->Command );
+		rio_dprintk (RIO_DEBUG_CMD, "COMMAND information: Host Port Number 0x%x, "
+					"Command Code 0x%x\n", PktCmdP->PhbNum, PktCmdP->Command );
 		return TRUE;
 	}
 
@@ -473,17 +472,18 @@ PKT *PacketP;
 	rio_spin_lock_irqsave(&PortP->portSem, flags);
 	switch( RBYTE(PktCmdP->Command) ) {
 		case BREAK_RECEIVED:
-		rio_dprintk (RIO_DEBUG_CMD, "Received a break!\n");
+			rio_dprintk (RIO_DEBUG_CMD, "Received a break!\n");
 			/* If the current line disc. is not multi-threading and
 	   			the current processor is not the default, reset rup_intr
 	   			and return FALSE to ensure that the command packet is
 	   			not freed. */
 			/* Call tmgr HANGUP HERE */
 			/* Fix this later when every thing works !!!! RAMRAJ */
+			gs_got_break (&PortP->gs);
 			break;
 
 		case COMPLETE:
-		rio_dprintk (RIO_DEBUG_CMD, "Command complete on phb %d host %d\n",
+			rio_dprintk (RIO_DEBUG_CMD, "Command complete on phb %d host %d\n",
 			     RBYTE(PktCmdP->PhbNum), HostP-p->RIOHosts);
 			subCommand = 1;
 			switch (RBYTE(PktCmdP->SubCommand)) {
@@ -547,6 +547,8 @@ PKT *PacketP;
 				** carrier.
 				*/
 				if (PortP->gs.tty == NULL)
+					break;
+				if (PortP->gs.tty->termios == NULL)
 					break;
 			  
 				if (!(PortP->gs.tty->termios->c_cflag & CLOCAL) &&
@@ -622,7 +624,8 @@ RIOGetCmdBlk()
 	struct CmdBlk *CmdBlkP;
 
 	CmdBlkP = (struct CmdBlk *)sysbrk(sizeof(struct CmdBlk));
-	bzero(CmdBlkP, sizeof(struct CmdBlk));
+	if (CmdBlkP)
+		bzero(CmdBlkP, sizeof(struct CmdBlk));
 
 	return CmdBlkP;
 }
@@ -912,62 +915,6 @@ struct Host *		HostP;
 		}
 		spin_unlock_irqrestore(&UnixRupP->RupLock, flags);
 	} while ( Rup );
-}
-
-
-/*
-** Return the length of the named string
-*/
-int
-RIOStrlen(Str)
-register char *Str;
-{
-	register int len = 0;
-
-	while ( *Str++ )
-		len++;
-	return len;
-}
-
-/*
-** compares s1 to s2 and return 0 if they match.
-*/
-int
-RIOStrCmp(s1, s2)
-register char *s1;
-register char *s2;
-{
-	while ( *s1 && *s2 && *s1==*s2 )
-		s1++, s2++;
-	return *s1-*s2;
-}
-
-/*
-** compares s1 to s2 for upto n bytes and return 0 if they match.
-*/
-int
-RIOStrnCmp(s1, s2, n)
-register char *s1;
-register char *s2;
-int n;
-{
-	while ( n && *s1 && *s2 && *s1==*s2 )
-		n--, s1++, s2++;
-	return n ? *s1!=*s2 : 0;
-}
-
-/*
-** copy up to 'len' bytes from 'from' to 'to'.
-*/
-void
-RIOStrNCpy(to, from, len)
-char *to;
-char *from;
-int len; 
-{
-	while ( len-- && (*to++ = *from++) )
-		;
-	to[-1]='\0';
 }
 
 int

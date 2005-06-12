@@ -9,10 +9,6 @@
  * Copyright (C) 1999 Goutham Rao <goutham.rao@intel.com>
  */
 
-#if 1
-#define FPSWA_BUG
-#endif
-
 typedef struct {
 	/* 4 * 128 bits */
 	unsigned long fp_lp[4*2];
@@ -71,5 +67,7 @@ typedef struct {
 	unsigned int	 reserved;
 	efi_fpswa_t	 fpswa;
 } fpswa_interface_t;
+
+extern fpswa_interface_t *fpswa_interface;
 
 #endif /* _ASM_IA64_FPSWA_H */

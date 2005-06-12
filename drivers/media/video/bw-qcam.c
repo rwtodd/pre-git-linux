@@ -1,8 +1,6 @@
 /*
  *    QuickCam Driver For Video4Linux.
  *
- *	This version only works as a module.
- *
  *	Video4Linux conversion work by Alan Cox.
  *	Parport compatibility by Phil Blundell.
  *	Busy loop avoidance by Mark Cooke.
@@ -70,11 +68,10 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/parport.h>
 #include <linux/sched.h>
-#include <linux/version.h>
 #include <linux/videodev.h>
 #include <asm/semaphore.h>
 #include <asm/uaccess.h>
@@ -83,33 +80,28 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 static unsigned int maxpoll=250;   /* Maximum busy-loop count for qcam I/O */
 static unsigned int yieldlines=4;  /* Yield after this many during capture */
+static int video_nr = -1;
 
-#if LINUX_VERSION_CODE >= 0x020117
-MODULE_PARM(maxpoll,"i");
-MODULE_PARM(yieldlines,"i");   
-#endif
+module_param(maxpoll, int, 0);
+module_param(yieldlines, int, 0);
+module_param(video_nr, int, 0);
 
-extern __inline__ int read_lpstatus(struct qcam_device *q)
+static inline int read_lpstatus(struct qcam_device *q)
 {
 	return parport_read_status(q->pport);
 }
 
-extern __inline__ int read_lpcontrol(struct qcam_device *q)
-{
-	return parport_read_control(q->pport);
-}
-
-extern __inline__ int read_lpdata(struct qcam_device *q)
+static inline int read_lpdata(struct qcam_device *q)
 {
 	return parport_read_data(q->pport);
 }
 
-extern __inline__ void write_lpdata(struct qcam_device *q, int d)
+static inline void write_lpdata(struct qcam_device *q, int d)
 {
 	parport_write_data(q->pport, d);
 }
 
-extern __inline__ void write_lpcontrol(struct qcam_device *q, int d)
+static inline void write_lpcontrol(struct qcam_device *q, int d)
 {
 	parport_write_control(q->pport, d);
 }
@@ -252,8 +244,7 @@ static int qc_waithand(struct qcam_device *q, int val)
 			   
 			if(runs++>maxpoll)
 			{
-				current->state=TASK_INTERRUPTIBLE;
-				schedule_timeout(HZ/200);
+				msleep_interruptible(5);
 			}
 			if(runs>(maxpoll+1000)) /* 5 seconds */
 				return -1;
@@ -272,8 +263,7 @@ static int qc_waithand(struct qcam_device *q, int val)
 			   
 			if(runs++>maxpoll)
 			{
-				current->state=TASK_INTERRUPTIBLE;
-				schedule_timeout(HZ/200);
+				msleep_interruptible(5);
 			}
 			if(runs++>(maxpoll+1000)) /* 5 seconds */
 				return -1;
@@ -305,8 +295,7 @@ static unsigned int qc_waithand2(struct qcam_device *q, int val)
 		   
 		if(runs++>maxpoll)
 		{
-			current->state=TASK_INTERRUPTIBLE;
-			schedule_timeout(HZ/200);
+			msleep_interruptible(5);
 		}
 		if(runs++>(maxpoll+1000)) /* 5 seconds */
 			return 0;
@@ -452,7 +441,7 @@ static int qc_setscanmode(struct qcam_device *q)
 /* Reset the QuickCam and program for brightness, contrast,
  * white-balance, and resolution. */
 
-void qc_set(struct qcam_device *q)
+static void qc_set(struct qcam_device *q)
 {
 	int val;
 	int val2;
@@ -506,7 +495,7 @@ void qc_set(struct qcam_device *q)
    the supplied buffer.  It returns the number of bytes read,
    or -1 on error. */
 
-extern __inline__ int qc_readbytes(struct qcam_device *q, char buffer[])
+static inline int qc_readbytes(struct qcam_device *q, char buffer[])
 {
 	int ret=1;
 	unsigned int hi, lo;
@@ -602,7 +591,7 @@ extern __inline__ int qc_readbytes(struct qcam_device *q, char buffer[])
  * n=2^(bit depth)-1.  Ask me for more details if you don't understand
  * this. */
 
-long qc_capture(struct qcam_device * q, char *buf, unsigned long len)
+static long qc_capture(struct qcam_device * q, char __user *buf, unsigned long len)
 {
 	int i, j, k, yield;
 	int bytes;
@@ -663,7 +652,7 @@ long qc_capture(struct qcam_device * q, char *buf, unsigned long len)
 			}
 			pixels_read += bytes;
 		}
-		(void) qc_readbytes(q, 0);	/* reset state machine */
+		(void) qc_readbytes(q, NULL);	/* reset state machine */
 		
 		/* Grabbing an entire frame from the quickcam is a lengthy
 		   process. We don't (usually) want to busy-block the
@@ -672,8 +661,7 @@ long qc_capture(struct qcam_device * q, char *buf, unsigned long len)
 		   time will be 240 / 200 = 1.2 seconds. The compile-time
 		   default is to yield every 4 lines. */
 		if (i >= yield) {
-			current->state=TASK_INTERRUPTIBLE;
-			schedule_timeout(HZ/200);
+			msleep_interruptible(5);
 			yield = i + yieldlines;
 		}
 	}
@@ -694,127 +682,95 @@ long qc_capture(struct qcam_device * q, char *buf, unsigned long len)
  *	Video4linux interfacing
  */
 
-static int qcam_open(struct video_device *dev, int flags)
+static int qcam_do_ioctl(struct inode *inode, struct file *file,
+			 unsigned int cmd, void *arg)
 {
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static void qcam_close(struct video_device *dev)
-{
-	MOD_DEC_USE_COUNT;
-}
-
-static long qcam_write(struct video_device *v, const char *buf, unsigned long count, int noblock)
-{
-	return -EINVAL;
-}
-
-static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
-{
+	struct video_device *dev = video_devdata(file);
 	struct qcam_device *qcam=(struct qcam_device *)dev;
 	
 	switch(cmd)
 	{
 		case VIDIOCGCAP:
 		{
-			struct video_capability b;
-			strcpy(b.name, "Quickcam");
-			b.type = VID_TYPE_CAPTURE|VID_TYPE_SCALES|VID_TYPE_MONOCHROME;
-			b.channels = 1;
-			b.audios = 0;
-			b.maxwidth = 320;
-			b.maxheight = 240;
-			b.minwidth = 80;
-			b.minheight = 60;
-			if(copy_to_user(arg, &b,sizeof(b)))
-				return -EFAULT;
+			struct video_capability *b = arg;
+			strcpy(b->name, "Quickcam");
+			b->type = VID_TYPE_CAPTURE|VID_TYPE_SCALES|VID_TYPE_MONOCHROME;
+			b->channels = 1;
+			b->audios = 0;
+			b->maxwidth = 320;
+			b->maxheight = 240;
+			b->minwidth = 80;
+			b->minheight = 60;
 			return 0;
 		}
 		case VIDIOCGCHAN:
 		{
-			struct video_channel v;
-			if(copy_from_user(&v, arg, sizeof(v)))
-				return -EFAULT;
-			if(v.channel!=0)
+			struct video_channel *v = arg;
+			if(v->channel!=0)
 				return -EINVAL;
-			v.flags=0;
-			v.tuners=0;
+			v->flags=0;
+			v->tuners=0;
 			/* Good question.. its composite or SVHS so.. */
-			v.type = VIDEO_TYPE_CAMERA;
-			strcpy(v.name, "Camera");
-			if(copy_to_user(arg, &v, sizeof(v)))
-				return -EFAULT;
+			v->type = VIDEO_TYPE_CAMERA;
+			strcpy(v->name, "Camera");
 			return 0;
 		}
 		case VIDIOCSCHAN:
 		{
-			int v;
-			if(copy_from_user(&v, arg,sizeof(v)))
-				return -EFAULT;
-			if(v!=0)
+			struct video_channel *v = arg;
+			if(v->channel!=0)
 				return -EINVAL;
 			return 0;
 		}
 		case VIDIOCGTUNER:
 		{
-			struct video_tuner v;
-			if(copy_from_user(&v, arg, sizeof(v))!=0)
-				return -EFAULT;
-			if(v.tuner)
+			struct video_tuner *v = arg;
+			if(v->tuner)
 				return -EINVAL;
-			strcpy(v.name, "Format");
-			v.rangelow=0;
-			v.rangehigh=0;
-			v.flags= 0;
-			v.mode = VIDEO_MODE_AUTO;
-			if(copy_to_user(arg,&v,sizeof(v))!=0)
-				return -EFAULT;
+			strcpy(v->name, "Format");
+			v->rangelow=0;
+			v->rangehigh=0;
+			v->flags= 0;
+			v->mode = VIDEO_MODE_AUTO;
 			return 0;
 		}
 		case VIDIOCSTUNER:
 		{
-			struct video_tuner v;
-			if(copy_from_user(&v, arg, sizeof(v))!=0)
-				return -EFAULT;
-			if(v.tuner)
+			struct video_tuner *v = arg;
+			if(v->tuner)
 				return -EINVAL;
-			if(v.mode!=VIDEO_MODE_AUTO)
+			if(v->mode!=VIDEO_MODE_AUTO)
 				return -EINVAL;
 			return 0;
 		}
 		case VIDIOCGPICT:
 		{
-			struct video_picture p;
-			p.colour=0x8000;
-			p.hue=0x8000;
-			p.brightness=qcam->brightness<<8;
-			p.contrast=qcam->contrast<<8;
-			p.whiteness=qcam->whitebal<<8;
-			p.depth=qcam->bpp;
-			p.palette=VIDEO_PALETTE_GREY;
-			if(copy_to_user(arg, &p, sizeof(p)))
-				return -EFAULT;
+			struct video_picture *p = arg;
+			p->colour=0x8000;
+			p->hue=0x8000;
+			p->brightness=qcam->brightness<<8;
+			p->contrast=qcam->contrast<<8;
+			p->whiteness=qcam->whitebal<<8;
+			p->depth=qcam->bpp;
+			p->palette=VIDEO_PALETTE_GREY;
 			return 0;
 		}
 		case VIDIOCSPICT:
 		{
-			struct video_picture p;
-			if(copy_from_user(&p, arg, sizeof(p)))
-				return -EFAULT;
-			if(p.palette!=VIDEO_PALETTE_GREY)
+			struct video_picture *p = arg;
+			if(p->palette!=VIDEO_PALETTE_GREY)
 			    	return -EINVAL;
-			if(p.depth!=4 && p.depth!=6)
+			if(p->depth!=4 && p->depth!=6)
 				return -EINVAL;
 			
 			/*
 			 *	Now load the camera.
 			 */
 
-			qcam->brightness = p.brightness>>8;
-			qcam->contrast = p.contrast>>8;
-			qcam->whitebal = p.whiteness>>8;
-			qcam->bpp = p.depth;
+			qcam->brightness = p->brightness>>8;
+			qcam->contrast = p->contrast>>8;
+			qcam->whitebal = p->whiteness>>8;
+			qcam->bpp = p->depth;
 
 			down(&qcam->lock);			
 			qc_setscanmode(qcam);
@@ -825,27 +781,25 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 		}
 		case VIDIOCSWIN:
 		{
-			struct video_window vw;
-			if(copy_from_user(&vw, arg,sizeof(vw)))
-				return -EFAULT;
-			if(vw.flags)
+			struct video_window *vw = arg;
+			if(vw->flags)
 				return -EINVAL;
-			if(vw.clipcount)
+			if(vw->clipcount)
 				return -EINVAL;
-			if(vw.height<60||vw.height>240)
+			if(vw->height<60||vw->height>240)
 				return -EINVAL;
-			if(vw.width<80||vw.width>320)
+			if(vw->width<80||vw->width>320)
 				return -EINVAL;
 				
 			qcam->width = 320;
 			qcam->height = 240;
 			qcam->transfer_scale = 4;
 			
-			if(vw.width>=160 && vw.height>=120)
+			if(vw->width>=160 && vw->height>=120)
 			{
 				qcam->transfer_scale = 2;
 			}
-			if(vw.width>=320 && vw.height>=240)
+			if(vw->width>=320 && vw->height>=240)
 			{
 				qcam->width = 320;
 				qcam->height = 240;
@@ -864,28 +818,20 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 		}
 		case VIDIOCGWIN:
 		{
-			struct video_window vw;
-			memset(&vw, 0, sizeof(vw));
-			vw.width=qcam->width/qcam->transfer_scale;
-			vw.height=qcam->height/qcam->transfer_scale;
-			if(copy_to_user(arg, &vw, sizeof(vw)))
-				return -EFAULT;
+			struct video_window *vw = arg;
+			memset(vw, 0, sizeof(*vw));
+			vw->width=qcam->width/qcam->transfer_scale;
+			vw->height=qcam->height/qcam->transfer_scale;
 			return 0;
 		}
-		case VIDIOCCAPTURE:
-			return -EINVAL;
-		case VIDIOCGFBUF:
-			return -EINVAL;
-		case VIDIOCSFBUF:
-			return -EINVAL;
 		case VIDIOCKEY:
 			return 0;
+		case VIDIOCCAPTURE:
+		case VIDIOCGFBUF:
+		case VIDIOCSFBUF:
 		case VIDIOCGFREQ:
-			return -EINVAL;
 		case VIDIOCSFREQ:
-			return -EINVAL;
 		case VIDIOCGAUDIO:
-			return -EINVAL;
 		case VIDIOCSAUDIO:
 			return -EINVAL;
 		default:
@@ -894,8 +840,16 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 	return 0;
 }
 
-static long qcam_read(struct video_device *v, char *buf, unsigned long count,  int noblock)
+static int qcam_ioctl(struct inode *inode, struct file *file,
+		     unsigned int cmd, unsigned long arg)
 {
+	return video_usercopy(inode, file, cmd, arg, qcam_do_ioctl);
+}
+
+static ssize_t qcam_read(struct file *file, char __user *buf,
+			 size_t count, loff_t *ppos)
+{
+	struct video_device *v = video_devdata(file);
 	struct qcam_device *qcam=(struct qcam_device *)v;
 	int len;
 	parport_claim_or_block(qcam->pdev);
@@ -916,23 +870,28 @@ static long qcam_read(struct video_device *v, char *buf, unsigned long count,  i
 	return len;
 }
  
+static struct file_operations qcam_fops = {
+	.owner		= THIS_MODULE,
+	.open           = video_exclusive_open,
+	.release        = video_exclusive_release,
+	.ioctl          = qcam_ioctl,
+	.read		= qcam_read,
+	.llseek         = no_llseek,
+};
 static struct video_device qcam_template=
 {
-	name:		"Connectix Quickcam",
-	type:		VID_TYPE_CAPTURE,
-	hardware:	VID_HARDWARE_QCAM_BW,
-	open:		qcam_open,
-	close:		qcam_close,
-	read:		qcam_read,
-	write:		qcam_write,
-	ioctl:		qcam_ioctl,
+	.owner		= THIS_MODULE,
+	.name		= "Connectix Quickcam",
+	.type		= VID_TYPE_CAPTURE,
+	.hardware	= VID_HARDWARE_QCAM_BW,
+	.fops           = &qcam_fops,
 };
 
 #define MAX_CAMS 4
 static struct qcam_device *qcams[MAX_CAMS];
 static unsigned int num_cams = 0;
 
-int init_bwqcam(struct parport *port)
+static int init_bwqcam(struct parport *port)
 {
 	struct qcam_device *qcam;
 
@@ -963,7 +922,7 @@ int init_bwqcam(struct parport *port)
 	
 	printk(KERN_INFO "Connectix Quickcam on %s\n", qcam->pport->name);
 	
-	if(video_register_device(&qcam->vdev, VFL_TYPE_GRABBER)==-1)
+	if(video_register_device(&qcam->vdev, VFL_TYPE_GRABBER, video_nr)==-1)
 	{
 		parport_unregister_device(qcam->pdev);
 		kfree(qcam);
@@ -975,7 +934,7 @@ int init_bwqcam(struct parport *port)
 	return 0;
 }
 
-void close_bwqcam(struct qcam_device *qcam)
+static void close_bwqcam(struct qcam_device *qcam)
 {
 	video_unregister_device(&qcam->vdev);
 	parport_unregister_device(qcam->pdev);
@@ -987,39 +946,67 @@ void close_bwqcam(struct qcam_device *qcam)
  *       -- March 14, 1999  Billy Donahue <billy@escape.com> */
 #ifdef MODULE
 static char *parport[MAX_CAMS] = { NULL, };
-MODULE_PARM(parport, "1-" __MODULE_STRING(MAX_CAMS) "s");
+module_param_array(parport, charp, NULL, 0);
 #endif
 
-#ifdef MODULE
-int init_module(void)
+static int accept_bwqcam(struct parport *port)
 {
-	struct parport *port;
+#ifdef MODULE
 	int n;
-	if(parport[0] && strncmp(parport[0], "auto", 4)){
+
+	if (parport[0] && strncmp(parport[0], "auto", 4) != 0) {
 		/* user gave parport parameters */
 		for(n=0; parport[n] && n<MAX_CAMS; n++){
 			char *ep;
 			unsigned long r;
 			r = simple_strtoul(parport[n], &ep, 0);
-			if(ep == parport[n]){
+			if (ep == parport[n]) {
 				printk(KERN_ERR
 					"bw-qcam: bad port specifier \"%s\"\n",
 					parport[n]);
 				continue;
 			}
-			for (port=parport_enumerate(); port; port=port->next){
-				if(r!=port->number)
-					continue;
-				init_bwqcam(port);
-				break;
-			}
+			if (r == port->number)
+				return 1;
 		}
-		return (num_cams)?0:-ENODEV;
-	} 
-	/* no parameter or "auto" */
-	for (port = parport_enumerate(); port; port=port->next)
-		init_bwqcam(port);
+		return 0;
+	}
+#endif
+	return 1;
+}
 
+static void bwqcam_attach(struct parport *port)
+{
+	if (accept_bwqcam(port))
+		init_bwqcam(port);
+}
+
+static void bwqcam_detach(struct parport *port)
+{
+	int i;
+	for (i = 0; i < num_cams; i++) {
+		struct qcam_device *qcam = qcams[i];
+		if (qcam && qcam->pdev->port == port) {
+			qcams[i] = NULL;
+			close_bwqcam(qcam);
+		}
+	}
+}
+
+static struct parport_driver bwqcam_driver = {
+	.name	= "bw-qcam",
+	.attach	= bwqcam_attach,
+	.detach	= bwqcam_detach,
+};
+
+static void __exit exit_bw_qcams(void)
+{
+	parport_unregister_driver(&bwqcam_driver);
+}
+
+static int __init init_bw_qcams(void)
+{
+#ifdef MODULE
 	/* Do some sanity checks on the module parameters. */
 	if (maxpoll > 5000) {
 		printk("Connectix Quickcam max-poll was above 5000. Using 5000.\n");
@@ -1030,23 +1017,11 @@ int init_module(void)
 		printk("Connectix Quickcam yieldlines was less than 1. Using 1.\n");
 		yieldlines = 1;
 	}
-
-	return (num_cams)?0:-ENODEV;
-}
-
-void cleanup_module(void)
-{
-	unsigned int i;
-	for (i = 0; i < num_cams; i++)
-		close_bwqcam(qcams[i]);
-}
-#else
-int __init init_bw_qcams(struct video_init *unused)
-{
-	struct parport *port;
-
-	for (port = parport_enumerate(); port; port=port->next)
-		init_bwqcam(port);
-	return 0;
-}
 #endif
+	return parport_register_driver(&bwqcam_driver);
+}
+
+module_init(init_bw_qcams);
+module_exit(exit_bw_qcams);
+
+MODULE_LICENSE("GPL");

@@ -2,13 +2,14 @@
  * linux/arch/m68k/motorola.c
  *
  * Routines specific to the Motorola MMU, originally from:
- * linux/arch/m68k/init.c 
+ * linux/arch/m68k/init.c
  * which are Copyright (C) 1995 Hamish Macdonald
- * 
+ *
  * Moved 8/20/1999 Sam Creasey
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -18,9 +19,6 @@
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
-#ifdef CONFIG_BLK_DEV_RAM
-#include <linux/blk.h>
-#endif
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
@@ -42,7 +40,8 @@
  * For 68020/030 this is 0.
  * For 68040, this is _PAGE_CACHE040 (cachable, copyback)
  */
-unsigned long mm_cachebits = 0;
+unsigned long mm_cachebits;
+EXPORT_SYMBOL(mm_cachebits);
 #endif
 
 static pte_t * __init kernel_page_table(void)
@@ -52,9 +51,9 @@ static pte_t * __init kernel_page_table(void)
 	ptablep = (pte_t *)alloc_bootmem_low_pages(PAGE_SIZE);
 
 	clear_page(ptablep);
-	__flush_page_to_ram((unsigned long) ptablep);
-	flush_tlb_kernel_page((unsigned long) ptablep);
-	nocache_page ((unsigned long)ptablep);
+	__flush_page_to_ram(ptablep);
+	flush_tlb_kernel_page(ptablep);
+	nocache_page(ptablep);
 
 	return ptablep;
 }
@@ -87,20 +86,20 @@ static pmd_t * __init kernel_ptr_table(void)
 #endif
 	}
 
-	if (((unsigned long)(last_pgtable + PTRS_PER_PMD) & ~PAGE_MASK) == 0) {
+	last_pgtable += PTRS_PER_PMD;
+	if (((unsigned long)last_pgtable & ~PAGE_MASK) == 0) {
 		last_pgtable = (pmd_t *)alloc_bootmem_low_pages(PAGE_SIZE);
 
 		clear_page(last_pgtable);
-		__flush_page_to_ram((unsigned long)last_pgtable);
-		flush_tlb_kernel_page((unsigned long)last_pgtable);
-		nocache_page((unsigned long)last_pgtable);
-	} else
-		last_pgtable += PTRS_PER_PMD;
+		__flush_page_to_ram(last_pgtable);
+		flush_tlb_kernel_page(last_pgtable);
+		nocache_page(last_pgtable);
+	}
 
 	return last_pgtable;
 }
 
-static unsigned long __init 
+static unsigned long __init
 map_chunk (unsigned long addr, long size)
 {
 #define PTRTREESIZE (256*1024)
@@ -176,7 +175,7 @@ map_chunk (unsigned long addr, long size)
 				pte_dir = kernel_page_table();
 				pmd_set(pmd_dir, pte_dir);
 			}
-			pte_dir = pte_offset(pmd_dir, virtaddr);
+			pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
 
 			if (virtaddr) {
 				if (!pte_present(*pte_dir))
@@ -195,9 +194,6 @@ map_chunk (unsigned long addr, long size)
 
 	return virtaddr;
 }
-
-extern unsigned long empty_bad_page_table;
-extern unsigned long empty_bad_page;
 
 /*
  * paging_init() continues the virtual memory environment setup which
@@ -226,18 +222,6 @@ void __init paging_init(void)
 		for (i = 0; i < 16; i++)
 			pgprot_val(protection_map[i]) |= _PAGE_CACHE040;
 	}
-	/* Fix the PAGE_NONE value. */
-	if (CPU_IS_040_OR_060) {
-		/* On the 680[46]0 we can use the _PAGE_SUPER bit.  */
-		pgprot_val(protection_map[0]) |= _PAGE_SUPER;
-		pgprot_val(protection_map[VM_SHARED]) |= _PAGE_SUPER;
-	} else {
-		/* Otherwise we must fake it. */
-		pgprot_val(protection_map[0]) &= ~_PAGE_PRESENT;
-		pgprot_val(protection_map[0]) |= _PAGE_FAKE_SUPER;
-		pgprot_val(protection_map[VM_SHARED]) &= ~_PAGE_PRESENT;
-		pgprot_val(protection_map[VM_SHARED]) |= _PAGE_FAKE_SUPER;
-	}
 
 	/*
 	 * Map the physical memory available into the kernel virtual
@@ -262,21 +246,19 @@ void __init paging_init(void)
 	 * initialize the bad page table and bad page to point
 	 * to a couple of allocated pages
 	 */
-	empty_bad_page_table = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_bad_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_zero_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	memset((void *)empty_zero_page, 0, PAGE_SIZE);
+	empty_zero_page = alloc_bootmem_pages(PAGE_SIZE);
+	memset(empty_zero_page, 0, PAGE_SIZE);
 
 	/*
-	 * Set up SFC/DFC registers (user data space)
+	 * Set up SFC/DFC registers
 	 */
-	set_fs (USER_DS);
+	set_fs(KERNEL_DS);
 
 #ifdef DEBUG
 	printk ("before free_area_init\n");
 #endif
 	zones_size[0] = (mach_max_dma_address < (unsigned long)high_memory ?
-			 mach_max_dma_address : (unsigned long)high_memory);
+			 (mach_max_dma_address+1) : (unsigned long)high_memory);
 	zones_size[1] = (unsigned long)high_memory - zones_size[0];
 
 	zones_size[0] = (zones_size[0] - PAGE_OFFSET) >> PAGE_SHIFT;
@@ -296,6 +278,7 @@ void free_initmem(void)
 		virt_to_page(addr)->flags &= ~(1 << PG_reserved);
 		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
+		totalram_pages++;
 	}
 }
 

@@ -8,6 +8,7 @@
 #define LINUX_NFSD_H
 
 #include <linux/fs.h>
+#include <linux/vfs.h>
 #include <linux/nfs.h>
 
 struct nfsd_fhandle {
@@ -29,16 +30,16 @@ struct nfsd_readargs {
 	struct svc_fh		fh;
 	__u32			offset;
 	__u32			count;
-	__u32			totalsize;
+	struct kvec		vec[RPCSVC_MAXPAGES];
+	int			vlen;
 };
 
 struct nfsd_writeargs {
 	svc_fh			fh;
-	__u32			beginoffset;
 	__u32			offset;
-	__u32			totalcount;
-	__u8 *			data;
 	int			len;
+	struct kvec		vec[RPCSVC_MAXPAGES];
+	int			vlen;
 };
 
 struct nfsd_createargs {
@@ -57,6 +58,11 @@ struct nfsd_renameargs {
 	int			tlen;
 };
 
+struct nfsd_readlinkargs {
+	struct svc_fh		fh;
+	char *			buffer;
+};
+	
 struct nfsd_linkargs {
 	struct svc_fh		ffh;
 	struct svc_fh		tfh;
@@ -77,6 +83,7 @@ struct nfsd_readdirargs {
 	struct svc_fh		fh;
 	__u32			cookie;
 	__u32			count;
+	u32 *			buffer;
 };
 
 struct nfsd_attrstat {
@@ -98,10 +105,15 @@ struct nfsd_readres {
 
 struct nfsd_readdirres {
 	int			count;
+
+	struct readdir_cd	common;
+	u32 *			buffer;
+	int			buflen;
+	u32 *			offset;
 };
 
 struct nfsd_statfsres {
-	struct statfs		stats;
+	struct kstatfs		stats;
 };
 
 /*
@@ -119,11 +131,11 @@ union nfsd_xdrstore {
 	struct nfsd_readdirargs	readdir;
 };
 
-#define NFSSVC_XDRSIZE		sizeof(union nfsd_xdrstore)
+#define NFS2_SVC_XDRSIZE	sizeof(union nfsd_xdrstore)
 
 
 int nfssvc_decode_void(struct svc_rqst *, u32 *, void *);
-int nfssvc_decode_fhandle(struct svc_rqst *, u32 *, struct svc_fh *);
+int nfssvc_decode_fhandle(struct svc_rqst *, u32 *, struct nfsd_fhandle *);
 int nfssvc_decode_sattrargs(struct svc_rqst *, u32 *,
 				struct nfsd_sattrargs *);
 int nfssvc_decode_diropargs(struct svc_rqst *, u32 *,
@@ -136,6 +148,8 @@ int nfssvc_decode_createargs(struct svc_rqst *, u32 *,
 				struct nfsd_createargs *);
 int nfssvc_decode_renameargs(struct svc_rqst *, u32 *,
 				struct nfsd_renameargs *);
+int nfssvc_decode_readlinkargs(struct svc_rqst *, u32 *,
+				struct nfsd_readlinkargs *);
 int nfssvc_decode_linkargs(struct svc_rqst *, u32 *,
 				struct nfsd_linkargs *);
 int nfssvc_decode_symlinkargs(struct svc_rqst *, u32 *,
@@ -151,7 +165,7 @@ int nfssvc_encode_statfsres(struct svc_rqst *, u32 *, struct nfsd_statfsres *);
 int nfssvc_encode_readdirres(struct svc_rqst *, u32 *, struct nfsd_readdirres *);
 
 int nfssvc_encode_entry(struct readdir_cd *, const char *name,
-				int namlen, off_t offset, ino_t ino, unsigned int);
+				int namlen, loff_t offset, ino_t ino, unsigned int);
 
 int nfssvc_release_fhandle(struct svc_rqst *, u32 *, struct nfsd_fhandle *);
 

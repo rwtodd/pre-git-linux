@@ -1,7 +1,7 @@
 /* smctr.h: SMC Token Ring driver header for Linux
  *
  * Authors:
- *  - Jay Schulist <jschlst@turbolinux.com>
+ *  - Jay Schulist <jschlst@samba.org>
  */
 
 #ifndef __LINUX_SMCTR_H
@@ -1050,6 +1050,8 @@ typedef struct net_local {
         __u16 QueueSkb;
 
 	struct tr_statistics MacStat;   /* MAC statistics structure */
+	
+	spinlock_t	lock;
 } NET_LOCAL;
 
 /************************************

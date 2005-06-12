@@ -17,7 +17,7 @@
  * with compliant or compatible devices. It will use whatever features
  * the device supports, prefering those that are typically faster.
  *
- * When the device is opened, it is left in COMPATABILITY mode, and
+ * When the device is opened, it is left in COMPATIBILITY mode, and
  * writes work like any printer device. The driver only attempt to
  * negotiate 1284 modes when needed so that plugs can be pulled,
  * switch boxes switched, etc., without disrupting things. It will
@@ -40,9 +40,9 @@
  */
 
 # define BPP_PUT_PINS _IOW('B', 1, int)
-# define BPP_GET_PINS _IOR('B', 2, void)
+# define BPP_GET_PINS _IOR('B', 2, char) /* that's bogus - should've been _IO */
 # define BPP_PUT_DATA _IOW('B', 3, int)
-# define BPP_GET_DATA _IOR('B', 4, void)
+# define BPP_GET_DATA _IOR('B', 4, char) /* ditto */
 
 /*
  * Set the data bus to input mode. Disengage the data bin driver and

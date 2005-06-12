@@ -5,7 +5,7 @@
  *
  *		INET protocol dispatch tables.
  *
- * Version:	$Id: protocol.c,v 1.12 2000/10/03 07:29:00 anton Exp $
+ * Version:	$Id: protocol.c,v 1.14 2001/05/18 02:25:49 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -16,6 +16,8 @@
  *		Alan Cox	: Added new fields for init and ready for
  *				  proper fragmentation (_NO_ 4K limits!)
  *		Richard Colella	: Hang on hash collision
+ *		Vince Laviano	: Modified inet_del_protocol() to correctly
+ *				  maintain copy bit.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -25,6 +27,7 @@
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -35,7 +38,6 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/timer.h>
-#include <linux/brlock.h>
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/tcp.h>
@@ -46,150 +48,54 @@
 #include <net/ipip.h>
 #include <linux/igmp.h>
 
-#define IPPROTO_PREVIOUS NULL
-
-#ifdef CONFIG_IP_MULTICAST
-
-static struct inet_protocol igmp_protocol = 
-{
-	igmp_rcv,		/* IGMP handler		*/
-	NULL,			/* IGMP error control	*/
-	IPPROTO_PREVIOUS,	/* next			*/
-	IPPROTO_IGMP,		/* protocol ID		*/
-	0,			/* copy			*/
-	NULL,			/* data			*/
-	"IGMP"			/* name			*/
-};
-
-#undef  IPPROTO_PREVIOUS
-#define IPPROTO_PREVIOUS &igmp_protocol
-
-#endif
-
-static struct inet_protocol tcp_protocol = 
-{
-	tcp_v4_rcv,		/* TCP handler		*/
-	tcp_v4_err,		/* TCP error control	*/  
-	IPPROTO_PREVIOUS,
-	IPPROTO_TCP,		/* protocol ID		*/
-	0,			/* copy			*/
-	NULL,			/* data			*/
-	"TCP"			/* name			*/
-};
-
-#undef  IPPROTO_PREVIOUS
-#define IPPROTO_PREVIOUS &tcp_protocol
-
-static struct inet_protocol udp_protocol = 
-{
-	udp_rcv,		/* UDP handler		*/
-	udp_err,		/* UDP error control	*/
-	IPPROTO_PREVIOUS,	/* next			*/
-	IPPROTO_UDP,		/* protocol ID		*/
-	0,			/* copy			*/
-	NULL,			/* data			*/
-	"UDP"			/* name			*/
-};
-
-#undef  IPPROTO_PREVIOUS
-#define IPPROTO_PREVIOUS &udp_protocol
-
-
-static struct inet_protocol icmp_protocol = 
-{
-	icmp_rcv,		/* ICMP handler		*/
-	NULL,			/* ICMP error control	*/
-	IPPROTO_PREVIOUS,	/* next			*/
-	IPPROTO_ICMP,		/* protocol ID		*/
-	0,			/* copy			*/
-	NULL,			/* data			*/
-	"ICMP"			/* name			*/
-};
-
-#undef  IPPROTO_PREVIOUS
-#define IPPROTO_PREVIOUS &icmp_protocol
-
-
-struct inet_protocol *inet_protocol_base = IPPROTO_PREVIOUS;
-
-struct inet_protocol *inet_protos[MAX_INET_PROTOS];
+struct net_protocol *inet_protos[MAX_INET_PROTOS];
+static DEFINE_SPINLOCK(inet_proto_lock);
 
 /*
  *	Add a protocol handler to the hash tables
  */
 
-void inet_add_protocol(struct inet_protocol *prot)
+int inet_add_protocol(struct net_protocol *prot, unsigned char protocol)
 {
-	unsigned char hash;
-	struct inet_protocol *p2;
+	int hash, ret;
 
-	hash = prot->protocol & (MAX_INET_PROTOS - 1);
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	prot ->next = inet_protos[hash];
-	inet_protos[hash] = prot;
-	prot->copy = 0;
+	hash = protocol & (MAX_INET_PROTOS - 1);
 
-	/*
-	 *	Set the copy bit if we need to. 
-	 */
-	 
-	p2 = (struct inet_protocol *) prot->next;
-	while(p2 != NULL) 
-	{
-		if (p2->protocol == prot->protocol) 
-		{
-			prot->copy = 1;
-			break;
-		}
-		p2 = (struct inet_protocol *) p2->next;
+	spin_lock_bh(&inet_proto_lock);
+	if (inet_protos[hash]) {
+		ret = -1;
+	} else {
+		inet_protos[hash] = prot;
+		ret = 0;
 	}
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	spin_unlock_bh(&inet_proto_lock);
+
+	return ret;
 }
 
 /*
  *	Remove a protocol from the hash tables.
  */
  
-int inet_del_protocol(struct inet_protocol *prot)
+int inet_del_protocol(struct net_protocol *prot, unsigned char protocol)
 {
-	struct inet_protocol *p;
-	struct inet_protocol *lp = NULL;
-	unsigned char hash;
+	int hash, ret;
 
-	hash = prot->protocol & (MAX_INET_PROTOS - 1);
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	if (prot == inet_protos[hash]) 
-	{
-		inet_protos[hash] = (struct inet_protocol *) inet_protos[hash]->next;
-		br_write_unlock_bh(BR_NETPROTO_LOCK);
-		return(0);
+	hash = protocol & (MAX_INET_PROTOS - 1);
+
+	spin_lock_bh(&inet_proto_lock);
+	if (inet_protos[hash] == prot) {
+		inet_protos[hash] = NULL;
+		ret = 0;
+	} else {
+		ret = -1;
 	}
+	spin_unlock_bh(&inet_proto_lock);
 
-	p = (struct inet_protocol *) inet_protos[hash];
-	while(p != NULL) 
-	{
-		/*
-		 * We have to worry if the protocol being deleted is
-		 * the last one on the list, then we may need to reset
-		 * someone's copied bit.
-		 */
-		if (p->next != NULL && p->next == prot) 
-		{
-			/*
-			 * if we are the last one with this protocol and
-			 * there is a previous one, reset its copy bit.
-			 */
-			if (p->copy == 0 && lp != NULL) 
-				lp->copy = 0;
-			p->next = prot->next;
-			br_write_unlock_bh(BR_NETPROTO_LOCK);
-			return(0);
-		}
-		if (p->next != NULL && p->next->protocol == prot->protocol) 
-			lp = p;
+	synchronize_net();
 
-		p = (struct inet_protocol *) p->next;
-	}
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
-	return(-1);
+	return ret;
 }
+
+EXPORT_SYMBOL(inet_add_protocol);
+EXPORT_SYMBOL(inet_del_protocol);

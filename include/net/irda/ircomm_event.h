@@ -31,6 +31,8 @@
 #ifndef IRCOMM_EVENT_H
 #define IRCOMM_EVENT_H
 
+#include <net/irda/irmod.h>
+
 typedef enum {
         IRCOMM_IDLE,
         IRCOMM_WAITI,
@@ -73,7 +75,6 @@ struct ircomm_info {
 };
 
 extern char *ircomm_state[];
-extern char *ircomm_event[];
 
 struct ircomm_cb;   /* Forward decl. */
 

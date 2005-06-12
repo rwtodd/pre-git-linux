@@ -8,11 +8,13 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/init.h>
 #include <linux/file.h>
 #include <linux/smp_lock.h>
+#include <linux/err.h>
+#include <linux/fs.h>
 
 static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
@@ -48,7 +50,7 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	if (*cp == '\0') 
 		return -ENOEXEC; /* No interpreter name found */
 	i_name = cp;
-	i_arg = 0;
+	i_arg = NULL;
 	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++)
 		/* nothing */ ;
 	while ((*cp == ' ') || (*cp == '\t'))
@@ -67,7 +69,7 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 * user environment and arguments are stored.
 	 */
 	remove_arg_zero(bprm);
-	retval = copy_strings_kernel(1, &bprm->filename, bprm);
+	retval = copy_strings_kernel(1, &bprm->interp, bprm);
 	if (retval < 0) return retval; 
 	bprm->argc++;
 	if (i_arg) {
@@ -78,6 +80,8 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	retval = copy_strings_kernel(1, &i_name, bprm);
 	if (retval) return retval; 
 	bprm->argc++;
+	bprm->interp = interp;
+
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
 	 */
@@ -92,8 +96,9 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	return search_binary_handler(bprm,regs);
 }
 
-struct linux_binfmt script_format = {
-	NULL, THIS_MODULE, load_script, NULL, NULL, 0
+static struct linux_binfmt script_format = {
+	.module		= THIS_MODULE,
+	.load_binary	= load_script,
 };
 
 static int __init init_script_binfmt(void)
@@ -106,5 +111,6 @@ static void __exit exit_script_binfmt(void)
 	unregister_binfmt(&script_format);
 }
 
-module_init(init_script_binfmt)
-module_exit(exit_script_binfmt)
+core_initcall(init_script_binfmt);
+module_exit(exit_script_binfmt);
+MODULE_LICENSE("GPL");

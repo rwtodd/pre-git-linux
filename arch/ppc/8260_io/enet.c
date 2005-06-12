@@ -10,7 +10,7 @@
  * This version of the driver is somewhat selectable for the different
  * processor/board combinations.  It works for the boards I know about
  * now, and should be easily modified to include others.  Some of the
- * configuration information is contained in "commproc.h" and the
+ * configuration information is contained in <asm/commproc.h> and the
  * remainder is here.
  *
  * Buffer descriptors are kept in the CPM dual port RAM, and the frame
@@ -30,7 +30,7 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -39,13 +39,13 @@
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
+#include <linux/bitops.h>
 
-#include <asm/immap_8260.h>
+#include <asm/immap_cpm2.h>
 #include <asm/pgtable.h>
 #include <asm/mpc8260.h>
-#include <asm/bitops.h>
 #include <asm/uaccess.h>
-#include <asm/cpm_8260.h>
+#include <asm/cpm2.h>
 #include <asm/irq.h>
 
 /*
@@ -122,7 +122,7 @@ struct scc_enet_private {
 static int scc_enet_open(struct net_device *dev);
 static int scc_enet_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static int scc_enet_rx(struct net_device *dev);
-static void scc_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs);
+static irqreturn_t scc_enet_interrupt(int irq, void *dev_id, struct pt_regs *);
 static int scc_enet_close(struct net_device *dev);
 static struct net_device_stats *scc_enet_get_stats(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -206,7 +206,7 @@ scc_enet_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	cep->stats.tx_bytes += skb->len;
 	cep->skb_cur = (cep->skb_cur+1) & TX_RING_MOD_MASK;
-	
+
 	spin_lock_irq(&cep->lock);
 
 	/* Send it on its way.  Tell CPM its ready, interrupt when done,
@@ -272,7 +272,7 @@ scc_enet_timeout(struct net_device *dev)
 /* The interrupt handler.
  * This is called from the CPM handler, not the MPC core interrupt.
  */
-static void
+static irqreturn_t
 scc_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 {
 	struct	net_device *dev = dev_id;
@@ -376,7 +376,7 @@ scc_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 	    }
 
 	    if (must_restart) {
-		volatile cpm8260_t *cp;
+		volatile cpm_cpm2_t *cp;
 
 		/* Some transmit errors cause the transmitter to shut
 		 * down.  We now issue a restart transmit.  Since the
@@ -403,7 +403,7 @@ scc_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 		printk("SCC ENET: BSY can't happen.\n");
 	}
 
-	return;
+	return IRQ_HANDLED;
 }
 
 /* During a receive, the cur_rx points to the current incoming buffer.
@@ -429,7 +429,7 @@ scc_enet_rx(struct net_device *dev)
 for (;;) {
 	if (bdp->cbd_sc & BD_ENET_RX_EMPTY)
 		break;
-		
+
 #ifndef final_version
 	/* Since we have allocated space to hold a complete frame, both
 	 * the first and last indicators should be set.
@@ -549,13 +549,13 @@ static void set_multicast_list(struct net_device *dev)
 	ep = (scc_enet_t *)dev->base_addr;
 
 	if (dev->flags&IFF_PROMISC) {
-	  
+	
 		/* Log any net taps. */
 		printk("%s: Promiscuous mode enabled.\n", dev->name);
-		cep->sccp->scc_pmsr |= SCC_PSMR_PRO;
+		cep->sccp->scc_psmr |= SCC_PSMR_PRO;
 	} else {
 
-		cep->sccp->scc_pmsr &= ~SCC_PSMR_PRO;
+		cep->sccp->scc_psmr &= ~SCC_PSMR_PRO;
 
 		if (dev->flags & IFF_ALLMULTI) {
 			/* Catch all multicast addresses, so set the
@@ -577,7 +577,7 @@ static void set_multicast_list(struct net_device *dev)
 			dmi = dev->mc_list;
 
 			for (i=0; i<dev->mc_count; i++) {
-				
+		
 				/* Only support group multicast for now.
 				*/
 				if (!(dmi->dmi_addr[0] & 1))
@@ -608,37 +608,37 @@ static void set_multicast_list(struct net_device *dev)
 
 /* Initialize the CPM Ethernet on SCC.
  */
-int __init scc_enet_init(void)
+static int __init scc_enet_init(void)
 {
 	struct net_device *dev;
 	struct scc_enet_private *cep;
-	int i, j;
+	int i, j, err;
+	uint dp_offset;
 	unsigned char	*eap;
 	unsigned long	mem_addr;
 	bd_t		*bd;
 	volatile	cbd_t		*bdp;
-	volatile	cpm8260_t	*cp;
+	volatile	cpm_cpm2_t	*cp;
 	volatile	scc_t		*sccp;
 	volatile	scc_enet_t	*ep;
-	volatile	immap_t		*immap;
-	volatile	iop8260_t	*io;
+	volatile	cpm2_map_t		*immap;
+	volatile	iop_cpm2_t	*io;
 
 	cp = cpmp;	/* Get pointer to Communication Processor */
 
-	immap = (immap_t *)IMAP_ADDR;	/* and to internal registers */
+	immap = (cpm2_map_t *)CPM_MAP_ADDR;	/* and to internal registers */
 	io = &immap->im_ioport;
 
 	bd = (bd_t *)__res;
 
-	/* Allocate some private information.
-	*/
-	cep = (struct scc_enet_private *)kmalloc(sizeof(*cep), GFP_KERNEL);
-	__clear_user(cep,sizeof(*cep));
-	spin_lock_init(&cep->lock);
-
 	/* Create an Ethernet device instance.
 	*/
-	dev = init_etherdev(0, 0);
+	dev = alloc_etherdev(sizeof(*cep));
+	if (!dev)
+		return -ENOMEM;
+
+	cep = dev->priv;
+	spin_lock_init(&cep->lock);
 
 	/* Get pointer to SCC area in parameter RAM.
 	*/
@@ -661,7 +661,7 @@ int __init scc_enet_init(void)
 		(PC_ENET_RENA | PC_ENET_CLSN | PC_ENET_TXCLK | PC_ENET_RXCLK);
 	io->iop_pdirc &=
 		~(PC_ENET_RENA | PC_ENET_CLSN | PC_ENET_TXCLK | PC_ENET_RXCLK);
-	io->iop_psorc &= 
+	io->iop_psorc &=
 		~(PC_ENET_RENA | PC_ENET_TXCLK | PC_ENET_RXCLK);
 	io->iop_psorc |= PC_ENET_CLSN;
 
@@ -681,13 +681,13 @@ int __init scc_enet_init(void)
 	 * These are relative offsets in the DP ram address space.
 	 * Initialize base addresses for the buffer descriptors.
 	 */
-	i = m8260_cpm_dpalloc(sizeof(cbd_t) * RX_RING_SIZE, 8);
-	ep->sen_genscc.scc_rbase = i;
-	cep->rx_bd_base = (cbd_t *)&immap->im_dprambase[i];
+	dp_offset = cpm_dpalloc(sizeof(cbd_t) * RX_RING_SIZE, 8);
+	ep->sen_genscc.scc_rbase = dp_offset;
+	cep->rx_bd_base = (cbd_t *)cpm_dpram_addr(dp_offset);
 
-	i = m8260_cpm_dpalloc(sizeof(cbd_t) * TX_RING_SIZE, 8);
-	ep->sen_genscc.scc_tbase = i;
-	cep->tx_bd_base = (cbd_t *)&immap->im_dprambase[i];
+	dp_offset = cpm_dpalloc(sizeof(cbd_t) * TX_RING_SIZE, 8);
+	ep->sen_genscc.scc_tbase = dp_offset;
+	cep->tx_bd_base = (cbd_t *)cpm_dpram_addr(dp_offset);
 
 	cep->dirty_tx = cep->cur_tx = cep->tx_bd_base;
 	cep->cur_rx = cep->rx_bd_base;
@@ -768,6 +768,7 @@ int __init scc_enet_init(void)
 		/* Allocate a page.
 		*/
 		mem_addr = __get_free_page(GFP_KERNEL);
+		/* BUG: no check for failure */
 
 		/* Initialize the BD for every fragment in the page.
 		*/
@@ -804,7 +805,8 @@ int __init scc_enet_init(void)
 
 	/* Install our interrupt handler.
 	*/
-	request_8xxirq(SIU_INT_ENET, scc_enet_interrupt, 0, "enet", dev);
+	request_irq(SIU_INT_ENET, scc_enet_interrupt, 0, "enet", dev);
+	/* BUG: no check for failure */
 
 	/* Set GSMR_H to enable all normal operating modes.
 	 * Set GSMR_L to enable Ethernet to MC68160.
@@ -819,7 +821,7 @@ int __init scc_enet_init(void)
 	/* Set processing mode.  Use Ethernet CRC, catch broadcast, and
 	 * start frame search 22 bit times after RENA.
 	 */
-	sccp->scc_pmsr = (SCC_PSMR_ENCRC | SCC_PSMR_NIB22);
+	sccp->scc_psmr = (SCC_PSMR_ENCRC | SCC_PSMR_NIB22);
 
 	/* It is now OK to enable the Ethernet transmitter.
 	 * Unfortunately, there are board implementation differences here.
@@ -834,7 +836,6 @@ int __init scc_enet_init(void)
 	io->iop_pdatc |= PC_EST8260_ENET_NOTFD;
 
 	dev->base_addr = (unsigned long)ep;
-	dev->priv = cep;
 
 	/* The CPM Ethernet specific entries in the device structure. */
 	dev->open = scc_enet_open;
@@ -849,6 +850,12 @@ int __init scc_enet_init(void)
 	*/
 	sccp->scc_gsmrl |= (SCC_GSMRL_ENR | SCC_GSMRL_ENT);
 
+	err = register_netdev(dev);
+	if (err) {
+		free_netdev(dev);
+		return err;
+	}
+
 	printk("%s: SCC ENET Version 0.1, ", dev->name);
 	for (i=0; i<5; i++)
 		printk("%02x:", dev->dev_addr[i]);
@@ -857,3 +864,4 @@ int __init scc_enet_init(void)
 	return 0;
 }
 
+module_init(scc_enet_init);

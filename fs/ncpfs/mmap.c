@@ -7,14 +7,14 @@
  */
 
 #include <linux/stat.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/shm.h>
 #include <linux/errno.h>
 #include <linux/mman.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
 #include <linux/ncp_fs.h>
 
@@ -22,16 +22,11 @@
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
-static inline int min(int a, int b)
-{
-	return a < b ? a : b;
-}
-
 /*
  * Fill in the supplied page for mmap
  */
 static struct page* ncp_file_mmap_nopage(struct vm_area_struct *area,
-				     unsigned long address, int write_access)
+				     unsigned long address, int *type)
 {
 	struct file *file = area->vm_file;
 	struct dentry *dentry = file->f_dentry;
@@ -43,7 +38,7 @@ static struct page* ncp_file_mmap_nopage(struct vm_area_struct *area,
 	int bufsize;
 	int pos;
 
-	page = alloc_page(GFP_HIGHMEM); /* ncpfs has nothing against GFP_HIGHMEM
+	page = alloc_page(GFP_HIGHUSER); /* ncpfs has nothing against high pages
 	           as long as recvmsg and memset works on it */
 	if (!page)
 		return page;
@@ -66,7 +61,7 @@ static struct page* ncp_file_mmap_nopage(struct vm_area_struct *area,
 
 			to_read = bufsize - (pos % bufsize);
 
-			to_read = min(to_read, count - already_read);
+			to_read = min_t(unsigned int, to_read, count - already_read);
 
 			if (ncp_read_kernel(NCP_SERVER(inode),
 				     NCP_FINFO(inode)->file_handle,
@@ -90,12 +85,21 @@ static struct page* ncp_file_mmap_nopage(struct vm_area_struct *area,
 		memset(pg_addr + already_read, 0, PAGE_SIZE - already_read);
 	flush_dcache_page(page);
 	kunmap(page);
+
+	/*
+	 * If I understand ncp_read_kernel() properly, the above always
+	 * fetches from the network, here the analogue of disk.
+	 * -- wli
+	 */
+	if (type)
+		*type = VM_FAULT_MAJOR;
+	inc_page_state(pgmajfault);
 	return page;
 }
 
 static struct vm_operations_struct ncp_file_mmap =
 {
-	nopage:	ncp_file_mmap_nopage,
+	.nopage	= ncp_file_mmap_nopage,
 };
 
 
@@ -106,23 +110,19 @@ int ncp_mmap(struct file *file, struct vm_area_struct *vma)
 	
 	DPRINTK("ncp_mmap: called\n");
 
-	if (!ncp_conn_valid(NCP_SERVER(inode))) {
+	if (!ncp_conn_valid(NCP_SERVER(inode)))
 		return -EIO;
-	}
+
 	/* only PAGE_COW or read-only supported now */
 	if (vma->vm_flags & VM_SHARED)
 		return -EINVAL;
-	if (!inode->i_sb || !S_ISREG(inode->i_mode))
-		return -EACCES;
 	/* we do not support files bigger than 4GB... We eventually 
 	   supports just 4GB... */
 	if (((vma->vm_end - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff 
 	   > (1U << (32 - PAGE_SHIFT)))
 		return -EFBIG;
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-	}
 
 	vma->vm_ops = &ncp_file_mmap;
+	file_accessed(file);
 	return 0;
 }

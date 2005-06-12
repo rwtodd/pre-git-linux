@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_stp_if.c,v 1.3 2000/05/05 02:17:17 davem Exp $
+ *	$Id: br_stp_if.c,v 1.4 2001/04/14 21:14:39 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -14,78 +14,70 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/if_bridge.h>
 #include <linux/smp_lock.h>
-#include <asm/uaccess.h>
+
 #include "br_private.h"
 #include "br_private_stp.h"
 
-__u16 br_make_port_id(struct net_bridge_port *p)
+
+/* Port id is composed of priority and port number.
+ * NB: least significant bits of priority are dropped to
+ *     make room for more ports.
+ */
+static inline port_id br_make_port_id(__u8 priority, __u16 port_no)
 {
-	return (p->priority << 8) | p->port_no;
+	return ((u16)priority << BR_PORT_BITS) 
+		| (port_no & ((1<<BR_PORT_BITS)-1));
 }
 
 /* called under bridge lock */
 void br_init_port(struct net_bridge_port *p)
 {
-	p->port_id = br_make_port_id(p);
+	p->port_id = br_make_port_id(p->priority, p->port_no);
 	br_become_designated_port(p);
 	p->state = BR_STATE_BLOCKING;
 	p->topology_change_ack = 0;
 	p->config_pending = 0;
-	br_timer_clear(&p->message_age_timer);
-	br_timer_clear(&p->forward_delay_timer);
-	br_timer_clear(&p->hold_timer);
+
+	br_stp_port_timer_init(p);
 }
 
 /* called under bridge lock */
 void br_stp_enable_bridge(struct net_bridge *br)
 {
 	struct net_bridge_port *p;
-	struct timer_list *timer = &br->tick;
 
-	init_timer(timer);
-	timer->data = (unsigned long) br;
-	timer->function = br_tick;
-	timer->expires = jiffies + 1;
-	add_timer(timer);
-
-	br_timer_set(&br->hello_timer, jiffies);
+	spin_lock_bh(&br->lock);
+	mod_timer(&br->hello_timer, jiffies + br->hello_time);
 	br_config_bpdu_generation(br);
 
-	p = br->port_list;
-	while (p != NULL) {
-		if (p->dev->flags & IFF_UP)
+	list_for_each_entry(p, &br->port_list, list) {
+		if ((p->dev->flags & IFF_UP) && netif_carrier_ok(p->dev))
 			br_stp_enable_port(p);
 
-		p = p->next;
 	}
-
-	br_timer_set(&br->gc_timer, jiffies);
+	spin_unlock_bh(&br->lock);
 }
 
-/* called under bridge lock */
+/* NO locks held */
 void br_stp_disable_bridge(struct net_bridge *br)
 {
 	struct net_bridge_port *p;
 
-	br->topology_change = 0;
-	br->topology_change_detected = 0;
-	br_timer_clear(&br->hello_timer);
-	br_timer_clear(&br->topology_change_timer);
-	br_timer_clear(&br->tcn_timer);
-	br_timer_clear(&br->gc_timer);
-	br_fdb_cleanup(br);
-
-	p = br->port_list;
-	while (p != NULL) {
+	spin_lock(&br->lock);
+	list_for_each_entry(p, &br->port_list, list) {
 		if (p->state != BR_STATE_DISABLED)
 			br_stp_disable_port(p);
 
-		p = p->next;
 	}
 
-	del_timer(&br->tick);
+	br->topology_change = 0;
+	br->topology_change_detected = 0;
+	spin_unlock(&br->lock);
+
+	del_timer_sync(&br->hello_timer);
+	del_timer_sync(&br->topology_change_timer);
+	del_timer_sync(&br->tcn_timer);
 }
 
 /* called under bridge lock */
@@ -103,17 +95,20 @@ void br_stp_disable_port(struct net_bridge_port *p)
 
 	br = p->br;
 	printk(KERN_INFO "%s: port %i(%s) entering %s state\n",
-	       br->dev.name, p->port_no, p->dev->name, "disabled");
+	       br->dev->name, p->port_no, p->dev->name, "disabled");
 
 	wasroot = br_is_root_bridge(br);
 	br_become_designated_port(p);
 	p->state = BR_STATE_DISABLED;
 	p->topology_change_ack = 0;
 	p->config_pending = 0;
-	br_timer_clear(&p->message_age_timer);
-	br_timer_clear(&p->forward_delay_timer);
-	br_timer_clear(&p->hold_timer);
+
+	del_timer(&p->message_age_timer);
+	del_timer(&p->forward_delay_timer);
+	del_timer(&p->hold_timer);
+
 	br_configuration_update(br);
+
 	br_port_state_selection(br);
 
 	if (br_is_root_bridge(br) && !wasroot)
@@ -121,7 +116,8 @@ void br_stp_disable_port(struct net_bridge_port *p)
 }
 
 /* called under bridge lock */
-static void br_stp_change_bridge_id(struct net_bridge *br, unsigned char *addr)
+static void br_stp_change_bridge_id(struct net_bridge *br, 
+				    const unsigned char *addr)
 {
 	unsigned char oldaddr[6];
 	struct net_bridge_port *p;
@@ -131,17 +127,15 @@ static void br_stp_change_bridge_id(struct net_bridge *br, unsigned char *addr)
 
 	memcpy(oldaddr, br->bridge_id.addr, ETH_ALEN);
 	memcpy(br->bridge_id.addr, addr, ETH_ALEN);
-	memcpy(br->dev.dev_addr, addr, ETH_ALEN);
+	memcpy(br->dev->dev_addr, addr, ETH_ALEN);
 
-	p = br->port_list;
-	while (p != NULL) {
+	list_for_each_entry(p, &br->port_list, list) {
 		if (!memcmp(p->designated_bridge.addr, oldaddr, ETH_ALEN))
 			memcpy(p->designated_bridge.addr, addr, ETH_ALEN);
 
 		if (!memcmp(p->designated_root.addr, oldaddr, ETH_ALEN))
 			memcpy(p->designated_root.addr, addr, ETH_ALEN);
 
-		p = p->next;
 	}
 
 	br_configuration_update(br);
@@ -150,23 +144,19 @@ static void br_stp_change_bridge_id(struct net_bridge *br, unsigned char *addr)
 		br_become_root_bridge(br);
 }
 
-static unsigned char br_mac_zero[6] = {0,0,0,0,0,0};
+static const unsigned char br_mac_zero[6];
 
 /* called under bridge lock */
 void br_stp_recalculate_bridge_id(struct net_bridge *br)
 {
-	unsigned char *addr;
+	const unsigned char *addr = br_mac_zero;
 	struct net_bridge_port *p;
 
-	addr = br_mac_zero;
-
-	p = br->port_list;
-	while (p != NULL) {
+	list_for_each_entry(p, &br->port_list, list) {
 		if (addr == br_mac_zero ||
 		    memcmp(p->dev->dev_addr, addr, ETH_ALEN) < 0)
 			addr = p->dev->dev_addr;
 
-		p = p->next;
 	}
 
 	if (memcmp(br->bridge_id.addr, addr, ETH_ALEN))
@@ -174,22 +164,20 @@ void br_stp_recalculate_bridge_id(struct net_bridge *br)
 }
 
 /* called under bridge lock */
-void br_stp_set_bridge_priority(struct net_bridge *br, int newprio)
+void br_stp_set_bridge_priority(struct net_bridge *br, u16 newprio)
 {
 	struct net_bridge_port *p;
 	int wasroot;
 
 	wasroot = br_is_root_bridge(br);
 
-	p = br->port_list;
-	while (p != NULL) {
+	list_for_each_entry(p, &br->port_list, list) {
 		if (p->state != BR_STATE_DISABLED &&
 		    br_is_designated_port(p)) {
 			p->designated_bridge.prio[0] = (newprio >> 8) & 0xFF;
 			p->designated_bridge.prio[1] = newprio & 0xFF;
 		}
 
-		p = p->next;
 	}
 
 	br->bridge_id.prio[0] = (newprio >> 8) & 0xFF;
@@ -201,14 +189,15 @@ void br_stp_set_bridge_priority(struct net_bridge *br, int newprio)
 }
 
 /* called under bridge lock */
-void br_stp_set_port_priority(struct net_bridge_port *p, int newprio)
+void br_stp_set_port_priority(struct net_bridge_port *p, u8 newprio)
 {
-	int new_port_id = ((newprio & 0xFF) << 8) | p->port_no;
+	port_id new_port_id = br_make_port_id(newprio, p->port_no);
 
 	if (br_is_designated_port(p))
 		p->designated_port = new_port_id;
 
 	p->port_id = new_port_id;
+	p->priority = newprio;
 	if (!memcmp(&p->br->bridge_id, &p->designated_bridge, 8) &&
 	    p->port_id < p->designated_port) {
 		br_become_designated_port(p);
@@ -217,9 +206,17 @@ void br_stp_set_port_priority(struct net_bridge_port *p, int newprio)
 }
 
 /* called under bridge lock */
-void br_stp_set_path_cost(struct net_bridge_port *p, int path_cost)
+void br_stp_set_path_cost(struct net_bridge_port *p, u32 path_cost)
 {
 	p->path_cost = path_cost;
 	br_configuration_update(p->br);
 	br_port_state_selection(p->br);
+}
+
+ssize_t br_show_bridge_id(char *buf, const struct bridge_id *id)
+{
+	return sprintf(buf, "%.2x%.2x.%.2x%.2x%.2x%.2x%.2x%.2x\n",
+	       id->prio[0], id->prio[1],
+	       id->addr[0], id->addr[1], id->addr[2],
+	       id->addr[3], id->addr[4], id->addr[5]);
 }

@@ -9,7 +9,7 @@
  * This file contains the system call numbers.
  */
 
-#define __NR_setup		  0	/* used only by init, to get system going */
+#define __NR_restart_syscall	  0
 #define __NR_exit		  1
 #define __NR_fork		  2
 #define __NR_read		  3
@@ -189,8 +189,8 @@
 #define __NR_rt_sigtimedwait	177
 #define __NR_rt_sigqueueinfo	178
 #define __NR_rt_sigsuspend	179
-#define __NR_pread		180
-#define __NR_pwrite		181
+#define __NR_pread64		180
+#define __NR_pwrite64		181
 #define __NR_chown		182
 #define __NR_getcwd		183
 #define __NR_capget		184
@@ -231,12 +231,78 @@
 #define __NR_madvise		219
 #define __NR_getdents64		220
 #define __NR_fcntl64		221
+/* 223 is unused */
+#define __NR_gettid		224
+#define __NR_setxattr		226
+#define __NR_lsetxattr		227
+#define __NR_fsetxattr		228
+#define __NR_getxattr		229
+#define __NR_lgetxattr		230
+#define __NR_fgetxattr		231
+#define __NR_listxattr		232
+#define __NR_llistxattr		233
+#define __NR_flistxattr		234
+#define __NR_removexattr	235
+#define __NR_lremovexattr	236
+#define __NR_fremovexattr	237
+#define __NR_tkill		238
+#define __NR_sendfile64		239
+#define __NR_futex		240
+#define __NR_sched_setaffinity	241
+#define __NR_sched_getaffinity	242
+#define __NR_set_thread_area	243
+#define __NR_get_thread_area	244
+#define __NR_io_setup		245
+#define __NR_io_destroy		246
+#define __NR_io_getevents	247
+#define __NR_io_submit		248
+#define __NR_io_cancel		249
+#define __NR_fadvise64		250
 
-/* user-visible error numbers are in the range -1 - -125: see <asm-sh/errno.h> */
+#define __NR_exit_group		252
+#define __NR_lookup_dcookie	253
+#define __NR_epoll_create	254
+#define __NR_epoll_ctl		255
+#define __NR_epoll_wait		256
+#define __NR_remap_file_pages	257
+#define __NR_set_tid_address	258
+#define __NR_timer_create	259
+#define __NR_timer_settime	(__NR_timer_create+1)
+#define __NR_timer_gettime	(__NR_timer_create+2)
+#define __NR_timer_getoverrun	(__NR_timer_create+3)
+#define __NR_timer_delete	(__NR_timer_create+4)
+#define __NR_clock_settime	(__NR_timer_create+5)
+#define __NR_clock_gettime	(__NR_timer_create+6)
+#define __NR_clock_getres	(__NR_timer_create+7)
+#define __NR_clock_nanosleep	(__NR_timer_create+8)
+#define __NR_statfs64		268
+#define __NR_fstatfs64		269
+#define __NR_tgkill		270
+#define __NR_utimes		271
+#define __NR_fadvise64_64	272
+#define __NR_vserver		273
+#define __NR_mbind              274
+#define __NR_get_mempolicy      275
+#define __NR_set_mempolicy      276
+#define __NR_mq_open            277
+#define __NR_mq_unlink          (__NR_mq_open+1)
+#define __NR_mq_timedsend       (__NR_mq_open+2)
+#define __NR_mq_timedreceive    (__NR_mq_open+3)
+#define __NR_mq_notify          (__NR_mq_open+4)
+#define __NR_mq_getsetattr      (__NR_mq_open+5)
+#define __NR_sys_kexec_load	283
+#define __NR_waitid		284
+#define __NR_add_key		285
+#define __NR_request_key	286
+#define __NR_keyctl		287
+
+#define NR_syscalls 288
+
+/* user-visible error numbers are in the range -1 - -124: see <asm-sh/errno.h> */
 
 #define __syscall_return(type, res) \
 do { \
-	if ((unsigned long)(res) >= (unsigned long)(-125)) { \
+	if ((unsigned long)(res) >= (unsigned long)(-124)) { \
 	/* Avoid using "res" which is declared to be in register r0; \
 	   errno might expand to a function call and clobber it.  */ \
 		int __err = -(res); \
@@ -330,7 +396,55 @@ __asm__ __volatile__ ("trapa	#0x15" \
 __syscall_return(type,__sc0); \
 }
 
+#define _syscall6(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4,type5,arg5,type6,arg6) \
+type name (type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5, type6 arg6) \
+{ \
+register long __sc3 __asm__ ("r3") = __NR_##name; \
+register long __sc4 __asm__ ("r4") = (long) arg1; \
+register long __sc5 __asm__ ("r5") = (long) arg2; \
+register long __sc6 __asm__ ("r6") = (long) arg3; \
+register long __sc7 __asm__ ("r7") = (long) arg4; \
+register long __sc0 __asm__ ("r0") = (long) arg5; \
+register long __sc1 __asm__ ("r1") = (long) arg6; \
+__asm__ __volatile__ ("trapa	#0x15" \
+	: "=z" (__sc0) \
+	: "0" (__sc0), "r" (__sc4), "r" (__sc5), "r" (__sc6), "r" (__sc7),  \
+	  "r" (__sc3), "r" (__sc1) \
+	: "memory" ); \
+__syscall_return(type,__sc0); \
+}
+
+#ifdef __KERNEL__
+#define __ARCH_WANT_IPC_PARSE_VERSION
+#define __ARCH_WANT_OLD_READDIR
+#define __ARCH_WANT_OLD_STAT
+#define __ARCH_WANT_STAT64
+#define __ARCH_WANT_SYS_ALARM
+#define __ARCH_WANT_SYS_GETHOSTNAME
+#define __ARCH_WANT_SYS_PAUSE
+#define __ARCH_WANT_SYS_SGETMASK
+#define __ARCH_WANT_SYS_SIGNAL
+#define __ARCH_WANT_SYS_TIME
+#define __ARCH_WANT_SYS_UTIME
+#define __ARCH_WANT_SYS_WAITPID
+#define __ARCH_WANT_SYS_SOCKETCALL
+#define __ARCH_WANT_SYS_FADVISE64
+#define __ARCH_WANT_SYS_GETPGRP
+#define __ARCH_WANT_SYS_LLSEEK
+#define __ARCH_WANT_SYS_NICE
+#define __ARCH_WANT_SYS_OLD_GETRLIMIT
+#define __ARCH_WANT_SYS_OLDUMOUNT
+#define __ARCH_WANT_SYS_SIGPENDING
+#define __ARCH_WANT_SYS_SIGPROCMASK
+#define __ARCH_WANT_SYS_RT_SIGACTION
+#endif
+
 #ifdef __KERNEL_SYSCALLS__
+
+#include <linux/compiler.h>
+#include <linux/types.h>
+#include <linux/linkage.h>
+#include <asm/ptrace.h>
 
 /*
  * we need this inline - forking from kernel space will result
@@ -355,7 +469,6 @@ static __inline__ _syscall1(int,dup,int,fd)
 static __inline__ _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
 static __inline__ _syscall3(int,open,const char *,file,int,flag,int,mode)
 static __inline__ _syscall1(int,close,int,fd)
-static __inline__ _syscall1(int,_exit,int,exitcode)
 static __inline__ _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
 static __inline__ _syscall1(int,delete_module,const char *,name)
 
@@ -363,6 +476,48 @@ static __inline__ pid_t wait(int * wait_stat)
 {
 	return waitpid(-1,wait_stat,0);
 }
+
+asmlinkage long sys_mmap2(
+			unsigned long addr, unsigned long len,
+			unsigned long prot, unsigned long flags,
+			unsigned long fd, unsigned long pgoff);
+asmlinkage int sys_execve(char *ufilename, char **uargv,
+			char **uenvp, unsigned long r7,
+			struct pt_regs regs);
+asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
+			unsigned long parent_tidptr,
+			unsigned long child_tidptr,
+			struct pt_regs regs);
+asmlinkage int sys_fork(unsigned long r4, unsigned long r5,
+			unsigned long r6, unsigned long r7,
+			struct pt_regs regs);
+asmlinkage int sys_vfork(unsigned long r4, unsigned long r5,
+			unsigned long r6, unsigned long r7,
+			struct pt_regs regs);
+asmlinkage int sys_pipe(unsigned long r4, unsigned long r5,
+			unsigned long r6, unsigned long r7,
+			struct pt_regs regs);
+asmlinkage int sys_ptrace(long request, long pid, long addr, long data);
+asmlinkage ssize_t sys_pread_wrapper(unsigned int fd, char *buf,
+				size_t count, long dummy, loff_t pos);
+asmlinkage ssize_t sys_pwrite_wrapper(unsigned int fd, const char *buf,
+				size_t count, long dummy, loff_t pos);
+struct sigaction;
+asmlinkage long sys_rt_sigaction(int sig,
+				const struct sigaction __user *act,
+				struct sigaction __user *oact,
+				size_t sigsetsize);
+
+#endif
+
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
+ * but it doesn't work on all toolchains, so we just do it by hand
+ */
+#ifndef cond_syscall
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
 #endif
 
 #endif /* __ASM_SH_UNISTD_H */

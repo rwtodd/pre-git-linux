@@ -1,17 +1,40 @@
 /*
- * Architecture-specific kernel symbols
+ *    Architecture-specific kernel symbols
+ *
+ *    Copyright (C) 2000-2001 Richard Hirst <rhirst with parisc-linux.org>
+ *    Copyright (C) 2001 Dave Kennedy
+ *    Copyright (C) 2001 Paul Bame <bame at parisc-linux.org>
+ *    Copyright (C) 2001-2003 Grant Grundler <grundler with parisc-linux.org>
+ *    Copyright (C) 2002-2003 Matthew Wilcox <willy at parisc-linux.org>
+ *    Copyright (C) 2002 Randolph Chung <tausq at parisc-linux.org>
+ *    Copyright (C) 2002-2003 Helge Deller <deller with parisc-linux.org>
+ * 
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/syscalls.h>
 
 #include <linux/string.h>
-EXPORT_SYMBOL_NOVERS(memscan);
-EXPORT_SYMBOL_NOVERS(memset);
+EXPORT_SYMBOL(memchr);
 EXPORT_SYMBOL(memcmp);
-EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL(memmove);
+EXPORT_SYMBOL(memscan);
+EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(strcat);
 EXPORT_SYMBOL(strchr);
 EXPORT_SYMBOL(strcmp);
@@ -20,61 +43,70 @@ EXPORT_SYMBOL(strlen);
 EXPORT_SYMBOL(strncat);
 EXPORT_SYMBOL(strncmp);
 EXPORT_SYMBOL(strncpy);
-EXPORT_SYMBOL(strtok);
+EXPORT_SYMBOL(strnlen);
+EXPORT_SYMBOL(strrchr);
+EXPORT_SYMBOL(strstr);
+EXPORT_SYMBOL(strpbrk);
 
-#include <linux/pci.h>
-EXPORT_SYMBOL(hppa_dma_ops);
+#include <linux/pm.h>
+EXPORT_SYMBOL(pm_power_off);
 
-#include <asm/irq.h>
-EXPORT_SYMBOL(enable_irq);
-EXPORT_SYMBOL(disable_irq);
-
-#include <asm/processor.h>
-EXPORT_SYMBOL(kernel_thread);
-EXPORT_SYMBOL(boot_cpu_data);
-
+#include <asm/atomic.h>
+EXPORT_SYMBOL(__xchg8);
+EXPORT_SYMBOL(__xchg32);
+EXPORT_SYMBOL(__cmpxchg_u32);
 #ifdef CONFIG_SMP
-EXPORT_SYMBOL(synchronize_irq);
-
-#include <asm/smplock.h>
-EXPORT_SYMBOL(kernel_flag);
-
-#include <asm/system.h>
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);
-
+EXPORT_SYMBOL(__atomic_hash);
+#endif
+#ifdef __LP64__
+EXPORT_SYMBOL(__xchg64);
+EXPORT_SYMBOL(__cmpxchg_u64);
 #endif
 
 #include <asm/uaccess.h>
-EXPORT_SYMBOL(lcopy_to_user);
-EXPORT_SYMBOL(lcopy_from_user);
+EXPORT_SYMBOL(lstrncpy_from_user);
+EXPORT_SYMBOL(lclear_user);
+EXPORT_SYMBOL(lstrnlen_user);
 
+/* Global fixups */
+extern void fixup_get_user_skip_1(void);
+extern void fixup_get_user_skip_2(void);
+extern void fixup_put_user_skip_1(void);
+extern void fixup_put_user_skip_2(void);
+EXPORT_SYMBOL(fixup_get_user_skip_1);
+EXPORT_SYMBOL(fixup_get_user_skip_2);
+EXPORT_SYMBOL(fixup_put_user_skip_1);
+EXPORT_SYMBOL(fixup_put_user_skip_2);
+
+#ifndef __LP64__
 /* Needed so insmod can set dp value */
+extern int $global$;
+EXPORT_SYMBOL($global$);
+#endif
 
-extern int data_start;
+#include <asm/io.h>
+EXPORT_SYMBOL(__ioremap);
+EXPORT_SYMBOL(iounmap);
+EXPORT_SYMBOL(memcpy_toio);
+EXPORT_SYMBOL(memcpy_fromio);
+EXPORT_SYMBOL(memset_io);
 
-EXPORT_SYMBOL_NOVERS(data_start);
+#include <asm/unistd.h>
+EXPORT_SYMBOL(sys_open);
+EXPORT_SYMBOL(sys_lseek);
+EXPORT_SYMBOL(sys_read);
+EXPORT_SYMBOL(sys_write);
 
-#include <asm/gsc.h>
-EXPORT_SYMBOL(_gsc_writeb);
-EXPORT_SYMBOL(_gsc_writew);
-EXPORT_SYMBOL(_gsc_writel);
-EXPORT_SYMBOL(_gsc_readb);
-EXPORT_SYMBOL(_gsc_readw);
-EXPORT_SYMBOL(_gsc_readl);
-EXPORT_SYMBOL(busdevice_alloc_irq);
-EXPORT_SYMBOL(register_driver);
-EXPORT_SYMBOL(gsc_alloc_irq);
-EXPORT_SYMBOL(pdc_iodc_read);
+#include <asm/semaphore.h>
+EXPORT_SYMBOL(__up);
+EXPORT_SYMBOL(__down_interruptible);
+EXPORT_SYMBOL(__down);
 
 extern void $$divI(void);
 extern void $$divU(void);
 extern void $$remI(void);
 extern void $$remU(void);
 extern void $$mulI(void);
-extern void $$mulU(void);
 extern void $$divU_3(void);
 extern void $$divU_5(void);
 extern void $$divU_6(void);
@@ -94,45 +126,62 @@ extern void $$divI_12(void);
 extern void $$divI_14(void);
 extern void $$divI_15(void);
 
-EXPORT_SYMBOL_NOVERS($$divI);
-EXPORT_SYMBOL_NOVERS($$divU);
-EXPORT_SYMBOL_NOVERS($$remI);
-EXPORT_SYMBOL_NOVERS($$remU);
-EXPORT_SYMBOL_NOVERS($$mulI);
-EXPORT_SYMBOL_NOVERS($$mulU);
-EXPORT_SYMBOL_NOVERS($$divU_3);
-EXPORT_SYMBOL_NOVERS($$divU_5);
-EXPORT_SYMBOL_NOVERS($$divU_6);
-EXPORT_SYMBOL_NOVERS($$divU_9);
-EXPORT_SYMBOL_NOVERS($$divU_10);
-EXPORT_SYMBOL_NOVERS($$divU_12);
-EXPORT_SYMBOL_NOVERS($$divU_7);
-EXPORT_SYMBOL_NOVERS($$divU_14);
-EXPORT_SYMBOL_NOVERS($$divU_15);
-EXPORT_SYMBOL_NOVERS($$divI_3);
-EXPORT_SYMBOL_NOVERS($$divI_5);
-EXPORT_SYMBOL_NOVERS($$divI_6);
-EXPORT_SYMBOL_NOVERS($$divI_7);
-EXPORT_SYMBOL_NOVERS($$divI_9);
-EXPORT_SYMBOL_NOVERS($$divI_10);
-EXPORT_SYMBOL_NOVERS($$divI_12);
-EXPORT_SYMBOL_NOVERS($$divI_14);
-EXPORT_SYMBOL_NOVERS($$divI_15);
+EXPORT_SYMBOL($$divI);
+EXPORT_SYMBOL($$divU);
+EXPORT_SYMBOL($$remI);
+EXPORT_SYMBOL($$remU);
+EXPORT_SYMBOL($$mulI);
+EXPORT_SYMBOL($$divU_3);
+EXPORT_SYMBOL($$divU_5);
+EXPORT_SYMBOL($$divU_6);
+EXPORT_SYMBOL($$divU_9);
+EXPORT_SYMBOL($$divU_10);
+EXPORT_SYMBOL($$divU_12);
+EXPORT_SYMBOL($$divU_7);
+EXPORT_SYMBOL($$divU_14);
+EXPORT_SYMBOL($$divU_15);
+EXPORT_SYMBOL($$divI_3);
+EXPORT_SYMBOL($$divI_5);
+EXPORT_SYMBOL($$divI_6);
+EXPORT_SYMBOL($$divI_7);
+EXPORT_SYMBOL($$divI_9);
+EXPORT_SYMBOL($$divI_10);
+EXPORT_SYMBOL($$divI_12);
+EXPORT_SYMBOL($$divI_14);
+EXPORT_SYMBOL($$divI_15);
 
 extern void __ashrdi3(void);
+extern void __ashldi3(void);
+extern void __lshrdi3(void);
+extern void __muldi3(void);
 
-EXPORT_SYMBOL_NOVERS(__ashrdi3);
+EXPORT_SYMBOL(__ashrdi3);
+EXPORT_SYMBOL(__ashldi3);
+EXPORT_SYMBOL(__lshrdi3);
+EXPORT_SYMBOL(__muldi3);
+
+asmlinkage void * __canonicalize_funcptr_for_compare(void *);
+EXPORT_SYMBOL(__canonicalize_funcptr_for_compare);
 
 #ifdef __LP64__
 extern void __divdi3(void);
 extern void __udivdi3(void);
+extern void __umoddi3(void);
+extern void __moddi3(void);
 
-EXPORT_SYMBOL_NOVERS(__divdi3);
-EXPORT_SYMBOL_NOVERS(__udivdi3);
+EXPORT_SYMBOL(__divdi3);
+EXPORT_SYMBOL(__udivdi3);
+EXPORT_SYMBOL(__umoddi3);
+EXPORT_SYMBOL(__moddi3);
 #endif
 
 #ifndef __LP64__
 extern void $$dyncall(void);
-EXPORT_SYMBOL_NOVERS($$dyncall);
+EXPORT_SYMBOL($$dyncall);
 #endif
 
+#ifdef CONFIG_DISCONTIGMEM
+#include <asm/mmzone.h>
+EXPORT_SYMBOL(node_data);
+EXPORT_SYMBOL(pfnnid_map);
+#endif

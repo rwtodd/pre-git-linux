@@ -629,7 +629,7 @@ typedef struct _SCCB {
 #if (FW_TYPE==_UCB_MGR_)  
    #define  HBA_AUTO_SENSE_FAIL        0x1B  
    #define  HBA_TQ_REJECTED            0x1C  
-   #define  HBA_UNSUPORTED_MSG         0x1D  
+   #define  HBA_UNSUPPORTED_MSG         0x1D  
    #define  HBA_HW_ERROR               0x20  
    #define  HBA_ATN_NOT_RESPONDED      0x21  
    #define  HBA_SCSI_RESET_BY_ADAPTER  0x22
@@ -3846,7 +3846,7 @@ int SetDevWideMode(PSCCBcard pCurrCard,PUCB p_ucb)
 	}
 	else
 	{
-		if(!currTar_Info->TarEEValue & EE_WIDE_SCSI)
+		if(!(currTar_Info->TarEEValue & EE_WIDE_SCSI))
 		{
 			return(0);
 		}
@@ -7529,7 +7529,7 @@ void sinits(PSCCB p_sccb, UCHAR p_card)
  *
  *   $Workfile:   phase.c  $
  *
- *   Description:  Functions to intially handle the SCSI bus phase when
+ *   Description:  Functions to initially handle the SCSI bus phase when
  *                 the target asserts request (and the automation is not
  *                 enabled to handle the situation).
  *
@@ -10866,7 +10866,7 @@ int DiagBusMaster(ULONG port)
  * Function: DiagEEPROM
  *
  * Description: Verfiy checksum and 'Key' and initialize the EEPROM if
- *              neccessary.
+ *              necessary.
  *
  *---------------------------------------------------------------------*/
 
@@ -12053,14 +12053,14 @@ UCHAR CalcLrc(UCHAR buffer[])
 */
 
 static inline unsigned char
-FlashPoint__ProbeHostAdapter(FlashPoint_Info_T *FlashPointInfo)
+FlashPoint__ProbeHostAdapter(struct FlashPoint_Info *FlashPointInfo)
 {
   return FlashPoint_ProbeHostAdapter((PSCCBMGR_INFO) FlashPointInfo);
 }
 
 
 static inline FlashPoint_CardHandle_T
-FlashPoint__HardwareResetHostAdapter(FlashPoint_Info_T *FlashPointInfo)
+FlashPoint__HardwareResetHostAdapter(struct FlashPoint_Info *FlashPointInfo)
 {
   return FlashPoint_HardwareResetHostAdapter((PSCCBMGR_INFO) FlashPointInfo);
 }
@@ -12073,14 +12073,14 @@ FlashPoint__ReleaseHostAdapter(FlashPoint_CardHandle_T CardHandle)
 
 
 static inline void
-FlashPoint__StartCCB(FlashPoint_CardHandle_T CardHandle, BusLogic_CCB_T *CCB)
+FlashPoint__StartCCB(FlashPoint_CardHandle_T CardHandle, struct BusLogic_CCB *CCB)
 {
   FlashPoint_StartCCB(CardHandle, (PSCCB) CCB);
 }
 
 
 static inline void
-FlashPoint__AbortCCB(FlashPoint_CardHandle_T CardHandle, BusLogic_CCB_T *CCB)
+FlashPoint__AbortCCB(FlashPoint_CardHandle_T CardHandle, struct BusLogic_CCB *CCB)
 {
   FlashPoint_AbortCCB(CardHandle, (PSCCB) CCB);
 }
@@ -12143,11 +12143,11 @@ void FlashPoint_InquireTargetInfo(FlashPoint_CardHandle_T CardHandle,
   Define prototypes for the FlashPoint SCCB Manager Functions.
 */
 
-extern unsigned char FlashPoint_ProbeHostAdapter(FlashPoint_Info_T *);
+extern unsigned char FlashPoint_ProbeHostAdapter(struct FlashPoint_Info *);
 extern FlashPoint_CardHandle_T
-       FlashPoint_HardwareResetHostAdapter(FlashPoint_Info_T *);
-extern void FlashPoint_StartCCB(FlashPoint_CardHandle_T, BusLogic_CCB_T *);
-extern int FlashPoint_AbortCCB(FlashPoint_CardHandle_T, BusLogic_CCB_T *);
+       FlashPoint_HardwareResetHostAdapter(struct FlashPoint_Info *);
+extern void FlashPoint_StartCCB(FlashPoint_CardHandle_T, struct BusLogic_CCB *);
+extern int FlashPoint_AbortCCB(FlashPoint_CardHandle_T, struct BusLogic_CCB *);
 extern boolean FlashPoint_InterruptPending(FlashPoint_CardHandle_T);
 extern int FlashPoint_HandleInterrupt(FlashPoint_CardHandle_T);
 extern void FlashPoint_ReleaseHostAdapter(FlashPoint_CardHandle_T);

@@ -9,23 +9,18 @@
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
-#include <linux/locks.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/smp_lock.h>
 
 #include <linux/ncp_fs.h>
 #include "ncplib_kernel.h"
-
-static inline unsigned int min(unsigned int a, unsigned int b)
-{
-	return a < b ? a : b;
-}
 
 static int ncp_fsync(struct file *file, struct dentry *dentry, int datasync)
 {
@@ -56,12 +51,10 @@ int ncp_make_open(struct inode *inode, int right)
 		struct ncp_entry_info finfo;
 		int result;
 
-		finfo.i.dirEntNum = NCP_FINFO(inode)->dirEntNum;
-		finfo.i.volNumber = NCP_FINFO(inode)->volNumber;
 		/* tries max. rights */
 		finfo.access = O_RDWR;
 		result = ncp_open_create_file_or_subdir(NCP_SERVER(inode),
-					NULL, NULL, OC_MODE_OPEN,
+					inode, NULL, OC_MODE_OPEN,
 					0, AR_READ | AR_WRITE, &finfo);
 		if (!result)
 			goto update;
@@ -70,13 +63,13 @@ int ncp_make_open(struct inode *inode, int right)
 			case O_RDONLY:
 				finfo.access = O_RDONLY;
 				result = ncp_open_create_file_or_subdir(NCP_SERVER(inode),
-					NULL, NULL, OC_MODE_OPEN,
+					inode, NULL, OC_MODE_OPEN,
 					0, AR_READ, &finfo);
 				break;
 			case O_WRONLY:
 				finfo.access = O_WRONLY;
 				result = ncp_open_create_file_or_subdir(NCP_SERVER(inode),
-					NULL, NULL, OC_MODE_OPEN,
+					inode, NULL, OC_MODE_OPEN,
 					0, AR_WRITE, &finfo);
 				break;
 		}
@@ -106,7 +99,7 @@ out:
 }
 
 static ssize_t
-ncp_file_read(struct file *file, char *buf, size_t count, loff_t *ppos)
+ncp_file_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
 	struct dentry *dentry = file->f_dentry;
 	struct inode *inode = dentry->d_inode;
@@ -120,30 +113,26 @@ ncp_file_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 	DPRINTK("ncp_file_read: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
 
-	error = -EIO;
 	if (!ncp_conn_valid(NCP_SERVER(inode)))
-		goto out;
-	error = -EINVAL;
-	if (!S_ISREG(inode->i_mode)) {
-		DPRINTK("ncp_file_read: read from non-file, mode %07o\n",
-			inode->i_mode);
-		goto out;
-	}
+		return -EIO;
 
 	pos = *ppos;
-/* leave it out on server ...
-	if (pos + count > inode->i_size) {
-		count = inode->i_size - pos;
+
+	if ((ssize_t) count < 0) {
+		return -EINVAL;
 	}
-*/
-	error = 0;
-	if (!count)	/* size_t is never < 0 */
-		goto out;
+	if (!count)
+		return 0;
+	if (pos > inode->i_sb->s_maxbytes)
+		return 0;
+	if (pos + count > inode->i_sb->s_maxbytes) {
+		count = inode->i_sb->s_maxbytes - pos;
+	}
 
 	error = ncp_make_open(inode, O_RDONLY);
 	if (error) {
 		DPRINTK(KERN_ERR "ncp_file_read: open failed, error=%d\n", error);
-		goto out;
+		return error;
 	}
 
 	bufsize = NCP_SERVER(inode)->buffer_size;
@@ -157,8 +146,9 @@ ncp_file_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 	/* First read in as much as possible for each bufsize. */
 	while (already_read < count) {
 		int read_this_time;
-		size_t to_read = min(bufsize - (pos % bufsize),
-				  count - already_read);
+		size_t to_read = min_t(unsigned int,
+				     bufsize - (pos % bufsize),
+				     count - already_read);
 
 		error = ncp_read_bounce(NCP_SERVER(inode),
 			 	NCP_FINFO(inode)->file_handle,
@@ -180,20 +170,17 @@ ncp_file_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 
 	*ppos = pos;
 
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-	}
-	
+	file_accessed(file);
+
 	DPRINTK("ncp_file_read: exit %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
 outrel:
 	ncp_inode_close(inode);		
-out:
 	return already_read ? already_read : error;
 }
 
 static ssize_t
-ncp_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
+ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	struct dentry *dentry = file->f_dentry;
 	struct inode *inode = dentry->d_inode;
@@ -205,27 +192,40 @@ ncp_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 
 	DPRINTK("ncp_file_write: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
-	errno = -EIO;
 	if (!ncp_conn_valid(NCP_SERVER(inode)))
-		goto out;
-	if (!S_ISREG(inode->i_mode)) {
-		DPRINTK("ncp_file_write: write to non-file, mode %07o\n",
-			inode->i_mode);
+		return -EIO;
+	if ((ssize_t) count < 0)
 		return -EINVAL;
+	pos = *ppos;
+	if (file->f_flags & O_APPEND) {
+		pos = inode->i_size;
 	}
 
-	errno = 0;
+	if (pos + count > MAX_NON_LFS && !(file->f_flags&O_LARGEFILE)) {
+		if (pos >= MAX_NON_LFS) {
+			send_sig(SIGXFSZ, current, 0);
+			return -EFBIG;
+		}
+		if (count > MAX_NON_LFS - (u32)pos) {
+			count = MAX_NON_LFS - (u32)pos;
+		}
+	}
+	if (pos >= inode->i_sb->s_maxbytes) {
+		if (count || pos > inode->i_sb->s_maxbytes) {
+			send_sig(SIGXFSZ, current, 0);
+			return -EFBIG;
+		}
+	}
+	if (pos + count > inode->i_sb->s_maxbytes) {
+		count = inode->i_sb->s_maxbytes - pos;
+	}
+	
 	if (!count)
-		goto out;
+		return 0;
 	errno = ncp_make_open(inode, O_WRONLY);
 	if (errno) {
 		DPRINTK(KERN_ERR "ncp_file_write: open failed, error=%d\n", errno);
 		return errno;
-	}
-	pos = *ppos;
-
-	if (file->f_flags & O_APPEND) {
-		pos = inode->i_size;
 	}
 	bufsize = NCP_SERVER(inode)->buffer_size;
 
@@ -238,8 +238,9 @@ ncp_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 	}
 	while (already_written < count) {
 		int written_this_time;
-		size_t to_write = min(bufsize - (pos % bufsize),
-				   count - already_written);
+		size_t to_write = min_t(unsigned int,
+				      bufsize - (pos % bufsize),
+				      count - already_written);
 
 		if (copy_from_user(bouncebuffer, buf, to_write)) {
 			errno = -EFAULT;
@@ -260,8 +261,9 @@ ncp_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 		}
 	}
 	vfree(bouncebuffer);
-	inode->i_mtime = inode->i_atime = CURRENT_TIME;
-	
+
+	inode_update_time(inode, 1);
+
 	*ppos = pos;
 
 	if (pos > inode->i_size) {
@@ -271,7 +273,6 @@ ncp_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 		dentry->d_parent->d_name.name, dentry->d_name.name);
 outrel:
 	ncp_inode_close(inode);		
-out:
 	return already_written ? already_written : errno;
 }
 
@@ -284,15 +285,16 @@ static int ncp_release(struct inode *inode, struct file *file) {
 
 struct file_operations ncp_file_operations =
 {
-	read:		ncp_file_read,
-	write:		ncp_file_write,
-	ioctl:		ncp_ioctl,
-	mmap:		ncp_mmap,
-	release:	ncp_release,
-	fsync:		ncp_fsync,
+	.llseek		= remote_llseek,
+	.read		= ncp_file_read,
+	.write		= ncp_file_write,
+	.ioctl		= ncp_ioctl,
+	.mmap		= ncp_mmap,
+	.release	= ncp_release,
+	.fsync		= ncp_fsync,
 };
 
 struct inode_operations ncp_file_inode_operations =
 {
-	setattr:	ncp_notify_change,
+	.setattr	= ncp_notify_change,
 };

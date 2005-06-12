@@ -1,4 +1,4 @@
-/* $Id: oplib.h,v 1.21 2000/08/26 02:38:04 anton Exp $
+/* $Id: oplib.h,v 1.23 2001/12/21 00:54:31 davem Exp $
  * oplib.h:  Describes the interface and available routines in the
  *           Linux Prom library.
  *
@@ -10,6 +10,7 @@
 
 #include <asm/openprom.h>
 #include <linux/spinlock.h>
+#include <linux/compiler.h>
 
 /* The master romvec pointer... */
 extern struct linux_romvec *romvec;
@@ -153,8 +154,9 @@ extern char prom_getchar(void);
 /* Blocking put character to console. */
 extern void prom_putchar(char character);
 
-/* Prom's internal printf routine, don't use in kernel/boot code. */
-void prom_printf(char *fmt, ...);
+/* Prom's internal routines, don't use in kernel/boot code. */
+extern void prom_printf(char *fmt, ...);
+extern void prom_write(const char *buf, unsigned int len);
 
 /* Query for input device type */
 
@@ -243,8 +245,8 @@ extern int prom_getproplen(int thisnode, char *property);
 /* Fetch the requested property using the given buffer.  Returns
  * the number of bytes the prom put into your buffer or -1 on error.
  */
-extern int prom_getproperty(int thisnode, char *property,
-			    char *prop_buffer, int propbuf_size);
+extern int __must_check prom_getproperty(int thisnode, char *property,
+					 char *prop_buffer, int propbuf_size);
 
 /* Acquire an integer property. */
 extern int prom_getint(int node, char *property);
@@ -298,20 +300,17 @@ extern int prom_inst2pkg(int);
 
 /* Dorking with Bus ranges... */
 
-/* Adjust reg values with the passed ranges. */
-extern void prom_adjust_regs(struct linux_prom_registers *regp, int nregs,
-			     struct linux_prom_ranges *rangep, int nranges);
-
-/* Adjust child ranges with the passed parent ranges. */
-extern void prom_adjust_ranges(struct linux_prom_ranges *cranges, int ncranges,
-			       struct linux_prom_ranges *pranges, int npranges);
-
-/* Apply promlib probed OBIO ranges to registers. */
+/* Apply promlib probes OBIO ranges to registers. */
 extern void prom_apply_obio_ranges(struct linux_prom_registers *obioregs, int nregs);
 
 /* Apply ranges of any prom node (and optionally parent node as well) to registers. */
 extern void prom_apply_generic_ranges(int node, int parent, 
 				      struct linux_prom_registers *sbusregs, int nregs);
+
+/* CPU probing helpers.  */
+int cpu_find_by_instance(int instance, int *prom_node, int *mid);
+int cpu_find_by_mid(int mid, int *prom_node);
+int cpu_get_hwmid(int prom_node);
 
 extern spinlock_t prom_lock;
 

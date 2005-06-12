@@ -1,29 +1,24 @@
 #ifndef __SHMEM_FS_H
 #define __SHMEM_FS_H
 
+#include <linux/swap.h>
+#include <linux/mempolicy.h>
+
 /* inode in-kernel data */
 
 #define SHMEM_NR_DIRECT 16
 
-/*
- * A swap entry has to fit into a "unsigned long", as
- * the entry is hidden in the "index" field of the
- * swapper address space.
- *
- * We have to move it here, since not every user of fs.h is including
- * mm.h, but m.h is including fs.h via sched .h :-/
- */
-typedef struct {
-	unsigned long val;
-} swp_entry_t;
-
 struct shmem_inode_info {
-	spinlock_t	lock;
-	swp_entry_t	i_direct[SHMEM_NR_DIRECT]; /* for the first blocks */
-	swp_entry_t   **i_indirect; /* doubly indirect blocks */
-	unsigned long	swapped;
-	int		locked;     /* into memory */
-	struct list_head	list;
+	spinlock_t		lock;
+	unsigned long		flags;
+	unsigned long		alloced;	/* data pages alloced to file */
+	unsigned long		swapped;	/* subtotal assigned to swap */
+	unsigned long		next_index;	/* highest alloced index + 1 */
+	struct shared_policy	policy;		/* NUMA memory alloc policy */
+	struct page		*i_indirect;	/* top indirect blocks page */
+	swp_entry_t		i_direct[SHMEM_NR_DIRECT]; /* first blocks */
+	struct list_head	swaplist;	/* chain of maybes on swap */
+	struct inode		vfs_inode;
 };
 
 struct shmem_sb_info {
@@ -33,5 +28,10 @@ struct shmem_sb_info {
 	unsigned long free_inodes;  /* How many are left for allocation */
 	spinlock_t    stat_lock;
 };
+
+static inline struct shmem_inode_info *SHMEM_I(struct inode *inode)
+{
+	return container_of(inode, struct shmem_inode_info, vfs_inode);
+}
 
 #endif

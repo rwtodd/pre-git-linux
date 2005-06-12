@@ -2,7 +2,9 @@
 #ifndef _IEEE1394_CORE_H
 #define _IEEE1394_CORE_H
 
-#include <linux/tqueue.h>
+#include <linux/slab.h>
+#include <linux/devfs_fs_kernel.h>
+#include <asm/atomic.h>
 #include <asm/semaphore.h>
 #include "hosts.h"
 
@@ -10,39 +12,37 @@
 struct hpsb_packet {
         /* This struct is basically read-only for hosts with the exception of
          * the data buffer contents and xnext - see below. */
-        struct list_head list;
 
-        /* This can be used for host driver internal linking. */
-        struct hpsb_packet *xnext;
+	/* This can be used for host driver internal linking.
+	 *
+	 * NOTE: This must be left in init state when the driver is done
+	 * with it (e.g. by using list_del_init()), since the core does
+	 * some sanity checks to make sure the packet is not on a
+	 * driver_list when free'ing it. */
+	struct list_head driver_list;
 
         nodeid_t node_id;
 
         /* Async and Iso types should be clear, raw means send-as-is, do not
          * CRC!  Byte swapping shall still be done in this case. */
-        enum { async, iso, raw } __attribute__((packed)) type;
+        enum { hpsb_async, hpsb_iso, hpsb_raw } __attribute__((packed)) type;
 
         /* Okay, this is core internal and a no care for hosts.
          * queued   = queued for sending
          * pending  = sent, waiting for response
          * complete = processing completed, successful or not
-         * incoming = incoming packet
          */
-        enum { 
-                unused, queued, pending, complete, incoming 
+        enum {
+                hpsb_unused, hpsb_queued, hpsb_pending, hpsb_complete
         } __attribute__((packed)) state;
 
         /* These are core internal. */
-        char tlabel;
+        signed char tlabel;
         char ack_code;
         char tcode;
 
         unsigned expect_response:1;
         unsigned no_waiter:1;
-
-        /* Data big endianness flag - may vary from request to request.  The
-         * header is always in machine byte order.
-         * Not really used currently.  */
-        unsigned data_be:1;
 
         /* Speed to transmit with: 0 = 100Mbps, 1 = 200Mbps, 2 = 400Mbps */
         unsigned speed_code:2;
@@ -63,21 +63,36 @@ struct hpsb_packet {
         struct hpsb_host *host;
         unsigned int generation;
 
-        /* Very core internal, don't care. */
-        struct semaphore state_change;
+	atomic_t refcnt;
 
-        task_queue complete_tq;
+	/* Function (and possible data to pass to it) to call when this
+	 * packet is completed.  */
+	void (*complete_routine)(void *);
+	void *complete_data;
+
+	/* XXX This is just a hack at the moment */
+	struct sk_buff *skb;
 
         /* Store jiffies for implementing bus timeouts. */
         unsigned long sendtime;
+
+        quadlet_t embedded_header[5];
 };
 
+/* Set a task for when a packet completes */
+void hpsb_set_packet_complete_task(struct hpsb_packet *packet,
+		void (*routine)(void *), void *data);
 
-void abort_timedouts(struct hpsb_host *host);
+static inline struct hpsb_packet *driver_packet(struct list_head *l)
+{
+	return list_entry(l, struct hpsb_packet, driver_list);
+}
+
+void abort_timedouts(unsigned long __opaque);
 void abort_requests(struct hpsb_host *host);
 
-struct hpsb_packet *alloc_hpsb_packet(size_t data_size);
-void free_hpsb_packet(struct hpsb_packet *packet);
+struct hpsb_packet *hpsb_alloc_packet(size_t data_size);
+void hpsb_free_packet(struct hpsb_packet *packet);
 
 
 /*
@@ -86,28 +101,32 @@ void free_hpsb_packet(struct hpsb_packet *packet);
  *
  * Use the functions, not the variable.
  */
-#include <asm/atomic.h>
-extern atomic_t hpsb_generation;
-
-inline static unsigned int get_hpsb_generation(void)
+static inline unsigned int get_hpsb_generation(struct hpsb_host *host)
 {
-        return atomic_read(&hpsb_generation);
+        return atomic_read(&host->generation);
 }
-
-inline static void inc_hpsb_generation(void)
-{
-        atomic_inc(&hpsb_generation);
-}
-
 
 /*
- * Queue packet for transmitting, return 0 for failure.
+ * Send a PHY configuration packet, return 0 on success, negative
+ * errno on failure.
+ */
+int hpsb_send_phy_config(struct hpsb_host *host, int rootid, int gapcnt);
+
+/*
+ * Queue packet for transmitting, return 0 on success, negative errno
+ * on failure.
  */
 int hpsb_send_packet(struct hpsb_packet *packet);
 
+/*
+ * Queue packet for transmitting, and block until the transaction
+ * completes. Return 0 on success, negative errno on failure.
+ */
+int hpsb_send_packet_and_wait(struct hpsb_packet *packet);
+
 /* Initiate bus reset on the given host.  Returns 1 if bus reset already in
  * progress, 0 otherwise. */
-int hpsb_reset_bus(struct hpsb_host *host);
+int hpsb_reset_bus(struct hpsb_host *host, int type);
 
 /*
  * The following functions are exported for host driver module usage.  All of
@@ -126,7 +145,7 @@ int hpsb_bus_reset(struct hpsb_host *host);
  */
 void hpsb_selfid_received(struct hpsb_host *host, quadlet_t sid);
 
-/* 
+/*
  * Notify completion of SelfID stage to the core and report new physical ID
  * and whether host is root now.
  */
@@ -154,5 +173,55 @@ void hpsb_packet_sent(struct hpsb_host *host, struct hpsb_packet *packet,
  */
 void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size,
                           int write_acked);
+
+
+/*
+ * CHARACTER DEVICE DISPATCHING
+ *
+ * All ieee1394 character device drivers share the same major number
+ * (major 171).  The 256 minor numbers are allocated to the various
+ * task-specific interfaces (raw1394, video1394, dv1394, etc) in
+ * blocks of 16.
+ *
+ * The core ieee1394.o module allocates the device number region
+ * 171:0-255, the various drivers must then cdev_add() their cdev
+ * objects to handle their respective sub-regions.
+ *
+ * Minor device number block allocations:
+ *
+ * Block 0  (  0- 15)  raw1394
+ * Block 1  ( 16- 31)  video1394
+ * Block 2  ( 32- 47)  dv1394
+ *
+ * Blocks 3-14 free for future allocation
+ *
+ * Block 15 (240-255)  reserved for drivers under development, etc.
+ */
+
+#define IEEE1394_MAJOR               171
+
+#define IEEE1394_MINOR_BLOCK_RAW1394       0
+#define IEEE1394_MINOR_BLOCK_VIDEO1394     1
+#define IEEE1394_MINOR_BLOCK_DV1394        2
+#define IEEE1394_MINOR_BLOCK_AMDTP         3
+#define IEEE1394_MINOR_BLOCK_EXPERIMENTAL 15
+
+#define IEEE1394_CORE_DEV		MKDEV(IEEE1394_MAJOR, 0)
+#define IEEE1394_RAW1394_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_RAW1394 * 16)
+#define IEEE1394_VIDEO1394_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_VIDEO1394 * 16)
+#define IEEE1394_DV1394_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_DV1394 * 16)
+#define IEEE1394_AMDTP_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_AMDTP * 16)
+#define IEEE1394_EXPERIMENTAL_DEV	MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_EXPERIMENTAL * 16)
+
+/* return the index (within a minor number block) of a file */
+static inline unsigned char ieee1394_file_to_instance(struct file *file)
+{
+	return file->f_dentry->d_inode->i_cindex;
+}
+
+
+/* Our sysfs bus entry */
+extern struct bus_type ieee1394_bus_type;
+extern struct class hpsb_host_class;
 
 #endif /* _IEEE1394_CORE_H */

@@ -27,11 +27,11 @@
 #define FPCR_DYN_PLUS	 (0x3UL << FPCR_DYN_SHIFT)	/* towards +INF */
 #define FPCR_DYN_MASK	 (0x3UL << FPCR_DYN_SHIFT)
 
-#define FPCR_MASK	0xffff800000000000
+#define FPCR_MASK	0xffff800000000000L
 
 /*
  * IEEE trap enables are implemented in software.  These per-thread
- * bits are stored in the "flags" field of "struct thread_struct".
+ * bits are stored in the "ieee_state" field of "struct thread_info".
  * Thus, the bits are defined so as not to conflict with the
  * floating-point enable bit (which is architected).  On top of that,
  * we want to make these bits compatible with OSF/1 so

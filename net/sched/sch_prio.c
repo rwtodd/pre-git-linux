@@ -15,7 +15,7 @@
 #include <linux/module.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -47,60 +47,91 @@ struct prio_sched_data
 };
 
 
-static __inline__ unsigned prio_classify(struct sk_buff *skb, struct Qdisc *sch)
+static struct Qdisc *
+prio_classify(struct sk_buff *skb, struct Qdisc *sch, int *qerr)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
+	u32 band = skb->priority;
 	struct tcf_result res;
-	u32 band;
 
-	band = skb->priority;
+	*qerr = NET_XMIT_DROP;
 	if (TC_H_MAJ(skb->priority) != sch->handle) {
+#ifdef CONFIG_NET_CLS_ACT
+		switch (tc_classify(skb, q->filter_list, &res)) {
+		case TC_ACT_STOLEN:
+		case TC_ACT_QUEUED:
+			*qerr = NET_XMIT_SUCCESS;
+		case TC_ACT_SHOT:
+			return NULL;
+		};
+
+		if (!q->filter_list ) {
+#else
 		if (!q->filter_list || tc_classify(skb, q->filter_list, &res)) {
+#endif
 			if (TC_H_MAJ(band))
 				band = 0;
-			return q->prio2band[band&TC_PRIO_MAX];
+			return q->queues[q->prio2band[band&TC_PRIO_MAX]];
 		}
 		band = res.classid;
 	}
 	band = TC_H_MIN(band) - 1;
-	return band < q->bands ? band : q->prio2band[0];
+	if (band > q->bands)
+		return q->queues[q->prio2band[0]];
+
+	return q->queues[band];
 }
 
 static int
-prio_enqueue(struct sk_buff *skb, struct Qdisc* sch)
+prio_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
 	struct Qdisc *qdisc;
 	int ret;
 
-	qdisc = q->queues[prio_classify(skb, sch)];
-
-	if ((ret = qdisc->enqueue(skb, qdisc)) == 0) {
-		sch->stats.bytes += skb->len;
-		sch->stats.packets++;
-		sch->q.qlen++;
-		return 0;
+	qdisc = prio_classify(skb, sch, &ret);
+#ifdef CONFIG_NET_CLS_ACT
+	if (qdisc == NULL) {
+		if (ret == NET_XMIT_DROP)
+			sch->qstats.drops++;
+		kfree_skb(skb);
+		return ret;
 	}
-	sch->stats.drops++;
-	return ret;
+#endif
+
+	if ((ret = qdisc->enqueue(skb, qdisc)) == NET_XMIT_SUCCESS) {
+		sch->bstats.bytes += skb->len;
+		sch->bstats.packets++;
+		sch->q.qlen++;
+		return NET_XMIT_SUCCESS;
+	}
+	sch->qstats.drops++;
+	return ret; 
 }
 
 
 static int
 prio_requeue(struct sk_buff *skb, struct Qdisc* sch)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
 	struct Qdisc *qdisc;
 	int ret;
 
-	qdisc = q->queues[prio_classify(skb, sch)];
+	qdisc = prio_classify(skb, sch, &ret);
+#ifdef CONFIG_NET_CLS_ACT
+	if (qdisc == NULL) {
+		if (ret == NET_XMIT_DROP)
+			sch->qstats.drops++;
+		kfree_skb(skb);
+		return ret;
+	}
+#endif
 
-	if ((ret = qdisc->ops->requeue(skb, qdisc)) == 0) {
+	if ((ret = qdisc->ops->requeue(skb, qdisc)) == NET_XMIT_SUCCESS) {
 		sch->q.qlen++;
+		sch->qstats.requeues++;
 		return 0;
 	}
-	sch->stats.drops++;
-	return ret;
+	sch->qstats.drops++;
+	return NET_XMIT_DROP;
 }
 
 
@@ -108,7 +139,7 @@ static struct sk_buff *
 prio_dequeue(struct Qdisc* sch)
 {
 	struct sk_buff *skb;
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	int prio;
 	struct Qdisc *qdisc;
 
@@ -124,18 +155,18 @@ prio_dequeue(struct Qdisc* sch)
 
 }
 
-static int
-prio_drop(struct Qdisc* sch)
+static unsigned int prio_drop(struct Qdisc* sch)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	int prio;
+	unsigned int len;
 	struct Qdisc *qdisc;
 
 	for (prio = q->bands-1; prio >= 0; prio--) {
 		qdisc = q->queues[prio];
-		if (qdisc->ops->drop(qdisc)) {
+		if ((len = qdisc->ops->drop(qdisc)) != 0) {
 			sch->q.qlen--;
-			return 1;
+			return len;
 		}
 	}
 	return 0;
@@ -146,7 +177,7 @@ static void
 prio_reset(struct Qdisc* sch)
 {
 	int prio;
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 
 	for (prio=0; prio<q->bands; prio++)
 		qdisc_reset(q->queues[prio]);
@@ -157,18 +188,21 @@ static void
 prio_destroy(struct Qdisc* sch)
 {
 	int prio;
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
+	struct tcf_proto *tp;
 
-	for (prio=0; prio<q->bands; prio++) {
-		qdisc_destroy(q->queues[prio]);
-		q->queues[prio] = &noop_qdisc;
+	while ((tp = q->filter_list) != NULL) {
+		q->filter_list = tp->next;
+		tcf_destroy(tp);
 	}
-	MOD_DEC_USE_COUNT;
+
+	for (prio=0; prio<q->bands; prio++)
+		qdisc_destroy(q->queues[prio]);
 }
 
 static int prio_tune(struct Qdisc *sch, struct rtattr *opt)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	struct tc_prio_qopt *qopt = RTA_DATA(opt);
 	int i;
 
@@ -213,7 +247,7 @@ static int prio_tune(struct Qdisc *sch, struct rtattr *opt)
 
 static int prio_init(struct Qdisc *sch, struct rtattr *opt)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	int i;
 
 	for (i=0; i<TCQ_PRIO_BANDS; i++)
@@ -227,14 +261,12 @@ static int prio_init(struct Qdisc *sch, struct rtattr *opt)
 		if ((err= prio_tune(sch, opt)) != 0)
 			return err;
 	}
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
 static int prio_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	unsigned char	 *b = skb->tail;
 	struct tc_prio_qopt opt;
 
@@ -247,12 +279,11 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
 static int prio_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 		      struct Qdisc **old)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	unsigned long band = arg - 1;
 
 	if (band >= q->bands)
@@ -264,6 +295,7 @@ static int prio_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 	sch_tree_lock(sch);
 	*old = q->queues[band];
 	q->queues[band] = new;
+	sch->q.qlen -= (*old)->q.qlen;
 	qdisc_reset(*old);
 	sch_tree_unlock(sch);
 
@@ -273,7 +305,7 @@ static int prio_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 static struct Qdisc *
 prio_leaf(struct Qdisc *sch, unsigned long arg)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	unsigned long band = arg - 1;
 
 	if (band >= q->bands)
@@ -284,7 +316,7 @@ prio_leaf(struct Qdisc *sch, unsigned long arg)
 
 static unsigned long prio_get(struct Qdisc *sch, u32 classid)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	unsigned long band = TC_H_MIN(classid);
 
 	if (band - 1 >= q->bands)
@@ -306,7 +338,7 @@ static void prio_put(struct Qdisc *q, unsigned long cl)
 static int prio_change(struct Qdisc *sch, u32 handle, u32 parent, struct rtattr **tca, unsigned long *arg)
 {
 	unsigned long cl = *arg;
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 
 	if (cl - 1 > q->bands)
 		return -ENOENT;
@@ -315,30 +347,29 @@ static int prio_change(struct Qdisc *sch, u32 handle, u32 parent, struct rtattr 
 
 static int prio_delete(struct Qdisc *sch, unsigned long cl)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	if (cl - 1 > q->bands)
 		return -ENOENT;
 	return 0;
 }
 
 
-#ifdef CONFIG_RTNETLINK
 static int prio_dump_class(struct Qdisc *sch, unsigned long cl, struct sk_buff *skb,
 			   struct tcmsg *tcm)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 
 	if (cl - 1 > q->bands)
 		return -ENOENT;
+	tcm->tcm_handle |= TC_H_MIN(cl);
 	if (q->queues[cl-1])
 		tcm->tcm_info = q->queues[cl-1]->handle;
 	return 0;
 }
-#endif
 
 static void prio_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 	int prio;
 
 	if (arg->stop)
@@ -359,65 +390,55 @@ static void prio_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 
 static struct tcf_proto ** prio_find_tcf(struct Qdisc *sch, unsigned long cl)
 {
-	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
+	struct prio_sched_data *q = qdisc_priv(sch);
 
 	if (cl)
 		return NULL;
 	return &q->filter_list;
 }
 
-static struct Qdisc_class_ops prio_class_ops =
-{
-	prio_graft,
-	prio_leaf,
-
-	prio_get,
-	prio_put,
-	prio_change,
-	prio_delete,
-	prio_walk,
-
-	prio_find_tcf,
-	prio_bind,
-	prio_put,
-
-#ifdef CONFIG_RTNETLINK
-	prio_dump_class,
-#endif
+static struct Qdisc_class_ops prio_class_ops = {
+	.graft		=	prio_graft,
+	.leaf		=	prio_leaf,
+	.get		=	prio_get,
+	.put		=	prio_put,
+	.change		=	prio_change,
+	.delete		=	prio_delete,
+	.walk		=	prio_walk,
+	.tcf_chain	=	prio_find_tcf,
+	.bind_tcf	=	prio_bind,
+	.unbind_tcf	=	prio_put,
+	.dump		=	prio_dump_class,
 };
 
-struct Qdisc_ops prio_qdisc_ops =
-{
-	NULL,
-	&prio_class_ops,
-	"prio",
-	sizeof(struct prio_sched_data),
-
-	prio_enqueue,
-	prio_dequeue,
-	prio_requeue,
-	prio_drop,
-
-	prio_init,
-	prio_reset,
-	prio_destroy,
-	prio_tune,
-
-#ifdef CONFIG_RTNETLINK
-	prio_dump,
-#endif
+static struct Qdisc_ops prio_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	&prio_class_ops,
+	.id		=	"prio",
+	.priv_size	=	sizeof(struct prio_sched_data),
+	.enqueue	=	prio_enqueue,
+	.dequeue	=	prio_dequeue,
+	.requeue	=	prio_requeue,
+	.drop		=	prio_drop,
+	.init		=	prio_init,
+	.reset		=	prio_reset,
+	.destroy	=	prio_destroy,
+	.change		=	prio_tune,
+	.dump		=	prio_dump,
+	.owner		=	THIS_MODULE,
 };
 
-#ifdef MODULE
-
-int init_module(void)
+static int __init prio_module_init(void)
 {
 	return register_qdisc(&prio_qdisc_ops);
 }
 
-void cleanup_module(void) 
+static void __exit prio_module_exit(void) 
 {
 	unregister_qdisc(&prio_qdisc_ops);
 }
 
-#endif
+module_init(prio_module_init)
+module_exit(prio_module_exit)
+
+MODULE_LICENSE("GPL");

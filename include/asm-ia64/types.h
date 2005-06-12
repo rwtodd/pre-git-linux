@@ -2,25 +2,28 @@
 #define _ASM_IA64_TYPES_H
 
 /*
- * This file is never included by application software unless
- * explicitly requested (e.g., via linux/types.h) in which case the
- * application is Linux specific so (user-) name space pollution is
- * not a major issue.  However, for interoperability, libraries still
+ * This file is never included by application software unless explicitly requested (e.g.,
+ * via linux/types.h) in which case the application is Linux specific so (user-) name
+ * space pollution is not a major issue.  However, for interoperability, libraries still
  * need to be careful to avoid a name clashes.
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Based on <asm-alpha/types.h>.
+ *
+ * Modified 1998-2000, 2002
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  */
 
 #ifdef __ASSEMBLY__
 # define __IA64_UL(x)		(x)
 # define __IA64_UL_CONST(x)	x
+
+# ifdef __KERNEL__
+#  define BITS_PER_LONG 64
+# endif
+
 #else
 # define __IA64_UL(x)		((unsigned long)(x))
 # define __IA64_UL_CONST(x)	x##UL
-#endif
-
-#ifndef __ASSEMBLY__
 
 typedef unsigned int umode_t;
 
@@ -63,6 +66,8 @@ typedef __u64 u64;
 /* DMA addresses are 64-bits wide, in general.  */
 
 typedef u64 dma_addr_t;
+
+typedef unsigned short kmem_bufctl_t;
 
 # endif /* __KERNEL__ */
 #endif /* !__ASSEMBLY__ */

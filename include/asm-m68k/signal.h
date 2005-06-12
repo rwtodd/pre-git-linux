@@ -68,7 +68,7 @@ typedef unsigned long sigset_t;
 
 /* These should not be considered constants from userland.  */
 #define SIGRTMIN	32
-#define SIGRTMAX	(_NSIG-1)
+#define SIGRTMAX	_NSIG
 
 /*
  * SA_FLAGS values:
@@ -85,7 +85,7 @@ typedef unsigned long sigset_t;
  * Unix names RESETHAND and NODEFER respectively.
  */
 #define SA_NOCLDSTOP	0x00000001
-#define SA_NOCLDWAIT	0x00000002 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000002
 #define SA_SIGINFO	0x00000004
 #define SA_ONSTACK	0x08000000
 #define SA_RESTART	0x10000000
@@ -96,7 +96,7 @@ typedef unsigned long sigset_t;
 #define SA_ONESHOT	SA_RESETHAND
 #define SA_INTERRUPT	0x20000000 /* dummy -- ignored */
 
-/* 
+/*
  * sigaltstack controls
  */
 #define SS_ONSTACK	1
@@ -176,25 +176,25 @@ typedef struct sigaltstack {
 
 #define __HAVE_ARCH_SIG_BITOPS
 
-extern __inline__ void sigaddset(sigset_t *set, int _sig)
+static inline void sigaddset(sigset_t *set, int _sig)
 {
 	__asm__("bfset %0{%1,#1}" : "=m" (*set) : "id" ((_sig - 1) ^ 31)
 		: "cc");
 }
 
-extern __inline__ void sigdelset(sigset_t *set, int _sig)
+static inline void sigdelset(sigset_t *set, int _sig)
 {
 	__asm__("bfclr %0{%1,#1}" : "=m"(*set) : "id"((_sig - 1) ^ 31)
 		: "cc");
 }
 
-extern __inline__ int __const_sigismember(sigset_t *set, int _sig)
+static inline int __const_sigismember(sigset_t *set, int _sig)
 {
 	unsigned long sig = _sig - 1;
 	return 1 & (set->sig[sig / _NSIG_BPW] >> (sig % _NSIG_BPW));
 }
 
-extern __inline__ int __gen_sigismember(sigset_t *set, int _sig)
+static inline int __gen_sigismember(sigset_t *set, int _sig)
 {
 	int ret;
 	__asm__("bfextu %1{%2,#1},%0"
@@ -207,13 +207,13 @@ extern __inline__ int __gen_sigismember(sigset_t *set, int _sig)
 	 __const_sigismember(set,sig) :		\
 	 __gen_sigismember(set,sig))
 
-#define sigmask(sig)	(1UL << ((sig) - 1))
-
-extern __inline__ int sigfindinword(unsigned long word)
+static inline int sigfindinword(unsigned long word)
 {
 	__asm__("bfffo %1{#0,#0},%0" : "=d"(word) : "d"(word & -word) : "cc");
 	return word ^ 31;
 }
+
+#define HAVE_ARCH_GET_SIGNAL_TO_DELIVER
 
 #endif /* __KERNEL__ */
 

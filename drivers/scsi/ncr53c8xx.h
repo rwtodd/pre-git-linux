@@ -22,7 +22,7 @@
 **  This driver has been ported to Linux from the FreeBSD NCR53C8XX driver
 **  and is currently maintained by
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -42,56 +42,60 @@
 #ifndef NCR53C8XX_H
 #define NCR53C8XX_H
 
+#include <scsi/scsi_host.h>
+
 #include "sym53c8xx_defs.h"
 
 /*
-**	Define Scsi_Host_Template parameters
+	Build a scatter/gather entry.
+	see sym53c8xx_2/sym_hipd.h for more detailed sym_build_sge()
+	implementation ;)
+ */
+
+#define ncr_build_sge(np, data, badd, len)	\
+do {						\
+	(data)->addr = cpu_to_scr(badd);	\
+	(data)->size = cpu_to_scr(len);		\
+} while (0)
+
+/*==========================================================
 **
-**	Used by hosts.c and ncr53c8xx.c with module configuration.
+**	Structures used by the detection routine to transmit 
+**	device configuration to the attach function.
+**
+**==========================================================
 */
+struct ncr_slot {
+	u_long	base;
+	u_long	base_2;
+	u_long	base_c;
+	u_long	base_2_c;
+	void __iomem *base_v;
+	void __iomem *base_2_v;
+	int	irq;
+/* port and reg fields to use INB, OUTB macros */
+	volatile struct ncr_reg	__iomem *reg;
+};
 
-#include <scsi/scsicam.h>
+/*==========================================================
+**
+**	Structure used by detection routine to save data on 
+**	each detected board for attach.
+**
+**==========================================================
+*/
+struct ncr_device {
+	struct device  *dev;
+	struct ncr_slot  slot;
+	struct ncr_chip  chip;
+	u_char host_id;
+	u8 differential;
+};
 
-int ncr53c8xx_abort(Scsi_Cmnd *);
-int ncr53c8xx_detect(Scsi_Host_Template *tpnt);
-const char *ncr53c8xx_info(struct Scsi_Host *host);
-int ncr53c8xx_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int ncr53c8xx_reset(Scsi_Cmnd *, unsigned int);
-
-#ifdef MODULE
-int ncr53c8xx_release(struct Scsi_Host *);
-#else
-#define ncr53c8xx_release NULL
-#endif
-
-
-#if	LINUX_VERSION_CODE >= LinuxVersionCode(2,1,75)
-
-#define NCR53C8XX {     name:           "",			\
-			detect:         ncr53c8xx_detect,	\
-			release:        ncr53c8xx_release,	\
-			info:           ncr53c8xx_info, 	\
-			queuecommand:   ncr53c8xx_queue_command,\
-			abort:          ncr53c8xx_abort,	\
-			reset:          ncr53c8xx_reset,	\
-			bios_param:     scsicam_bios_param,	\
-			can_queue:      SCSI_NCR_CAN_QUEUE,	\
-			this_id:        7,			\
-			sg_tablesize:   SCSI_NCR_SG_TABLESIZE,	\
-			cmd_per_lun:    SCSI_NCR_CMD_PER_LUN,	\
-			use_clustering: DISABLE_CLUSTERING} 
-
-#else
-
-#define NCR53C8XX {	NULL, NULL, NULL, NULL,				\
-			NULL,			ncr53c8xx_detect,	\
-			ncr53c8xx_release,	ncr53c8xx_info,	NULL,	\
-			ncr53c8xx_queue_command,ncr53c8xx_abort,	\
-			ncr53c8xx_reset, NULL,	scsicam_bios_param,	\
-			SCSI_NCR_CAN_QUEUE,	7,			\
-			SCSI_NCR_SG_TABLESIZE,	SCSI_NCR_CMD_PER_LUN,	\
-			0,	0,	DISABLE_CLUSTERING} 
- 
-#endif /* LINUX_VERSION_CODE */
+extern struct Scsi_Host *ncr_attach(struct scsi_host_template *tpnt, int unit, struct ncr_device *device);
+extern int ncr53c8xx_release(struct Scsi_Host *host);
+irqreturn_t ncr53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs);
+extern int ncr53c8xx_init(void);
+extern void ncr53c8xx_exit(void);
 
 #endif /* NCR53C8XX_H */

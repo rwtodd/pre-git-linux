@@ -24,6 +24,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/pnp.h>
 
 /*
  *  Configuration registers (TODO: change by specification)
@@ -54,89 +55,17 @@
 
 #ifdef __KERNEL__
 
-#include <linux/pci.h>
-
-#define ISAPNP_PORT_FLAG_16BITADDR	(1<<0)
-#define ISAPNP_PORT_FLAG_FIXED		(1<<1)
-
-struct isapnp_port {
-	unsigned short min;		/* min base number */
-	unsigned short max;		/* max base number */
-	unsigned char align;		/* align boundary */
-	unsigned char size;		/* size of range */
-	unsigned char flags;		/* port flags */
-	unsigned char pad;		/* pad */
-	struct isapnp_resources *res;	/* parent */
-	struct isapnp_port *next;	/* next port */
-};
-
-struct isapnp_irq {
-	unsigned short map;		/* bitmaks for IRQ lines */
-	unsigned char flags;		/* IRQ flags */
-	unsigned char pad;		/* pad */
-	struct isapnp_resources *res;	/* parent */
-	struct isapnp_irq *next;	/* next IRQ */
-};
-
-struct isapnp_dma {
-	unsigned char map;		/* bitmask for DMA channels */
-	unsigned char flags;		/* DMA flags */
-	struct isapnp_resources *res;	/* parent */
-	struct isapnp_dma *next;	/* next port */
-};
-
-struct isapnp_mem {
-	unsigned int min;		/* min base number */
-	unsigned int max;		/* max base number */
-	unsigned int align;		/* align boundary */
-	unsigned int size;		/* size of range */
-	unsigned char flags;		/* memory flags */
-	unsigned char pad;		/* pad */
-	struct isapnp_resources *res;	/* parent */
-	struct isapnp_mem *next;	/* next memory resource */
-};
-
-struct isapnp_mem32 {
-	/* TODO */
-	unsigned char data[17];
-	struct isapnp_resources *res;	/* parent */
-	struct isapnp_mem32 *next;	/* next 32-bit memory resource */
-};
-
-struct isapnp_fixup {
-	unsigned short vendor;		/* matching vendor */
-	unsigned short device;		/* matching device */
-	void (*quirk_function)(struct pci_dev *dev);	/* fixup function */
-};
-
-
-#define ISAPNP_RES_PRIORITY_PREFERRED	0
-#define ISAPNP_RES_PRIORITY_ACCEPTABLE	1
-#define ISAPNP_RES_PRIORITY_FUNCTIONAL	2
-#define ISAPNP_RES_PRIORITY_INVALID	65535
-
-struct isapnp_resources {
-	unsigned short priority;	/* priority */
-	unsigned short dependent;	/* dependent resources */
-	struct isapnp_port *port;	/* first port */
-	struct isapnp_irq *irq;		/* first IRQ */
-	struct isapnp_dma *dma;		/* first DMA */
-	struct isapnp_mem *mem;		/* first memory resource */
-	struct isapnp_mem32 *mem32;	/* first 32-bit memory */
-	struct pci_dev *dev;		/* parent */
-	struct isapnp_resources *alt;	/* alternative resource (aka dependent resources) */
-	struct isapnp_resources *next;	/* next resource */
-};
+#define DEVICE_COUNT_COMPATIBLE 4
 
 #define ISAPNP_ANY_ID		0xffff
 #define ISAPNP_CARD_DEVS	8
 
 #define ISAPNP_CARD_ID(_va, _vb, _vc, _device) \
-		card_vendor: ISAPNP_VENDOR(_va, _vb, _vc), card_device: ISAPNP_DEVICE(_device)
+		.card_vendor = ISAPNP_VENDOR(_va, _vb, _vc), .card_device = ISAPNP_DEVICE(_device)
 #define ISAPNP_CARD_END \
-		card_vendor: 0, card_device: 0
+		.card_vendor = 0, .card_device = 0
 #define ISAPNP_DEVICE_ID(_va, _vb, _vc, _function) \
-		{ vendor: ISAPNP_VENDOR(_va, _vb, _vc), function: ISAPNP_FUNCTION(_function) }
+		{ .vendor = ISAPNP_VENDOR(_va, _vb, _vc), .function = ISAPNP_FUNCTION(_function) }
 
 /* export used IDs outside module */
 #define ISAPNP_CARD_TABLE(name) \
@@ -151,10 +80,10 @@ struct isapnp_card_id {
 };
 
 #define ISAPNP_DEVICE_SINGLE(_cva, _cvb, _cvc, _cdevice, _dva, _dvb, _dvc, _dfunction) \
-		card_vendor: ISAPNP_VENDOR(_cva, _cvb, _cvc), card_device: ISAPNP_DEVICE(_cdevice), \
-		vendor: ISAPNP_VENDOR(_dva, _dvb, _dvc), function: ISAPNP_FUNCTION(_dfunction)
+		.card_vendor = ISAPNP_VENDOR(_cva, _cvb, _cvc), .card_device =  ISAPNP_DEVICE(_cdevice), \
+		.vendor = ISAPNP_VENDOR(_dva, _dvb, _dvc), .function = ISAPNP_FUNCTION(_dfunction)
 #define ISAPNP_DEVICE_SINGLE_END \
-		card_vendor: 0, card_device: 0
+		.card_vendor = 0, .card_device = 0
 
 struct isapnp_device_id {
 	unsigned short card_vendor, card_device;
@@ -180,74 +109,52 @@ void isapnp_wake(unsigned char csn);
 void isapnp_device(unsigned char device);
 void isapnp_activate(unsigned char device);
 void isapnp_deactivate(unsigned char device);
-void isapnp_fixup_device(struct pci_dev *dev);
 void *isapnp_alloc(long size);
+
+#ifdef CONFIG_PROC_FS
 int isapnp_proc_init(void);
 int isapnp_proc_done(void);
-/* manager */
-struct pci_bus *isapnp_find_card(unsigned short vendor,
-				 unsigned short device,
-				 struct pci_bus *from);
-struct pci_dev *isapnp_find_dev(struct pci_bus *card,
-				unsigned short vendor,
-				unsigned short function,
-				struct pci_dev *from);
-int isapnp_probe_cards(const struct isapnp_card_id *ids,
-		       int (*probe)(struct pci_bus *card,
-				    const struct isapnp_card_id *id));
-int isapnp_probe_devs(const struct isapnp_device_id *ids,
-			int (*probe)(struct pci_dev *dev,
-				     const struct isapnp_device_id *id));
-/* misc */
-void isapnp_resource_change(struct resource *resource,
-			    unsigned long start,
-			    unsigned long size);
-int isapnp_activate_dev(struct pci_dev *dev, const char *name);
+#else
+static inline int isapnp_proc_init(void) { return 0; }
+static inline int isapnp_proc_done(void) { return 0; }
+#endif
+
 /* init/main.c */
 int isapnp_init(void);
 
-extern struct list_head isapnp_cards;
-extern struct list_head isapnp_devices;
-
-#define isapnp_for_each_card(card) \
-	for(card = pci_bus_b(isapnp_cards.next); card != pci_bus_b(&isapnp_cards); card = pci_bus_b(card->node.next))
-#define isapnp_for_each_dev(dev) \
-	for(dev = pci_dev_g(isapnp_devices.next); dev != pci_dev_g(&isapnp_devices); dev = pci_dev_g(dev->global_list.next))
+/* compat */
+struct pnp_card *pnp_find_card(unsigned short vendor,
+			       unsigned short device,
+			       struct pnp_card *from);
+struct pnp_dev *pnp_find_dev(struct pnp_card *card,
+			     unsigned short vendor,
+			     unsigned short function,
+			     struct pnp_dev *from);
 
 #else /* !CONFIG_ISAPNP */
 
 /* lowlevel configuration */
-extern inline int isapnp_present(void) { return 0; }
-extern inline int isapnp_cfg_begin(int csn, int device) { return -ENODEV; }
-extern inline int isapnp_cfg_end(void) { return -ENODEV; }
-extern inline unsigned char isapnp_read_byte(unsigned char idx) { return 0xff; }
-extern inline unsigned short isapnp_read_word(unsigned char idx) { return 0xffff; }
-extern inline unsigned int isapnp_read_dword(unsigned char idx) { return 0xffffffff; }
-extern inline void isapnp_write_byte(unsigned char idx, unsigned char val) { ; }
-extern inline void isapnp_write_word(unsigned char idx, unsigned short val) { ; }
-extern inline void isapnp_write_dword(unsigned char idx, unsigned int val) { ; }
-extern inline void isapnp_wake(unsigned char csn) { ; }
-extern inline void isapnp_device(unsigned char device) { ; }
-extern inline void isapnp_activate(unsigned char device) { ; }
-extern inline void isapnp_deactivate(unsigned char device) { ; }
-/* manager */
-extern inline struct pci_bus *isapnp_find_card(unsigned short vendor,
-					       unsigned short device,
-					       struct pci_bus *from) { return NULL; }
-extern inline struct pci_dev *isapnp_find_dev(struct pci_bus *card,
-					      unsigned short vendor,
-					      unsigned short function,
-					      struct pci_dev *from) { return NULL; }
-extern inline int isapnp_probe_cards(const struct isapnp_card_id *ids,
-				     int (*probe)(struct pci_bus *card,
-						  const struct isapnp_card_id *id)) { return -ENODEV; }
-extern inline int isapnp_probe_devs(const struct isapnp_device_id *ids,
-				    int (*probe)(struct pci_dev *dev,
-						 const struct isapnp_device_id *id)) { return -ENODEV; }
-extern inline void isapnp_resource_change(struct resource *resource,
-					  unsigned long start,
-					  unsigned long size) { ; }
-extern inline int isapnp_activate_dev(struct pci_dev *dev, const char *name) { return -ENODEV; }
+static inline int isapnp_present(void) { return 0; }
+static inline int isapnp_cfg_begin(int csn, int device) { return -ENODEV; }
+static inline int isapnp_cfg_end(void) { return -ENODEV; }
+static inline unsigned char isapnp_read_byte(unsigned char idx) { return 0xff; }
+static inline unsigned short isapnp_read_word(unsigned char idx) { return 0xffff; }
+static inline unsigned int isapnp_read_dword(unsigned char idx) { return 0xffffffff; }
+static inline void isapnp_write_byte(unsigned char idx, unsigned char val) { ; }
+static inline void isapnp_write_word(unsigned char idx, unsigned short val) { ; }
+static inline void isapnp_write_dword(unsigned char idx, unsigned int val) { ; }
+static inline void isapnp_wake(unsigned char csn) { ; }
+static inline void isapnp_device(unsigned char device) { ; }
+static inline void isapnp_activate(unsigned char device) { ; }
+static inline void isapnp_deactivate(unsigned char device) { ; }
+
+static inline struct pnp_card *pnp_find_card(unsigned short vendor,
+					     unsigned short device,
+					     struct pnp_card *from) { return NULL; }
+static inline struct pnp_dev *pnp_find_dev(struct pnp_card *card,
+					   unsigned short vendor,
+					   unsigned short function,
+					   struct pnp_dev *from) { return NULL; }
 
 #endif /* CONFIG_ISAPNP */
 

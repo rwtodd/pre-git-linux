@@ -32,7 +32,7 @@ extern void prom_ranges_init(void);
 
 void __init prom_init(struct linux_romvec *rp)
 {
-#if CONFIG_AP1000
+#ifdef CONFIG_AP1000
 	extern struct linux_romvec *ap_prom_init(void);
 	rp = ap_prom_init();
 #endif
@@ -73,7 +73,7 @@ void __init prom_init(struct linux_romvec *rp)
 	if((prom_root_node == 0) || (prom_root_node == -1))
 		prom_halt();
 
-	if((((unsigned long) prom_nodeops) == 0) || 
+	if((((unsigned long) prom_nodeops) == 0) ||
 	   (((unsigned long) prom_nodeops) == -1))
 		prom_halt();
 

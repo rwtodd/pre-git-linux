@@ -1,32 +1,13 @@
 #
-# linux/arch/arm/nwfpe/Makefile
-#
-# Copyright (C) 1998, 1999 Philip Blundell
+# Copyright (C) 1998, 1999, 2001 Philip Blundell
 #
 
-USE_STANDARD_AS_RULE := true
+obj-$(CONFIG_FPE_NWFPE)		+= nwfpe.o
 
-NWFPE_OBJS := fpa11.o fpa11_cpdo.o fpa11_cpdt.o fpa11_cprt.o \
-	      fpmodule.o fpopcode.o softfloat.o \
-	      single_cpdo.o double_cpdo.o extended_cpdo.o
+nwfpe-y				+= fpa11.o fpa11_cpdo.o fpa11_cpdt.o \
+				   fpa11_cprt.o fpmodule.o fpopcode.o \
+				   softfloat.o single_cpdo.o double_cpdo.o
 
-ifeq ($(CONFIG_CPU_26),y)
-NWFPE_OBJS += entry26.o
-else
-NWFPE_OBJS += entry.o
-endif
-
-ifeq ($(CONFIG_NWFPE),y)
-O_TARGET := math-emu.o
-O_OBJS = $(NWFPE_OBJS)
-else
-  ifeq ($(CONFIG_NWFPE),m)
-    M_OBJS = nwfpe.o
-    MI_OBJS = $(NWFPE_OBJS)
-  endif
-endif
-
-include $(TOPDIR)/Rules.make
-
-nwfpe.o: $(MI_OBJS) $(MIX_OBJS)
-	 $(LD) $(LD_RFLAG) -r -o $@ $(MI_OBJS) $(MIX_OBJS)
+nwfpe-$(CONFIG_FPE_NWFPE_XP)	+= extended_cpdo.o
+nwfpe-$(CONFIG_CPU_26)		+= entry26.o
+nwfpe-$(CONFIG_CPU_32)		+= entry.o

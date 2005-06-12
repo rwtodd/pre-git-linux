@@ -1,6 +1,6 @@
-	Linux kernel release 2.4.xx
+	Linux kernel release 2.6.xx
 
-These are the release notes for Linux version 2.4.  Read them carefully,
+These are the release notes for Linux version 2.6.  Read them carefully,
 as they tell you what this is all about, explain how to install the
 kernel, and what to do if something goes wrong. 
 
@@ -35,10 +35,16 @@ DOCUMENTATION:
 
  - There are various README files in the Documentation/ subdirectory:
    these typically contain kernel-specific installation notes for some 
-   drivers for example. See ./Documentation/00-INDEX for a list of what
+   drivers for example. See Documentation/00-INDEX for a list of what
    is contained in each file.  Please read the Changes file, as it
    contains information about the problems, which may result by upgrading
    your kernel.
+
+ - The Documentation/DocBook/ subdirectory contains several guides for
+   kernel developers and users.  These guides can be rendered in a
+   number of formats:  PostScript (.ps), PDF, and HTML, among others.
+   After installation, "make psdocs", "make pdfdocs", or "make htmldocs"
+   will render the documentation in the requested format.
 
 INSTALLING the kernel:
 
@@ -46,7 +52,7 @@ INSTALLING the kernel:
    directory where you have permissions (eg. your home directory) and
    unpack it:
 
-		gzip -cd linux-2.4.XX.tar.gz | tar xvf -
+		gzip -cd linux-2.6.XX.tar.gz | tar xvf -
 
    Replace "XX" with the version number of the latest kernel.
 
@@ -55,15 +61,15 @@ INSTALLING the kernel:
    files.  They should match the library, and not get messed up by
    whatever the kernel-du-jour happens to be.
 
- - You can also upgrade between 2.4.xx releases by patching.  Patches are
+ - You can also upgrade between 2.6.xx releases by patching.  Patches are
    distributed in the traditional gzip and the new bzip2 format.  To
    install by patching, get all the newer patch files, enter the
-   directory in which you unpacked the kernel source and execute:
+   top level directory of the kernel source (linux-2.6.xx) and execute:
 
-		gzip -cd patchXX.gz | patch -p0
+		gzip -cd ../patch-2.6.xx.gz | patch -p1
 
    or
-		bzip2 -dc patchXX.bz2 | patch -p0
+		bzip2 -dc ../patch-2.6.xx.bz2 | patch -p1
 
    (repeat xx for all versions bigger than the version of your current
    source tree, _in_order_) and you should be ok.  You may want to remove
@@ -90,20 +96,35 @@ INSTALLING the kernel:
 
 SOFTWARE REQUIREMENTS
 
-   Compiling and running the 2.4.xx kernels requires up-to-date
+   Compiling and running the 2.6.xx kernels requires up-to-date
    versions of various software packages.  Consult
-   ./Documentation/Changes for the minimum version numbers required
+   Documentation/Changes for the minimum version numbers required
    and how to get updates for these packages.  Beware that using
    excessively old versions of these packages can cause indirect
    errors that are very difficult to track down, so don't assume that
    you can just update packages when obvious problems arise during
    build or operation.
 
-CONFIGURING the kernel:
+BUILD directory for the kernel:
 
- - Do a "make config" to configure the basic kernel.  "make config" needs
-   bash to work: it will search for bash in $BASH, /bin/bash and /bin/sh
-   (in that order), so one of those must be correct for it to work. 
+   When compiling the kernel all output files will per default be
+   stored together with the kernel source code.
+   Using the option "make O=output/dir" allow you to specify an alternate
+   place for the output files (including .config).
+   Example:
+     kernel source code:	/usr/src/linux-2.6.N
+     build directory:		/home/name/build/kernel
+
+   To configure and build the kernel use:
+   cd /usr/src/linux-2.6.N
+   make O=/home/name/build/kernel menuconfig
+   make O=/home/name/build/kernel
+   sudo make O=/home/name/build/kernel modules_install install
+
+   Please note: If the 'O=output/dir' option is used then it must be
+   used for all invocations of make.
+
+CONFIGURING the kernel:
 
    Do not skip this step even if you are only upgrading one minor
    version.  New configuration options are added in each release, and
@@ -114,7 +135,8 @@ CONFIGURING the kernel:
 
  - Alternate configuration commands are:
 	"make menuconfig"  Text based color menus, radiolists & dialogs.
-	"make xconfig"     X windows based configuration tool.
+	"make xconfig"     X windows (Qt) based configuration tool.
+	"make gconfig"     X windows (Gtk) based configuration tool.
 	"make oldconfig"   Default all questions based on the contents of
 			   your existing ./.config file.
    
@@ -140,38 +162,25 @@ CONFIGURING the kernel:
  - Check the top Makefile for further site-dependent configuration
    (default SVGA mode etc). 
 
- - Finally, do a "make dep" to set up all the dependencies correctly. 
-
 COMPILING the kernel:
 
- - Make sure you have gcc-2.91.66 (egcs-1.1.2) available.  gcc 2.95.2 may
-   also work but is not as safe, and *gcc 2.7.2.3 is no longer supported*.
+ - Make sure you have gcc 2.95.3 available.
+   gcc 2.91.66 (egcs-1.1.2), and gcc 2.7.2.3 are known to miscompile
+   some parts of the kernel, and are *no longer supported*.
    Also remember to upgrade your binutils package (for as/ld/nm and company)
-   if necessary. For more information, refer to ./Documentation/Changes.
+   if necessary. For more information, refer to Documentation/Changes.
 
-   Please note that you can still run a.out user programs with this
-   kernel.
+   Please note that you can still run a.out user programs with this kernel.
 
- - Do a "make bzImage" to create a compressed kernel image.  If you want
-   to make a boot disk (without root filesystem or LILO), insert a floppy
-   in your A: drive, and do a "make bzdisk".  It is also possible to do
-   "make install" if you have lilo installed to suit the kernel makefiles,
-   but you may want to check your particular lilo setup first. 
+ - Do a "make" to create a compressed kernel image. It is also
+   possible to do "make install" if you have lilo installed to suit the
+   kernel makefiles, but you may want to check your particular lilo setup first.
 
    To do the actual install you have to be root, but none of the normal
    build should require that. Don't take the name of root in vain.
 
- - In the unlikely event that your system cannot boot bzImage kernels you
-   can still compile your kernel as zImage. However, since zImage support
-   will be removed at some point in the future in favor of bzImage we
-   encourage people having problems with booting bzImage kernels to report
-   these, with detailed hardware configuration information, to the
-   linux-kernel mailing list and to H. Peter Anvin <hpa+linux@zytor.com>.
-
  - If you configured any of the parts of the kernel as `modules', you
-   will have to do "make modules" followed by "make modules_install".
-   Read Documentation/modules.txt for more information.  For example,
-   an explanation of how to use the modules is included there.
+   will also have to do "make modules_install".
 
  - Keep a backup kernel handy in case something goes wrong.  This is 
    especially true for the development releases, since each new release
@@ -182,15 +191,11 @@ COMPILING the kernel:
    do a "make modules_install".
 
  - In order to boot your new kernel, you'll need to copy the kernel
-   image (found in .../linux/arch/i386/boot/bzImage after compilation)
+   image (e.g. .../linux/arch/i386/boot/bzImage after compilation)
    to the place where your regular bootable kernel is found. 
 
-   For some, this is on a floppy disk, in which case you can copy the
-   kernel bzImage file to /dev/fd0 to make a bootable floppy. Please note
-   that you can not boot a kernel by directly dumping it to a 720k
-   double-density 3.5" floppy.  In this case, it is highly recommended
-   that you install LILO on your double-density boot floppy or switch to
-   high-density floppies.
+ - Booting a kernel directly from a floppy without the assistance of a
+   bootloader such as LILO, is no longer supported.
 
    If you boot Linux from the hard drive, chances are you use LILO which
    uses the kernel image as specified in the file /etc/lilo.conf.  The
@@ -221,10 +226,8 @@ IF SOMETHING GOES WRONG:
    the file MAINTAINERS to see if there is a particular person associated
    with the part of the kernel that you are having trouble with. If there
    isn't anyone listed there, then the second best thing is to mail
-   them to me (torvalds@transmeta.com), and possibly to any other
-   relevant mailing-list or to the newsgroup.  The mailing-lists are
-   useful especially for SCSI and networking problems, as I can't test
-   either of those personally anyway. 
+   them to me (torvalds@osdl.org), and possibly to any other relevant
+   mailing-list or to the newsgroup.
 
  - In all bug-reports, *please* tell what kernel you are talking about,
    how to duplicate the problem, and what your setup is (use your common
@@ -250,8 +253,9 @@ IF SOMETHING GOES WRONG:
    the above example it's due to a bad kernel pointer). More information
    on making sense of the dump is in Documentation/oops-tracing.txt
 
- - You can use the "ksymoops" program to make sense of the dump.  This
-   utility can be downloaded from
+ - If you compiled the kernel with CONFIG_KALLSYMS you can send the dump
+   as is, otherwise you will have to use the "ksymoops" program to make
+   sense of the dump.  This utility can be downloaded from
    ftp://ftp.<country>.kernel.org/pub/linux/utils/kernel/ksymoops.
    Alternately you can do the dump lookup by hand:
 

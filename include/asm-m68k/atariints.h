@@ -59,8 +59,8 @@
 /* ST-MFP interrupts */
 #define IRQ_MFP_BUSY      (8)
 #define IRQ_MFP_DCD       (9)
-#define IRQ_MFP_CTS  	  (10)
-#define IRQ_MFP_GPU 	  (11)
+#define IRQ_MFP_CTS	  (10)
+#define IRQ_MFP_GPU	  (11)
 #define IRQ_MFP_TIMD      (12)
 #define IRQ_MFP_TIMC	  (13)
 #define IRQ_MFP_ACIA	  (14)
@@ -81,7 +81,7 @@
 #define IRQ_TT_MFP_IO0       (24)
 #define IRQ_TT_MFP_IO1       (25)
 #define IRQ_TT_MFP_SCC	     (26)
-#define IRQ_TT_MFP_RI 	     (27)
+#define IRQ_TT_MFP_RI	     (27)
 #define IRQ_TT_MFP_TIMD      (28)
 #define IRQ_TT_MFP_TIMC	     (29)
 #define IRQ_TT_MFP_DRVRDY    (30)
@@ -122,7 +122,7 @@
 static inline int get_mfp_bit( unsigned irq, int type )
 
 {	unsigned char	mask, *reg;
-	
+
 	mask = 1 << (irq & 7);
 	reg = (unsigned char *)&mfp.int_en_a + type*4 +
 		  ((irq & 8) >> 2) + (((irq-8) & 16) << 3);
@@ -132,7 +132,7 @@ static inline int get_mfp_bit( unsigned irq, int type )
 static inline void set_mfp_bit( unsigned irq, int type )
 
 {	unsigned char	mask, *reg;
-	
+
 	mask = 1 << (irq & 7);
 	reg = (unsigned char *)&mfp.int_en_a + type*4 +
 		  ((irq & 8) >> 2) + (((irq-8) & 16) << 3);
@@ -143,7 +143,7 @@ static inline void set_mfp_bit( unsigned irq, int type )
 static inline void clear_mfp_bit( unsigned irq, int type )
 
 {	unsigned char	mask, *reg;
-	
+
 	mask = ~(1 << (irq & 7));
 	reg = (unsigned char *)&mfp.int_en_a + type*4 +
 		  ((irq & 8) >> 2) + (((irq-8) & 16) << 3);
@@ -180,14 +180,14 @@ static inline void atari_disable_irq( unsigned irq )
  * "stored"
  */
 
-extern inline void atari_turnon_irq( unsigned irq )
+static inline void atari_turnon_irq( unsigned irq )
 
 {
 	if (irq < STMFP_SOURCE_BASE || irq >= SCC_SOURCE_BASE) return;
 	set_mfp_bit( irq, MFP_ENABLE );
 }
 
-extern inline void atari_turnoff_irq( unsigned irq )
+static inline void atari_turnoff_irq( unsigned irq )
 
 {
 	if (irq < STMFP_SOURCE_BASE || irq >= SCC_SOURCE_BASE) return;
@@ -195,14 +195,14 @@ extern inline void atari_turnoff_irq( unsigned irq )
 	clear_mfp_bit( irq, MFP_PENDING );
 }
 
-extern inline void atari_clear_pending_irq( unsigned irq )
+static inline void atari_clear_pending_irq( unsigned irq )
 
 {
 	if (irq < STMFP_SOURCE_BASE || irq >= SCC_SOURCE_BASE) return;
 	clear_mfp_bit( irq, MFP_PENDING );
 }
 
-extern inline int atari_irq_pending( unsigned irq )
+static inline int atari_irq_pending( unsigned irq )
 
 {
 	if (irq < STMFP_SOURCE_BASE || irq >= SCC_SOURCE_BASE) return( 0 );

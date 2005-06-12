@@ -10,7 +10,7 @@
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * $Id: jffs_fm.h,v 1.10 2000/08/17 15:42:44 dwmw2 Exp $
+ * $Id: jffs_fm.h,v 1.13 2001/01/11 12:03:25 dwmw2 Exp $
  *
  * Ported to Linux 2.3.x and MTD:
  * Copyright (C) 2000  Alexander Larsson (alex@cendio.se), Cendio Systems AB
@@ -59,10 +59,15 @@
 
 /* How many padding bytes should be inserted between two chunks of data
    on the flash?  */
-#define JFFS_GET_PAD_BYTES(size) ((JFFS_ALIGN_SIZE                     \
-				  - ((__u32)(size) % JFFS_ALIGN_SIZE)) \
-				  % JFFS_ALIGN_SIZE)
+#define JFFS_GET_PAD_BYTES(size) ( (JFFS_ALIGN_SIZE-1) & -(__u32)(size) )
 #define JFFS_PAD(size) ( (size + (JFFS_ALIGN_SIZE-1)) & ~(JFFS_ALIGN_SIZE-1) )
+
+
+
+void jffs_free_fm(struct jffs_fm *n);
+struct jffs_fm *jffs_alloc_fm(void);
+
+
 struct jffs_node_ref
 {
 	struct jffs_node *node;
@@ -82,7 +87,6 @@ struct jffs_fm
 
 struct jffs_fmcontrol
 {
-	__u32 flash_start;
 	__u32 flash_size;
 	__u32 used_size;
 	__u32 dirty_size;
@@ -117,7 +121,8 @@ struct jffs_fmcontrol
    flash memory so it will be referenced by the head member.  */
 
 
-struct jffs_fmcontrol *jffs_build_begin(struct jffs_control *c, kdev_t dev);
+
+struct jffs_fmcontrol *jffs_build_begin(struct jffs_control *c, int unit);
 void jffs_build_end(struct jffs_fmcontrol *fmc);
 void jffs_cleanup_fmcontrol(struct jffs_fmcontrol *fmc);
 

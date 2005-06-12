@@ -26,7 +26,7 @@
 /*
  * Version string
  */
-#define LOCKD_VERSION		"0.4"
+#define LOCKD_VERSION		"0.5"
 
 /*
  * Default timeout for RPC calls (seconds)
@@ -39,22 +39,38 @@
 struct nlm_host {
 	struct nlm_host *	h_next;		/* linked list (hash table) */
 	struct sockaddr_in	h_addr;		/* peer address */
-	struct svc_client *	h_exportent;	/* NFS client */
 	struct rpc_clnt	*	h_rpcclnt;	/* RPC client to talk to peer */
 	char			h_name[20];	/* remote hostname */
 	u32			h_version;	/* interface version */
+	rpc_authflavor_t	h_authflavor;	/* RPC authentication type */
 	unsigned short		h_proto;	/* transport proto */
-	unsigned short		h_authflavor;	/* RPC authentication type */
 	unsigned short		h_reclaiming : 1,
+				h_server     : 1, /* server side, not client side */
 				h_inuse      : 1,
+				h_killed     : 1,
 				h_monitored  : 1;
 	wait_queue_head_t	h_gracewait;	/* wait while reclaiming */
 	u32			h_state;	/* pseudo-state counter */
 	u32			h_nsmstate;	/* true remote NSM state */
-	unsigned int		h_count;	/* reference count */
+	u32			h_pidcount;	/* Pseudopids */
+	atomic_t		h_count;	/* reference count */
 	struct semaphore	h_sema;		/* mutex for pmap binding */
 	unsigned long		h_nextrebind;	/* next portmap call */
 	unsigned long		h_expires;	/* eligible for GC */
+	struct list_head	h_lockowners;	/* Lockowners for the client */
+	spinlock_t		h_lock;
+};
+
+/*
+ * Map an fl_owner_t into a unique 32-bit "pid"
+ */
+struct nlm_lockowner {
+	struct list_head list;
+	atomic_t count;
+
+	struct nlm_host *host;
+	fl_owner_t owner;
+	uint32_t pid;
 };
 
 /*
@@ -76,7 +92,7 @@ struct nlm_rqst {
 struct nlm_file {
 	struct nlm_file *	f_next;		/* linked list */
 	struct nfs_fh		f_handle;	/* NFS file handle */
-	struct file		f_file;		/* VFS file pointer */
+	struct file *		f_file;		/* VFS file pointer */
 	struct nlm_share *	f_shares;	/* DOS shares */
 	struct nlm_block *	f_blocks;	/* blocked locks */
 	unsigned int		f_locks;	/* guesstimate # of locks */
@@ -120,7 +136,7 @@ extern struct svc_procedure	nlmsvc_procedures[];
 #ifdef CONFIG_LOCKD_V4
 extern struct svc_procedure	nlmsvc_procedures4[];
 #endif
-extern unsigned long		nlmsvc_grace_period;
+extern int			nlmsvc_grace_period;
 extern unsigned long		nlmsvc_timeout;
 
 /*
@@ -142,13 +158,14 @@ void		  nlmclnt_freegrantargs(struct nlm_rqst *);
  */
 struct nlm_host * nlmclnt_lookup_host(struct sockaddr_in *, int, int);
 struct nlm_host * nlmsvc_lookup_host(struct svc_rqst *);
-struct nlm_host * nlm_lookup_host(struct svc_client *,
-					struct sockaddr_in *, int, int);
+struct nlm_host * nlm_lookup_host(int server, struct sockaddr_in *, int, int);
 struct rpc_clnt * nlm_bind_host(struct nlm_host *);
 void		  nlm_rebind_host(struct nlm_host *);
 struct nlm_host * nlm_get_host(struct nlm_host *);
 void		  nlm_release_host(struct nlm_host *);
 void		  nlm_shutdown_hosts(void);
+extern struct nlm_host *nlm_find_client(void);
+
 
 /*
  * Server-side lock handling
@@ -163,6 +180,7 @@ u32		  nlmsvc_cancel_blocked(struct nlm_file *, struct nlm_lock *);
 unsigned long	  nlmsvc_retry_blocked(void);
 int		  nlmsvc_traverse_blocks(struct nlm_host *, struct nlm_file *,
 					int action);
+void	  nlmsvc_grant_reply(struct svc_rqst *, struct nlm_cookie *, u32);
 
 /*
  * File handling for the server personality
@@ -172,17 +190,18 @@ u32		  nlm_lookup_file(struct svc_rqst *, struct nlm_file **,
 void		  nlm_release_file(struct nlm_file *);
 void		  nlmsvc_mark_resources(void);
 void		  nlmsvc_free_host_resources(struct nlm_host *);
+void		  nlmsvc_invalidate_all(void);
 
-extern __inline__ struct inode *
+static __inline__ struct inode *
 nlmsvc_file_inode(struct nlm_file *file)
 {
-	return file->f_file.f_dentry->d_inode;
+	return file->f_file->f_dentry->d_inode;
 }
 
 /*
  * Compare two host addresses (needs modifying for ipv6)
  */
-extern __inline__ int
+static __inline__ int
 nlm_cmp_addr(struct sockaddr_in *sin1, struct sockaddr_in *sin2)
 {
 	return sin1->sin_addr.s_addr == sin2->sin_addr.s_addr;
@@ -192,7 +211,7 @@ nlm_cmp_addr(struct sockaddr_in *sin1, struct sockaddr_in *sin2)
  * Compare two NLM locks.
  * When the second lock is of type F_UNLCK, this acts like a wildcard.
  */
-extern __inline__ int
+static __inline__ int
 nlm_compare_locks(struct file_lock *fl1, struct file_lock *fl2)
 {
 	return	fl1->fl_pid   == fl2->fl_pid
@@ -200,6 +219,8 @@ nlm_compare_locks(struct file_lock *fl1, struct file_lock *fl2)
 	     && fl1->fl_end   == fl2->fl_end
 	     &&(fl1->fl_type  == fl2->fl_type || fl2->fl_type == F_UNLCK);
 }
+
+extern struct lock_manager_operations nlmsvc_lock_operations;
 
 #endif /* __KERNEL__ */
 

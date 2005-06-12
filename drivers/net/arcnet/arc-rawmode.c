@@ -14,7 +14,7 @@
  * skeleton.c Written 1993 by Donald Becker.
  * Copyright 1993 United States Government as represented by the
  * Director, National Security Agency.  This software may only be used
- * and distributed according to the terms of the GNU Public License as
+ * and distributed according to the terms of the GNU General Public License as
  * modified by SRC, incorporated herein by reference.
  *
  * **********************
@@ -37,25 +37,28 @@
 
 static void rx(struct net_device *dev, int bufnum,
 	       struct archdr *pkthdr, int length);
-static int build_header(struct sk_buff *skb, unsigned short type,
-			uint8_t daddr);
+static int build_header(struct sk_buff *skb, struct net_device *dev,
+			unsigned short type, uint8_t daddr);
 static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		      int bufnum);
 
-
 struct ArcProto rawmode_proto =
 {
-	'r',
-	XMTU,
-	rx,
-	build_header,
-	prepare_tx
+	.suffix		= 'r',
+	.mtu		= XMTU,
+	.rx		= rx,
+	.build_header	= build_header,
+	.prepare_tx	= prepare_tx,
+	.continue_tx    = NULL,
+	.ack_tx         = NULL
 };
 
 
-void arcnet_raw_init(void)
+static int __init arcnet_raw_init(void)
 {
 	int count;
+
+	printk(VERSION);
 
 	for (count = 0; count < 256; count++)
 		if (arc_proto_map[count] == arc_proto_default)
@@ -66,25 +69,18 @@ void arcnet_raw_init(void)
 		arc_bcast_proto = &rawmode_proto;
 
 	arc_proto_default = &rawmode_proto;
-}
-
-
-#ifdef MODULE
-
-int __init init_module(void)
-{
-	printk(VERSION);
-	arcnet_raw_init();
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit arcnet_raw_exit(void)
 {
 	arcnet_unregister_proto(&rawmode_proto);
 }
 
-#endif				/* MODULE */
+module_init(arcnet_raw_init);
+module_exit(arcnet_raw_exit);
 
+MODULE_LICENSE("GPL");
 
 
 /* packet receiver */
@@ -126,8 +122,10 @@ static void rx(struct net_device *dev, int bufnum,
 
 	BUGLVL(D_SKB) arcnet_dump_skb(dev, skb, "rx");
 
-	skb->protocol = 0;
+	skb->protocol = __constant_htons(ETH_P_ARCNET);
+;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 }
 
 
@@ -135,10 +133,9 @@ static void rx(struct net_device *dev, int bufnum,
  * Create the ARCnet hard/soft headers for raw mode.
  * There aren't any soft headers in raw mode - not even the protocol id.
  */
-static int build_header(struct sk_buff *skb, unsigned short type,
-			uint8_t daddr)
+static int build_header(struct sk_buff *skb, struct net_device *dev,
+			unsigned short type, uint8_t daddr)
 {
-	struct net_device *dev = skb->dev;
 	int hdr_size = ARC_HDR_SIZE;
 	struct archdr *pkt = (struct archdr *) skb_push(skb, hdr_size);
 
@@ -194,6 +191,9 @@ static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		hard->offset[1] = ofs = 512 - length - 3;
 	} else
 		hard->offset[0] = ofs = 256 - length;
+
+	BUGMSG(D_DURING, "prepare_tx: length=%d ofs=%d\n",
+	       length,ofs);
 
 	lp->hw.copy_to_card(dev, bufnum, 0, hard, ARC_HDR_SIZE);
 	lp->hw.copy_to_card(dev, bufnum, ofs, &pkt->soft, length);

@@ -1,20 +1,19 @@
-// $Id: l3ni1.h,v 2.3 2000/11/16 13:50:43 keil Exp $
-//-----------------------------------------------------------------------------
-//
-// NI1 D-channel protocol
-//
-// Author       Matt Henderson & Guy Ellis - Traverse Tecnologies Pty Ltd
-//              www.traverse.com.au
-//
-// 2000.6.6 Initial implementation of routines for US NI1 
-// Layer 3 protocol based on the EURO/DSS1 D-channel protocol 
-// driver written by Karsten Keil et al.  Thanks also for the 
-// code provided by Ragnar Paulson.
-//
-//
-// This file is (c) under GNU PUBLIC LICENSE
-//
-//-----------------------------------------------------------------------------
+/* $Id: l3ni1.h,v 2.3.6.2 2001/09/23 22:24:50 kai Exp $
+ *
+ * NI1 D-channel protocol
+ *
+ * Author       Matt Henderson & Guy Ellis
+ * Copyright    by Traverse Technologies Pty Ltd, www.travers.com.au
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * 2000.6.6 Initial implementation of routines for US NI1 
+ * Layer 3 protocol based on the EURO/DSS1 D-channel protocol 
+ * driver written by Karsten Keil et al.  Thanks also for the 
+ * code provided by Ragnar Paulson.
+ *
+ */
 
 #ifndef l3ni1_process
 
@@ -122,7 +121,7 @@
 typedef struct
   { unsigned char invoke_id; /* used invoke id in remote ops, 0 = not active */
     ulong ll_id; /* remebered ll id */
-    u_char remote_operation; /* handled remote operation, 0 = not active */ 
+    u8 remote_operation; /* handled remote operation, 0 = not active */ 
     int proc; /* rememered procedure */  
     ulong remote_result; /* result of remote operation for statcallb */
     char uus1_data[35]; /* data send during alerting or disconnect */

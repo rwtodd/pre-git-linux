@@ -27,21 +27,13 @@
  *     changed * appropriately. See below.
  */
 
- char zftc_src[] ="$Source: /homes/cvs/ftape-stacked/ftape/compressor/zftape-compress.c,v $";
- char zftc_rev[] = "$Revision: 1.1.6.1 $";
- char zftc_dat[] = "$Date: 1997/11/16 15:15:56 $";
-
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 
 #include <linux/zftape.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,6)
 #include <asm/uaccess.h>
-#else
-#include <asm/segment.h>
-#endif
 
 #include "../zftape/zftape-init.h"
 #include "../zftape/zftape-eof.h"
@@ -63,8 +55,6 @@
 
 /* local variables 
  */
-static int keep_module_locked = 1;
-
 static void *zftc_wrk_mem = NULL;
 static __u8 *zftc_buf     = NULL;
 static void *zftc_scratch_buf  = NULL;
@@ -79,10 +69,10 @@ static unsigned int zftc_rd_compressed   = 0;
 /* forward */
 static int  zftc_write(int *write_cnt,
 		       __u8 *dst_buf, const int seg_sz,
-		       const __u8 *src_buf, const int req_len,
+		       const __u8 __user *src_buf, const int req_len,
 		       const zft_position *pos, const zft_volinfo *volume);
 static int  zftc_read(int *read_cnt,
-		      __u8  *dst_buf, const int to_do,
+		      __u8  __user *dst_buf, const int to_do,
 		      const __u8 *src_buf, const int seg_sz,
 		      const zft_position *pos, const zft_volinfo *volume);
 static int  zftc_seek(unsigned int new_block_pos, 
@@ -271,16 +261,6 @@ static void get_next_cluster(cmpr_info *cluster, const __u8 *buff,
 
 static void zftc_lock(void)
 {
-#if LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-	if (!MOD_IN_USE) {
-		MOD_INC_USE_COUNT;
-	}
-#else
-	MOD_INC_USE_COUNT; /*  sets MOD_VISITED and MOD_USED_ONCE,
-			    *  locking is done with can_unload()
-			    */
-#endif
-	keep_module_locked = 1;
 }
 
 /*  this function is needed for zftape_reset_position in zftape-io.c 
@@ -291,12 +271,6 @@ static void zftc_reset(void)
 
 	memset((void *)&cseg, '\0', sizeof(cseg));
 	zftc_stats();
-#if LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-	if (MOD_IN_USE) {
-		MOD_DEC_USE_COUNT;
-	}
-#endif
-	keep_module_locked = 0;
 	TRACE_EXIT;
 }
 
@@ -560,7 +534,7 @@ static int start_new_cseg(cmpr_info *cluster,
  */
 static int zftc_write(int *write_cnt,
 		      __u8 *dst_buf, const int seg_sz,
-		      const __u8 *src_buf, const int req_len,
+		      const __u8 __user *src_buf, const int req_len,
 		      const zft_position *pos, const zft_volinfo *volume)
 {
 	int req_len_left = req_len;
@@ -569,16 +543,6 @@ static int zftc_write(int *write_cnt,
 	int buf_pos_write = pos->seg_byte_pos;
 	TRACE_FUN(ft_t_flow);
 	
-	keep_module_locked = 1;
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
-	MOD_INC_USE_COUNT; /*  sets MOD_VISITED and MOD_USED_ONCE,
-			    *  locking is done with can_unload()
-			    */
-#else
-	if (!MOD_IN_USE) {
-		MOD_INC_USE_COUNT;
-	}
-#endif
 	/* Note: we do not unlock the module because
 	 * there are some values cached in that `cseg' variable.  We
 	 * don't don't want to use this information when being
@@ -618,17 +582,10 @@ static int zftc_write(int *write_cnt,
 		 * block.  We know, that the compression buffer is
 		 * empty (else there wouldn't be any space left).  
 		 */
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 		if (copy_from_user(zftc_scratch_buf, src_buf + result, 
 				   volume->blk_sz) != 0) {
 			TRACE_EXIT -EFAULT;
 		}
-#else
-		TRACE_CATCH(verify_area(VERIFY_READ, src_buf + result, 
-					volume->blk_sz),);
-		memcpy_fromfs(zftc_scratch_buf, src_buf + result, 
-			      volume->blk_sz);
-#endif
 		req_len_left -= volume->blk_sz;
 		cseg.cmpr_sz = zft_compress(zftc_scratch_buf, volume->blk_sz, 
 					    zftc_buf);
@@ -694,7 +651,7 @@ static int zftc_write(int *write_cnt,
  * be set to 0 
  */
 static int zftc_read (int *read_cnt, 
-		      __u8  *dst_buf, const int to_do, 
+		      __u8  __user *dst_buf, const int to_do, 
 		      const __u8 *src_buf, const int seg_sz, 
 		      const zft_position *pos, const zft_volinfo *volume)
 {          
@@ -703,16 +660,6 @@ static int zftc_read (int *read_cnt,
 	int remaining = to_do;
 	TRACE_FUN(ft_t_flow);
 
-	keep_module_locked = 1;
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
-	MOD_INC_USE_COUNT; /*  sets MOD_VISITED and MOD_USED_ONCE,
-			    *  locking is done with can_unload()
-			    */
-#else
-	if (!MOD_IN_USE) {
-		MOD_INC_USE_COUNT;
-	}
-#endif
 	TRACE_CATCH(zft_allocate_cmpr_mem(volume->blk_sz),);
 	if (pos->seg_byte_pos == 0) {
 		/* new segment just read
@@ -746,16 +693,11 @@ static int zftc_read (int *read_cnt,
 				      "Uncompressed blk (%d) != blk size (%d)",
 				      uncompressed_sz, volume->blk_sz);
 			}       
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 			if (copy_to_user(dst_buf + result, 
 					 zftc_scratch_buf, 
 					 uncompressed_sz) != 0 ) {
 				TRACE_EXIT -EFAULT;
 			}
-#else
-			memcpy_tofs(dst_buf + result, zftc_scratch_buf, 
-				    uncompressed_sz);
-#endif
 			remaining      -= uncompressed_sz;
 			result     += uncompressed_sz;
 			cseg.cmpr_pos  = 0;
@@ -838,16 +780,6 @@ static int zftc_seek(unsigned int new_block_pos,
 	int fast_seek_trials = 0;
 	TRACE_FUN(ft_t_flow);
 
-	keep_module_locked = 1;
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
-	MOD_INC_USE_COUNT; /*  sets MOD_VISITED and MOD_USED_ONCE,
-			    *  locking is done with can_unload()
-			    */
-#else
-	if (!MOD_IN_USE) {
-		MOD_INC_USE_COUNT;
-	}
-#endif
 	if (new_block_pos == 0) {
 		pos->seg_pos      = volume->start_seg;
 		pos->seg_byte_pos = 0;
@@ -1240,16 +1172,11 @@ int zft_compressor_init(void)
         if (TRACE_LEVEL >= ft_t_info) {
 		printk(
 KERN_INFO "(c) 1997 Claus-Justus Heine (claus@momo.math.rwth-aachen.de)\n"
-KERN_INFO "Compressor for zftape (lzrw3 algorithm)\n"
-KERN_INFO "Compiled for kernel version %s"
-#ifdef MODVERSIONS
-		" with versioned symbols"
-#endif
-		"\n", UTS_RELEASE);
+KERN_INFO "Compressor for zftape (lzrw3 algorithm)\n");
         }
 #else /* !MODULE */
 	/* print a short no-nonsense boot message */
-	printk("zftape compressor v1.00a 970514 for Linux " UTS_RELEASE "\n");
+	printk("zftape compressor v1.00a 970514\n");
 	printk("For use with " FTAPE_VERSION "\n");
 #endif /* MODULE */
 	TRACE(ft_t_info, "zft_compressor_init @ 0x%p", zft_compressor_init);
@@ -1258,54 +1185,19 @@ KERN_INFO "Compiled for kernel version %s"
 	TRACE_EXIT 0;
 }
 
-
 #ifdef MODULE
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
+
 MODULE_AUTHOR(
 	"(c) 1996, 1997 Claus-Justus Heine (claus@momo.math.rwth-aachen.de");
 MODULE_DESCRIPTION(
 "Compression routines for zftape. Uses the lzrw3 algorithm by Ross Williams");
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
-static int can_unload(void)
-{
-	return keep_module_locked ? -EBUSY : 0;
-}
-#endif
+MODULE_LICENSE("GPL");
 
 /* Called by modules package when installing the driver
  */
 int init_module(void)
 {
-	int result;
-
-#if LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-	register_symtab(0); /* remove global ftape symbols */
-#else
-	if (!mod_member_present(&__this_module, can_unload))
-		return -EBUSY;
-	__this_module.can_unload = can_unload;
-	EXPORT_NO_SYMBOLS;
-#endif
-	result = zft_compressor_init();
-	keep_module_locked = 0;
-	return result;
+	return zft_compressor_init();
 }
 
-/* Called by modules package when removing the driver 
- */
-void cleanup_module(void)
-{
-	TRACE_FUN(ft_t_flow);
-
-	if (zft_cmpr_unregister() != &cmpr_ops) {
-		TRACE(ft_t_info, "failed");
-	} else {
-		TRACE(ft_t_info, "successful");
-	}
-	zftc_cleanup();
-        printk(KERN_INFO "zft-compressor successfully unloaded.\n");
-	TRACE_EXIT;
-}
 #endif /* MODULE */

@@ -6,7 +6,6 @@ typedef unsigned int dmach_t;
 #include <linux/config.h>
 #include <linux/spinlock.h>
 #include <asm/system.h>
-#include <asm/memory.h>
 #include <asm/scatterlist.h>
 #include <asm/arch/dma.h>
 
@@ -24,14 +23,14 @@ typedef unsigned int dmamode_t;
 
 extern spinlock_t  dma_spin_lock;
 
-extern __inline__ unsigned long claim_dma_lock(void)
+static inline unsigned long claim_dma_lock(void)
 {
 	unsigned long flags;
 	spin_lock_irqsave(&dma_spin_lock, flags);
 	return flags;
 }
 
-extern __inline__ void release_dma_lock(unsigned long flags)
+static inline void release_dma_lock(unsigned long flags)
 {
 	spin_unlock_irqrestore(&dma_spin_lock, flags);
 }
@@ -73,6 +72,10 @@ extern void enable_dma(dmach_t channel);
  * disabling an interrupt or whatever.
  */
 extern void disable_dma(dmach_t channel);
+
+/* Test whether the specified channel has an active DMA transfer
+ */
+extern int dma_channel_active(dmach_t channel);
 
 /* Set the DMA scatter gather list for this channel
  *

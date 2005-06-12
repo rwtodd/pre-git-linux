@@ -31,7 +31,7 @@
  * ino/dev of the exported inode.
  */
 struct nfs_fhbase_old {
-	struct dentry *	fb_dentry;	/* dentry cookie - always 0xfeebbaca */
+	__u32		fb_dcookie;	/* dentry cookie - always 0xfeebbaca */
 	__u32		fb_ino;		/* our inode number */
 	__u32		fb_dirino;	/* dir inode number, 0 for directories */
 	__u32		fb_dev;		/* our device */
@@ -66,8 +66,9 @@ struct nfs_fhbase_old {
  *     0  - 4 byte device id (ms-2-bytes major, ls-2-bytes minor), 4byte inode number
  *        NOTE: we cannot use the kdev_t device id value, because kdev_t.h
  *              says we mustn't.  We must break it up and reassemble.
- *  Possible future encodings:
  *     1  - 4 byte user specified identifier
+ *     2  - 4 byte major, 4 byte minor, 4 byte inode number - DEPRECATED
+ *     3  - 4 byte device id, encoded for user-space, 4 byte inode number
  *
  * The fileid_type identified how the file within the filesystem is encoded.
  * This is (will be) passed to, and set by, the underlying filesystem if it supports
@@ -96,12 +97,12 @@ struct knfsd_fh {
 					 */
 	union {
 		struct nfs_fhbase_old	fh_old;
-		__u32			fh_pad[NFS3_FHSIZE/4];
+		__u32			fh_pad[NFS4_FHSIZE/4];
 		struct nfs_fhbase_new	fh_new;
 	} fh_base;
 };
 
-#define ofh_dcookie		fh_base.fh_old.fb_dentry
+#define ofh_dcookie		fh_base.fh_old.fb_dcookie
 #define ofh_ino			fh_base.fh_old.fb_ino
 #define ofh_dirino		fh_base.fh_old.fb_dirino
 #define ofh_dev			fh_base.fh_old.fb_dev
@@ -114,28 +115,16 @@ struct knfsd_fh {
 #define	fh_auth_type		fh_base.fh_new.fb_auth_type
 #define	fh_fileid_type		fh_base.fh_new.fb_fileid_type
 #define	fh_auth			fh_base.fh_new.fb_auth
+#define	fh_fsid			fh_base.fh_new.fb_auth
 
 #ifdef __KERNEL__
 
-/*
- * Conversion macros for the filehandle fields.
- */
-extern inline __u32 kdev_t_to_u32(kdev_t dev)
-{
-	return (__u32) dev;
-}
-
-extern inline kdev_t u32_to_kdev_t(__u32 udev)
-{
-	return (kdev_t) udev;
-}
-
-extern inline __u32 ino_t_to_u32(ino_t ino)
+static inline __u32 ino_t_to_u32(ino_t ino)
 {
 	return (__u32) ino;
 }
 
-extern inline ino_t u32_to_ino_t(__u32 uino)
+static inline ino_t u32_to_ino_t(__u32 uino)
 {
 	return (ino_t) uino;
 }
@@ -158,8 +147,8 @@ typedef struct svc_fh {
 
 	/* Pre-op attributes saved during fh_lock */
 	__u64			fh_pre_size;	/* size before operation */
-	time_t			fh_pre_mtime;	/* mtime before oper */
-	time_t			fh_pre_ctime;	/* ctime before oper */
+	struct timespec		fh_pre_mtime;	/* mtime before oper */
+	struct timespec		fh_pre_ctime;	/* ctime before oper */
 
 	/* Post-op attributes saved in fh_unlock */
 	umode_t			fh_post_mode;	/* i_mode */
@@ -169,37 +158,60 @@ typedef struct svc_fh {
 	__u64			fh_post_size;	/* i_size */
 	unsigned long		fh_post_blocks; /* i_blocks */
 	unsigned long		fh_post_blksize;/* i_blksize */
-	kdev_t			fh_post_rdev;	/* i_rdev */
-	time_t			fh_post_atime;	/* i_atime */
-	time_t			fh_post_mtime;	/* i_mtime */
-	time_t			fh_post_ctime;	/* i_ctime */
+	__u32			fh_post_rdev[2];/* i_rdev */
+	struct timespec		fh_post_atime;	/* i_atime */
+	struct timespec		fh_post_mtime;	/* i_mtime */
+	struct timespec		fh_post_ctime;	/* i_ctime */
 #endif /* CONFIG_NFSD_V3 */
 
 } svc_fh;
 
+static inline void mk_fsid_v0(u32 *fsidv, dev_t dev, ino_t ino)
+{
+	fsidv[0] = htonl((MAJOR(dev)<<16) |
+			MINOR(dev));
+	fsidv[1] = ino_t_to_u32(ino);
+}
+
+static inline void mk_fsid_v1(u32 *fsidv, u32 fsid)
+{
+	fsidv[0] = fsid;
+}
+
+static inline void mk_fsid_v2(u32 *fsidv, dev_t dev, ino_t ino)
+{
+	fsidv[0] = htonl(MAJOR(dev));
+	fsidv[1] = htonl(MINOR(dev));
+	fsidv[2] = ino_t_to_u32(ino);
+}
+
+static inline void mk_fsid_v3(u32 *fsidv, dev_t dev, ino_t ino)
+{
+	fsidv[0] = new_encode_dev(dev);
+	fsidv[1] = ino_t_to_u32(ino);
+}
+
+static inline int key_len(int type)
+{
+	switch(type) {
+	case 0: return 8;
+	case 1: return 4;
+	case 2: return 12;
+	case 3: return 8;
+	default: return 0;
+	}
+}
+
 /*
  * Shorthand for dprintk()'s
  */
-inline static char * SVCFH_fmt(struct svc_fh *fhp)
-{
-	struct knfsd_fh *fh = &fhp->fh_handle;
-	
-	static char buf[80];
-	sprintf(buf, "%d: %08x %08x %08x %08x %08x %08x",
-		fh->fh_size,
-		fh->fh_base.fh_pad[0],
-		fh->fh_base.fh_pad[1],
-		fh->fh_base.fh_pad[2],
-		fh->fh_base.fh_pad[3],
-		fh->fh_base.fh_pad[4],
-		fh->fh_base.fh_pad[5]);
-	return buf;
-}
+extern char * SVCFH_fmt(struct svc_fh *fhp);
+
 /*
  * Function prototypes
  */
 u32	fh_verify(struct svc_rqst *, struct svc_fh *, int, int);
-int	fh_compose(struct svc_fh *, struct svc_export *, struct dentry *);
+int	fh_compose(struct svc_fh *, struct svc_export *, struct dentry *, struct svc_fh *);
 int	fh_update(struct svc_fh *);
 void	fh_put(struct svc_fh *);
 
@@ -236,7 +248,7 @@ fill_pre_wcc(struct svc_fh *fhp)
 	inode = fhp->fh_dentry->d_inode;
 	if (!fhp->fh_pre_saved) {
 		fhp->fh_pre_mtime = inode->i_mtime;
-			fhp->fh_pre_ctime = inode->i_ctime;
+		fhp->fh_pre_ctime = inode->i_ctime;
 			fhp->fh_pre_size  = inode->i_size;
 			fhp->fh_pre_saved = 1;
 	}
@@ -266,7 +278,8 @@ fill_post_wcc(struct svc_fh *fhp)
 		/* how much do we care for accuracy with MinixFS? */
 		fhp->fh_post_blocks     = (inode->i_size+511) >> 9;
 	}
-	fhp->fh_post_rdev       = inode->i_rdev;
+	fhp->fh_post_rdev[0]    = htonl((u32)imajor(inode));
+	fhp->fh_post_rdev[1]    = htonl((u32)iminor(inode));
 	fhp->fh_post_atime      = inode->i_atime;
 	fhp->fh_post_mtime      = inode->i_mtime;
 	fhp->fh_post_ctime      = inode->i_ctime;

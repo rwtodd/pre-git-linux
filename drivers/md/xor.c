@@ -26,39 +26,37 @@
 static struct xor_block_template *active_template;
 
 void
-xor_block(unsigned int count, struct buffer_head **bh_ptr)
+xor_block(unsigned int count, unsigned int bytes, void **ptr)
 {
 	unsigned long *p0, *p1, *p2, *p3, *p4;
-	unsigned long bytes = bh_ptr[0]->b_size;
 
-	p0 = (unsigned long *) bh_ptr[0]->b_data;
-	p1 = (unsigned long *) bh_ptr[1]->b_data;
+	p0 = (unsigned long *) ptr[0];
+	p1 = (unsigned long *) ptr[1];
 	if (count == 2) {
 		active_template->do_2(bytes, p0, p1);
 		return;
 	}
 
-	p2 = (unsigned long *) bh_ptr[2]->b_data;
+	p2 = (unsigned long *) ptr[2];
 	if (count == 3) {
 		active_template->do_3(bytes, p0, p1, p2);
 		return;
 	}
 
-	p3 = (unsigned long *) bh_ptr[3]->b_data;
+	p3 = (unsigned long *) ptr[3];
 	if (count == 4) {
 		active_template->do_4(bytes, p0, p1, p2, p3);
 		return;
 	}
 
-	p4 = (unsigned long *) bh_ptr[4]->b_data;
+	p4 = (unsigned long *) ptr[4];
 	active_template->do_5(bytes, p0, p1, p2, p3, p4);
 }
 
 /* Set of all registered templates.  */
 static struct xor_block_template *template_list;
 
-/* The -6*32 shift factor colors the cache.  */
-#define BENCH_SIZE (PAGE_SIZE-6*32)
+#define BENCH_SIZE (PAGE_SIZE)
 
 static void
 do_xor_speed(struct xor_block_template *tmpl, void *b1, void *b2)
@@ -103,40 +101,54 @@ calibrate_xor_block(void)
 	void *b1, *b2;
 	struct xor_block_template *f, *fastest;
 
-	b1 = (void *) md__get_free_pages(GFP_KERNEL, 2);
+	b1 = (void *) __get_free_pages(GFP_KERNEL, 2);
 	if (! b1) {
 		printk("raid5: Yikes!  No memory available.\n");
 		return -ENOMEM;
 	}
 	b2 = b1 + 2*PAGE_SIZE + BENCH_SIZE;
 
-	printk(KERN_INFO "raid5: measuring checksumming speed\n");
-	sti();
+	/*
+	 * If this arch/cpu has a short-circuited selection, don't loop through all
+	 * the possible functions, just test the best one
+	 */
+
+	fastest = NULL;
+
+#ifdef XOR_SELECT_TEMPLATE
+		fastest = XOR_SELECT_TEMPLATE(fastest);
+#endif
 
 #define xor_speed(templ)	do_xor_speed((templ), b1, b2)
 
-	XOR_TRY_TEMPLATES;
+	if (fastest) {
+		printk(KERN_INFO "raid5: automatically using best checksumming function: %s\n",
+			fastest->name);
+		xor_speed(fastest);
+	} else {
+		printk(KERN_INFO "raid5: measuring checksumming speed\n");
+		XOR_TRY_TEMPLATES;
+		fastest = template_list;
+		for (f = fastest; f; f = f->next)
+			if (f->speed > fastest->speed)
+				fastest = f;
+	}
+
+	printk("raid5: using function: %s (%d.%03d MB/sec)\n",
+	       fastest->name, fastest->speed / 1000, fastest->speed % 1000);
 
 #undef xor_speed
 
 	free_pages((unsigned long)b1, 2);
 
-	fastest = template_list;
-	for (f = fastest; f; f = f->next)
-		if (f->speed > fastest->speed)
-			fastest = f;
-
-#ifdef XOR_SELECT_TEMPLATE
-	fastest = XOR_SELECT_TEMPLATE(fastest);
-#endif
-
 	active_template = fastest;
-	printk("raid5: using function: %s (%d.%03d MB/sec)\n",
-	       fastest->name, fastest->speed / 1000, fastest->speed % 1000);
-
 	return 0;
 }
 
-MD_EXPORT_SYMBOL(xor_block);
+static __exit void xor_exit(void) { }
+
+EXPORT_SYMBOL(xor_block);
+MODULE_LICENSE("GPL");
 
 module_init(calibrate_xor_block);
+module_exit(xor_exit);

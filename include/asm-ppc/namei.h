@@ -1,8 +1,8 @@
-/* $Id: namei.h,v 1.4 1998/10/28 08:13:33 jj Exp $
- * linux/include/asm-ppc/namei.h
- * Adapted from linux/include/asm-alpha/namei.h
+/*
+ * include/asm-ppc/namei.h
+ * Adapted from include/asm-alpha/namei.h
  *
- * Included from linux/fs/namei.c
+ * Included from fs/namei.c
  */
 
 #ifdef __KERNEL__

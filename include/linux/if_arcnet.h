@@ -23,8 +23,12 @@
  *    These are the defined ARCnet Protocol ID's.
  */
 
+/* CAP mode */
+/* No macro but uses 1-8 */
+
 /* RFC1201 Protocol ID's */
 #define ARC_P_IP		212	/* 0xD4 */
+#define ARC_P_IPV6		196	/* 0xC4: RFC2497 */
 #define ARC_P_ARP		213	/* 0xD5 */
 #define ARC_P_RARP		214	/* 0xD6 */
 #define ARC_P_IPX		250	/* 0xFA */
@@ -44,6 +48,9 @@
 #define ARC_P_POWERLAN_BEACON2	243	/* 0xF3 */
 #define ARC_P_LANSOFT		251	/* 0xFB - what is this? */
 #define ARC_P_ATALK		0xDD
+
+/* Hardware address length */
+#define ARCNET_ALEN	1
 
 /*
  * The RFC1201-specific components of an arcnet packet header.
@@ -82,6 +89,16 @@ struct arc_eth_encap
 #define ETH_ENCAP_HDR_SIZE 14
 
 
+struct arc_cap
+{
+	uint8_t proto;
+	uint8_t cookie[sizeof(int)];   /* Actually NOT sent over the network */
+	union {
+		uint8_t ack;
+		uint8_t raw[0];		/* 507 bytes */
+	} mes;
+};
+
 /*
  * The data needed by the actual arcnet hardware.
  *
@@ -112,6 +129,7 @@ struct archdr
 	struct arc_rfc1201   rfc1201;
 	struct arc_rfc1051   rfc1051;
 	struct arc_eth_encap eth_encap;
+	struct arc_cap       cap;
 	uint8_t raw[0];		/* 508 bytes				*/
     } soft;
 };

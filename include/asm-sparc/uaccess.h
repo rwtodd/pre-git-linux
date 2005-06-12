@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.22 2000/08/29 07:01:58 davem Exp $
+/* $Id: uaccess.h,v 1.24 2001/10/30 04:32:24 davem Exp $
  * uaccess.h: User space memore access functions.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -8,8 +8,10 @@
 #define _ASM_UACCESS_H
 
 #ifdef __KERNEL__
+#include <linux/compiler.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/errno.h>
 #include <asm/vac-ops.h>
 #include <asm/a.out.h>
 #endif
@@ -44,7 +46,7 @@
 #define __access_ok(addr,size) (__user_ok((addr) & get_fs().seg,(size)))
 #define access_ok(type,addr,size) __access_ok((unsigned long)(addr),(size))
 
-extern inline int verify_area(int type, const void * addr, unsigned long size)
+static inline int verify_area(int type, const void __user * addr, unsigned long size)
 {
 	return access_ok(type,addr,size)?0:-EFAULT;
 }
@@ -77,7 +79,7 @@ struct exception_table_entry
 };
 
 /* Returns 0 if exception not found and fixup otherwise.  */
-extern unsigned long search_exception_table(unsigned long, unsigned long *);
+extern unsigned long search_extables_range(unsigned long addr, unsigned long *g2);
 
 extern void __ret_efault(void);
 
@@ -88,14 +90,16 @@ extern void __ret_efault(void);
  * This gets kind of ugly. We want to return _two_ values in "get_user()"
  * and yet we don't want to do any pointers, because that is too much
  * of a performance impact. Thus we have a few rather ugly macros here,
- * and hide all the uglyness from the user.
+ * and hide all the ugliness from the user.
  */
 #define put_user(x,ptr) ({ \
 unsigned long __pu_addr = (unsigned long)(ptr); \
+__chk_user_ptr(ptr); \
 __put_user_check((__typeof__(*(ptr)))(x),__pu_addr,sizeof(*(ptr))); })
 
 #define get_user(x,ptr) ({ \
 unsigned long __gu_addr = (unsigned long)(ptr); \
+__chk_user_ptr(ptr); \
 __get_user_check((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr))); })
 
 /*
@@ -103,11 +107,11 @@ __get_user_check((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr))); })
  * doing multiple accesses to the same area (the user has to do the
  * checks by hand with "access_ok()")
  */
-#define __put_user(x,ptr) __put_user_nocheck((x),(ptr),sizeof(*(ptr)))
+#define __put_user(x,ptr) __put_user_nocheck((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
 #define __get_user(x,ptr) __get_user_nocheck((x),(ptr),sizeof(*(ptr)),__typeof__(*(ptr)))
 
 struct __large_struct { unsigned long buf[100]; };
-#define __m(x) ((struct __large_struct *)(x))
+#define __m(x) ((struct __large_struct __user *)(x))
 
 #define __put_user_check(x,addr,size) ({ \
 register int __pu_ret; \
@@ -116,6 +120,7 @@ switch (size) { \
 case 1: __put_user_asm(x,b,addr,__pu_ret); break; \
 case 2: __put_user_asm(x,h,addr,__pu_ret); break; \
 case 4: __put_user_asm(x,,addr,__pu_ret); break; \
+case 8: __put_user_asm(x,d,addr,__pu_ret); break; \
 default: __pu_ret = __put_user_bad(); break; \
 } } else { __pu_ret = -EFAULT; } __pu_ret; })
 
@@ -126,6 +131,7 @@ switch (size) { \
 case 1: __put_user_asm_ret(x,b,addr,retval,__foo); break; \
 case 2: __put_user_asm_ret(x,h,addr,retval,__foo); break; \
 case 4: __put_user_asm_ret(x,,addr,retval,__foo); break; \
+case 8: __put_user_asm_ret(x,d,addr,retval,__foo); break; \
 default: if (__put_user_bad()) return retval; break; \
 } } else return retval; })
 
@@ -135,6 +141,7 @@ switch (size) { \
 case 1: __put_user_asm(x,b,addr,__pu_ret); break; \
 case 2: __put_user_asm(x,h,addr,__pu_ret); break; \
 case 4: __put_user_asm(x,,addr,__pu_ret); break; \
+case 8: __put_user_asm(x,d,addr,__pu_ret); break; \
 default: __pu_ret = __put_user_bad(); break; \
 } __pu_ret; })
 
@@ -144,6 +151,7 @@ switch (size) { \
 case 1: __put_user_asm_ret(x,b,addr,retval,__foo); break; \
 case 2: __put_user_asm_ret(x,h,addr,retval,__foo); break; \
 case 4: __put_user_asm_ret(x,,addr,retval,__foo); break; \
+case 8: __put_user_asm_ret(x,d,addr,retval,__foo); break; \
 default: if (__put_user_bad()) return retval; break; \
 } })
 
@@ -202,6 +210,7 @@ switch (size) { \
 case 1: __get_user_asm(__gu_val,ub,addr,__gu_ret); break; \
 case 2: __get_user_asm(__gu_val,uh,addr,__gu_ret); break; \
 case 4: __get_user_asm(__gu_val,,addr,__gu_ret); break; \
+case 8: __get_user_asm(__gu_val,d,addr,__gu_ret); break; \
 default: __gu_val = 0; __gu_ret = __get_user_bad(); break; \
 } } else { __gu_val = 0; __gu_ret = -EFAULT; } x = (type) __gu_val; __gu_ret; })
 
@@ -212,6 +221,7 @@ switch (size) { \
 case 1: __get_user_asm_ret(__gu_val,ub,addr,retval); break; \
 case 2: __get_user_asm_ret(__gu_val,uh,addr,retval); break; \
 case 4: __get_user_asm_ret(__gu_val,,addr,retval); break; \
+case 8: __get_user_asm_ret(__gu_val,d,addr,retval); break; \
 default: if (__get_user_bad()) return retval; \
 } x = (type) __gu_val; } else return retval; })
 
@@ -222,6 +232,7 @@ switch (size) { \
 case 1: __get_user_asm(__gu_val,ub,addr,__gu_ret); break; \
 case 2: __get_user_asm(__gu_val,uh,addr,__gu_ret); break; \
 case 4: __get_user_asm(__gu_val,,addr,__gu_ret); break; \
+case 8: __get_user_asm(__gu_val,d,addr,__gu_ret); break; \
 default: __gu_val = 0; __gu_ret = __get_user_bad(); break; \
 } x = (type) __gu_val; __gu_ret; })
 
@@ -231,6 +242,7 @@ switch (size) { \
 case 1: __get_user_asm_ret(__gu_val,ub,addr,retval); break; \
 case 2: __get_user_asm_ret(__gu_val,uh,addr,retval); break; \
 case 4: __get_user_asm_ret(__gu_val,,addr,retval); break; \
+case 8: __get_user_asm_ret(__gu_val,d,addr,retval); break; \
 default: if (__get_user_bad()) return retval; \
 } x = (type) __gu_val; })
 
@@ -282,86 +294,90 @@ __asm__ __volatile__(							\
 
 extern int __get_user_bad(void);
 
-extern __kernel_size_t __copy_user(void *to, void *from, __kernel_size_t size);
+extern unsigned long __copy_user(void __user *to, const void __user *from, unsigned long size);
 
-#define copy_to_user(to,from,n) ({ \
-void *__copy_to = (void *) (to); \
-__kernel_size_t __copy_size = (__kernel_size_t) (n); \
-__kernel_size_t __copy_res; \
-if(__copy_size && __access_ok((unsigned long)__copy_to, __copy_size)) { \
-__copy_res = __copy_user(__copy_to, (void *) (from), __copy_size); \
-} else __copy_res = __copy_size; \
-__copy_res; })
-
-#define __copy_to_user(to,from,n)		\
-	__copy_user((void *)(to),		\
-		    (void *)(from), n)
-
-#define copy_from_user(to,from,n) ({ \
-void *__copy_to = (void *) (to); \
-void *__copy_from = (void *) (from); \
-__kernel_size_t __copy_size = (__kernel_size_t) (n); \
-__kernel_size_t __copy_res; \
-if(__copy_size && __access_ok((unsigned long)__copy_from, __copy_size)) { \
-__copy_res = __copy_user(__copy_to, __copy_from, __copy_size); \
-} else __copy_res = __copy_size; \
-__copy_res; })
-
-#define __copy_from_user(to,from,n)		\
-	__copy_user((void *)(to),		\
-		    (void *)(from), n)
-
-extern __inline__ __kernel_size_t __clear_user(void *addr, __kernel_size_t size)
+static inline unsigned long copy_to_user(void __user *to, const void *from, unsigned long n)
 {
-  __kernel_size_t ret;
-  __asm__ __volatile__ ("
-	.section __ex_table,#alloc
-	.align 4
-	.word 1f,3
-	.previous
-	mov %2, %%o1
-1:	call __bzero
-	 mov %1, %%o0
-	mov %%o0, %0 
-	" : "=r" (ret) : "r" (addr), "r" (size) :
-	"o0", "o1", "o2", "o3", "o4", "o5", "o7",
-	"g1", "g2", "g3", "g4", "g5", "g7", "cc");
-  return ret;
+	if (n && __access_ok((unsigned long) to, n))
+		return __copy_user(to, (__force void __user *) from, n);
+	else
+		return n;
 }
 
-#define clear_user(addr,n) ({ \
-void *__clear_addr = (void *) (addr); \
-__kernel_size_t __clear_size = (__kernel_size_t) (n); \
-__kernel_size_t __clear_res; \
-if(__clear_size && __access_ok((unsigned long)__clear_addr, __clear_size)) { \
-__clear_res = __clear_user(__clear_addr, __clear_size); \
-} else __clear_res = __clear_size; \
-__clear_res; })
-
-extern int __strncpy_from_user(unsigned long dest, unsigned long src, int count);
-
-#define strncpy_from_user(dest,src,count) ({ \
-unsigned long __sfu_src = (unsigned long) (src); \
-int __sfu_count = (int) (count); \
-long __sfu_res = -EFAULT; \
-if(__access_ok(__sfu_src, __sfu_count)) { \
-__sfu_res = __strncpy_from_user((unsigned long) (dest), __sfu_src, __sfu_count); \
-} __sfu_res; })
-
-extern int __strlen_user(const char *);
-extern int __strnlen_user(const char *, long len);
-
-extern __inline__ int strlen_user(const char *str)
+static inline unsigned long __copy_to_user(void __user *to, const void *from, unsigned long n)
 {
-	if(!access_ok(VERIFY_READ, str, 0))
+	return __copy_user(to, (__force void __user *) from, n);
+}
+
+static inline unsigned long copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	if (n && __access_ok((unsigned long) from, n))
+		return __copy_user((__force void __user *) to, from, n);
+	else
+		return n;
+}
+
+static inline unsigned long __copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	return __copy_user((__force void __user *) to, from, n);
+}
+
+#define __copy_to_user_inatomic __copy_to_user
+#define __copy_from_user_inatomic __copy_from_user
+
+static inline unsigned long __clear_user(void __user *addr, unsigned long size)
+{
+	unsigned long ret;
+
+	__asm__ __volatile__ (
+		".section __ex_table,#alloc\n\t"
+		".align 4\n\t"
+		".word 1f,3\n\t"
+		".previous\n\t"
+		"mov %2, %%o1\n"
+		"1:\n\t"
+		"call __bzero\n\t"
+		" mov %1, %%o0\n\t"
+		"mov %%o0, %0\n"
+		: "=r" (ret) : "r" (addr), "r" (size) :
+		"o0", "o1", "o2", "o3", "o4", "o5", "o7",
+		"g1", "g2", "g3", "g4", "g5", "g7", "cc");
+
+	return ret;
+}
+
+static inline unsigned long clear_user(void __user *addr, unsigned long n)
+{
+	if (n && __access_ok((unsigned long) addr, n))
+		return __clear_user(addr, n);
+	else
+		return n;
+}
+
+extern long __strncpy_from_user(char *dest, const char __user *src, long count);
+
+static inline long strncpy_from_user(char *dest, const char __user *src, long count)
+{
+	if (__access_ok((unsigned long) src, count))
+		return __strncpy_from_user(dest, src, count);
+	else
+		return -EFAULT;
+}
+
+extern long __strlen_user(const char __user *);
+extern long __strnlen_user(const char __user *, long len);
+
+static inline long strlen_user(const char __user *str)
+{
+	if (!access_ok(VERIFY_READ, str, 0))
 		return 0;
 	else
 		return __strlen_user(str);
 }
 
-extern __inline__ int strnlen_user(const char *str, long len)
+static inline long strnlen_user(const char __user *str, long len)
 {
-	if(!access_ok(VERIFY_READ, str, 0))
+	if (!access_ok(VERIFY_READ, str, 0))
 		return 0;
 	else
 		return __strnlen_user(str, len);

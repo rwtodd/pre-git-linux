@@ -4,7 +4,7 @@
 
 
 #include <linux/module.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
@@ -48,7 +48,7 @@ struct suni_priv {
 
 static struct timer_list poll_timer;
 static struct suni_priv *sunis = NULL;
-static spinlock_t sunis_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(sunis_lock);
 
 
 #define ADD_LIMITED(s,v) \
@@ -95,7 +95,7 @@ static void suni_hz(unsigned long from_timer)
 #undef ADD_LIMITED
 
 
-static int fetch_stats(struct atm_dev *dev,struct sonet_stats *arg,int zero)
+static int fetch_stats(struct atm_dev *dev,struct sonet_stats __user *arg,int zero)
 {
 	struct sonet_stats tmp;
 	int error = 0;
@@ -115,11 +115,11 @@ static int fetch_stats(struct atm_dev *dev,struct sonet_stats *arg,int zero)
   }
 
 
-static int change_diag(struct atm_dev *dev,void *arg,int set)
+static int change_diag(struct atm_dev *dev,void __user *arg,int set)
 {
 	int todo;
 
-	if (get_user(todo,(int *) arg)) return -EFAULT;
+	if (get_user(todo,(int __user *)arg)) return -EFAULT;
 	HANDLE_FLAG(SONET_INS_SBIP,TSOP_DIAG,SUNI_TSOP_DIAG_DBIP8);
 	HANDLE_FLAG(SONET_INS_LBIP,TLOP_DIAG,SUNI_TLOP_DIAG_DBIP);
 	HANDLE_FLAG(SONET_INS_PBIP,TPOP_CD,SUNI_TPOP_DIAG_DB3);
@@ -128,14 +128,14 @@ static int change_diag(struct atm_dev *dev,void *arg,int set)
 	HANDLE_FLAG(SONET_INS_PAIS,TPOP_CD,SUNI_TPOP_DIAG_PAIS);
 	HANDLE_FLAG(SONET_INS_LOS,TSOP_DIAG,SUNI_TSOP_DIAG_DLOS);
 	HANDLE_FLAG(SONET_INS_HCS,TACP_CS,SUNI_TACP_CS_DHCS);
-	return put_user(todo,(int *) arg) ? -EFAULT : 0;
+	return put_user(todo,(int __user *)arg) ? -EFAULT : 0;
 }
 
 
 #undef HANDLE_FLAG
 
 
-static int get_diag(struct atm_dev *dev,void *arg)
+static int get_diag(struct atm_dev *dev,void __user *arg)
 {
 	int set;
 
@@ -148,7 +148,7 @@ static int get_diag(struct atm_dev *dev,void *arg)
 	if (GET(TPOP_CD) & SUNI_TPOP_DIAG_PAIS) set |= SONET_INS_PAIS;
 	if (GET(TSOP_DIAG) & SUNI_TSOP_DIAG_DLOS) set |= SONET_INS_LOS;
 	if (GET(TACP_CS) & SUNI_TACP_CS_DHCS) set |= SONET_INS_HCS;
-	return put_user(set,(int *) arg) ? -EFAULT : 0;
+	return put_user(set,(int __user *)arg) ? -EFAULT : 0;
 }
 
 
@@ -175,13 +175,12 @@ static int set_loopback(struct atm_dev *dev,int mode)
 }
 
 
-static int suni_ioctl(struct atm_dev *dev,unsigned int cmd,void *arg)
+static int suni_ioctl(struct atm_dev *dev,unsigned int cmd,void __user *arg)
 {
 	switch (cmd) {
 		case SONET_GETSTATZ:
 		case SONET_GETSTAT:
-			return fetch_stats(dev,(struct sonet_stats *) arg,
-			    cmd == SONET_GETSTATZ);
+			return fetch_stats(dev, arg, cmd == SONET_GETSTATZ);
 		case SONET_SETDIAG:
 			return change_diag(dev,arg,1);
 		case SONET_CLRDIAG:
@@ -192,18 +191,18 @@ static int suni_ioctl(struct atm_dev *dev,unsigned int cmd,void *arg)
 			if (arg != SONET_FRAME_SONET) return -EINVAL;
 			return 0;
 		case SONET_GETFRAMING:
-			return put_user(SONET_FRAME_SONET,(int *) arg) ?
+			return put_user(SONET_FRAME_SONET,(int __user *)arg) ?
 			    -EFAULT : 0;
 		case SONET_GETFRSENSE:
 			return -EINVAL;
 		case ATM_SETLOOP:
-			return set_loopback(dev,(int) (long) arg);
+			return set_loopback(dev,(int)(unsigned long)arg);
 		case ATM_GETLOOP:
-			return put_user(PRIV(dev)->loop_mode,(int *) arg) ?
+			return put_user(PRIV(dev)->loop_mode,(int __user *)arg) ?
 			    -EFAULT : 0;
 		case ATM_QUERYLOOP:
 			return put_user(ATM_LM_LOC_PHY | ATM_LM_RMT_PHY,
-			    (int *) arg) ? -EFAULT : 0;
+			    (int __user *) arg) ? -EFAULT : 0;
 		default:
 			return -ENOIOCTLCMD;
 	}
@@ -230,8 +229,9 @@ static int suni_start(struct atm_dev *dev)
 	unsigned long flags;
 	int first;
 
-	if (!(PRIV(dev) = kmalloc(sizeof(struct suni_priv),GFP_KERNEL)))
+	if (!(dev->phy_data = kmalloc(sizeof(struct suni_priv),GFP_KERNEL)))
 		return -ENOMEM;
+
 	PRIV(dev)->dev = dev;
 	spin_lock_irqsave(&sunis_lock,flags);
 	first = !sunis;
@@ -276,26 +276,27 @@ static int suni_stop(struct atm_dev *dev)
 	if (!sunis) del_timer_sync(&poll_timer);
 	spin_unlock_irqrestore(&sunis_lock,flags);
 	kfree(PRIV(dev));
+
 	return 0;
 }
 
 
 static const struct atmphy_ops suni_ops = {
-	start:		suni_start,
-	ioctl:		suni_ioctl,
-	interrupt:	suni_int,
-	stop:		suni_stop,
+	.start		= suni_start,
+	.ioctl		= suni_ioctl,
+	.interrupt	= suni_int,
+	.stop		= suni_stop,
 };
 
 
-int __init suni_init(struct atm_dev *dev)
+int suni_init(struct atm_dev *dev)
 {
 	unsigned char mri;
 
 	mri = GET(MRI); /* reset SUNI */
 	PUT(mri | SUNI_MRI_RESET,MRI);
 	PUT(mri,MRI);
-	PUT(0,MT); /* disable all tests */
+	PUT((GET(MT) & SUNI_MT_DS27_53),MT); /* disable all tests */
 	REG_CHANGE(SUNI_TPOP_APM_S,SUNI_TPOP_APM_S_SHIFT,SUNI_TPOP_S_SONET,
 	    TPOP_APM); /* use SONET */
 	REG_CHANGE(SUNI_TACP_IUCHP_CLP,0,SUNI_TACP_IUCHP_CLP,
@@ -305,23 +306,6 @@ int __init suni_init(struct atm_dev *dev)
 	return 0;
 }
 
-
 EXPORT_SYMBOL(suni_init);
 
-
-#ifdef MODULE
-
-
-int init_module(void)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-
-void cleanup_module(void)
-{
-	/* Nay */
-}
-
-#endif
+MODULE_LICENSE("GPL");

@@ -20,14 +20,13 @@
 #include <linux/timer.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
-#include <linux/version.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 
 #include <linux/i2c.h>
 #include <linux/videodev.h>
 
-#include "tuner.h"
+#include <media/tuner.h>
 
 static int debug;	/* insmod parameter */
 static int this_adap;
@@ -114,8 +113,7 @@ set_tv_freq(struct i2c_client *c, int freq)
 /* ---------------------------------------------------------------------- */
 
 static int 
-tuner_attach(struct i2c_adapter *adap, int addr,
-	     unsigned short flags, int kind)
+tuner_attach(struct i2c_adapter *adap, int addr, int kind)
 {
 	static unsigned char buffer[] = { 0x29, 0x32, 0x2a, 0, 0x2b, 0 };
 
@@ -136,7 +134,6 @@ tuner_attach(struct i2c_adapter *adap, int addr,
 	printk("tuner: SAB3036 found, status %02x\n", tuner_getstatus(client));
 
         i2c_attach_client(client);
-	MOD_INC_USE_COUNT;
 
 	if (i2c_master_send(client, buffer, 2) != 2)
 		printk("tuner: i2c i/o error 1\n");
@@ -150,7 +147,6 @@ tuner_attach(struct i2c_adapter *adap, int addr,
 static int 
 tuner_detach(struct i2c_client *c)
 {
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -185,34 +181,30 @@ tuner_probe(struct i2c_adapter *adap)
 static struct i2c_driver 
 i2c_driver_tuner = 
 {
-	"sab3036",		/* name       */
-	I2C_DRIVERID_SAB3036,	/* ID         */
-        I2C_DF_NOTIFY,
-	tuner_probe,
-	tuner_detach,
-	tuner_command
+	.owner		=	THIS_MODULE,
+	.name		=	"sab3036",
+	.id		=	I2C_DRIVERID_SAB3036,
+        .flags		=	I2C_DF_NOTIFY,
+	.attach_adapter =	tuner_probe,
+	.detach_client  =	tuner_detach,
+	.command	=	tuner_command
 };
 
 static struct i2c_client client_template =
 {
-        "SAB3036",		/* name       */
-        -1,
-        0,
-        0,
-        NULL,
-        &i2c_driver_tuner
+        .id 		= -1,
+        .driver		= &i2c_driver_tuner,
+	.name		= "SAB3036",
 };
 
-EXPORT_NO_SYMBOLS;
-
-int __init
+static int __init
 tuner3036_init(void)
 {
 	i2c_add_driver(&i2c_driver_tuner);
 	return 0;
 }
 
-void __exit
+static void __exit
 tuner3036_exit(void)
 {
 	i2c_del_driver(&i2c_driver_tuner);
@@ -220,7 +212,9 @@ tuner3036_exit(void)
 
 MODULE_DESCRIPTION("SAB3036 tuner driver");
 MODULE_AUTHOR("Philip Blundell <philb@gnu.org>");
-MODULE_PARM(debug,"i");
+MODULE_LICENSE("GPL");
+
+module_param(debug, int, 0);
 MODULE_PARM_DESC(debug,"Enable debugging output");
 
 module_init(tuner3036_init);

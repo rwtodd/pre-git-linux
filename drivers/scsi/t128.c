@@ -110,16 +110,18 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <asm/io.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
+#include <linux/interrupt.h>
+#include <linux/stat.h>
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/delay.h>
+
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "t128.h"
 #define AUTOPROBE_IRQ
 #include "NCR5380.h"
-#include "constants.h"
-#include "sd.h"
-#include <linux/stat.h>
-#include <linux/init.h>
 
 static struct override {
     unsigned long address;
@@ -143,7 +145,7 @@ static struct base {
 
 #define NO_BASES (sizeof (bases) / sizeof (struct base))
 
-static const struct signature {
+static struct signature {
     const char *string;
     int offset;
 } signatures[] __initdata = {
@@ -197,6 +199,7 @@ int __init t128_detect(Scsi_Host_Template * tpnt){
     static int current_override = 0, current_base = 0;
     struct Scsi_Host *instance;
     unsigned long base;
+    void __iomem *p;
     int sig, count;
 
     tpnt->proc_name = "t128";
@@ -204,26 +207,34 @@ int __init t128_detect(Scsi_Host_Template * tpnt){
 
     for (count = 0; current_override < NO_OVERRIDES; ++current_override) {
 	base = 0;
+	p = NULL;
 
-	if (overrides[current_override].address)
+	if (overrides[current_override].address) {
 	    base = overrides[current_override].address;
-	else 
+	    p = ioremap(bases[current_base].address, 0x2000);
+	    if (!p)
+		base = 0;
+	} else 
 	    for (; !base && (current_base < NO_BASES); ++current_base) {
 #if (TDEBUG & TDEBUG_INIT)
     printk("scsi-t128 : probing address %08x\n", bases[current_base].address);
 #endif
+		if (bases[current_base].noauto)
+			continue;
+		p = ioremap(bases[current_base].address, 0x2000);
+		if (!p)
+			continue;
 		for (sig = 0; sig < NO_SIGNATURES; ++sig) 
-		    if (!bases[current_base].noauto && 
-			isa_check_signature(bases[current_base].address +
-					signatures[sig].offset,
+		    if (check_signature(p + signatures[sig].offset,
 					signatures[sig].string,
 					strlen(signatures[sig].string))) {
 			base = bases[current_base].address;
 #if (TDEBUG & TDEBUG_INIT)
 			printk("scsi-t128 : detected board.\n");
 #endif
-			break;
+			goto found;
 		    }
+		iounmap(p);
 	    }
 
 #if defined(TDEBUG) && (TDEBUG & TDEBUG_INIT)
@@ -233,11 +244,13 @@ int __init t128_detect(Scsi_Host_Template * tpnt){
 	if (!base)
 	    break;
 
+found:
 	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
 	if(instance == NULL)
 		break;
 		
 	instance->base = base;
+	((struct NCR5380_hostdata *)instance->hostdata)->base = p;
 
 	NCR5380_init(instance, 0);
 
@@ -246,14 +259,14 @@ int __init t128_detect(Scsi_Host_Template * tpnt){
 	else 
 	    instance->irq = NCR5380_probe_irq(instance, T128_IRQS);
 
-	if (instance->irq != IRQ_NONE) 
-	    if (request_irq(instance->irq, do_t128_intr, SA_INTERRUPT, "t128", NULL)) {
+	if (instance->irq != SCSI_IRQ_NONE) 
+	    if (request_irq(instance->irq, t128_intr, SA_INTERRUPT, "t128", instance)) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
 		    instance->host_no, instance->irq);
-		instance->irq = IRQ_NONE;
+		instance->irq = SCSI_IRQ_NONE;
 	    } 
 
-	if (instance->irq == IRQ_NONE) {
+	if (instance->irq == SCSI_IRQ_NONE) {
 	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", instance->host_no);
 	    printk("scsi%d : please jumper the board for a free IRQ.\n", instance->host_no);
 	}
@@ -263,7 +276,7 @@ int __init t128_detect(Scsi_Host_Template * tpnt){
 #endif
 
 	printk("scsi%d : at 0x%08lx", instance->host_no, instance->base);
-	if (instance->irq == IRQ_NONE)
+	if (instance->irq == SCSI_IRQ_NONE)
 	    printk (" interrupts disabled");
 	else 
 	    printk (" irq %d", instance->irq);
@@ -278,8 +291,22 @@ int __init t128_detect(Scsi_Host_Template * tpnt){
     return count;
 }
 
+static int t128_release(struct Scsi_Host *shost)
+{
+	NCR5380_local_declare();
+	NCR5380_setup(shost);
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	NCR5380_exit(shost);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	iounmap(base);
+	return 0;
+}
+
 /*
- * Function : int t128_biosparam(Disk * disk, kdev_t dev, int *ip)
+ * Function : int t128_biosparam(Disk * disk, struct block_device *dev, int *ip)
  *
  * Purpose : Generates a BIOS / DOS compatible H-C-S mapping for 
  *	the specified device / size.
@@ -298,12 +325,12 @@ int __init t128_detect(Scsi_Host_Template * tpnt){
  * and matching the H_C_S coordinates to what DOS uses.
  */
 
-int t128_biosparam(Disk * disk, kdev_t dev, int * ip)
+int t128_biosparam(struct scsi_device *sdev, struct block_device *bdev,
+		sector_t capacity, int * ip)
 {
-  int size = disk->capacity;
   ip[0] = 64;
   ip[1] = 32;
-  ip[2] = size >> 11;
+  ip[2] = capacity >> 11;
   return 0;
 }
 
@@ -322,28 +349,30 @@ int t128_biosparam(Disk * disk, kdev_t dev, int * ip)
 
 static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
     int len) {
-    unsigned long reg = instance->base + T_DATA_REG_OFFSET;
+    NCR5380_local_declare();
+    void __iomem *reg;
     unsigned char *d = dst;
     register int i = len;
 
+    NCR5380_setup(instance);
+    reg = base + T_DATA_REG_OFFSET;
 
 #if 0
     for (; i; --i) {
-	while (!(isa_readb(instance->base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
+	while (!(readb(base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
 #else
-    while (!(isa_readb(instance->base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
+    while (!(readb(base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
     for (; i; --i) {
 #endif
-	*d++ = isa_readb(reg);
+	*d++ = readb(reg);
     }
 
-    if (isa_readb(instance->base + T_STATUS_REG_OFFSET) & T_ST_TIM) {
+    if (readb(base + T_STATUS_REG_OFFSET) & T_ST_TIM) {
 	unsigned char tmp;
-	unsigned long foo;
-	foo = instance->base + T_CONTROL_REG_OFFSET;
-	tmp = isa_readb(foo);
-	isa_writeb(tmp | T_CR_CT, foo);
-	isa_writeb(tmp, foo);
+	void __iomem *foo = base + T_CONTROL_REG_OFFSET;
+	tmp = readb(foo);
+	writeb(tmp | T_CR_CT, foo);
+	writeb(tmp, foo);
 	printk("scsi%d : watchdog timer fired in NCR5380_pread()\n",
 	    instance->host_no);
 	return -1;
@@ -366,27 +395,30 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 
 static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src,
     int len) {
-    unsigned long reg = instance->base + T_DATA_REG_OFFSET;
+    NCR5380_local_declare();
+    void __iomem *reg;
     unsigned char *s = src;
     register int i = len;
 
+    NCR5380_setup(instance);
+    reg = base + T_DATA_REG_OFFSET;
+
 #if 0
     for (; i; --i) {
-	while (!(isa_readb(instance->base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
+	while (!(readb(base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
 #else
-    while (!(isa_readb(instance->base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
+    while (!(readb(base+T_STATUS_REG_OFFSET) & T_ST_RDY)) barrier();
     for (; i; --i) {
 #endif
-	isa_writeb(*s++, reg);
+	writeb(*s++, reg);
     }
 
-    if (isa_readb(instance->base + T_STATUS_REG_OFFSET) & T_ST_TIM) {
+    if (readb(base + T_STATUS_REG_OFFSET) & T_ST_TIM) {
 	unsigned char tmp;
-	unsigned long foo;
-	foo = instance->base + T_CONTROL_REG_OFFSET;
-	tmp = isa_readb(foo);
-	isa_writeb(tmp | T_CR_CT, foo);
-	isa_writeb(tmp, foo);
+	void __iomem *foo = base + T_CONTROL_REG_OFFSET;
+	tmp = readb(foo);
+	writeb(tmp | T_CR_CT, foo);
+	writeb(tmp, foo);
 	printk("scsi%d : watchdog timer fired in NCR5380_pwrite()\n",
 	    instance->host_no);
 	return -1;
@@ -394,9 +426,24 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 	return 0;
 }
 
+MODULE_LICENSE("GPL");
+
 #include "NCR5380.c"
 
-/* Eventually this will go into an include file, but this will be later */
-static Scsi_Host_Template driver_template = TRANTOR_T128;
-
+static Scsi_Host_Template driver_template = {
+	.name           = "Trantor T128/T128F/T228",
+	.detect         = t128_detect,
+	.release        = t128_release,
+	.queuecommand   = t128_queue_command,
+	.eh_abort_handler = t128_abort,
+	.eh_bus_reset_handler    = t128_bus_reset,
+	.eh_host_reset_handler   = t128_host_reset,
+	.eh_device_reset_handler = t128_device_reset,
+	.bios_param     = t128_biosparam,
+	.can_queue      = CAN_QUEUE,
+        .this_id        = 7,
+	.sg_tablesize   = SG_ALL,
+	.cmd_per_lun    = CMD_PER_LUN,
+	.use_clustering = DISABLE_CLUSTERING,
+};
 #include "scsi_module.c"

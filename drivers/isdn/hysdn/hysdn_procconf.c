@@ -1,27 +1,16 @@
-/* $Id: hysdn_procconf.c,v 1.8 2000/11/13 22:51:47 kai Exp $
-
+/* $Id: hysdn_procconf.c,v 1.8.6.4 2001/09/23 22:24:54 kai Exp $
+ *
  * Linux driver for HYSDN cards, /proc/net filesystem dir and conf functions.
+ *
  * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
  *
  * Copyright 1999  by Werner Cornelius (werner@titro.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/poll.h>
@@ -31,7 +20,7 @@
 
 #include "hysdn_defs.h"
 
-static char *hysdn_procconf_revision = "$Revision: 1.8 $";
+static char *hysdn_procconf_revision = "$Revision: 1.8.6.4 $";
 
 #define INFO_OUT_LEN 80		/* length of info line including lf */
 
@@ -41,7 +30,7 @@ static char *hysdn_procconf_revision = "$Revision: 1.8 $";
 #define CONF_STATE_DETECT 0	/* waiting for detect */
 #define CONF_STATE_CONF   1	/* writing config data */
 #define CONF_STATE_POF    2	/* writing pof data */
-#define CONF_LINE_LEN    80	/* 80 chars max */
+#define CONF_LINE_LEN   255	/* 255 chars max */
 
 struct conf_writedata {
 	hysdn_card *card;	/* card the device is connected to */
@@ -56,7 +45,7 @@ struct conf_writedata {
 /***********************************************************************/
 /* process_line parses one config line and transfers it to the card if */
 /* necessary.                                                          */
-/* if the return value is negative an error occured.                   */
+/* if the return value is negative an error occurred.                   */
 /***********************************************************************/
 static int
 process_line(struct conf_writedata *cnf)
@@ -92,15 +81,6 @@ process_line(struct conf_writedata *cnf)
 	return (0);
 }				/* process_line */
 
-/*************************/
-/* dummy file operations */
-/*************************/
-static loff_t
-hysdn_dummy_lseek(struct file *file, loff_t offset, int orig)
-{
-	return -ESPIPE;
-}				/* hysdn_dummy_lseek */
-
 /***********************************/
 /* conf file operations and tables */
 /***********************************/
@@ -109,14 +89,12 @@ hysdn_dummy_lseek(struct file *file, loff_t offset, int orig)
 /* write conf file -> boot or send cfg line to card */
 /****************************************************/
 static ssize_t
-hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
+hysdn_conf_write(struct file *file, const char __user *buf, size_t count, loff_t * off)
 {
 	struct conf_writedata *cnf;
 	int i;
 	uchar ch, *cp;
 
-	if (&file->f_pos != off)	/* fs error check */
-		return (-ESPIPE);
 	if (!count)
 		return (0);	/* nothing to handle */
 
@@ -130,7 +108,7 @@ hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
 		if (ch == 0x1A) {
 			/* we detected a pof file */
 			if ((cnf->needed_size = pof_write_open(cnf->card, &cnf->pof_buffer)) <= 0)
-				return (cnf->needed_size);	/* an error occured -> exit */
+				return (cnf->needed_size);	/* an error occurred -> exit */
 			cnf->buf_size = 0;	/* buffer is empty */
 			cnf->state = CONF_STATE_POF;	/* new state */
 		} else {
@@ -158,7 +136,7 @@ hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
 			cnf->needed_size = pof_write_buffer(cnf->card, cnf->buf_size);	/* write data */
 			if (cnf->needed_size <= 0) {
 				cnf->card->state = CARD_STATE_BOOTERR;	/* show boot error */
-				return (cnf->needed_size);	/* an error occured */
+				return (cnf->needed_size);	/* an error occurred */
 			}
 			cnf->buf_size = 0;	/* buffer is empty again */
 		}
@@ -229,13 +207,10 @@ hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
 /* read conf file -> output card info data */
 /*******************************************/
 static ssize_t
-hysdn_conf_read(struct file *file, char *buf, size_t count, loff_t * off)
+hysdn_conf_read(struct file *file, char __user *buf, size_t count, loff_t * off)
 {
 	char *cp;
 	int i;
-
-	if (off != &file->f_pos)	/* fs error check */
-		return -ESPIPE;
 
 	if (file->f_mode & FMODE_READ) {
 		if (!(cp = file->private_data))
@@ -274,7 +249,7 @@ hysdn_conf_open(struct inode *ino, struct file *filep)
 	card = card_root;
 	while (card) {
 		pd = card->procconf;
-		if (pd->low_ino == (ino->i_ino & 0xFFFF))
+		if (pd == PDE(ino))
 			break;
 		card = card->next;	/* search next entry */
 	}
@@ -340,7 +315,7 @@ hysdn_conf_open(struct inode *ino, struct file *filep)
 		return (-EPERM);	/* no permission this time */
 	}
 	unlock_kernel();
-	return (0);
+	return nonseekable_open(ino, filep);
 }				/* hysdn_conf_open */
 
 /***************************/
@@ -359,7 +334,7 @@ hysdn_conf_close(struct inode *ino, struct file *filep)
 	card = card_root;
 	while (card) {
 		pd = card->procconf;
-		if (pd->low_ino == (ino->i_ino & 0xFFFF))
+		if (pd == PDE(ino))
 			break;
 		card = card->next;	/* search next entry */
 	}
@@ -396,11 +371,11 @@ hysdn_conf_close(struct inode *ino, struct file *filep)
 /******************************************************/
 static struct file_operations conf_fops =
 {
-	llseek:         hysdn_dummy_lseek,
-	read:           hysdn_conf_read,
-	write:          hysdn_conf_write,
-	open:           hysdn_conf_open,
-	release:        hysdn_conf_close,                                       
+	.llseek         = no_llseek,
+	.read           = hysdn_conf_read,
+	.write          = hysdn_conf_write,
+	.open           = hysdn_conf_open,
+	.release        = hysdn_conf_close,                                       
 };
 
 /*****************************/
@@ -465,4 +440,4 @@ hysdn_procconf_release(void)
 	}
 
 	remove_proc_entry(PROC_SUBDIR_NAME, proc_net);
-}				/* hysdn_procfs_release */
+}

@@ -1,15 +1,11 @@
 #
 # Makefile for the linux ppc-specific parts of the memory manager.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET		:= mm.o
-obj-y			:= fault.o init.o mem_pieces.o extable.o
+obj-y				:= fault.o init.o mem_pieces.o \
+					mmu_context.o pgtable.o
 
-obj-$(CONFIG_4xx)	+= 4xx_tlb.o
-
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_PPC_STD_MMU)	+= hashtable.o ppc_mmu.o tlb.o
+obj-$(CONFIG_40x)		+= 4xx_mmu.o
+obj-$(CONFIG_44x)		+= 44x_mmu.o
+obj-$(CONFIG_FSL_BOOKE)		+= fsl_booke_mmu.o

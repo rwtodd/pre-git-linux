@@ -2,40 +2,31 @@
 #define __ASM_HARDIRQ_H
 
 #include <linux/config.h>
+#include <linux/cache.h>
 #include <linux/threads.h>
+#include <asm/irq.h>
 
-/* entry.S is sensitive to the offsets of these fields */
 typedef struct {
-	unsigned int __softirq_active;
-	unsigned int __softirq_mask;
-	unsigned int __local_irq_count;
-	unsigned int __local_bh_count;
-	unsigned int __syscall_count;
+	unsigned int __softirq_pending;
 } ____cacheline_aligned irq_cpustat_t;
 
 #include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
 
-/*
- * Are we in an interrupt context? Either doing bottom half
- * or hardware interrupt processing?
- */
-#define in_interrupt() ({ const int __cpu = smp_processor_id(); \
-	(local_irq_count(__cpu) + local_bh_count(__cpu) != 0); })
-
-#define in_irq() (local_irq_count(smp_processor_id()) != 0)
-
-#ifndef CONFIG_SMP
-
-#define hardirq_trylock(cpu)	(local_irq_count(cpu) == 0)
-#define hardirq_endlock(cpu)	do { } while (0)
-
-#define irq_enter(cpu,irq)	(local_irq_count(cpu)++)
-#define irq_exit(cpu,irq)	(local_irq_count(cpu)--)
-
-#define synchronize_irq()	do { } while (0)
-
+#if NR_IRQS > 256
+#define HARDIRQ_BITS	9
 #else
-#error SMP not supported
-#endif /* CONFIG_SMP */
+#define HARDIRQ_BITS	8
+#endif
+
+/*
+ * The hardirq mask has to be large enough to have space
+ * for potentially all IRQ sources in the system nesting
+ * on a single CPU:
+ */
+#if (1 << HARDIRQ_BITS) < NR_IRQS
+# error HARDIRQ_BITS is too low!
+#endif
+
+#define __ARCH_IRQ_EXIT_IRQS_DISABLED	1
 
 #endif /* __ASM_HARDIRQ_H */

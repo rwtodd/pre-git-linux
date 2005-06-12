@@ -9,13 +9,19 @@
  */
 
 #include <linux/vmalloc.h>
+#include <linux/init.h>
+#include <linux/slab.h>
 #include <asm/io.h>
-#include <asm/pgalloc.h>
+#include <asm/fixmap.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
+#include <asm/pgtable.h>
 
 static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
 	unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
+	unsigned long pfn;
 
 	address &= ~PMD_MASK;
 	end = address + size;
@@ -23,15 +29,16 @@ static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned l
 		end = PMD_SIZE;
 	if (address >= end)
 		BUG();
+	pfn = phys_addr >> PAGE_SHIFT;
 	do {
 		if (!pte_none(*pte)) {
 			printk("remap_area_pte: page already exists\n");
 			BUG();
 		}
-		set_pte(pte, mk_pte_phys(phys_addr, __pgprot(_PAGE_PRESENT | _PAGE_RW | 
+		set_pte(pte, pfn_pte(pfn, __pgprot(_PAGE_PRESENT | _PAGE_RW | 
 					_PAGE_DIRTY | _PAGE_ACCESSED | flags)));
 		address += PAGE_SIZE;
-		phys_addr += PAGE_SIZE;
+		pfn++;
 		pte++;
 	} while (address && (address < end));
 }
@@ -49,7 +56,7 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 	if (address >= end)
 		BUG();
 	do {
-		pte_t * pte = pte_alloc_kernel(pmd, address);
+		pte_t * pte = pte_alloc_kernel(&init_mm, pmd, address);
 		if (!pte)
 			return -ENOMEM;
 		remap_area_pte(pte, address, end - address, address + phys_addr, flags);
@@ -62,6 +69,7 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 static int remap_area_pages(unsigned long address, unsigned long phys_addr,
 				 unsigned long size, unsigned long flags)
 {
+	int error;
 	pgd_t * dir;
 	unsigned long end = address + size;
 
@@ -70,19 +78,28 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
 	flush_cache_all();
 	if (address >= end)
 		BUG();
+	spin_lock(&init_mm.page_table_lock);
 	do {
+		pud_t *pud;
 		pmd_t *pmd;
-		pmd = pmd_alloc_kernel(dir, address);
+		
+		error = -ENOMEM;
+		pud = pud_alloc(&init_mm, dir, address);
+		if (!pud)
+			break;
+		pmd = pmd_alloc(&init_mm, pud, address);
 		if (!pmd)
-			return -ENOMEM;
+			break;
 		if (remap_area_pmd(pmd, address, end - address,
 					 phys_addr + address, flags))
-			return -ENOMEM;
+			break;
+		error = 0;
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
 	} while (address && (address < end));
+	spin_unlock(&init_mm.page_table_lock);
 	flush_tlb_all();
-	return 0;
+	return error;
 }
 
 /*
@@ -98,9 +115,9 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
  * have to convert them into an offset in a page-aligned mapping, but the
  * caller shouldn't need to know that small detail.
  */
-void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
+void __iomem * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
 {
-	void * addr;
+	void __iomem * addr;
 	struct vm_struct * area;
 	unsigned long offset, last_addr;
 
@@ -113,12 +130,12 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	 * Don't remap the low PCI/ISA area, it's always mapped..
 	 */
 	if (phys_addr >= 0xA0000 && last_addr < 0x100000)
-		return phys_to_virt(phys_addr);
+		return (void __iomem *) phys_to_virt(phys_addr);
 
 	/*
 	 * Don't allow anybody to remap normal RAM that we're using..
 	 */
-	if (phys_addr < virt_to_phys(high_memory)) {
+	if (phys_addr <= virt_to_phys(high_memory - 1)) {
 		char *t_addr, *t_end;
 		struct page *page;
 
@@ -135,24 +152,162 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	 */
 	offset = phys_addr & ~PAGE_MASK;
 	phys_addr &= PAGE_MASK;
-	size = PAGE_ALIGN(last_addr) - phys_addr;
+	size = PAGE_ALIGN(last_addr+1) - phys_addr;
 
 	/*
 	 * Ok, go for it..
 	 */
-	area = get_vm_area(size, VM_IOREMAP);
+	area = get_vm_area(size, VM_IOREMAP | (flags << 20));
 	if (!area)
 		return NULL;
-	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
-		vfree(addr);
+	area->phys_addr = phys_addr;
+	addr = (void __iomem *) area->addr;
+	if (remap_area_pages((unsigned long) addr, phys_addr, size, flags)) {
+		vunmap((void __force *) addr);
 		return NULL;
 	}
-	return (void *) (offset + (char *)addr);
+	return (void __iomem *) (offset + (char __iomem *)addr);
 }
 
-void iounmap(void *addr)
+
+/**
+ * ioremap_nocache     -   map bus memory into CPU space
+ * @offset:    bus address of the memory
+ * @size:      size of the resource to map
+ *
+ * ioremap_nocache performs a platform specific sequence of operations to
+ * make bus memory CPU accessible via the readb/readw/readl/writeb/
+ * writew/writel functions and the other mmio helpers. The returned
+ * address is not guaranteed to be usable directly as a virtual
+ * address. 
+ *
+ * This version of ioremap ensures that the memory is marked uncachable
+ * on the CPU as well as honouring existing caching rules from things like
+ * the PCI bus. Note that there are other caches and buffers on many 
+ * busses. In particular driver authors should read up on PCI writes
+ *
+ * It's useful if some control registers are in such an area and
+ * write combining or read caching is not desirable:
+ * 
+ * Must be freed with iounmap.
+ */
+
+void __iomem *ioremap_nocache (unsigned long phys_addr, unsigned long size)
 {
-	if (addr > high_memory)
-		return vfree((void *) (PAGE_MASK & (unsigned long) addr));
+	unsigned long last_addr;
+	void __iomem *p = __ioremap(phys_addr, size, _PAGE_PCD);
+	if (!p) 
+		return p; 
+
+	/* Guaranteed to be > phys_addr, as per __ioremap() */
+	last_addr = phys_addr + size - 1;
+
+	if (last_addr < virt_to_phys(high_memory) - 1) {
+		struct page *ppage = virt_to_page(__va(phys_addr));		
+		unsigned long npages;
+
+		phys_addr &= PAGE_MASK;
+
+		/* This might overflow and become zero.. */
+		last_addr = PAGE_ALIGN(last_addr);
+
+		/* .. but that's ok, because modulo-2**n arithmetic will make
+	 	* the page-aligned "last - first" come out right.
+	 	*/
+		npages = (last_addr - phys_addr) >> PAGE_SHIFT;
+
+		if (change_page_attr(ppage, npages, PAGE_KERNEL_NOCACHE) < 0) { 
+			iounmap(p); 
+			p = NULL;
+		}
+		global_flush_tlb();
+	}
+
+	return p;					
+}
+
+void iounmap(volatile void __iomem *addr)
+{
+	struct vm_struct *p;
+	if ((void __force *) addr <= high_memory) 
+		return; 
+	p = remove_vm_area((void *) (PAGE_MASK & (unsigned long __force) addr));
+	if (!p) { 
+		printk("__iounmap: bad address %p\n", addr);
+		return;
+	}
+
+	if ((p->flags >> 20) && p->phys_addr < virt_to_phys(high_memory) - 1) {
+		/* p->size includes the guard page, but cpa doesn't like that */
+		change_page_attr(virt_to_page(__va(p->phys_addr)),
+				 (p->size - PAGE_SIZE) >> PAGE_SHIFT,
+				 PAGE_KERNEL); 				 
+		global_flush_tlb();
+	} 
+	kfree(p); 
+}
+
+void __init *bt_ioremap(unsigned long phys_addr, unsigned long size)
+{
+	unsigned long offset, last_addr;
+	unsigned int nrpages;
+	enum fixed_addresses idx;
+
+	/* Don't allow wraparound or zero size */
+	last_addr = phys_addr + size - 1;
+	if (!size || last_addr < phys_addr)
+		return NULL;
+
+	/*
+	 * Don't remap the low PCI/ISA area, it's always mapped..
+	 */
+	if (phys_addr >= 0xA0000 && last_addr < 0x100000)
+		return phys_to_virt(phys_addr);
+
+	/*
+	 * Mappings have to be page-aligned
+	 */
+	offset = phys_addr & ~PAGE_MASK;
+	phys_addr &= PAGE_MASK;
+	size = PAGE_ALIGN(last_addr) - phys_addr;
+
+	/*
+	 * Mappings have to fit in the FIX_BTMAP area.
+	 */
+	nrpages = size >> PAGE_SHIFT;
+	if (nrpages > NR_FIX_BTMAPS)
+		return NULL;
+
+	/*
+	 * Ok, go for it..
+	 */
+	idx = FIX_BTMAP_BEGIN;
+	while (nrpages > 0) {
+		set_fixmap(idx, phys_addr);
+		phys_addr += PAGE_SIZE;
+		--idx;
+		--nrpages;
+	}
+	return (void*) (offset + fix_to_virt(FIX_BTMAP_BEGIN));
+}
+
+void __init bt_iounmap(void *addr, unsigned long size)
+{
+	unsigned long virt_addr;
+	unsigned long offset;
+	unsigned int nrpages;
+	enum fixed_addresses idx;
+
+	virt_addr = (unsigned long)addr;
+	if (virt_addr < fix_to_virt(FIX_BTMAP_BEGIN))
+		return;
+	offset = virt_addr & ~PAGE_MASK;
+	nrpages = PAGE_ALIGN(offset + size - 1) >> PAGE_SHIFT;
+
+	idx = FIX_BTMAP_BEGIN;
+	while (nrpages > 0) {
+		clear_fixmap(idx);
+		--idx;
+		--nrpages;
+	}
 }

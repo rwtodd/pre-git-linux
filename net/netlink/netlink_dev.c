@@ -20,19 +20,22 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/devfs_fs_kernel.h>
 #include <linux/smp_lock.h>
+#include <linux/device.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
-static unsigned open_map;
+static long open_map;
 static struct socket *netlink_user[MAX_LINKS];
+static struct class_simple *netlink_class;
 
 /*
  *	Device operations
@@ -40,7 +43,7 @@ static struct socket *netlink_user[MAX_LINKS];
  
 static unsigned int netlink_poll(struct file *file, poll_table * wait)
 {
-	struct socket *sock = netlink_user[MINOR(file->f_dentry->d_inode->i_rdev)];
+	struct socket *sock = netlink_user[iminor(file->f_dentry->d_inode)];
 
 	if (sock->ops->poll==NULL)
 		return 0;
@@ -51,15 +54,15 @@ static unsigned int netlink_poll(struct file *file, poll_table * wait)
  *	Write a message to the kernel side of a communication link
  */
  
-static ssize_t netlink_write(struct file * file, const char * buf,
+static ssize_t netlink_write(struct file * file, const char __user * buf,
 			     size_t count, loff_t *pos)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	struct socket *sock = netlink_user[MINOR(inode->i_rdev)];
+	struct socket *sock = netlink_user[iminor(inode)];
 	struct msghdr msg;
 	struct iovec iov;
 
-	iov.iov_base = (void*)buf;
+	iov.iov_base = (void __user*)buf;
 	iov.iov_len = count;
 	msg.msg_name=NULL;
 	msg.msg_namelen=0;
@@ -75,11 +78,11 @@ static ssize_t netlink_write(struct file * file, const char * buf,
  *	Read a message from the kernel side of the communication link
  */
 
-static ssize_t netlink_read(struct file * file, char * buf,
+static ssize_t netlink_read(struct file * file, char __user * buf,
 			    size_t count, loff_t *pos)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	struct socket *sock = netlink_user[MINOR(inode->i_rdev)];
+	struct socket *sock = netlink_user[iminor(inode)];
 	struct msghdr msg;
 	struct iovec iov;
 
@@ -97,26 +100,19 @@ static ssize_t netlink_read(struct file * file, char * buf,
 	return sock_recvmsg(sock, &msg, count, msg.msg_flags);
 }
 
-static loff_t netlink_lseek(struct file * file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static int netlink_open(struct inode * inode, struct file * file)
 {
-	unsigned int minor = MINOR(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	struct socket *sock;
 	struct sockaddr_nl nladdr;
 	int err;
 
 	if (minor>=MAX_LINKS)
 		return -ENODEV;
-	if (open_map&(1<<minor))
+	if (test_and_set_bit(minor, &open_map))
 		return -EBUSY;
 
-	open_map |= (1<<minor);
-
-	err = sock_create(PF_NETLINK, SOCK_RAW, minor, &sock);
+	err = sock_create_kern(PF_NETLINK, SOCK_RAW, minor, &sock);
 	if (err < 0)
 		goto out;
 
@@ -132,20 +128,18 @@ static int netlink_open(struct inode * inode, struct file * file)
 	return 0;
 
 out:
-	open_map &= ~(1<<minor);
+	clear_bit(minor, &open_map);
 	return err;
 }
 
 static int netlink_release(struct inode * inode, struct file * file)
 {
-	unsigned int minor = MINOR(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	struct socket *sock;
 
-	lock_kernel();
 	sock = netlink_user[minor];
 	netlink_user[minor] = NULL;
-	open_map &= ~(1<<minor);
-	unlock_kernel();
+	clear_bit(minor, &open_map);
 	sock_release(sock);
 	return 0;
 }
@@ -154,7 +148,7 @@ static int netlink_release(struct inode * inode, struct file * file)
 static int netlink_ioctl(struct inode *inode, struct file *file,
 		    unsigned int cmd, unsigned long arg)
 {
-	unsigned int minor = MINOR(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	int retval = 0;
 
 	if (minor >= MAX_LINKS)
@@ -168,60 +162,117 @@ static int netlink_ioctl(struct inode *inode, struct file *file,
 
 
 static struct file_operations netlink_fops = {
-	owner:		THIS_MODULE,
-	llseek:		netlink_lseek,
-	read:		netlink_read,
-	write:		netlink_write,
-	poll:		netlink_poll,
-	ioctl:		netlink_ioctl,
-	open:		netlink_open,
-	release:	netlink_release,
+	.owner =	THIS_MODULE,
+	.llseek =	no_llseek,
+	.read =		netlink_read,
+	.write =	netlink_write,
+	.poll =		netlink_poll,
+	.ioctl =	netlink_ioctl,
+	.open =		netlink_open,
+	.release =	netlink_release,
 };
 
-static devfs_handle_t devfs_handle;
+static struct {
+	char *name;
+	int minor;
+} entries[] = {
+	{
+		.name	= "route",
+		.minor	= NETLINK_ROUTE,
+	},
+	{
+		.name	= "skip",
+		.minor	= NETLINK_SKIP,
+	},
+	{
+		.name	= "usersock",
+		.minor	= NETLINK_USERSOCK,
+	},
+	{
+		.name	= "fwmonitor",
+		.minor	= NETLINK_FIREWALL,
+	},
+	{
+		.name	= "tcpdiag",
+		.minor	= NETLINK_TCPDIAG,
+	},
+	{
+		.name	= "nflog",
+		.minor	= NETLINK_NFLOG,
+	},
+	{
+		.name	= "xfrm",
+		.minor	= NETLINK_XFRM,
+	},
+	{
+		.name	= "arpd",
+		.minor	= NETLINK_ARPD,
+	},
+	{
+		.name	= "route6",
+		.minor	= NETLINK_ROUTE6,
+	},
+	{
+		.name	= "ip6_fw",
+		.minor	= NETLINK_IP6_FW,
+	},
+	{
+		.name	= "dnrtmsg",
+		.minor	= NETLINK_DNRTMSG,
+	},
+};
 
-static void __init make_devfs_entries (const char *name, int minor)
+static int __init init_netlink(void)
 {
-	devfs_register (devfs_handle, name, DEVFS_FL_DEFAULT,
-			NETLINK_MAJOR, minor,
-			S_IFCHR | S_IRUSR | S_IWUSR,
-			&netlink_fops, NULL);
-}
+	int i;
 
-int __init init_netlink(void)
-{
-	if (devfs_register_chrdev(NETLINK_MAJOR,"netlink", &netlink_fops)) {
+	if (register_chrdev(NETLINK_MAJOR,"netlink", &netlink_fops)) {
 		printk(KERN_ERR "netlink: unable to get major %d\n", NETLINK_MAJOR);
 		return -EIO;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "netlink", NULL);
+
+	netlink_class = class_simple_create(THIS_MODULE, "netlink");
+	if (IS_ERR(netlink_class)) {
+		printk (KERN_ERR "Error creating netlink class.\n");
+		unregister_chrdev(NETLINK_MAJOR, "netlink");
+		return PTR_ERR(netlink_class);
+	}
+
+	devfs_mk_dir("netlink");
+
 	/*  Someone tell me the official names for the uppercase ones  */
-	make_devfs_entries ("route", 0);
-	make_devfs_entries ("skip", 1);
-	make_devfs_entries ("USERSOCK", 2);
-	make_devfs_entries ("fwmonitor", 3);
-	make_devfs_entries ("ARPD", 8);
-	make_devfs_entries ("ROUTE6", 11);
-	make_devfs_entries ("IP6_FW", 13);
-	devfs_register_series (devfs_handle, "tap%u", 16, DEVFS_FL_DEFAULT,
-			       NETLINK_MAJOR, 16,
-			       S_IFCHR | S_IRUSR | S_IWUSR,
-			       &netlink_fops, NULL);
+	for (i = 0; i < ARRAY_SIZE(entries); i++) {
+		devfs_mk_cdev(MKDEV(NETLINK_MAJOR, entries[i].minor),
+			S_IFCHR|S_IRUSR|S_IWUSR, "netlink/%s", entries[i].name);
+		class_simple_device_add(netlink_class, MKDEV(NETLINK_MAJOR, entries[i].minor), NULL, "%s", entries[i].name);
+	}
+
+	for (i = 0; i < 16; i++) {
+		devfs_mk_cdev(MKDEV(NETLINK_MAJOR, i + 16),
+			S_IFCHR|S_IRUSR|S_IWUSR, "netlink/tap%d", i);
+		class_simple_device_add(netlink_class, MKDEV(NETLINK_MAJOR, i + 16), NULL, "tap%d", i);
+	}
+
 	return 0;
 }
 
-#ifdef MODULE
-
-int init_module(void)
+static void __exit cleanup_netlink(void)
 {
-	printk(KERN_INFO "Network Kernel/User communications module 0.04\n");
-	return init_netlink();
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(entries); i++) {
+		devfs_remove("netlink/%s", entries[i].name);
+		class_simple_device_remove(MKDEV(NETLINK_MAJOR, entries[i].minor));
+	}
+	for (i = 0; i < 16; i++) {
+		devfs_remove("netlink/tap%d", i);
+		class_simple_device_remove(MKDEV(NETLINK_MAJOR, i + 16));
+	}
+	devfs_remove("netlink");
+	class_simple_destroy(netlink_class);
+	unregister_chrdev(NETLINK_MAJOR, "netlink");
 }
 
-void cleanup_module(void)
-{
-	devfs_unregister (devfs_handle);
-	devfs_unregister_chrdev(NETLINK_MAJOR, "netlink");
-}
-
-#endif
+MODULE_LICENSE("GPL");
+module_init(init_netlink);
+module_exit(cleanup_netlink);

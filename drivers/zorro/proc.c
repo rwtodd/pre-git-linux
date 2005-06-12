@@ -3,7 +3,7 @@
  *
  *	Procfs interface for the Zorro bus.
  *
- *	Copyright (C) 1998-2000 Geert Uytterhoeven
+ *	Copyright (C) 1998-2003 Geert Uytterhoeven
  *
  *	Heavily based on the procfs interface for the PCI bus, which is
  *
@@ -14,6 +14,7 @@
 #include <linux/zorro.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <asm/amigahw.h>
 #include <asm/setup.h>
@@ -21,8 +22,9 @@
 static loff_t
 proc_bus_zorro_lseek(struct file *file, loff_t off, int whence)
 {
-	loff_t new;
+	loff_t new = -1;
 
+	lock_kernel();
 	switch (whence) {
 	case 0:
 		new = off;
@@ -33,11 +35,12 @@ proc_bus_zorro_lseek(struct file *file, loff_t off, int whence)
 	case 2:
 		new = sizeof(struct ConfigDev) + off;
 		break;
-	default:
+	}
+	if (new < 0 || new > sizeof(struct ConfigDev)) {
+		unlock_kernel();
 		return -EINVAL;
 	}
-	if (new < 0 || new > sizeof(struct ConfigDev))
-		return -EINVAL;
+	unlock_kernel();
 	return (file->f_pos = new);
 }
 
@@ -45,10 +48,10 @@ static ssize_t
 proc_bus_zorro_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 {
 	struct inode *ino = file->f_dentry->d_inode;
-	struct proc_dir_entry *dp = ino->u.generic_ip;
-	struct zorro_dev *dev = dp->data;
+	struct proc_dir_entry *dp = PDE(ino);
+	struct zorro_dev *z = dp->data;
 	struct ConfigDev cd;
-	int pos = *ppos;
+	loff_t pos = *ppos;
 
 	if (pos >= sizeof(struct ConfigDev))
 		return 0;
@@ -59,11 +62,11 @@ proc_bus_zorro_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 
 	/* Construct a ConfigDev */
 	memset(&cd, 0, sizeof(cd));
-	cd.cd_Rom = dev->rom;
-	cd.cd_SlotAddr = dev->slotaddr;
-	cd.cd_SlotSize = dev->slotsize;
-	cd.cd_BoardAddr = (void *)dev->resource.start;
-	cd.cd_BoardSize = dev->resource.end-dev->resource.start+1;
+	cd.cd_Rom = z->rom;
+	cd.cd_SlotAddr = z->slotaddr;
+	cd.cd_SlotSize = z->slotsize;
+	cd.cd_BoardAddr = (void *)zorro_resource_start(z);
+	cd.cd_BoardSize = zorro_resource_len(z);
 
 	if (copy_to_user(buf, &cd, nbytes))
 		return -EFAULT;
@@ -73,8 +76,8 @@ proc_bus_zorro_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 }
 
 static struct file_operations proc_bus_zorro_operations = {
-	llseek:		proc_bus_zorro_lseek,
-	read:		proc_bus_zorro_read,
+	.llseek		= proc_bus_zorro_lseek,
+	.read		= proc_bus_zorro_read,
 };
 
 static int
@@ -85,11 +88,10 @@ get_zorro_dev_info(char *buf, char **start, off_t pos, int count)
 	int len, cnt;
 
 	for (slot = cnt = 0; slot < zorro_num_autocon && count > cnt; slot++) {
-		struct zorro_dev *dev = &zorro_autocon[slot];
+		struct zorro_dev *z = &zorro_autocon[slot];
 		len = sprintf(buf, "%02x\t%08x\t%08lx\t%08lx\t%02x\n", slot,
-			      dev->id, dev->resource.start,
-			      dev->resource.end-dev->resource.start+1,
-			      dev->rom.er_Type);
+			      z->id, zorro_resource_start(z),
+			      zorro_resource_len(z), z->rom.er_Type);
 		at += len;
 		if (at >= pos) {
 			if (!*start) {

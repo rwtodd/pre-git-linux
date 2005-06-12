@@ -1,5 +1,13 @@
 /* The "unknown" protocol.  This is what is used for protocols we
- * don't understand.  It's returned by find_proto().
+ * don't understand.  It's returned by ip_ct_find_proto().
+ */
+
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #include <linux/types.h>
@@ -29,12 +37,13 @@ static int unknown_unique_tuple(struct ip_conntrack_tuple *tuple,
 	return 0;
 }
 
-static void
-unknown_manip_pkt(struct iphdr *iph, size_t len,
-		  const struct ip_conntrack_manip *manip,
+static int
+unknown_manip_pkt(struct sk_buff **pskb,
+		  unsigned int iphdroff,
+		  const struct ip_conntrack_tuple *tuple,
 		  enum ip_nat_manip_type maniptype)
 {
-	return;
+	return 1;
 }
 
 static unsigned int
@@ -51,8 +60,8 @@ unknown_print_range(char *buffer, const struct ip_nat_range *range)
 	return 0;
 }
 
-struct ip_nat_protocol unknown_nat_protocol = {
-	{ NULL, NULL }, "unknown", 0,
+struct ip_nat_protocol ip_nat_unknown_protocol = {
+	"unknown", 0,
 	unknown_manip_pkt,
 	unknown_in_range,
 	unknown_unique_tuple,

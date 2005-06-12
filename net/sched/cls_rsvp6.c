@@ -12,7 +12,7 @@
 #include <linux/module.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -33,10 +33,12 @@
 #include <net/route.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/pkt_sched.h>
+#include <net/act_api.h>
+#include <net/pkt_cls.h>
 
 #define RSVP_DST_LEN	4
 #define RSVP_ID		"rsvp6"
 #define RSVP_OPS	cls_rsvp6_ops
 
 #include "cls_rsvp.h"
+MODULE_LICENSE("GPL");

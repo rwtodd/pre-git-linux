@@ -22,6 +22,7 @@
 #include <linux/ip.h>
 #include <linux/skbuff.h>
 #endif
+#include <linux/compiler.h>
 #include <linux/netfilter_ipv4.h>
 
 #define IPT_FUNCTION_MAXNAMELEN 30
@@ -52,7 +53,9 @@ struct ipt_entry_match
 			u_int16_t match_size;
 
 			/* Used by userspace */
-			char name[IPT_FUNCTION_MAXNAMELEN];
+			char name[IPT_FUNCTION_MAXNAMELEN-1];
+
+			u_int8_t revision;
 		} user;
 		struct {
 			u_int16_t match_size;
@@ -75,7 +78,9 @@ struct ipt_entry_target
 			u_int16_t target_size;
 
 			/* Used by userspace */
-			char name[IPT_FUNCTION_MAXNAMELEN];
+			char name[IPT_FUNCTION_MAXNAMELEN-1];
+
+			u_int8_t revision;
 		} user;
 		struct {
 			u_int16_t target_size;
@@ -151,9 +156,11 @@ struct ipt_entry
 #define IPT_SO_SET_ADD_COUNTERS	(IPT_BASE_CTL + 1)
 #define IPT_SO_SET_MAX		IPT_SO_SET_ADD_COUNTERS
 
-#define IPT_SO_GET_INFO		(IPT_BASE_CTL)
-#define IPT_SO_GET_ENTRIES	(IPT_BASE_CTL + 1)
-#define IPT_SO_GET_MAX		IPT_SO_GET_ENTRIES
+#define IPT_SO_GET_INFO			(IPT_BASE_CTL)
+#define IPT_SO_GET_ENTRIES		(IPT_BASE_CTL + 1)
+#define IPT_SO_GET_REVISION_MATCH	(IPT_BASE_CTL + 2)
+#define IPT_SO_GET_REVISION_TARGET	(IPT_BASE_CTL + 3)
+#define IPT_SO_GET_MAX			IPT_SO_GET_REVISION_TARGET
 
 /* CONTINUE verdict for targets */
 #define IPT_CONTINUE 0xFFFFFFFF
@@ -252,7 +259,7 @@ struct ipt_replace
 	/* Number of counters (must be equal to current number of entries). */
 	unsigned int num_counters;
 	/* The old entries' counters. */
-	struct ipt_counters *counters;
+	struct ipt_counters __user *counters;
 
 	/* The entries (hang off end: not really an array). */
 	struct ipt_entry entries[0];
@@ -283,13 +290,22 @@ struct ipt_get_entries
 	struct ipt_entry entrytable[0];
 };
 
+/* The argument to IPT_SO_GET_REVISION_*.  Returns highest revision
+ * kernel supports, if >= revision. */
+struct ipt_get_revision
+{
+	char name[IPT_FUNCTION_MAXNAMELEN-1];
+
+	u_int8_t revision;
+};
+
 /* Standard return verdict, or do jump. */
 #define IPT_STANDARD_TARGET ""
 /* Error verdict. */
 #define IPT_ERROR_TARGET "ERROR"
 
 /* Helper functions */
-extern __inline__ struct ipt_entry_target *
+static __inline__ struct ipt_entry_target *
 ipt_get_target(struct ipt_entry *e)
 {
 	return (void *)e + e->target_offset;
@@ -300,14 +316,14 @@ ipt_get_target(struct ipt_entry *e)
 ({						\
 	unsigned int __i;			\
 	int __ret = 0;				\
-	struct ipt_entry_match *__m;		\
+	struct ipt_entry_match *__match;	\
 						\
 	for (__i = sizeof(struct ipt_entry);	\
 	     __i < (e)->target_offset;		\
-	     __i += __m->u.match_size) {	\
-		__m = (void *)(e) + __i;	\
+	     __i += __match->u.match_size) {	\
+		__match = (void *)(e) + __i;	\
 						\
-		__ret = fn(__m , ## args);	\
+		__ret = fn(__match , ## args);	\
 		if (__ret != 0)			\
 			break;			\
 	}					\
@@ -319,12 +335,12 @@ ipt_get_target(struct ipt_entry *e)
 ({								\
 	unsigned int __i;					\
 	int __ret = 0;						\
-	struct ipt_entry *__e;					\
+	struct ipt_entry *__entry;				\
 								\
-	for (__i = 0; __i < (size); __i += __e->next_offset) {	\
-		__e = (void *)(entries) + __i;			\
+	for (__i = 0; __i < (size); __i += __entry->next_offset) { \
+		__entry = (void *)(entries) + __i;		\
 								\
-		__ret = fn(__e , ## args);			\
+		__ret = fn(__entry , ## args);			\
 		if (__ret != 0)					\
 			break;					\
 	}							\
@@ -343,17 +359,20 @@ struct ipt_match
 {
 	struct list_head list;
 
-	const char name[IPT_FUNCTION_MAXNAMELEN];
+	const char name[IPT_FUNCTION_MAXNAMELEN-1];
+
+	u_int8_t revision;
 
 	/* Return true or false: return FALSE and set *hotdrop = 1 to
            force immediate packet drop. */
+	/* Arguments changed since 2.4, as this must now handle
+           non-linear skbs, using skb_copy_bits and
+           skb_ip_make_writable. */
 	int (*match)(const struct sk_buff *skb,
 		     const struct net_device *in,
 		     const struct net_device *out,
 		     const void *matchinfo,
 		     int offset,
-		     const void *hdr,
-		     u_int16_t datalen,
 		     int *hotdrop);
 
 	/* Called when user tries to insert an entry of this type. */
@@ -367,7 +386,7 @@ struct ipt_match
 	/* Called when entry of this type deleted. */
 	void (*destroy)(void *matchinfo, unsigned int matchinfosize);
 
-	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	/* Set this to THIS_MODULE. */
 	struct module *me;
 };
 
@@ -376,15 +395,9 @@ struct ipt_target
 {
 	struct list_head list;
 
-	const char name[IPT_FUNCTION_MAXNAMELEN];
+	const char name[IPT_FUNCTION_MAXNAMELEN-1];
 
-	/* Returns verdict. */
-	unsigned int (*target)(struct sk_buff **pskb,
-			       unsigned int hooknum,
-			       const struct net_device *in,
-			       const struct net_device *out,
-			       const void *targinfo,
-			       void *userdata);
+	u_int8_t revision;
 
 	/* Called when user tries to insert an entry of this type:
            hook_mask is a bitmask of hooks from which it can be
@@ -399,7 +412,17 @@ struct ipt_target
 	/* Called when entry of this type deleted. */
 	void (*destroy)(void *targinfo, unsigned int targinfosize);
 
-	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	/* Returns verdict.  Argument order changed since 2.4, as this
+           must now handle non-linear skbs, using skb_copy_bits and
+           skb_ip_make_writable. */
+	unsigned int (*target)(struct sk_buff **pskb,
+			       const struct net_device *in,
+			       const struct net_device *out,
+			       unsigned int hooknum,
+			       const void *targinfo,
+			       void *userdata);
+
+	/* Set this to THIS_MODULE. */
 	struct module *me;
 };
 
@@ -417,9 +440,6 @@ struct ipt_table
 	/* A unique name... */
 	char name[IPT_TABLE_MAXNAMELEN];
 
-	/* Seed table: copied in register_table */
-	struct ipt_replace *table;
-
 	/* What hooks you will enter on */
 	unsigned int valid_hooks;
 
@@ -428,9 +448,35 @@ struct ipt_table
 
 	/* Man behind the curtain... */
 	struct ipt_table_info *private;
+
+	/* Set to THIS_MODULE. */
+	struct module *me;
 };
 
-extern int ipt_register_table(struct ipt_table *table);
+/* net/sched/ipt.c: Gimme access to your targets!  Gets target->me. */
+extern struct ipt_target *ipt_find_target(const char *name, u8 revision);
+
+/* Standard entry. */
+struct ipt_standard
+{
+	struct ipt_entry entry;
+	struct ipt_standard_target target;
+};
+
+struct ipt_error_target
+{
+	struct ipt_entry_target target;
+	char errorname[IPT_FUNCTION_MAXNAMELEN];
+};
+
+struct ipt_error
+{
+	struct ipt_entry entry;
+	struct ipt_error_target target;
+};
+
+extern int ipt_register_table(struct ipt_table *table,
+			      const struct ipt_replace *repl);
 extern void ipt_unregister_table(struct ipt_table *table);
 extern unsigned int ipt_do_table(struct sk_buff **pskb,
 				 unsigned int hook,

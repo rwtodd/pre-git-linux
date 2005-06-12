@@ -15,7 +15,7 @@
  * at the same time in multiple CPUs? To be safe I added a spinlock
  * but it can be removed trivially if the palcode is robust against smp.
  */
-spinlock_t srm_irq_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(srm_irq_lock);
 
 static inline void
 srm_enable_irq(unsigned int irq)
@@ -49,13 +49,13 @@ srm_end_irq(unsigned int irq)
 
 /* Handle interrupts from the SRM, assuming no additional weirdness.  */
 static struct hw_interrupt_type srm_irq_type = {
-	typename:	"SRM",
-	startup:	srm_startup_irq,
-	shutdown:	srm_disable_irq,
-	enable:		srm_enable_irq,
-	disable:	srm_disable_irq,
-	ack:		srm_disable_irq,
-	end:		srm_end_irq,
+	.typename	= "SRM",
+	.startup	= srm_startup_irq,
+	.shutdown	= srm_disable_irq,
+	.enable		= srm_enable_irq,
+	.disable	= srm_disable_irq,
+	.ack		= srm_disable_irq,
+	.end		= srm_end_irq,
 };
 
 void __init

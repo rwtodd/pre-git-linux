@@ -26,14 +26,12 @@
 
 #include <linux/errno.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
-#include <asm/segment.h>
+#include <linux/slab.h>
+#include <linux/delay.h>
 
 #include <linux/zftape.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,0)
 #include <linux/vmalloc.h>
-#endif
 
 #include "../zftape/zftape-init.h"
 #include "../zftape/zftape-eof.h"
@@ -89,13 +87,6 @@ int zft_vmalloc_once(void *new, size_t size)
 	TRACE_ABORT(0, ft_t_noise,
 		    "allocated buffer @ %p, %d bytes", *(void **)new, size);
 }
-int zft_vcalloc_always(void *new, size_t size)
-{
-	TRACE_FUN(ft_t_flow);
-
-	zft_vfree(new, size);
-	TRACE_EXIT zft_vcalloc_once(new, size);
-}
 int zft_vmalloc_always(void *new, size_t size)
 {
 	TRACE_FUN(ft_t_flow);
@@ -122,8 +113,7 @@ void *zft_kmalloc(size_t size)
 	void *new;
 
 	while ((new = kmalloc(size, GFP_KERNEL)) == NULL) {
-		current->state   = TASK_INTERRUPTIBLE;
-		schedule_timeout(HZ/10);
+		msleep_interruptible(100);
 	}
 	memset(new, 0, size);
 	used_memory += size;

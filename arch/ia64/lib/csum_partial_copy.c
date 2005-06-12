@@ -1,12 +1,13 @@
 /*
  * Network Checksum & Copy routine
- * 
- * Copyright (C) 1999 Hewlett-Packard Co
- * Copyright (C) 1999 Stephane Eranian <eranian@hpl.hp.com>
+ *
+ * Copyright (C) 1999, 2003-2004 Hewlett-Packard Co
+ *	Stephane Eranian <eranian@hpl.hp.com>
  *
  * Most of the code has been imported from Linux/Alpha
  */
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/string.h>
 
@@ -101,28 +102,24 @@ out:
  * This is very ugly but temporary. THIS NEEDS SERIOUS ENHANCEMENTS.
  * But it's very tricky to get right even in C.
  */
-extern unsigned long do_csum(const unsigned char *, int);
+extern unsigned long do_csum(const unsigned char *, long);
 
 static unsigned int
-do_csum_partial_copy_from_user (const char *src, char *dst, int len,
-				unsigned int psum, int *errp)
+do_csum_partial_copy_from_user (const unsigned char __user *src, unsigned char *dst,
+				int len, unsigned int psum, int *errp)
 {
-	const unsigned char *psrc = src;
 	unsigned long result;
-	int cplen = len;
-	int r = 0;
 
 	/* XXX Fixme
-	 * for now we separate the copy from checksum for obvious 
+	 * for now we separate the copy from checksum for obvious
 	 * alignment difficulties. Look at the Alpha code and you'll be
 	 * scared.
 	 */
 
-	while ( cplen-- ) r |=__get_user(*dst++,psrc++);
+	if (__copy_from_user(dst, src, len) != 0 && errp)
+		*errp = -EFAULT;
 
-	if ( r && errp ) *errp = r;
-
-	result = do_csum(src, len);
+	result = do_csum(dst, len);
 
 	/* add in old sum, and carry.. */
 	result += psum;
@@ -132,10 +129,10 @@ do_csum_partial_copy_from_user (const char *src, char *dst, int len,
 }
 
 unsigned int
-csum_partial_copy_from_user(const char *src, char *dst, int len,
-			    unsigned int sum, int *errp)
+csum_partial_copy_from_user (const unsigned char __user *src, unsigned char *dst,
+			     int len, unsigned int sum, int *errp)
 {
-	if (!access_ok(src, len, VERIFY_READ)) {
+	if (!access_ok(VERIFY_READ, src, len)) {
 		*errp = -EFAULT;
 		memset(dst, 0, len);
 		return sum;
@@ -145,21 +142,10 @@ csum_partial_copy_from_user(const char *src, char *dst, int len,
 }
 
 unsigned int
-csum_partial_copy_nocheck(const char *src, char *dst, int len, unsigned int sum)
+csum_partial_copy_nocheck(const unsigned char __user *src, unsigned char *dst,
+			  int len, unsigned int sum)
 {
 	return do_csum_partial_copy_from_user(src, dst, len, sum, NULL);
 }
 
-unsigned int
-csum_partial_copy (const char *src, char *dst, int len, unsigned int sum)
-{
-	unsigned int ret;
-	int error = 0;
-
-	ret = do_csum_partial_copy_from_user(src, dst, len, sum, &error);
-	if (error)
-		printk("csum_partial_copy_old(): tell mingo to convert me!\n");
-
-	return ret;
-}
-
+EXPORT_SYMBOL(csum_partial_copy_nocheck);

@@ -3,20 +3,21 @@
  *
  *	Copyright (C) 1992 Linus Torvalds
  *
- * Fixed a disable_bh()/enable_bh() race (was causing a console lockup)
- * due bh_mask_count not atomic handling. Copyright (C) 1998  Andrea Arcangeli
- *
  * Rewritten. Old one was good in 2.2, but in 2.3 it was immoral. --ANK (990903)
  */
 
-#include <linux/config.h>
-#include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
-#include <linux/tqueue.h>
+#include <linux/mm.h>
+#include <linux/notifier.h>
+#include <linux/percpu.h>
+#include <linux/cpu.h>
+#include <linux/kthread.h>
+#include <linux/rcupdate.h>
 
+#include <asm/irq.h>
 /*
    - No shared variables, all the data are CPU local.
    - If a softirq needs serialization, let it serialize itself
@@ -25,10 +26,6 @@
      execution. Hence, we get something sort of weak cpu binding.
      Though it is still not clear, will it result in better locality
      or will not.
-   - These softirqs are not masked by global cli() and start_bh_atomic()
-     (by clear reasons). Hence, old parts of code still using global locks
-     MUST NOT use softirqs, but insert interfacing routines acquiring
-     global locks. F.e. look at BHs implementation.
 
    Examples:
    - NET RX softirq. It is multithreaded and does not require
@@ -37,164 +34,280 @@
      it is logically serialized per device, but this serialization
      is invisible to common code.
    - Tasklets: serialized wrt itself.
-   - Bottom halves: globally serialized, grr...
  */
 
-/* No separate irq_stat for s390, it is part of PSA */
-#if !defined(CONFIG_ARCH_S390)
-irq_cpustat_t irq_stat[NR_CPUS];
-#endif	/* CONFIG_ARCH_S390 */
+#ifndef __ARCH_IRQ_STAT
+irq_cpustat_t irq_stat[NR_CPUS] ____cacheline_aligned;
+EXPORT_SYMBOL(irq_stat);
+#endif
 
-static struct softirq_action softirq_vec[32] __cacheline_aligned;
+static struct softirq_action softirq_vec[32] __cacheline_aligned_in_smp;
 
-asmlinkage void do_softirq()
+static DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
+
+/*
+ * we cannot loop indefinitely here to avoid userspace starvation,
+ * but we also don't want to introduce a worst case 1/HZ latency
+ * to the pending events, so lets the scheduler to balance
+ * the softirq load for us.
+ */
+static inline void wakeup_softirqd(void)
 {
-	int cpu = smp_processor_id();
-	__u32 active, mask;
+	/* Interrupts are disabled: no need to stop preemption */
+	struct task_struct *tsk = __get_cpu_var(ksoftirqd);
+
+	if (tsk && tsk->state != TASK_RUNNING)
+		wake_up_process(tsk);
+}
+
+/*
+ * We restart softirq processing MAX_SOFTIRQ_RESTART times,
+ * and we fall back to softirqd after that.
+ *
+ * This number has been established via experimentation.
+ * The two things to balance is latency against fairness -
+ * we want to handle softirqs as soon as possible, but they
+ * should not be able to lock up the box.
+ */
+#define MAX_SOFTIRQ_RESTART 10
+
+asmlinkage void __do_softirq(void)
+{
+	struct softirq_action *h;
+	__u32 pending;
+	int max_restart = MAX_SOFTIRQ_RESTART;
+	int cpu;
+
+	pending = local_softirq_pending();
+
+	local_bh_disable();
+	cpu = smp_processor_id();
+restart:
+	/* Reset the pending bitmask before enabling irqs */
+	local_softirq_pending() = 0;
+
+	local_irq_enable();
+
+	h = softirq_vec;
+
+	do {
+		if (pending & 1) {
+			h->action(h);
+			rcu_bh_qsctr_inc(cpu);
+		}
+		h++;
+		pending >>= 1;
+	} while (pending);
+
+	local_irq_disable();
+
+	pending = local_softirq_pending();
+	if (pending && --max_restart)
+		goto restart;
+
+	if (pending)
+		wakeup_softirqd();
+
+	__local_bh_enable();
+}
+
+#ifndef __ARCH_HAS_DO_SOFTIRQ
+
+asmlinkage void do_softirq(void)
+{
+	__u32 pending;
+	unsigned long flags;
 
 	if (in_interrupt())
 		return;
 
-	local_bh_disable();
+	local_irq_save(flags);
 
-	local_irq_disable();
-	mask = softirq_mask(cpu);
-	active = softirq_active(cpu) & mask;
+	pending = local_softirq_pending();
 
-	if (active) {
-		struct softirq_action *h;
+	if (pending)
+		__do_softirq();
 
-restart:
-		/* Reset active bitmask before enabling irqs */
-		softirq_active(cpu) &= ~active;
-
-		local_irq_enable();
-
-		h = softirq_vec;
-		mask &= ~active;
-
-		do {
-			if (active & 1)
-				h->action(h);
-			h++;
-			active >>= 1;
-		} while (active);
-
-		local_irq_disable();
-
-		active = softirq_active(cpu);
-		if ((active &= mask) != 0)
-			goto retry;
-	}
-
-	local_bh_enable();
-
-	/* Leave with locally disabled hard irqs. It is critical to close
-	 * window for infinite recursion, while we help local bh count,
-	 * it protected us. Now we are defenceless.
-	 */
-	return;
-
-retry:
-	goto restart;
+	local_irq_restore(flags);
 }
 
+EXPORT_SYMBOL(do_softirq);
 
-static spinlock_t softirq_mask_lock = SPIN_LOCK_UNLOCKED;
+#endif
+
+void local_bh_enable(void)
+{
+	WARN_ON(irqs_disabled());
+	/*
+	 * Keep preemption disabled until we are done with
+	 * softirq processing:
+ 	 */
+ 	sub_preempt_count(SOFTIRQ_OFFSET - 1);
+
+	if (unlikely(!in_interrupt() && local_softirq_pending()))
+		do_softirq();
+
+	dec_preempt_count();
+	preempt_check_resched();
+}
+EXPORT_SYMBOL(local_bh_enable);
+
+#ifdef __ARCH_IRQ_EXIT_IRQS_DISABLED
+# define invoke_softirq()	__do_softirq()
+#else
+# define invoke_softirq()	do_softirq()
+#endif
+
+/*
+ * Exit an interrupt context. Process softirqs if needed and possible:
+ */
+void irq_exit(void)
+{
+	account_system_vtime(current);
+	sub_preempt_count(IRQ_EXIT_OFFSET);
+	if (!in_interrupt() && local_softirq_pending())
+		invoke_softirq();
+	preempt_enable_no_resched();
+}
+
+/*
+ * This function must run with irqs disabled!
+ */
+inline fastcall void raise_softirq_irqoff(unsigned int nr)
+{
+	__raise_softirq_irqoff(nr);
+
+	/*
+	 * If we're in an interrupt or softirq, we're done
+	 * (this also catches softirq-disabled code). We will
+	 * actually run the softirq once we return from
+	 * the irq or softirq.
+	 *
+	 * Otherwise we wake up ksoftirqd to make sure we
+	 * schedule the softirq soon.
+	 */
+	if (!in_interrupt())
+		wakeup_softirqd();
+}
+
+EXPORT_SYMBOL(raise_softirq_irqoff);
+
+void fastcall raise_softirq(unsigned int nr)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	raise_softirq_irqoff(nr);
+	local_irq_restore(flags);
+}
 
 void open_softirq(int nr, void (*action)(struct softirq_action*), void *data)
 {
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&softirq_mask_lock, flags);
 	softirq_vec[nr].data = data;
 	softirq_vec[nr].action = action;
-
-	for (i=0; i<NR_CPUS; i++)
-		softirq_mask(i) |= (1<<nr);
-	spin_unlock_irqrestore(&softirq_mask_lock, flags);
 }
 
+EXPORT_SYMBOL(open_softirq);
 
 /* Tasklets */
+struct tasklet_head
+{
+	struct tasklet_struct *list;
+};
 
-struct tasklet_head tasklet_vec[NR_CPUS] __cacheline_aligned;
+/* Some compilers disobey section attribute on statics when not
+   initialized -- RR */
+static DEFINE_PER_CPU(struct tasklet_head, tasklet_vec) = { NULL };
+static DEFINE_PER_CPU(struct tasklet_head, tasklet_hi_vec) = { NULL };
+
+void fastcall __tasklet_schedule(struct tasklet_struct *t)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	t->next = __get_cpu_var(tasklet_vec).list;
+	__get_cpu_var(tasklet_vec).list = t;
+	raise_softirq_irqoff(TASKLET_SOFTIRQ);
+	local_irq_restore(flags);
+}
+
+EXPORT_SYMBOL(__tasklet_schedule);
+
+void fastcall __tasklet_hi_schedule(struct tasklet_struct *t)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	t->next = __get_cpu_var(tasklet_hi_vec).list;
+	__get_cpu_var(tasklet_hi_vec).list = t;
+	raise_softirq_irqoff(HI_SOFTIRQ);
+	local_irq_restore(flags);
+}
+
+EXPORT_SYMBOL(__tasklet_hi_schedule);
 
 static void tasklet_action(struct softirq_action *a)
 {
-	int cpu = smp_processor_id();
 	struct tasklet_struct *list;
 
 	local_irq_disable();
-	list = tasklet_vec[cpu].list;
-	tasklet_vec[cpu].list = NULL;
+	list = __get_cpu_var(tasklet_vec).list;
+	__get_cpu_var(tasklet_vec).list = NULL;
 	local_irq_enable();
 
-	while (list != NULL) {
+	while (list) {
 		struct tasklet_struct *t = list;
 
 		list = list->next;
 
 		if (tasklet_trylock(t)) {
-			if (atomic_read(&t->count) == 0) {
-				clear_bit(TASKLET_STATE_SCHED, &t->state);
-
+			if (!atomic_read(&t->count)) {
+				if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
+					BUG();
 				t->func(t->data);
-				/*
-				 * talklet_trylock() uses test_and_set_bit that imply
-				 * an mb when it returns zero, thus we need the explicit
-				 * mb only here: while closing the critical section.
-				 */
-#ifdef CONFIG_SMP
-				smp_mb__before_clear_bit();
-#endif
 				tasklet_unlock(t);
 				continue;
 			}
 			tasklet_unlock(t);
 		}
+
 		local_irq_disable();
-		t->next = tasklet_vec[cpu].list;
-		tasklet_vec[cpu].list = t;
-		__cpu_raise_softirq(cpu, TASKLET_SOFTIRQ);
+		t->next = __get_cpu_var(tasklet_vec).list;
+		__get_cpu_var(tasklet_vec).list = t;
+		__raise_softirq_irqoff(TASKLET_SOFTIRQ);
 		local_irq_enable();
 	}
 }
 
-
-
-struct tasklet_head tasklet_hi_vec[NR_CPUS] __cacheline_aligned;
-
 static void tasklet_hi_action(struct softirq_action *a)
 {
-	int cpu = smp_processor_id();
 	struct tasklet_struct *list;
 
 	local_irq_disable();
-	list = tasklet_hi_vec[cpu].list;
-	tasklet_hi_vec[cpu].list = NULL;
+	list = __get_cpu_var(tasklet_hi_vec).list;
+	__get_cpu_var(tasklet_hi_vec).list = NULL;
 	local_irq_enable();
 
-	while (list != NULL) {
+	while (list) {
 		struct tasklet_struct *t = list;
 
 		list = list->next;
 
 		if (tasklet_trylock(t)) {
-			if (atomic_read(&t->count) == 0) {
-				clear_bit(TASKLET_STATE_SCHED, &t->state);
-
+			if (!atomic_read(&t->count)) {
+				if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
+					BUG();
 				t->func(t->data);
 				tasklet_unlock(t);
 				continue;
 			}
 			tasklet_unlock(t);
 		}
+
 		local_irq_disable();
-		t->next = tasklet_hi_vec[cpu].list;
-		tasklet_hi_vec[cpu].list = t;
-		__cpu_raise_softirq(cpu, HI_SOFTIRQ);
+		t->next = __get_cpu_var(tasklet_hi_vec).list;
+		__get_cpu_var(tasklet_hi_vec).list = t;
+		__raise_softirq_irqoff(HI_SOFTIRQ);
 		local_irq_enable();
 	}
 }
@@ -203,11 +316,14 @@ static void tasklet_hi_action(struct softirq_action *a)
 void tasklet_init(struct tasklet_struct *t,
 		  void (*func)(unsigned long), unsigned long data)
 {
-	t->func = func;
-	t->data = data;
+	t->next = NULL;
 	t->state = 0;
 	atomic_set(&t->count, 0);
+	t->func = func;
+	t->data = data;
 }
+
+EXPORT_SYMBOL(tasklet_init);
 
 void tasklet_kill(struct tasklet_struct *t)
 {
@@ -215,103 +331,162 @@ void tasklet_kill(struct tasklet_struct *t)
 		printk("Attempt to kill tasklet from interrupt\n");
 
 	while (test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
-		current->state = TASK_RUNNING;
-		do {
-			current->policy |= SCHED_YIELD;
-			schedule();
-		} while (test_bit(TASKLET_STATE_SCHED, &t->state));
+		do
+			yield();
+		while (test_bit(TASKLET_STATE_SCHED, &t->state));
 	}
 	tasklet_unlock_wait(t);
 	clear_bit(TASKLET_STATE_SCHED, &t->state);
 }
 
+EXPORT_SYMBOL(tasklet_kill);
 
-
-/* Old style BHs */
-
-static void (*bh_base[32])(void);
-struct tasklet_struct bh_task_vec[32];
-
-/* BHs are serialized by spinlock global_bh_lock.
-
-   It is still possible to make synchronize_bh() as
-   spin_unlock_wait(&global_bh_lock). This operation is not used
-   by kernel now, so that this lock is not made private only
-   due to wait_on_irq().
-
-   It can be removed only after auditing all the BHs.
- */
-spinlock_t global_bh_lock = SPIN_LOCK_UNLOCKED;
-
-static void bh_action(unsigned long nr)
+void __init softirq_init(void)
 {
-	int cpu = smp_processor_id();
-
-	if (!spin_trylock(&global_bh_lock))
-		goto resched;
-
-	if (!hardirq_trylock(cpu))
-		goto resched_unlock;
-
-	if (bh_base[nr])
-		bh_base[nr]();
-
-	hardirq_endlock(cpu);
-	spin_unlock(&global_bh_lock);
-	return;
-
-resched_unlock:
-	spin_unlock(&global_bh_lock);
-resched:
-	mark_bh(nr);
-}
-
-void init_bh(int nr, void (*routine)(void))
-{
-	bh_base[nr] = routine;
-	mb();
-}
-
-void remove_bh(int nr)
-{
-	tasklet_kill(bh_task_vec+nr);
-	bh_base[nr] = NULL;
-}
-
-void __init softirq_init()
-{
-	int i;
-
-	for (i=0; i<32; i++)
-		tasklet_init(bh_task_vec+i, bh_action, i);
-
 	open_softirq(TASKLET_SOFTIRQ, tasklet_action, NULL);
 	open_softirq(HI_SOFTIRQ, tasklet_hi_action, NULL);
 }
 
-void __run_task_queue(task_queue *list)
+static int ksoftirqd(void * __bind_cpu)
 {
-	struct list_head head, *next;
-	unsigned long flags;
+	set_user_nice(current, 19);
+	current->flags |= PF_NOFREEZE;
 
-	spin_lock_irqsave(&tqueue_lock, flags);
-	list_add(&head, list);
-	list_del_init(list);
-	spin_unlock_irqrestore(&tqueue_lock, flags);
+	set_current_state(TASK_INTERRUPTIBLE);
 
-	next = head.next;
-	while (next != &head) {
-		void (*f) (void *);
-		struct tq_struct *p;
-		void *data;
+	while (!kthread_should_stop()) {
+		if (!local_softirq_pending())
+			schedule();
 
-		p = list_entry(next, struct tq_struct, list);
-		next = next->next;
-		f = p->routine;
-		data = p->data;
-		wmb();
-		p->sync = 0;
-		if (f)
-			f(data);
+		__set_current_state(TASK_RUNNING);
+
+		while (local_softirq_pending()) {
+			/* Preempt disable stops cpu going offline.
+			   If already offline, we'll be on wrong CPU:
+			   don't process */
+			preempt_disable();
+			if (cpu_is_offline((long)__bind_cpu))
+				goto wait_to_die;
+			do_softirq();
+			preempt_enable();
+			cond_resched();
+		}
+
+		set_current_state(TASK_INTERRUPTIBLE);
 	}
+	__set_current_state(TASK_RUNNING);
+	return 0;
+
+wait_to_die:
+	preempt_enable();
+	/* Wait for kthread_stop */
+	set_current_state(TASK_INTERRUPTIBLE);
+	while (!kthread_should_stop()) {
+		schedule();
+		set_current_state(TASK_INTERRUPTIBLE);
+	}
+	__set_current_state(TASK_RUNNING);
+	return 0;
+}
+
+#ifdef CONFIG_HOTPLUG_CPU
+/*
+ * tasklet_kill_immediate is called to remove a tasklet which can already be
+ * scheduled for execution on @cpu.
+ *
+ * Unlike tasklet_kill, this function removes the tasklet
+ * _immediately_, even if the tasklet is in TASKLET_STATE_SCHED state.
+ *
+ * When this function is called, @cpu must be in the CPU_DEAD state.
+ */
+void tasklet_kill_immediate(struct tasklet_struct *t, unsigned int cpu)
+{
+	struct tasklet_struct **i;
+
+	BUG_ON(cpu_online(cpu));
+	BUG_ON(test_bit(TASKLET_STATE_RUN, &t->state));
+
+	if (!test_bit(TASKLET_STATE_SCHED, &t->state))
+		return;
+
+	/* CPU is dead, so no lock needed. */
+	for (i = &per_cpu(tasklet_vec, cpu).list; *i; i = &(*i)->next) {
+		if (*i == t) {
+			*i = t->next;
+			return;
+		}
+	}
+	BUG();
+}
+
+static void takeover_tasklets(unsigned int cpu)
+{
+	struct tasklet_struct **i;
+
+	/* CPU is dead, so no lock needed. */
+	local_irq_disable();
+
+	/* Find end, append list for that CPU. */
+	for (i = &__get_cpu_var(tasklet_vec).list; *i; i = &(*i)->next);
+	*i = per_cpu(tasklet_vec, cpu).list;
+	per_cpu(tasklet_vec, cpu).list = NULL;
+	raise_softirq_irqoff(TASKLET_SOFTIRQ);
+
+	for (i = &__get_cpu_var(tasklet_hi_vec).list; *i; i = &(*i)->next);
+	*i = per_cpu(tasklet_hi_vec, cpu).list;
+	per_cpu(tasklet_hi_vec, cpu).list = NULL;
+	raise_softirq_irqoff(HI_SOFTIRQ);
+
+	local_irq_enable();
+}
+#endif /* CONFIG_HOTPLUG_CPU */
+
+static int __devinit cpu_callback(struct notifier_block *nfb,
+				  unsigned long action,
+				  void *hcpu)
+{
+	int hotcpu = (unsigned long)hcpu;
+	struct task_struct *p;
+
+	switch (action) {
+	case CPU_UP_PREPARE:
+		BUG_ON(per_cpu(tasklet_vec, hotcpu).list);
+		BUG_ON(per_cpu(tasklet_hi_vec, hotcpu).list);
+		p = kthread_create(ksoftirqd, hcpu, "ksoftirqd/%d", hotcpu);
+		if (IS_ERR(p)) {
+			printk("ksoftirqd for %i failed\n", hotcpu);
+			return NOTIFY_BAD;
+		}
+		kthread_bind(p, hotcpu);
+  		per_cpu(ksoftirqd, hotcpu) = p;
+ 		break;
+	case CPU_ONLINE:
+		wake_up_process(per_cpu(ksoftirqd, hotcpu));
+		break;
+#ifdef CONFIG_HOTPLUG_CPU
+	case CPU_UP_CANCELED:
+		/* Unbind so it can run.  Fall thru. */
+		kthread_bind(per_cpu(ksoftirqd, hotcpu), smp_processor_id());
+	case CPU_DEAD:
+		p = per_cpu(ksoftirqd, hotcpu);
+		per_cpu(ksoftirqd, hotcpu) = NULL;
+		kthread_stop(p);
+		takeover_tasklets(hotcpu);
+		break;
+#endif /* CONFIG_HOTPLUG_CPU */
+ 	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block __devinitdata cpu_nfb = {
+	.notifier_call = cpu_callback
+};
+
+__init int spawn_ksoftirqd(void)
+{
+	void *cpu = (void *)(long)smp_processor_id();
+	cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
+	cpu_callback(&cpu_nfb, CPU_ONLINE, cpu);
+	register_cpu_notifier(&cpu_nfb);
+	return 0;
 }

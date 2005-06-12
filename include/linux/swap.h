@@ -1,23 +1,53 @@
 #ifndef _LINUX_SWAP_H
 #define _LINUX_SWAP_H
 
+#include <linux/config.h>
 #include <linux/spinlock.h>
+#include <linux/linkage.h>
+#include <linux/mmzone.h>
+#include <linux/list.h>
+#include <linux/sched.h>
+#include <asm/atomic.h>
 #include <asm/page.h>
 
 #define SWAP_FLAG_PREFER	0x8000	/* set if swap priority specified */
 #define SWAP_FLAG_PRIO_MASK	0x7fff
 #define SWAP_FLAG_PRIO_SHIFT	0
 
-#define MAX_SWAPFILES 8
+static inline int current_is_kswapd(void)
+{
+	return current->flags & PF_KSWAPD;
+}
 
+/*
+ * MAX_SWAPFILES defines the maximum number of swaptypes: things which can
+ * be swapped to.  The swap type and the offset into that swap type are
+ * encoded into pte's and into pgoff_t's in the swapcache.  Using five bits
+ * for the type means that the maximum number of swapcache pages is 27 bits
+ * on 32-bit-pgoff_t architectures.  And that assumes that the architecture packs
+ * the type/offset into the pte as 5/27 as well.
+ */
+#define MAX_SWAPFILES_SHIFT	5
+#define MAX_SWAPFILES		(1 << MAX_SWAPFILES_SHIFT)
+
+/*
+ * Magic header for a swap area. The first part of the union is
+ * what the swap magic looks like for the old (limited to 128MB)
+ * swap area format, the second part of the union adds - in the
+ * old reserved area - some extra information. Note that the first
+ * kilobyte is reserved for boot loader or disk label stuff...
+ *
+ * Having the magic at the end of the PAGE_SIZE makes detecting swap
+ * areas somewhat tricky on machines that support multiple page sizes.
+ * For 2.5 we'll probably want to move the magic to just beyond the
+ * bootbits...
+ */
 union swap_header {
-	struct 
-	{
+	struct {
 		char reserved[PAGE_SIZE - 10];
-		char magic[10];
+		char magic[10];			/* SWAP-SPACE or SWAPSPACE2 */
 	} magic;
-	struct 
-	{
+	struct {
 		char	     bootbits[1024];	/* Space for disklabel etc. */
 		unsigned int version;
 		unsigned int last_page;
@@ -27,7 +57,43 @@ union swap_header {
 	} info;
 };
 
+ /* A swap entry has to fit into a "unsigned long", as
+  * the entry is hidden in the "index" field of the
+  * swapper address space.
+  */
+typedef struct {
+	unsigned long val;
+} swp_entry_t;
+
+/*
+ * current->reclaim_state points to one of these when a task is running
+ * memory reclaim
+ */
+struct reclaim_state {
+	unsigned long reclaimed_slab;
+};
+
 #ifdef __KERNEL__
+
+struct address_space;
+struct sysinfo;
+struct writeback_control;
+struct zone;
+
+/*
+ * A swap extent maps a range of a swapfile's PAGE_SIZE pages onto a range of
+ * disk blocks.  A list of swap extents maps the entire swapfile.  (Where the
+ * term `swapfile' refers to either a blockdevice or an IS_REG file.  Apart
+ * from setup, they're handled identically.
+ *
+ * We always assume that blocks are of size PAGE_SIZE.
+ */
+struct swap_extent {
+	struct list_head list;
+	pgoff_t start_page;
+	pgoff_t nr_pages;
+	sector_t start_block;
+};
 
 /*
  * Max bad pages in the new format..
@@ -36,22 +102,31 @@ union swap_header {
 #define MAX_SWAP_BADPAGES \
 	((__swapoffset(magic.magic) - __swapoffset(info.badpages)) / sizeof(int))
 
-#include <asm/atomic.h>
-
-#define SWP_USED	1
-#define SWP_WRITEOK	3
+enum {
+	SWP_USED	= (1 << 0),	/* is slot in swap_info[] used? */
+	SWP_WRITEOK	= (1 << 1),	/* ok to write to this swap?	*/
+	SWP_ACTIVE	= (SWP_USED | SWP_WRITEOK),
+};
 
 #define SWAP_CLUSTER_MAX 32
 
 #define SWAP_MAP_MAX	0x7fff
 #define SWAP_MAP_BAD	0x8000
 
+/*
+ * The in-memory structure used to track swap areas.
+ * extent_list.prev points at the lowest-index extent.  That list is
+ * sorted.
+ */
 struct swap_info_struct {
 	unsigned int flags;
-	kdev_t swap_device;
 	spinlock_t sdev_lock;
-	struct dentry * swap_file;
-	struct vfsmount *swap_vfsmnt;
+	struct file *swap_file;
+	struct block_device *bdev;
+	struct list_head extent_list;
+	int nr_extents;
+	struct swap_extent *curr_swap_extent;
+	unsigned old_block_size;
 	unsigned short * swap_map;
 	unsigned int lowest_bit;
 	unsigned int highest_bit;
@@ -60,230 +135,92 @@ struct swap_info_struct {
 	int prio;			/* swap priority */
 	int pages;
 	unsigned long max;
+	unsigned long inuse_pages;
 	int next;			/* next entry on swap list */
 };
 
-extern int nr_swap_pages;
-FASTCALL(unsigned int nr_free_pages(void));
-FASTCALL(unsigned int nr_inactive_clean_pages(void));
-FASTCALL(unsigned int nr_free_buffer_pages(void));
-extern int nr_active_pages;
-extern int nr_inactive_dirty_pages;
-extern atomic_t nr_async_pages;
-extern struct address_space swapper_space;
-extern atomic_t page_cache_size;
-extern atomic_t buffermem_pages;
-extern spinlock_t pagecache_lock;
-extern void __remove_inode_page(struct page *);
-
-/* Incomplete types for prototype declarations: */
-struct task_struct;
-struct vm_area_struct;
-struct sysinfo;
-
-struct zone_t;
-
-/* linux/mm/swap.c */
-extern int memory_pressure;
-extern void age_page_up(struct page *);
-extern void age_page_up_nolock(struct page *);
-extern void age_page_down(struct page *);
-extern void age_page_down_nolock(struct page *);
-extern void age_page_down_ageonly(struct page *);
-extern void deactivate_page(struct page *);
-extern void deactivate_page_nolock(struct page *);
-extern void activate_page(struct page *);
-extern void activate_page_nolock(struct page *);
-extern void lru_cache_add(struct page *);
-extern void __lru_cache_del(struct page *);
-extern void lru_cache_del(struct page *);
-extern void recalculate_vm_stats(void);
-extern void swap_setup(void);
-
-/* linux/mm/vmscan.c */
-extern struct page * reclaim_page(zone_t *);
-extern wait_queue_head_t kswapd_wait;
-extern wait_queue_head_t kreclaimd_wait;
-extern int page_launder(int, int);
-extern int free_shortage(void);
-extern int inactive_shortage(void);
-extern void wakeup_kswapd(int);
-extern int try_to_free_pages(unsigned int gfp_mask);
-
-/* linux/mm/page_io.c */
-extern void rw_swap_page(int, struct page *, int);
-extern void rw_swap_page_nolock(int, swp_entry_t, char *, int);
-
-/* linux/mm/page_alloc.c */
-
-/* linux/mm/swap_state.c */
-extern void show_swap_cache_info(void);
-extern void add_to_swap_cache(struct page *, swp_entry_t);
-extern int swap_check_entry(unsigned long);
-extern struct page * lookup_swap_cache(swp_entry_t);
-extern struct page * read_swap_cache_async(swp_entry_t, int);
-#define read_swap_cache(entry) read_swap_cache_async(entry, 1);
-
-/* linux/mm/oom_kill.c */
-extern int out_of_memory(void);
-extern void oom_kill(void);
-
-/*
- * Make these inline later once they are working properly.
- */
-extern void __delete_from_swap_cache(struct page *page);
-extern void delete_from_swap_cache(struct page *page);
-extern void delete_from_swap_cache_nolock(struct page *page);
-extern void free_page_and_swap_cache(struct page *page);
-
-/* linux/mm/swapfile.c */
-extern unsigned int nr_swapfiles;
-extern struct swap_info_struct swap_info[];
-extern int is_swap_partition(kdev_t);
-extern void si_swapinfo(struct sysinfo *);
-extern swp_entry_t __get_swap_page(unsigned short);
-extern void get_swaphandle_info(swp_entry_t, unsigned long *, kdev_t *, 
-					struct inode **);
-extern int swap_duplicate(swp_entry_t);
-extern int swap_count(struct page *);
-extern int valid_swaphandles(swp_entry_t, unsigned long *);
-#define get_swap_page() __get_swap_page(1)
-extern void __swap_free(swp_entry_t, unsigned short);
-#define swap_free(entry) __swap_free((entry), 1)
 struct swap_list_t {
 	int head;	/* head of priority-ordered swapfile list */
 	int next;	/* swapfile to be used next */
 };
+
+/* Swap 50% full? Release swapcache more aggressively.. */
+#define vm_swap_full() (nr_swap_pages*2 < total_swap_pages)
+
+/* linux/mm/oom_kill.c */
+extern void out_of_memory(int gfp_mask);
+
+/* linux/mm/memory.c */
+extern void swapin_readahead(swp_entry_t, unsigned long, struct vm_area_struct *);
+
+/* linux/mm/page_alloc.c */
+extern unsigned long totalram_pages;
+extern unsigned long totalhigh_pages;
+extern long nr_swap_pages;
+extern unsigned int nr_free_pages(void);
+extern unsigned int nr_free_pages_pgdat(pg_data_t *pgdat);
+extern unsigned int nr_free_buffer_pages(void);
+extern unsigned int nr_free_pagecache_pages(void);
+
+/* linux/mm/swap.c */
+extern void FASTCALL(lru_cache_add(struct page *));
+extern void FASTCALL(lru_cache_add_active(struct page *));
+extern void FASTCALL(activate_page(struct page *));
+extern void FASTCALL(mark_page_accessed(struct page *));
+extern void lru_add_drain(void);
+extern int rotate_reclaimable_page(struct page *page);
+extern void swap_setup(void);
+
+/* linux/mm/vmscan.c */
+extern int try_to_free_pages(struct zone **, unsigned int, unsigned int);
+extern int shrink_all_memory(int);
+extern int vm_swappiness;
+
+#ifdef CONFIG_MMU
+/* linux/mm/shmem.c */
+extern int shmem_unuse(swp_entry_t entry, struct page *page);
+#endif /* CONFIG_MMU */
+
+extern void swap_unplug_io_fn(struct backing_dev_info *, struct page *);
+
+#ifdef CONFIG_SWAP
+/* linux/mm/page_io.c */
+extern int swap_readpage(struct file *, struct page *);
+extern int swap_writepage(struct page *page, struct writeback_control *wbc);
+extern int rw_swap_page_sync(int, swp_entry_t, struct page *);
+
+/* linux/mm/swap_state.c */
+extern struct address_space swapper_space;
+#define total_swapcache_pages  swapper_space.nrpages
+extern void show_swap_cache_info(void);
+extern int add_to_swap(struct page *);
+extern void __delete_from_swap_cache(struct page *);
+extern void delete_from_swap_cache(struct page *);
+extern int move_to_swap_cache(struct page *, swp_entry_t);
+extern int move_from_swap_cache(struct page *, unsigned long,
+		struct address_space *);
+extern void free_page_and_swap_cache(struct page *);
+extern void free_pages_and_swap_cache(struct page **, int);
+extern struct page * lookup_swap_cache(swp_entry_t);
+extern struct page * read_swap_cache_async(swp_entry_t, struct vm_area_struct *vma,
+					   unsigned long addr);
+/* linux/mm/swapfile.c */
+extern long total_swap_pages;
+extern unsigned int nr_swapfiles;
+extern struct swap_info_struct swap_info[];
+extern void si_swapinfo(struct sysinfo *);
+extern swp_entry_t get_swap_page(void);
+extern int swap_duplicate(swp_entry_t);
+extern int valid_swaphandles(swp_entry_t, unsigned long *);
+extern void swap_free(swp_entry_t);
+extern void free_swap_and_cache(swp_entry_t);
+extern sector_t map_swap_page(struct swap_info_struct *, pgoff_t);
+extern struct swap_info_struct *get_swap_info_struct(unsigned);
+extern int can_share_swap_page(struct page *);
+extern int remove_exclusive_swap_page(struct page *);
+struct backing_dev_info;
+
 extern struct swap_list_t swap_list;
-asmlinkage long sys_swapoff(const char *);
-asmlinkage long sys_swapon(const char *, int);
-
-#define SWAP_CACHE_INFO
-
-#ifdef SWAP_CACHE_INFO
-extern unsigned long swap_cache_add_total;
-extern unsigned long swap_cache_del_total;
-extern unsigned long swap_cache_find_total;
-extern unsigned long swap_cache_find_success;
-#endif
-
-/*
- * Work out if there are any other processes sharing this page, ignoring
- * any page reference coming from the swap cache, or from outstanding
- * swap IO on this page.  (The page cache _does_ count as another valid
- * reference to the page, however.)
- */
-static inline int is_page_shared(struct page *page)
-{
-	unsigned int count;
-	if (PageReserved(page))
-		return 1;
-	count = page_count(page);
-	if (PageSwapCache(page))
-		count += swap_count(page) - 2 - !!page->buffers;
-	return  count > 1;
-}
-
-extern spinlock_t pagemap_lru_lock;
-
-/*
- * Page aging defines.
- * Since we do exponential decay of the page age, we
- * can chose a fairly large maximum.
- */
-#define PAGE_AGE_START 2
-#define PAGE_AGE_ADV 3
-#define PAGE_AGE_MAX 64
-
-/*
- * List add/del helper macros. These must be called
- * with the pagemap_lru_lock held!
- */
-#define DEBUG_ADD_PAGE \
-	if (PageActive(page) || PageInactiveDirty(page) || \
-					PageInactiveClean(page)) BUG();
-
-#define ZERO_PAGE_BUG \
-	if (page_count(page) == 0) BUG();
-
-#define add_page_to_active_list(page) { \
-	DEBUG_ADD_PAGE \
-	ZERO_PAGE_BUG \
-	SetPageActive(page); \
-	list_add(&(page)->lru, &active_list); \
-	nr_active_pages++; \
-}
-
-#define add_page_to_inactive_dirty_list(page) { \
-	DEBUG_ADD_PAGE \
-	ZERO_PAGE_BUG \
-	SetPageInactiveDirty(page); \
-	list_add(&(page)->lru, &inactive_dirty_list); \
-	nr_inactive_dirty_pages++; \
-	page->zone->inactive_dirty_pages++; \
-}
-
-#define add_page_to_inactive_clean_list(page) { \
-	DEBUG_ADD_PAGE \
-	ZERO_PAGE_BUG \
-	SetPageInactiveClean(page); \
-	list_add(&(page)->lru, &page->zone->inactive_clean_list); \
-	page->zone->inactive_clean_pages++; \
-}
-
-#define del_page_from_active_list(page) { \
-	list_del(&(page)->lru); \
-	ClearPageActive(page); \
-	nr_active_pages--; \
-	DEBUG_ADD_PAGE \
-	ZERO_PAGE_BUG \
-}
-
-#define del_page_from_inactive_dirty_list(page) { \
-	list_del(&(page)->lru); \
-	ClearPageInactiveDirty(page); \
-	nr_inactive_dirty_pages--; \
-	page->zone->inactive_dirty_pages--; \
-	DEBUG_ADD_PAGE \
-	ZERO_PAGE_BUG \
-}
-
-#define del_page_from_inactive_clean_list(page) { \
-	list_del(&(page)->lru); \
-	ClearPageInactiveClean(page); \
-	page->zone->inactive_clean_pages--; \
-	DEBUG_ADD_PAGE \
-	ZERO_PAGE_BUG \
-}
-
-/*
- * In mm/swap.c::recalculate_vm_stats(), we substract
- * inactive_target from memory_pressure every second.
- * This means that memory_pressure is smoothed over
- * 64 (1 << INACTIVE_SHIFT) seconds.
- */
-#define INACTIVE_SHIFT 6
-#define inactive_min(a,b) ((a) < (b) ? (a) : (b))
-#define inactive_target inactive_min((memory_pressure >> INACTIVE_SHIFT), \
-		(num_physpages / 4))
-
-/*
- * Ugly ugly ugly HACK to make sure the inactive lists
- * don't fill up with unfreeable ramdisk pages. We really
- * want to fix the ramdisk driver to mark its pages as
- * unfreeable instead of using dirty buffer magic, but the
- * next code-change time is when 2.5 is forked...
- */
-#ifndef _LINUX_KDEV_T_H
-#include <linux/kdev_t.h>
-#endif
-#ifndef _LINUX_MAJOR_H
-#include <linux/major.h>
-#endif
-
-#define page_ramdisk(page) \
-	(page->buffers && (MAJOR(page->buffers->b_dev) == RAMDISK_MAJOR))
-
 extern spinlock_t swaplock;
 
 #define swap_list_lock()	spin_lock(&swaplock)
@@ -291,8 +228,66 @@ extern spinlock_t swaplock;
 #define swap_device_lock(p)	spin_lock(&p->sdev_lock)
 #define swap_device_unlock(p)	spin_unlock(&p->sdev_lock)
 
-extern void shmem_unuse(swp_entry_t entry, struct page *page);
+/* linux/mm/thrash.c */
+extern struct mm_struct * swap_token_mm;
+extern unsigned long swap_token_default_timeout;
+extern void grab_swap_token(void);
+extern void __put_swap_token(struct mm_struct *);
 
+static inline int has_swap_token(struct mm_struct *mm)
+{
+	return (mm == swap_token_mm);
+}
+
+static inline void put_swap_token(struct mm_struct *mm)
+{
+	if (has_swap_token(mm))
+		__put_swap_token(mm);
+}
+
+#else /* CONFIG_SWAP */
+
+#define total_swap_pages			0
+#define total_swapcache_pages			0UL
+
+#define si_swapinfo(val) \
+	do { (val)->freeswap = (val)->totalswap = 0; } while (0)
+#define free_page_and_swap_cache(page) \
+	page_cache_release(page)
+#define free_pages_and_swap_cache(pages, nr) \
+	release_pages((pages), (nr), 0);
+
+#define show_swap_cache_info()			/*NOTHING*/
+#define free_swap_and_cache(swp)		/*NOTHING*/
+#define swap_duplicate(swp)			/*NOTHING*/
+#define swap_free(swp)				/*NOTHING*/
+#define read_swap_cache_async(swp,vma,addr)	NULL
+#define lookup_swap_cache(swp)			NULL
+#define valid_swaphandles(swp, off)		0
+#define can_share_swap_page(p)			0
+#define move_to_swap_cache(p, swp)		1
+#define move_from_swap_cache(p, i, m)		1
+#define __delete_from_swap_cache(p)		/*NOTHING*/
+#define delete_from_swap_cache(p)		/*NOTHING*/
+#define swap_token_default_timeout		0
+
+static inline int remove_exclusive_swap_page(struct page *p)
+{
+	return 0;
+}
+
+static inline swp_entry_t get_swap_page(void)
+{
+	swp_entry_t entry;
+	entry.val = 0;
+	return entry;
+}
+
+/* linux/mm/thrash.c */
+#define put_swap_token(x) do { } while(0)
+#define grab_swap_token()  do { } while(0)
+#define has_swap_token(x) 0
+
+#endif /* CONFIG_SWAP */
 #endif /* __KERNEL__*/
-
 #endif /* _LINUX_SWAP_H */

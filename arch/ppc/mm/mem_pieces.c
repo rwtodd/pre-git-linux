@@ -1,6 +1,6 @@
 /*
  *    Copyright (c) 1996 Paul Mackerras <paulus@cs.anu.edu.au>
- *      Changes to accomodate Power Macintoshes.
+ *      Changes to accommodate Power Macintoshes.
  *    Cort Dougan <cort@cs.nmt.edu>
  *      Rewrites.
  *    Grant Erickson <grant@lcse.umn.edu>
@@ -17,8 +17,8 @@
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
-#include <linux/blk.h>
 #include <linux/init.h>
+#include <asm/page.h>
 
 #include "mem_pieces.h"
 
@@ -42,18 +42,18 @@ mem_pieces_find(unsigned int size, unsigned int align)
 		a = (a + align - 1) & -align;
 		if (a + size <= e) {
 			mem_pieces_remove(mp, a, size, 1);
-			return __va(a);
+			return (void *) __va(a);
 		}
 	}
 	panic("Couldn't find %u bytes at %u alignment\n", size, align);
-	
+
 	return NULL;
 }
 
 /*
  * Remove some memory from an array of pieces
  */
-void __init 
+void __init
 mem_pieces_remove(struct mem_pieces *mp, unsigned int start, unsigned int size,
 		  int must_exist)
 {
@@ -119,23 +119,6 @@ mem_pieces_print(struct mem_pieces *mp)
 		       mp->regions[i].address + mp->regions[i].size);
 	printk("\n");
 }
-
-#if defined(CONFIG_APUS) || defined(CONFIG_ALL_PPC)
-/*
- * Add some memory to an array of pieces
- */
-void __init
-mem_pieces_append(struct mem_pieces *mp, unsigned int start, unsigned int size)
-{
-	struct reg_property *rp;
-
-	if (mp->n_regions >= MEM_PIECES_MAX)
-		return;
-	rp = &mp->regions[mp->n_regions++];
-	rp->address = start;
-	rp->size = size;
-}
-#endif /* CONFIG_APUS || CONFIG_ALL_PPC */
 
 void __init
 mem_pieces_sort(struct mem_pieces *mp)

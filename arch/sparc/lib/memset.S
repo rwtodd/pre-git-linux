@@ -7,23 +7,25 @@
  * occurs and we were called as clear_user.
  */
 
-#include <asm/cprefix.h>
 #include <asm/ptrace.h>
 
-#define EX(x,y,a,b,z) 				\
+/* Work around cpp -rob */
+#define ALLOC #alloc
+#define EXECINSTR #execinstr
+#define EX(x,y,a,b) 				\
 98: 	x,y;					\
-	.section .fixup,z##alloc,z##execinstr;	\
+	.section .fixup,ALLOC,EXECINSTR;	\
 	.align	4;				\
 99:	ba 30f;					\
 	 a, b, %o0;				\
-	.section __ex_table,z##alloc;		\
+	.section __ex_table,ALLOC;		\
 	.align	4;				\
 	.word	98b, 99b;			\
 	.text;					\
 	.align	4
 
-#define EXT(start,end,handler,z) 		\
-	.section __ex_table,z##alloc;		\
+#define EXT(start,end,handler) 			\
+	.section __ex_table,ALLOC;		\
 	.align	4;				\
 	.word	start, 0, end, handler;		\
 	.text;					\
@@ -58,12 +60,12 @@
         .globl  __bzero_begin
 __bzero_begin:
 
-	.globl	C_LABEL(__bzero), C_LABEL(__memset), 
-	.globl	C_LABEL(memset)
-	.globl	C_LABEL(__memset_start), C_LABEL(__memset_end)
-C_LABEL(__memset_start):
-C_LABEL(__memset):
-C_LABEL(memset):
+	.globl	__bzero, __memset, 
+	.globl	memset
+	.globl	__memset_start, __memset_end
+__memset_start:
+__memset:
+memset:
 	and	%o1, 0xff, %g3
 	sll	%g3, 8, %g2
 	or	%g3, %g2, %g3
@@ -74,20 +76,20 @@ C_LABEL(memset):
 3:
 	cmp	%o2, 3
 	be	2f
-	 EX(stb	%g3, [%o0], sub %o1, 0,#)
+	 EX(stb	%g3, [%o0], sub %o1, 0)
 
 	cmp	%o2, 2
 	be	2f
-	 EX(stb	%g3, [%o0 + 0x01], sub %o1, 1,#)
+	 EX(stb	%g3, [%o0 + 0x01], sub %o1, 1)
 
-	EX(stb	%g3, [%o0 + 0x02], sub %o1, 2,#)
+	EX(stb	%g3, [%o0 + 0x02], sub %o1, 2)
 2:
 	sub	%o2, 4, %o2
 	add	%o1, %o2, %o1
 	b	4f
 	 sub	%o0, %o2, %o0
 
-C_LABEL(__bzero):
+__bzero:
 	mov	%g0, %g3
 1:
 	cmp	%o1, 7
@@ -101,7 +103,7 @@ C_LABEL(__bzero):
 	be	2f
 	 mov	%g3, %g2
 
-	EX(st	%g3, [%o0], sub %o1, 0,#)
+	EX(st	%g3, [%o0], sub %o1, 0)
 	sub	%o1, 4, %o1
 	add	%o0, 4, %o0
 2:
@@ -113,7 +115,7 @@ C_LABEL(__bzero):
 	subcc	%o3, 128, %o3
 	ZERO_BIG_BLOCK(%o0, 0x40, %g2)
 11:
-	EXT(10b, 11b, 20f,#)
+	EXT(10b, 11b, 20f)
 	bne	10b
 	 add	%o0, 128, %o0
 
@@ -138,17 +140,17 @@ C_LABEL(__bzero):
 	be	1f
 	 andcc	%o1, 2, %g0
 
-	EX(st	%g3, [%o0], and %o1, 7,#)
+	EX(st	%g3, [%o0], and %o1, 7)
 	add	%o0, 4, %o0
 1:
 	be	1f
 	 andcc	%o1, 1, %g0
 
-	EX(sth	%g3, [%o0], and %o1, 3,#)
+	EX(sth	%g3, [%o0], and %o1, 3)
 	add	%o0, 2, %o0
 1:
 	bne,a	8f
-	 EX(stb	%g3, [%o0], and %o1, 1,#)
+	 EX(stb	%g3, [%o0], and %o1, 1)
 8:
 	retl
 	 clr	%o0
@@ -161,11 +163,11 @@ C_LABEL(__bzero):
 	 add	%o0, 1, %o0
 	subcc	%o1, 1, %o1
 	bne,a	8b
-	 EX(stb	%g3, [%o0 - 1], add %o1, 1,#)
+	 EX(stb	%g3, [%o0 - 1], add %o1, 1)
 0:
 	retl
 	 clr	%o0
-C_LABEL(__memset_end):
+__memset_end:
 
 	.section .fixup,#alloc,#execinstr
 	.align	4
@@ -188,11 +190,11 @@ C_LABEL(__memset_end):
 	b 30f
 	 add	%o0, %o1, %o0
 30:
-/* %o4 is faulting address, %o5 is %pc where fault occured */
+/* %o4 is faulting address, %o5 is %pc where fault occurred */
 	save	%sp, -104, %sp
 	mov	%i5, %o0
 	mov	%i7, %o1
-	call	C_LABEL(lookup_fault)
+	call	lookup_fault
 	 mov	%i4, %o2
 	ret
 	 restore

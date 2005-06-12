@@ -9,39 +9,57 @@
  * these tests and macros.
  */
 
-#if 0
-#define __kernel_insbl(val, shift) \
-  (((unsigned long)(val) & 0xfful) << ((shift) * 8))
-#define __kernel_inswl(val, shift) \
-  (((unsigned long)(val) & 0xfffful) << ((shift) * 8))
-#define __kernel_insql(val, shift) \
-  ((unsigned long)(val) << ((shift) * 8))
+#if __GNUC__ == 3 && __GNUC_MINOR__ >= 4 || __GNUC__ > 3
+# define __kernel_insbl(val, shift)	__builtin_alpha_insbl(val, shift)
+# define __kernel_inswl(val, shift)	__builtin_alpha_inswl(val, shift)
+# define __kernel_insql(val, shift)	__builtin_alpha_insql(val, shift)
+# define __kernel_inslh(val, shift)	__builtin_alpha_inslh(val, shift)
+# define __kernel_extbl(val, shift)	__builtin_alpha_extbl(val, shift)
+# define __kernel_extwl(val, shift)	__builtin_alpha_extwl(val, shift)
+# define __kernel_cmpbge(a, b)		__builtin_alpha_cmpbge(a, b)
+# define __kernel_cttz(x)		__builtin_ctzl(x)
+# define __kernel_ctlz(x)		__builtin_clzl(x)
+# define __kernel_ctpop(x)		__builtin_popcountl(x)
 #else
-#define __kernel_insbl(val, shift)					\
+# define __kernel_insbl(val, shift)					\
   ({ unsigned long __kir;						\
      __asm__("insbl %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
      __kir; })
-#define __kernel_inswl(val, shift)					\
+# define __kernel_inswl(val, shift)					\
   ({ unsigned long __kir;						\
      __asm__("inswl %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
      __kir; })
-#define __kernel_insql(val, shift)					\
+# define __kernel_insql(val, shift)					\
   ({ unsigned long __kir;						\
      __asm__("insql %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
      __kir; })
-#endif
-
-#if 0 && (__GNUC__ > 2 || __GNUC_MINOR__ >= 92)
-#define __kernel_extbl(val, shift)  (((val) >> (((shift) & 7) * 8)) & 0xfful)
-#define __kernel_extwl(val, shift)  (((val) >> (((shift) & 7) * 8)) & 0xfffful)
-#else
-#define __kernel_extbl(val, shift)					\
+# define __kernel_inslh(val, shift)					\
+  ({ unsigned long __kir;						\
+     __asm__("inslh %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
+     __kir; })
+# define __kernel_extbl(val, shift)					\
   ({ unsigned long __kir;						\
      __asm__("extbl %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
      __kir; })
-#define __kernel_extwl(val, shift)					\
+# define __kernel_extwl(val, shift)					\
   ({ unsigned long __kir;						\
      __asm__("extwl %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
+     __kir; })
+# define __kernel_cmpbge(a, b)						\
+  ({ unsigned long __kir;						\
+     __asm__("cmpbge %r2,%1,%0" : "=r"(__kir) : "rI"(b), "rJ"(a));	\
+     __kir; })
+# define __kernel_cttz(x)						\
+  ({ unsigned long __kir;						\
+     __asm__("cttz %1,%0" : "=r"(__kir) : "r"(x));			\
+     __kir; })
+# define __kernel_ctlz(x)						\
+  ({ unsigned long __kir;						\
+     __asm__("ctlz %1,%0" : "=r"(__kir) : "r"(x));			\
+     __kir; })
+# define __kernel_ctpop(x)						\
+  ({ unsigned long __kir;						\
+     __asm__("ctpop %1,%0" : "=r"(__kir) : "r"(x));			\
      __kir; })
 #endif
 
@@ -72,13 +90,14 @@
   __asm__("stw %1,%0" : "=m"(mem) : "r"(val))
 #endif
 
-/* Somewhere in the middle of the GCC 2.96 development cycle, we implemented
-   a mechanism by which the user can annotate likely branch directions and
-   expect the blocks to be reordered appropriately.  Define __builtin_expect
-   to nothing for earlier compilers.  */
+/* Some idiots over in <linux/compiler.h> thought inline should imply
+   always_inline.  This breaks stuff.  We'll include this file whenever
+   we run into such problems.  */
 
-#if __GNUC__ == 2 && __GNUC_MINOR__ < 96
-#define __builtin_expect(x, expected_value) (x)
-#endif
+#include <linux/compiler.h>
+#undef inline
+#undef __inline__
+#undef __inline
+
 
 #endif /* __ALPHA_COMPILER_H */

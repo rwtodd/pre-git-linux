@@ -12,10 +12,9 @@
 #include <asm/io.h>
 #include <asm/page.h>
 #include <linux/kernel.h>
-#include <asm/processor.h>
 #include <asm/8xx_immap.h>
 #include <asm/mpc8xx.h>
-#include "commproc.h"
+#include <asm/commproc.h>
 
 extern void xmon_printf(const char *fmt, ...);
 extern int xmon_8xx_write(char *str, int nb);

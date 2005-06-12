@@ -79,25 +79,25 @@
 
 #define MAX_POLL_TIME	10
 
-static char *version =
+static char version[] =
 	"bionet.c:v1.0 06-feb-96 (c) Hartmut Laue.\n";
 
 #include <linux/module.h>
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -106,7 +106,6 @@ static char *version =
 #include <asm/setup.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/atarihw.h>
@@ -114,8 +113,6 @@ static char *version =
 #include <asm/atari_acsi.h>
 #include <asm/atari_stdma.h>
 
-
-extern struct net_device *init_etherdev(struct net_device *dev, int sizeof_private);
 
 /* use 0 for production, 1 for verification, >2 for debug
  */
@@ -127,6 +124,8 @@ extern struct net_device *init_etherdev(struct net_device *dev, int sizeof_priva
  */
 unsigned int bionet_debug = NET_DEBUG;
 MODULE_PARM(bionet_debug, "i");
+MODULE_PARM_DESC(bionet_debug, "bionet debug level (0-2)");
+MODULE_LICENSE("GPL");
 
 static unsigned int bionet_min_poll_time = 2;
 
@@ -149,8 +148,6 @@ unsigned char *phys_nic_packet;
 
 /* Index to functions, as function prototypes.
  */
-extern int bionet_probe(struct net_device *dev);
-
 static int bionet_open(struct net_device *dev);
 static int bionet_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void bionet_poll_rx(struct net_device *);
@@ -158,7 +155,7 @@ static int bionet_close(struct net_device *dev);
 static struct net_device_stats *net_get_stats(struct net_device *dev);
 static void bionet_tick(unsigned long);
 
-static struct timer_list bionet_timer = { function: bionet_tick };
+static struct timer_list bionet_timer = TIMER_INITIALIZER(bionet_tick, 0, 0);
 
 #define STRAM_ADDR(a)	(((a) & 0xff000000) == 0)
 
@@ -222,9 +219,9 @@ gsend:
 	return c;
 }
 
-static void
+static irqreturn_t
 bionet_intr(int irq, void *data, struct pt_regs *fp) {
-	return;
+	return IRQ_HANDLED;
 }
 
 
@@ -234,8 +231,7 @@ get_frame(unsigned long paddr, int odd) {
 	unsigned long flags;
 
 	DISABLE_IRQ();
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	dma_wd.dma_mode_status		= 0x9a;
 	dma_wd.dma_mode_status		= 0x19a;
@@ -246,7 +242,7 @@ get_frame(unsigned long paddr, int odd) {
 	dma_wd.dma_md			= (unsigned char)paddr;
 	paddr >>= 8;
 	dma_wd.dma_hi			= (unsigned char)paddr;
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	c = sendcmd(0,0x00,NODE_ADR | C_READ);	/* CMD: READ */
 	if( c < 128 ) goto rend;
@@ -283,8 +279,7 @@ hardware_send_packet(unsigned long paddr, int cnt) {
 	unsigned long flags;
 
 	DISABLE_IRQ();
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	dma_wd.dma_mode_status	= 0x19a;
 	dma_wd.dma_mode_status	= 0x9a;
@@ -296,7 +291,7 @@ hardware_send_packet(unsigned long paddr, int cnt) {
 	dma_wd.dma_hi		= (unsigned char)paddr;
 
 	dma_wd.fdc_acces_seccount	= 0x4;		/* sector count */
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	c = sendcmd(0,0x100,NODE_ADR | C_WRITE);	/* CMD: WRITE */
 	c = sendcmd(1,0x100,cnt&0xff);
@@ -324,15 +319,26 @@ end:
 
 /* Check for a network adaptor of this type, and return '0' if one exists.
  */
-int __init 
-bionet_probe(struct net_device *dev){
+struct net_device * __init bionet_probe(int unit)
+{
+	struct net_device *dev;
 	unsigned char station_addr[6];
-	static unsigned version_printed = 0;
-	static int no_more_found = 0; /* avoid "Probing for..." printed 4 times */
+	static unsigned version_printed;
+	static int no_more_found;	/* avoid "Probing for..." printed 4 times */
 	int i;
+	int err;
 
 	if (!MACH_IS_ATARI || no_more_found)
-		return -ENODEV;
+		return ERR_PTR(-ENODEV);
+
+	dev = alloc_etherdev(sizeof(struct net_local));
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+	}
+	SET_MODULE_OWNER(dev);
 
 	printk("Probing for BioNet 100 Adapter...\n");
 
@@ -350,10 +356,9 @@ bionet_probe(struct net_device *dev){
 	||  station_addr[2] != 'O' ) {
 		no_more_found = 1;
 		printk( "No BioNet 100 found.\n" );
-		return -ENODEV;
+		free_netdev(dev);
+		return ERR_PTR(-ENODEV);
 	}
-
-	SET_MODULE_OWNER(dev);
 
 	if (bionet_debug > 0 && version_printed++ == 0)
 		printk(version);
@@ -372,10 +377,6 @@ bionet_probe(struct net_device *dev){
 			nic_packet, phys_nic_packet );
 	}
 
-	if (dev->priv == NULL)
-		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	memset(dev->priv, 0, sizeof(struct net_local));
-
 	dev->open		= bionet_open;
 	dev->stop		= bionet_close;
 	dev->hard_start_xmit	= bionet_send_packet;
@@ -391,8 +392,11 @@ bionet_probe(struct net_device *dev){
 #endif
 		dev->dev_addr[i]  = station_addr[i];
 	}
-	ether_setup(dev);
-	return 0;
+	err = register_netdev(dev);
+	if (!err)
+		return dev;
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
 
 /* Open/initialize the board.  This is called (in the current kernel)
@@ -404,7 +408,7 @@ bionet_probe(struct net_device *dev){
  */
 static int
 bionet_open(struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (bionet_debug > 0)
 		printk("bionet_open\n");
@@ -429,17 +433,16 @@ bionet_open(struct net_device *dev) {
 
 static int
 bionet_send_packet(struct sk_buff *skb, struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	unsigned long flags;
 
 	/* Block a timer-based transmit from overlapping.  This could better be
 	 * done with atomic_swap(1, dev->tbusy), but set_bit() works as well.
 	 */
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	if (stdma_islocked()) {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		lp->stats.tx_errors++;
 	}
 	else {
@@ -448,7 +451,7 @@ bionet_send_packet(struct sk_buff *skb, struct net_device *dev) {
 		int stat;
 
 		stdma_lock(bionet_intr, NULL);
-		restore_flags(flags);
+		local_irq_restore(flags);
 		if( !STRAM_ADDR(buf+length-1) ) {
 			memcpy(nic_packet->buffer, skb->data, length);
 			buf = (unsigned long)&((struct nic_pkt_s *)phys_nic_packet)->buffer;
@@ -496,25 +499,24 @@ bionet_send_packet(struct sk_buff *skb, struct net_device *dev) {
  */
 static void
 bionet_poll_rx(struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int boguscount = 10;
 	int pkt_len, status;
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	/* ++roman: Take care at locking the ST-DMA... This must be done with ints
 	 * off, since otherwise an int could slip in between the question and the
 	 * locking itself, and then we'd go to sleep... And locking itself is
 	 * necessary to keep the floppy_change timer from working with ST-DMA
 	 * registers. */
 	if (stdma_islocked()) {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return;
 	}
 	stdma_lock(bionet_intr, NULL);
 	DISABLE_IRQ();
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	if( lp->poll_time < MAX_POLL_TIME ) lp->poll_time++;
 
@@ -551,6 +553,7 @@ bionet_poll_rx(struct net_device *dev) {
 			memcpy(skb->data, nic_packet->buffer, pkt_len);
 			skb->protocol = eth_type_trans( skb, dev ); 
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 			lp->stats.rx_bytes+=pkt_len;
 
@@ -598,7 +601,7 @@ bionet_poll_rx(struct net_device *dev) {
 static void
 bionet_tick(unsigned long data) {
 	struct net_device	 *dev = (struct net_device *)data;
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if( bionet_debug > 0 && (lp->open_time++ & 7) == 8 )
 		printk("bionet_tick: %ld\n", lp->open_time);
@@ -613,7 +616,7 @@ bionet_tick(unsigned long data) {
  */
 static int
 bionet_close(struct net_device *dev) {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (bionet_debug > 0)
 		printk("bionet_close, open_time=%ld\n", lp->open_time);
@@ -635,32 +638,27 @@ bionet_close(struct net_device *dev) {
  */
 static struct net_device_stats *net_get_stats(struct net_device *dev) 
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	return &lp->stats;
 }
 
 
 #ifdef MODULE
 
-static struct net_device bio_dev;
+static struct net_device *bio_dev;
 
-int
-init_module(void) {
-	int err;
-
-	bio_dev.init = bionet_probe;
-	if ((err = register_netdev(&bio_dev))) {
-		if (err == -EEXIST)  {
-			printk("BIONET: devices already present. Module not loaded.\n");
-		}
-		return err;
-	}
+int init_module(void)
+{
+	bio_dev = bionet_probe(-1);
+	if (IS_ERR(bio_dev))
+		return PTR_ERR(bio_dev);
 	return 0;
 }
 
-void
-cleanup_module(void) {
-	unregister_netdev(&bio_dev);
+void cleanup_module(void)
+{
+	unregister_netdev(bio_dev);
+	free_netdev(bio_dev);
 }
 
 #endif /* MODULE */

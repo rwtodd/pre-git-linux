@@ -1,6 +1,8 @@
 #ifndef _I386_TYPES_H
 #define _I386_TYPES_H
 
+#ifndef __ASSEMBLY__
+
 typedef unsigned short umode_t;
 
 /*
@@ -22,10 +24,18 @@ typedef __signed__ long long __s64;
 typedef unsigned long long __u64;
 #endif
 
+#endif /* __ASSEMBLY__ */
+
 /*
  * These aren't exported outside the kernel to avoid name space clashes
  */
 #ifdef __KERNEL__
+
+#define BITS_PER_LONG 32
+
+#ifndef __ASSEMBLY__
+
+#include <linux/config.h>
 
 typedef signed char s8;
 typedef unsigned char u8;
@@ -39,11 +49,23 @@ typedef unsigned int u32;
 typedef signed long long s64;
 typedef unsigned long long u64;
 
-#define BITS_PER_LONG 32
+/* DMA addresses come in generic and 64-bit flavours.  */
 
-/* Dma addresses are 32-bits wide.  */
-
+#ifdef CONFIG_HIGHMEM64G
+typedef u64 dma_addr_t;
+#else
 typedef u32 dma_addr_t;
+#endif
+typedef u64 dma64_addr_t;
+
+#ifdef CONFIG_LBD
+typedef u64 sector_t;
+#define HAVE_SECTOR_T
+#endif
+
+typedef unsigned short kmem_bufctl_t;
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* __KERNEL__ */
 

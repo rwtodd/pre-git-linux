@@ -25,6 +25,7 @@
  +---------------------------------------------------------------------------*/
 
 #include <linux/signal.h>
+#include <linux/ptrace.h>
 
 #include <asm/uaccess.h>
 #include <asm/desc.h>
@@ -78,7 +79,7 @@ static FUNC const st_instr_table[64] = {
   fdivr_,   FPU_trigb,  __BAD__, __BAD__, fdiv_i,  __BAD__, fdivp_,  __BAD__,
 };
 
-#endif NO_UNDOC_CODE
+#endif /* NO_UNDOC_CODE */
 
 
 #define _NONE_ 0   /* Take no special action */
@@ -120,14 +121,14 @@ static u_char const type_table[64] = {
   _REGI_, _NONE_, _null_, _null_, _REGIi, _null_, _REGIp, _null_
 };
 
-#endif NO_UNDOC_CODE
+#endif /* NO_UNDOC_CODE */
 
 
 #ifdef RE_ENTRANT_CHECKING
 u_char emulating=0;
-#endif RE_ENTRANT_CHECKING
+#endif /* RE_ENTRANT_CHECKING */
 
-static int valid_prefix(u_char *Byte, u_char **fpu_eip,
+static int valid_prefix(u_char *Byte, u_char __user **fpu_eip,
 			overrides *override);
 
 asmlinkage void math_emulate(long arg)
@@ -139,7 +140,7 @@ asmlinkage void math_emulate(long arg)
   FPU_REG loaded_data;
   FPU_REG *st0_ptr;
   u_char	  loaded_tag, st0_tag;
-  void *data_address;
+  void __user *data_address;
   struct address data_sel_off;
   struct address entry_sel_off;
   unsigned long code_base = 0;
@@ -152,12 +153,12 @@ asmlinkage void math_emulate(long arg)
       printk("ERROR: wm-FPU-emu is not RE-ENTRANT!\n");
     }
   RE_ENTRANT_CHECK_ON;
-#endif RE_ENTRANT_CHECKING
+#endif /* RE_ENTRANT_CHECKING */
 
-  if (!current->used_math)
+  if (!used_math())
     {
       finit();
-      current->used_math = 1;
+      set_used_math();
     }
 
   SETUP_DATA_AREA(arg);
@@ -191,7 +192,8 @@ asmlinkage void math_emulate(long arg)
 	  math_abort(FPU_info, SIGILL);
 	}
 
-      if ( SEG_D_SIZE(code_descriptor = LDT_DESCRIPTOR(FPU_CS)) )
+      code_descriptor = LDT_DESCRIPTOR(FPU_CS);
+      if ( SEG_D_SIZE(code_descriptor) )
 	{
 	  /* The above test may be wrong, the book is not clear */
 	  /* Segmented 32 bit protected mode */
@@ -213,7 +215,7 @@ asmlinkage void math_emulate(long arg)
   if (current->ptrace & PT_PTRACED)
     FPU_lookahead = 0;
 
-  if ( !valid_prefix(&byte1, (u_char **)&FPU_EIP,
+  if ( !valid_prefix(&byte1, (u_char __user **)&FPU_EIP,
 		     &addr_modes.override) )
     {
       RE_ENTRANT_CHECK_OFF;
@@ -251,12 +253,12 @@ do_another_FPU_instruction:
 #ifdef PARANOID
       EXCEPTION(EX_INTERNAL|0x128);
       math_abort(FPU_info,SIGILL);
-#endif PARANOID
+#endif /* PARANOID */
     }
 
   RE_ENTRANT_CHECK_OFF;
   FPU_code_verify_area(1);
-  FPU_get_user(FPU_modrm, (u_char *) FPU_EIP);
+  FPU_get_user(FPU_modrm, (u_char __user *) FPU_EIP);
   RE_ENTRANT_CHECK_ON;
   FPU_EIP++;
 
@@ -335,23 +337,23 @@ do_another_FPU_instruction:
 	      switch ( (byte1 >> 1) & 3 )
 		{
 		case 0:
-		  unmasked = FPU_load_single((float *)data_address,
+		  unmasked = FPU_load_single((float __user *)data_address,
 					     &loaded_data);
 		  loaded_tag = unmasked & 0xff;
 		  unmasked &= ~0xff;
 		  break;
 		case 1:
-		  loaded_tag = FPU_load_int32((long *)data_address, &loaded_data);
+		  loaded_tag = FPU_load_int32((long __user *)data_address, &loaded_data);
 		  break;
 		case 2:
-		  unmasked = FPU_load_double((double *)data_address,
+		  unmasked = FPU_load_double((double __user *)data_address,
 					     &loaded_data);
 		  loaded_tag = unmasked & 0xff;
 		  unmasked &= ~0xff;
 		  break;
 		case 3:
 		default:  /* Used here to suppress gcc warnings. */
-		  loaded_tag = FPU_load_int16((short *)data_address, &loaded_data);
+		  loaded_tag = FPU_load_int16((short __user *)data_address, &loaded_data);
 		  break;
 		}
 
@@ -386,7 +388,7 @@ do_another_FPU_instruction:
 			/* fdiv or fsub */
 			real_2op_NaN(&loaded_data, loaded_tag, 0, &loaded_data);
 		      else
-#endif PECULIAR_486
+#endif /* PECULIAR_486 */ 
 			/* fadd, fdivr, fmul, or fsubr */
 			real_2op_NaN(&loaded_data, loaded_tag, 0, st0_ptr);
 		    }
@@ -497,7 +499,7 @@ do_another_FPU_instruction:
 	 to do this: */
       operand_address.offset = 0;
       operand_address.selector = FPU_DS;
-#endif PECULIAR_486
+#endif /* PECULIAR_486 */
 
       st0_ptr = &st(0);
       st0_tag = FPU_gettag0();
@@ -557,12 +559,12 @@ FPU_fwait_done:
   RE_ENTRANT_CHECK_OFF;
   FPU_printall();
   RE_ENTRANT_CHECK_ON;
-#endif DEBUG
+#endif /* DEBUG */
 
-  if (FPU_lookahead && !current->need_resched)
+  if (FPU_lookahead && !need_resched())
     {
       FPU_ORIG_EIP = FPU_EIP - code_base;
-      if ( valid_prefix(&byte1, (u_char **)&FPU_EIP,
+      if ( valid_prefix(&byte1, (u_char __user **)&FPU_EIP,
 			&addr_modes.override) )
 	goto do_another_FPU_instruction;
     }
@@ -578,11 +580,11 @@ FPU_fwait_done:
    all prefix bytes, further changes are needed in the emulator code
    which accesses user address space. Access to separate segments is
    important for msdos emulation. */
-static int valid_prefix(u_char *Byte, u_char **fpu_eip,
+static int valid_prefix(u_char *Byte, u_char __user **fpu_eip,
 			overrides *override)
 {
   u_char byte;
-  u_char *ip = *fpu_eip;
+  u_char __user *ip = *fpu_eip;
 
   *override = (overrides) { 0, 0, PREFIX_DEFAULT };       /* defaults */
 
@@ -669,7 +671,7 @@ void math_abort(struct info * info, unsigned int signal)
 	__asm__("movl %0,%%esp ; ret": :"g" (((long) info)-4));
 #ifdef PARANOID
       printk("ERROR: wm-FPU-emu math_abort failed!\n");
-#endif PARANOID
+#endif /* PARANOID */
 }
 
 
@@ -678,9 +680,9 @@ void math_abort(struct info * info, unsigned int signal)
 #define sstatus_word() \
   ((S387->swd & ~SW_Top & 0xffff) | ((S387->ftop << SW_Top_Shift) & SW_Top))
 
-int restore_i387_soft(void *s387, struct _fpstate *buf)
+int restore_i387_soft(void *s387, struct _fpstate __user *buf)
 {
-  u_char *d = (u_char *)buf;
+  u_char __user *d = (u_char __user *)buf;
   int offset, other, i, tags, regnr, tag, newtop;
 
   RE_ENTRANT_CHECK_OFF;
@@ -724,9 +726,9 @@ int restore_i387_soft(void *s387, struct _fpstate *buf)
 }
 
 
-int save_i387_soft(void *s387, struct _fpstate * buf)
+int save_i387_soft(void *s387, struct _fpstate __user * buf)
 {
-  u_char *d = (u_char *)buf;
+  u_char __user *d = (u_char __user *)buf;
   int offset = (S387->ftop & 7) * 10, other = 80 - offset;
 
   RE_ENTRANT_CHECK_OFF;
@@ -739,7 +741,7 @@ int save_i387_soft(void *s387, struct _fpstate * buf)
   S387->twd |= 0xffff0000;
   S387->fcs &= ~0xf8000000;
   S387->fos |= 0xffff0000;
-#endif PECULIAR_486
+#endif /* PECULIAR_486 */
   __copy_to_user(d, &S387->cwd, 7*4);
   RE_ENTRANT_CHECK_ON;
 

@@ -34,10 +34,10 @@
 static char *_rioboot_c_sccs_ = "@(#)rioboot.c	1.3";
 #endif
 
-#define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/interrupt.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/string.h>
@@ -47,7 +47,6 @@ static char *_rioboot_c_sccs_ = "@(#)rioboot.c	1.3";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 
@@ -80,6 +79,8 @@ static char *_rioboot_c_sccs_ = "@(#)rioboot.c	1.3";
 #include "link.h"
 #include "cmdblk.h"
 #include "route.h"
+
+static int RIOBootComplete( struct rio_info *p, struct Host *HostP, uint Rup, struct PktCmd *PktCmdP );
 
 static uchar
 RIOAtVec2Ctrl[] =
@@ -128,7 +129,7 @@ struct DownLoad *	rbp;
 		p->RIOError.Error = HOST_FILE_TOO_LARGE;
 		/* restore(oldspl); */
 		func_exit ();
-		return ENOMEM;
+		return -ENOMEM;
 	}
 
 	if ( p->RIOBooting ) {
@@ -136,7 +137,7 @@ struct DownLoad *	rbp;
 		p->RIOError.Error = BOOT_IN_PROGRESS;
 		/* restore(oldspl); */
 		func_exit ();
-		return EBUSY;
+		return -EBUSY;
 	}
 
 	/*
@@ -164,7 +165,7 @@ struct DownLoad *	rbp;
 		p->RIOError.Error = COPYIN_FAILED;
 		/* restore(oldspl); */
 		func_exit ();
-		return EFAULT;
+		return -EFAULT;
 	}
 
 	/*
@@ -294,7 +295,7 @@ register struct DownLoad *rbp;
 			rio_dprintk (RIO_DEBUG_BOOT, "Bin too large\n");
 			p->RIOError.Error = HOST_FILE_TOO_LARGE;
 			func_exit ();
-			return EFBIG;
+			return -EFBIG;
 		}
 		/*
 		** Ensure that the host really is stopped.
@@ -321,15 +322,16 @@ register struct DownLoad *rbp;
 				rio_dprintk (RIO_DEBUG_BOOT, "No system memory available\n");
 				p->RIOError.Error = NOT_ENOUGH_CORE_FOR_PCI_COPY;
 				func_exit ();
-				return ENOMEM;
+				return -ENOMEM;
 			}
 			bzero(DownCode, rbp->Count);
 
 			if ( copyin((int)rbp->DataP,DownCode,rbp->Count)==COPYFAIL ) {
 				rio_dprintk (RIO_DEBUG_BOOT, "Bad copyin of host data\n");
+				sysfree( DownCode, rbp->Count );
 				p->RIOError.Error = COPYIN_FAILED;
 				func_exit ();
-				return EFAULT;
+				return -EFAULT;
 			}
 
 			HostP->Copy( DownCode, StartP, rbp->Count );
@@ -340,7 +342,7 @@ register struct DownLoad *rbp;
 			rio_dprintk (RIO_DEBUG_BOOT, "Bad copyin of host data\n");
 			p->RIOError.Error = COPYIN_FAILED;
 			func_exit ();
-			return EFAULT;
+			return -EFAULT;
 		}
 
 		rio_dprintk (RIO_DEBUG_BOOT, "Copy completed\n");
@@ -409,7 +411,7 @@ register struct DownLoad *rbp;
 		** compatible with the whole Tp family. (lies, damn lies, it'll never
 		** work in a month of Sundays).
 		**
-		** The nfix nyble is the 1s compliment of the nyble value you
+		** The nfix nyble is the 1s complement of the nyble value you
 		** want to load - in this case we wanted 'F' so we nfix loaded '0'.
 		*/
 
@@ -580,14 +582,14 @@ register struct DownLoad *rbp;
 			HostP->UnixRups[RupN].RupP		= &HostP->RupP[RupN];
 			HostP->UnixRups[RupN].Id		  = RupN+1;
 			HostP->UnixRups[RupN].BaseSysPort = NO_PORT;
-			HostP->UnixRups[RupN].RupLock = SPIN_LOCK_UNLOCKED;
+			spin_lock_init(&HostP->UnixRups[RupN].RupLock);
 		}
 
 		for ( RupN = 0; RupN<LINKS_PER_UNIT; RupN++ ) {
 			HostP->UnixRups[RupN+MAX_RUP].RupP	= &HostP->LinkStrP[RupN].rup;
 			HostP->UnixRups[RupN+MAX_RUP].Id  = 0;
 			HostP->UnixRups[RupN+MAX_RUP].BaseSysPort = NO_PORT;
-			HostP->UnixRups[RupN+MAX_RUP].RupLock = SPIN_LOCK_UNLOCKED;
+			spin_lock_init(&HostP->UnixRups[RupN+MAX_RUP].RupLock);
 		}
 
 		/*
@@ -802,7 +804,7 @@ struct PKT *PacketP;
 ** If booted by an RTA, HostP->Mapping[Rup].RtaUniqueNum is the booting RTA.
 ** RtaUniq is the booted RTA.
 */
-int RIOBootComplete( struct rio_info *p, struct Host *HostP, uint Rup, struct PktCmd *PktCmdP )
+static int RIOBootComplete( struct rio_info *p, struct Host *HostP, uint Rup, struct PktCmd *PktCmdP )
 {
 	struct Map	*MapP = NULL;
 	struct Map	*MapP2 = NULL;

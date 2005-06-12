@@ -1,5 +1,4 @@
-/* $Id: ioremap.c,v 1.2 1999/11/25 14:00:28 gniibe Exp $
- *
+/*
  * arch/sh/mm/ioremap.c
  *
  * Re-map IO memory to kernel address space so that we can access it.
@@ -10,13 +9,18 @@
  */
 
 #include <linux/vmalloc.h>
+#include <linux/mm.h>
 #include <asm/io.h>
+#include <asm/page.h>
 #include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
-static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
-	unsigned long phys_addr, unsigned long flags)
+static inline void remap_area_pte(pte_t * pte, unsigned long address,
+	unsigned long size, unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
+	unsigned long pfn;
 	pgprot_t pgprot = __pgprot(_PAGE_PRESENT | _PAGE_RW |
 				   _PAGE_DIRTY | _PAGE_ACCESSED |
 				   _PAGE_HW_SHARED | _PAGE_FLAGS_HARD | flags);
@@ -25,18 +29,23 @@ static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned l
 	end = address + size;
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
+	if (address >= end)
+		BUG();
+	pfn = phys_addr >> PAGE_SHIFT;
 	do {
-		if (!pte_none(*pte))
+		if (!pte_none(*pte)) {
 			printk("remap_area_pte: page already exists\n");
-		set_pte(pte, mk_pte_phys(phys_addr, pgprot));
+			BUG();
+		}
+		set_pte(pte, pfn_pte(pfn, pgprot));
 		address += PAGE_SIZE;
-		phys_addr += PAGE_SIZE;
+		pfn++;
 		pte++;
-	} while (address < end);
+	} while (address && (address < end));
 }
 
-static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
-	unsigned long phys_addr, unsigned long flags)
+static inline int remap_area_pmd(pmd_t * pmd, unsigned long address,
+	unsigned long size, unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
 
@@ -45,38 +54,48 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 	if (end > PGDIR_SIZE)
 		end = PGDIR_SIZE;
 	phys_addr -= address;
+	if (address >= end)
+		BUG();
 	do {
-		pte_t * pte = pte_alloc_kernel(pmd, address);
+		pte_t * pte = pte_alloc_kernel(&init_mm, pmd, address);
 		if (!pte)
 			return -ENOMEM;
 		remap_area_pte(pte, address, end - address, address + phys_addr, flags);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
-	} while (address < end);
+	} while (address && (address < end));
 	return 0;
 }
 
-static int remap_area_pages(unsigned long address, unsigned long phys_addr,
-	unsigned long size, unsigned long flags)
+int remap_area_pages(unsigned long address, unsigned long phys_addr,
+		     unsigned long size, unsigned long flags)
 {
+	int error;
 	pgd_t * dir;
 	unsigned long end = address + size;
 
 	phys_addr -= address;
 	dir = pgd_offset_k(address);
 	flush_cache_all();
-	while (address < end) {
-		pmd_t *pmd = pmd_alloc_kernel(dir, address);
+	if (address >= end)
+		BUG();
+	spin_lock(&init_mm.page_table_lock);
+	do {
+		pmd_t *pmd;
+		pmd = pmd_alloc(&init_mm, dir, address);
+		error = -ENOMEM;
 		if (!pmd)
-			return -ENOMEM;
+			break;
 		if (remap_area_pmd(pmd, address, end - address,
 					phys_addr + address, flags))
-			return -ENOMEM;
+			break;
+		error = 0;
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
-	}
+	} while (address && (address < end));
+	spin_unlock(&init_mm.page_table_lock);
 	flush_tlb_all();
-	return 0;
+	return error;
 }
 
 /*
@@ -92,7 +111,7 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
  * have to convert them into an offset in a page-aligned mapping, but the
  * caller shouldn't need to know that small detail.
  */
-void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
+void * p3_ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
 {
 	void * addr;
 	struct vm_struct * area;
@@ -106,7 +125,7 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	/*
 	 * Don't remap the low PCI/ISA area, it's always mapped..
 	 */
-	if (phys_addr >= 0xA0000 && last_addr <= 0x100000)
+	if (phys_addr >= 0xA0000 && last_addr < 0x100000)
 		return phys_to_virt(phys_addr);
 
 	/*
@@ -120,7 +139,7 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	 */
 	offset = phys_addr & ~PAGE_MASK;
 	phys_addr &= PAGE_MASK;
-	size = PAGE_ALIGN(last_addr) - phys_addr;
+	size = PAGE_ALIGN(last_addr+1) - phys_addr;
 
 	/*
 	 * Ok, go for it..
@@ -128,16 +147,17 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	area = get_vm_area(size, VM_IOREMAP);
 	if (!area)
 		return NULL;
+	area->phys_addr = phys_addr;
 	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
-		vfree(addr);
+	if (remap_area_pages((unsigned long) addr, phys_addr, size, flags)) {
+		vunmap(addr);
 		return NULL;
 	}
 	return (void *) (offset + (char *)addr);
 }
 
-void iounmap(void *addr)
+void p3_iounmap(void *addr)
 {
 	if (addr > high_memory)
-		return vfree((void *) (PAGE_MASK & (unsigned long) addr));
+		vfree((void *)(PAGE_MASK & (unsigned long)addr));
 }

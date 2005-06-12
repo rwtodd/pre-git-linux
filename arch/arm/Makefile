@@ -1,255 +1,218 @@
 #
 # arch/arm/Makefile
 #
-# This file is included by the global makefile so that you can add your own
-# architecture-specific flags and dependencies. Remember to do have actions
-# for "archclean" and "archdep" for cleaning up and making dependencies for
-# this architecture
-#
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995-2000 by Russell King
+# Copyright (C) 1995-2001 by Russell King
 
-OBJCOPY		:= $(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
-CPP		:= $(CC) -E
-LINKFLAGS	:= -p -X -T arch/arm/vmlinux.lds
-ARCHCC		:= $(word 1,$(CC))
+LDFLAGS_vmlinux	:=-p --no-undefined -X
+CPPFLAGS_vmlinux.lds = -DTEXTADDR=$(TEXTADDR) -DDATAADDR=$(DATAADDR)
+OBJCOPYFLAGS	:=-O binary -R .note -R .comment -S
+GZFLAGS		:=-9
+#CFLAGS		+=-pipe
 
-AFLAGS		+= -mno-fpu
-CFLAGS_PIPE	:= -pipe
-CFLAGS		:= $(CFLAGS) $(CFLAGS_PIPE) -msoft-float
+# Do not use arch/arm/defconfig - it's always outdated.
+# Select a platform tht is kept up-to-date
+KBUILD_DEFCONFIG := versatile_defconfig
 
-ifdef CONFIG_FRAME_POINTER
-CFLAGS		:= $(CFLAGS:-fomit-frame-pointer=)
+ifeq ($(CONFIG_FRAME_POINTER),y)
+CFLAGS		+=-fno-omit-frame-pointer -mapcs -mno-sched-prolog
 endif
 
-ifdef CONFIG_DEBUG_INFO
-CFLAGS		+= -g
-endif
-
-GZFLAGS		= -9
-
-# Ensure this is ld "2.9.4" or later
-NEW_LINKER	:= $(shell $(LD) --gc-sections --version >/dev/null 2>&1; echo $$?)
-
-ifneq ($(NEW_LINKER),0)
-dummy:;		@echo '*** ${VERSION}.${PATCHLEVEL} kernels no longer build correctly with old versions of binutils.'
-		@echo '*** Please upgrade your binutils to 2.9.5.'
-		@false
-endif
-
-# GCC 2.7 uses different options to later compilers; sort out which we have
-NEW_GCC		:= $(shell $(CC) --version 2>&1 | grep '^2\.7' > /dev/null; echo $$?)
-
-#
-# select flags depending on the compiler
-#
-ifneq ($(NEW_GCC),0)
-CFLAGS			+= -mshort-load-bytes
-CFLAGS_PROC_CPU_26	:= -mcpu=arm3 -mapcs-26 -Os
-CFLAGS_PROC_CPU_32v3	:= -march=armv3
-CFLAGS_PROC_CPU_32v4	:= -march=armv4
+ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
+CFLAGS		+= -mbig-endian
+AS		+= -EB
+LD		+= -EB
+AFLAGS		+= -mbig-endian
 else
-CFLAGS			+= -DNO_TEXT_SECTIONS
-CFLAGS_PROC_CPU_26	:= -m3
-CFLAGS_PROC_CPU_32v3	:= -m6
-CFLAGS_PROC_CPU_32v4	:= -m6
+CFLAGS		+= -mlittle-endian
+AS		+= -EL
+LD		+= -EL
+AFLAGS		+= -mlittle-endian
 endif
 
-#
-# Select CPU dependent flags
-#
-ifeq ($(CONFIG_CPU_26),y)
- PROCESSOR	 = armo
- TEXTADDR	 = 0x02080000
- CFLAGS		+= $(CFLAGS_PROC_CPU_26)
- AFLAGS		+= -mapcs-26
+comma = ,
+
+# This selects which instruction set is used.
+# Note that GCC does not numerically define an architecture version
+# macro, but instead defines a whole series of macros which makes
+# testing for a specific architecture or later rather impossible.
+arch-$(CONFIG_CPU_32v6)		:=-D__LINUX_ARM_ARCH__=6 $(call cc-option,-march=armv6,-march=armv5t -Wa$(comma)-march=armv6)
+arch-$(CONFIG_CPU_32v5)		:=-D__LINUX_ARM_ARCH__=5 $(call cc-option,-march=armv5te,-march=armv4)
+arch-$(CONFIG_CPU_32v4)		:=-D__LINUX_ARM_ARCH__=4 -march=armv4
+arch-$(CONFIG_CPU_32v3)		:=-D__LINUX_ARM_ARCH__=3 -march=armv3
+
+# This selects how we optimise for the processor.
+tune-$(CONFIG_CPU_ARM610)	:=-mtune=arm610
+tune-$(CONFIG_CPU_ARM710)	:=-mtune=arm710
+tune-$(CONFIG_CPU_ARM720T)	:=-mtune=arm7tdmi
+tune-$(CONFIG_CPU_ARM920T)	:=-mtune=arm9tdmi
+tune-$(CONFIG_CPU_ARM922T)	:=-mtune=arm9tdmi
+tune-$(CONFIG_CPU_ARM925T)	:=-mtune=arm9tdmi
+tune-$(CONFIG_CPU_ARM926T)	:=-mtune=arm9tdmi
+tune-$(CONFIG_CPU_SA110)	:=-mtune=strongarm110
+tune-$(CONFIG_CPU_SA1100)	:=-mtune=strongarm1100
+tune-$(CONFIG_CPU_XSCALE)	:=$(call cc-option,-mtune=xscale,-mtune=strongarm110) -Wa,-mcpu=xscale
+tune-$(CONFIG_CPU_V6)		:=-mtune=strongarm
+
+# Need -Uarm for gcc < 3.x
+CFLAGS_ABI	:=$(call cc-option,-mapcs-32,-mabi=apcs-gnu)
+CFLAGS		+=$(CFLAGS_ABI) $(arch-y) $(tune-y) $(call cc-option,-mshort-load-bytes,$(call cc-option,-malignment-traps,)) -msoft-float -Uarm
+AFLAGS		+=$(CFLAGS_ABI) $(arch-y) $(tune-y) -msoft-float
+
+CHECKFLAGS	+= -D__arm__
+
+#Default value
+head-y		:= arch/arm/kernel/head.o arch/arm/kernel/init_task.o
+textaddr-y	:= 0xC0008000
+
+ machine-$(CONFIG_ARCH_RPC)	   := rpc
+ machine-$(CONFIG_ARCH_EBSA110)	   := ebsa110
+ machine-$(CONFIG_ARCH_CLPS7500)   := clps7500
+  incdir-$(CONFIG_ARCH_CLPS7500)   := cl7500
+ machine-$(CONFIG_FOOTBRIDGE)	   := footbridge
+  incdir-$(CONFIG_FOOTBRIDGE)	   := ebsa285
+textaddr-$(CONFIG_ARCH_CO285)	   := 0x60008000
+ machine-$(CONFIG_ARCH_CO285)	   := footbridge
+  incdir-$(CONFIG_ARCH_CO285)	   := ebsa285
+ machine-$(CONFIG_ARCH_SHARK)	   := shark
+ machine-$(CONFIG_ARCH_SA1100)	   := sa1100
+ifeq ($(CONFIG_ARCH_SA1100),y)
+# SA1111 DMA bug: we don't want the kernel to live in precious DMA-able memory
+textaddr-$(CONFIG_SA1111)	   := 0xc0208000
 endif
-
-ifeq ($(CONFIG_CPU_32),y)
- PROCESSOR	 = armv
- TEXTADDR	 = 0xC0008000
- ifeq ($(CONFIG_CPU_32v4),y)
-  CFLAGS	+= $(CFLAGS_PROC_CPU_32v4)
-  AFLAGS	+= -mapcs-32 -marmv4
- else
-  CFLAGS	+= $(CFLAGS_PROC_CPU_32v3)
-  AFLAGS	+= -mapcs-32 -marmv3m
- endif
-
- opt-$(CONFIG_CPU_ARM6)		:= -mtune=arm6
- opt-$(CONFIG_CPU_ARM7)		:= -mtune=arm7
- opt-$(CONFIG_CPU_ARM720)	:= -mtune=arm7tdmi
- opt-$(CONFIG_CPU_ARM920)	:= -mtune=arm9tdmi
- opt-$(CONFIG_CPU_SA110)	:= -mtune=strongarm110
- opt-$(CONFIG_CPU_SA1100)	:= -mtune=strongarm110
-
- ifneq ($(NEW_GCC),0)
- CFLAGS	+= $(opt-y)
- endif
-endif
-
-LIBGCC		:= $(shell $(CC) $(CFLAGS) --print-libgcc-file-name)
-
-export	LIBGCC MACHINE PROCESSOR TEXTADDR GZFLAGS
-
-ifeq ($(CONFIG_ARCH_ARCA5K),y)
-MACHINE		 = arc
-endif
-
-ifeq ($(CONFIG_ARCH_RPC),y)
-MACHINE		 = rpc
-endif
+ machine-$(CONFIG_ARCH_PXA)	   := pxa
+ machine-$(CONFIG_ARCH_L7200)	   := l7200
+ machine-$(CONFIG_ARCH_INTEGRATOR) := integrator
+ machine-$(CONFIG_ARCH_CAMELOT)	   := epxa10db
+textaddr-$(CONFIG_ARCH_CLPS711X)   := 0xc0028000
+ machine-$(CONFIG_ARCH_CLPS711X)   := clps711x
+textaddr-$(CONFIG_ARCH_FORTUNET)   := 0xc0008000
+ machine-$(CONFIG_ARCH_IOP3XX)	   := iop3xx
+ machine-$(CONFIG_ARCH_IXP4XX)	   := ixp4xx
+ machine-$(CONFIG_ARCH_IXP2000)    := ixp2000
+ machine-$(CONFIG_ARCH_OMAP)	   := omap
+ machine-$(CONFIG_ARCH_S3C2410)	   := s3c2410
+ machine-$(CONFIG_ARCH_LH7A40X)	   := lh7a40x
+ machine-$(CONFIG_ARCH_VERSATILE)  := versatile
+ machine-$(CONFIG_ARCH_IMX)	   := imx
+ machine-$(CONFIG_ARCH_H720X)	   := h720x
 
 ifeq ($(CONFIG_ARCH_EBSA110),y)
-MACHINE		 = ebsa110
+# This is what happens if you forget the IOCS16 line.
+# PCMCIA cards stop working.
+CFLAGS_3c589_cs.o :=-DISA_SIXTEEN_BIT_PERIPHERAL
+export CFLAGS_3c589_cs.o
 endif
 
-ifeq ($(CONFIG_ARCH_CLPS7500),y)
-MACHINE		 = clps7500
-INCDIR		 = cl7500
+TEXTADDR := $(textaddr-y)
+ifeq ($(CONFIG_XIP_KERNEL),y)
+  DATAADDR := $(TEXTADDR)
+  xipaddr-$(CONFIG_ARCH_CO285) := 0x5f000000
+  xipaddr-y ?= 0xbf000000
+  # Replace phys addr with virt addr while keeping offset from base.
+  TEXTADDR := $(shell echo $(CONFIG_XIP_PHYS_ADDR) $(xipaddr-y) | \
+                      awk --non-decimal-data '/[:xdigit:]/ \
+                          { printf("0x%x\n", and($$1, 0x000fffff) + $$2) }' )
 endif
 
-ifeq ($(CONFIG_FOOTBRIDGE),y)
-MACHINE		 = footbridge
-INCDIR		 = ebsa285
+ifeq ($(incdir-y),)
+incdir-y := $(machine-y)
 endif
-
-ifeq ($(CONFIG_ARCH_CO285),y)
-TEXTADDR	 = 0x60008000
-MACHINE		 = footbridge
-INCDIR		 = ebsa285
+INCDIR   := arch-$(incdir-y)
+ifneq ($(machine-y),)
+MACHINE  := arch/arm/mach-$(machine-y)/
+else
+MACHINE  :=
 endif
+  
+export	TEXTADDR DATAADDR GZFLAGS
 
-ifeq ($(CONFIG_ARCH_NEXUSPCI),y)
-MACHINE		 = nexuspci
-endif
-
-ifeq ($(CONFIG_ARCH_SHARK),y)
-MACHINE		 = shark
-endif
-
-ifeq ($(CONFIG_ARCH_SA1100),y)
-MACHINE		 = sa1100
-endif
-
-ifeq ($(CONFIG_ARCH_L7200),y)
-MACHINE		 = l7200
-endif
-
-ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
-MACHINE		 = integrator
-endif
-
-# Only set INCDIR if its not already defined above
-# Grr, ?= doesn't work as all the other assignment operators do.  Make bug?
-ifeq ($(origin INCDIR), undefined)
-INCDIR		:= $(MACHINE)
+# Do we have FASTFPE?
+FASTFPE		:=arch/arm/fastfpe
+ifeq ($(FASTFPE),$(wildcard $(FASTFPE)))
+FASTFPE_OBJ	:=$(FASTFPE)/
 endif
 
 # If we have a machine-specific directory, then include it in the build.
-MACHDIR		:= arch/arm/mach-$(MACHINE)
-ifeq ($(MACHDIR),$(wildcard $(MACHDIR)))
-SUBDIRS		+= $(MACHDIR)
-CORE_FILES	:= $(MACHDIR)/$(MACHINE).o $(CORE_FILES)
+core-y				+= arch/arm/kernel/ arch/arm/mm/ arch/arm/common/
+core-y				+= $(MACHINE)
+core-$(CONFIG_FPE_NWFPE)	+= arch/arm/nwfpe/
+core-$(CONFIG_FPE_FASTFPE)	+= $(FASTFPE_OBJ)
+core-$(CONFIG_VFP)		+= arch/arm/vfp/
+
+drivers-$(CONFIG_OPROFILE)      += arch/arm/oprofile/
+drivers-$(CONFIG_ARCH_CLPS7500)	+= drivers/acorn/char/
+drivers-$(CONFIG_ARCH_L7200)	+= drivers/acorn/char/
+
+libs-y				+= arch/arm/lib/
+
+# Default target when executing plain make
+ifeq ($(CONFIG_XIP_KERNEL),y)
+all: xipImage
+else
+all: zImage
 endif
 
-HEAD		:= arch/arm/kernel/head-$(PROCESSOR).o \
-		   arch/arm/kernel/init_task.o
-SUBDIRS		+= arch/arm/kernel arch/arm/mm arch/arm/lib \
-		   arch/arm/nwfpe
-CORE_FILES	:= arch/arm/kernel/kernel.o arch/arm/mm/mm.o $(CORE_FILES)
-LIBS		:= arch/arm/lib/lib.o arch/arm/lib/lib.a $(LIBS) $(LIBGCC)
+boot := arch/arm/boot
 
-ifeq ($(CONFIG_NWFPE),y)
-LIBS		:= arch/arm/nwfpe/math-emu.o $(LIBS)
+#	Update machine arch and proc symlinks if something which affects
+#	them changed.  We use .arch to indicate when they were updated
+#	last, otherwise make uses the target directory mtime.
+
+include/asm-arm/.arch: $(wildcard include/config/arch/*.h) include/config/MARKER
+	@echo '  SYMLINK include/asm-arm/arch -> include/asm-arm/$(INCDIR)'
+ifneq ($(KBUILD_SRC),)
+	$(Q)mkdir -p include/asm-arm
+	$(Q)ln -fsn $(srctree)/include/asm-arm/$(INCDIR) include/asm-arm/arch
+else
+	$(Q)ln -fsn $(INCDIR) include/asm-arm/arch
 endif
+	@touch $@
 
-ifeq ($(CONFIG_ARCH_ACORN),y)
-SUBDIRS		+= drivers/acorn
-DRIVERS		+= drivers/acorn/block/acorn-block.a
-DRIVERS		+= drivers/acorn/char/acorn-char.o
-DRIVERS		+= drivers/acorn/net/acorn-net.o
-DRIVERS		+= drivers/acorn/scsi/acorn-scsi.a
-endif
+prepare: maketools include/asm-arm/.arch
 
-ifeq ($(CONFIG_ARCH_CLPS7500),y)
-SUBDIRS		+= drivers/acorn/char
-DRIVERS		+= drivers/acorn/char/acorn-char.o
-endif
+.PHONY: maketools FORCE
+maketools: include/asm-arm/constants.h include/linux/version.h FORCE
+	$(Q)$(MAKE) $(build)=arch/arm/tools include/asm-arm/mach-types.h
 
-MAKEBOOT	 = $(MAKE) -C arch/$(ARCH)/boot
+# Convert bzImage to zImage
+bzImage: zImage
 
-# The following is a hack to get 'constants.h' up
-# to date before starting compilation
+zImage Image xipImage bootpImage uImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $(boot)/$@
 
-$(patsubst %, _dir_%, $(SUBDIRS)) init/main.o init/version.o : \
-	include/asm-arm/mach-types.h
+zinstall install: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $@
 
-$(patsubst %, _dir_%, $(SUBDIRS)) : constants
+CLEAN_FILES += include/asm-arm/constants.h* include/asm-arm/mach-types.h \
+	       include/asm-arm/arch include/asm-arm/.arch
 
-include/asm-arm/mach-types.h: arch/arm/tools/mach-types  \
-			      arch/arm/tools/gen-mach-types
-	@awk -f arch/arm/tools/gen-mach-types arch/arm/tools/mach-types > $@
-
-constants: dummy
-	@$(MAKE) -C arch/arm/lib constants.h
-
-symlinks: archsymlinks
-
-archsymlinks:
-	$(RM) include/asm-arm/arch include/asm-arm/proc
-	(cd include/asm-arm; ln -sf arch-$(INCDIR) arch; ln -sf proc-$(PROCESSOR) proc)
-
-vmlinux: arch/arm/vmlinux.lds
-
-arch/arm/vmlinux.lds: arch/arm/vmlinux-$(PROCESSOR).lds.in dummy
-	@sed 's/TEXTADDR/$(TEXTADDR)/' <$< >$@
-
-arch/arm/kernel arch/arm/mm arch/arm/lib: dummy
-	$(MAKE) CFLAGS="$(CFLAGS) $(CFLAGS_KERNEL)" $(subst $@, _dir_$@, $@)
-
-bzImage zImage zinstall Image bootpImage install: vmlinux
-	@$(MAKEBOOT) $@
-
-archmrproper:
-	$(RM) include/asm-arm/arch include/asm-arm/proc
-
+# We use MRPROPER_FILES and CLEAN_FILES now
 archclean:
-	@$(MAKEBOOT) clean
-	$(RM) arch/arm/lib/constants.h arch/arm/vmlinux.lds
-	$(RM) include/asm-arm/mach-types.h
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-archdep: archsymlinks
-	@$(MAKEBOOT) dep
+# My testing targets (bypasses dependencies)
+bp:;	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $(boot)/bootpImage
+i zi:;	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $@
 
-# My testing targets (that short circuit a few dependencies)
-zImg:;	@$(MAKEBOOT) zImage
-Img:;	@$(MAKEBOOT) Image
-i:;	@$(MAKEBOOT) install
-zi:;	@$(MAKEBOOT) zinstall
+arch/$(ARCH)/kernel/asm-offsets.s: include/asm include/linux/version.h \
+				   include/asm-arm/.arch
 
-#
-# Configuration targets.  Use these to select a
-# configuration for your architecture
-CFGS=	a5k_config		ebsa110_config		\
-	footbridge_config	rpc_config		\
-	brutus_config		victor_config		\
-	empeg_config		thinclient_config	\
-	assabet_config		lart_config		\
-	cerf_config		lusl7200_config 
+include/asm-$(ARCH)/constants.h: arch/$(ARCH)/kernel/asm-offsets.s
+	$(call filechk,gen-asm-offsets)
 
-$(CFGS):
-	@( \
-	CFG=$(@:_config=); \
-	if [ -f arch/arm/def-configs/$$CFG ]; then \
-	  $(RM) arch/arm/defconfig; \
-	  cp arch/arm/def-configs/$$CFG arch/arm/defconfig; \
-	  echo "*** Default configuration for $$CFG installed"; \
-	  echo "*** Next, you may run 'make oldconfig'"; \
-	else \
-	  echo "$$CFG does not exist"; \
-	fi; \
-	)
+define archhelp
+  echo  '* zImage        - Compressed kernel image (arch/$(ARCH)/boot/zImage)'
+  echo  '  Image         - Uncompressed kernel image (arch/$(ARCH)/boot/Image)'
+  echo  '* xipImage      - XIP kernel image, if configured (arch/$(ARCH)/boot/xipImage)'
+  echo  '  bootpImage    - Combined zImage and initial RAM disk' 
+  echo  '                  (supply initrd image via make variable INITRD=<path>)'
+  echo  '  install       - Install uncompressed kernel'
+  echo  '  zinstall      - Install compressed kernel'
+  echo  '                  Install using (your) ~/bin/installkernel or'
+  echo  '                  (distribution) /sbin/installkernel or'
+  echo  '                  install to $$(INSTALL_PATH) and run lilo'
+endef

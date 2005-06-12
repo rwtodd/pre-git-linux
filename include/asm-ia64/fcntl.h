@@ -1,10 +1,10 @@
 #ifndef _ASM_IA64_FCNTL_H
 #define _ASM_IA64_FCNTL_H
 /*
- * This is mostly compatible with Linux/x86.
+ * Based on <asm-i386/fcntl.h>.
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Modified 1998-2000
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co.
  */
 
 /*
@@ -28,6 +28,7 @@
 #define O_LARGEFILE	0100000
 #define O_DIRECTORY	0200000	/* must be a directory */
 #define O_NOFOLLOW	0400000 /* don't follow links */
+#define O_NOATIME	01000000
 
 #define F_DUPFD		0	/* dup */
 #define F_GETFD		1	/* get close_on_exec */
@@ -78,9 +79,6 @@ struct flock {
 	pid_t l_pid;
 };
 
-#ifdef __KERNEL__
-# define flock64	flock
-#endif
-
 #define F_LINUX_SPECIFIC_BASE	1024
+
 #endif /* _ASM_IA64_FCNTL_H */

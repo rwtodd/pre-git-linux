@@ -6,10 +6,13 @@
 /* PAGE_SHIFT determines the page size */
 #ifndef CONFIG_SUN3
 #define PAGE_SHIFT	(12)
-#define PAGE_SIZE	(4096)
 #else
 #define PAGE_SHIFT	(13)
-#define PAGE_SIZE	(8192)
+#endif
+#ifdef __ASSEMBLY__
+#define PAGE_SIZE	(1 << PAGE_SHIFT)
+#else
+#define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #endif
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
@@ -18,13 +21,13 @@
 #include <asm/setup.h>
 
 #if PAGE_SHIFT < 13
-#define KTHREAD_SIZE (8192)
+#define THREAD_SIZE (8192)
 #else
-#define KTHREAD_SIZE PAGE_SIZE
+#define THREAD_SIZE PAGE_SIZE
 #endif
- 
+
 #ifndef __ASSEMBLY__
- 
+
 #define get_user_page(vaddr)		__get_free_page(GFP_KERNEL)
 #define free_user_page(page, addr)	free_page(addr)
 
@@ -49,15 +52,13 @@ static inline void copy_page(void *to, void *from)
 
 static inline void clear_page(void *page)
 {
-	unsigned long data, tmp;
-	void *sp = page;
+	unsigned long tmp;
+	unsigned long *sp = page;
 
-	data = 0;
-
-	*((unsigned long *)(page))++ = 0;
-	*((unsigned long *)(page))++ = 0;
-	*((unsigned long *)(page))++ = 0;
-	*((unsigned long *)(page))++ = 0;
+	*sp++ = 0;
+	*sp++ = 0;
+	*sp++ = 0;
+	*sp++ = 0;
 
 	__asm__ __volatile__("1:\t"
 			     ".chip 68040\n\t"
@@ -66,8 +67,8 @@ static inline void clear_page(void *page)
 			     "subqw  #8,%2\n\t"
 			     "subqw  #8,%2\n\t"
 			     "dbra   %1,1b\n\t"
-			     : "=a" (page), "=d" (tmp)
-			     : "a" (sp), "0" (page),
+			     : "=a" (sp), "=d" (tmp)
+			     : "a" (page), "0" (sp),
 			       "1" ((PAGE_SIZE - 16) / 16 - 1));
 }
 
@@ -76,8 +77,14 @@ static inline void clear_page(void *page)
 #define copy_page(to,from)	memcpy((to), (from), PAGE_SIZE)
 #endif
 
-#define clear_user_page(page, vaddr)	clear_page(page)
-#define copy_user_page(to, from, vaddr)	copy_page(to, from)
+#define clear_user_page(addr, vaddr, page)	\
+	do {	clear_page(addr);		\
+		flush_dcache_page(page);	\
+	} while (0)
+#define copy_user_page(to, from, vaddr, page)	\
+	do {	copy_page(to, from);		\
+		flush_dcache_page(page);	\
+	} while (0)
 
 /*
  * These are used to make use of C type-checking..
@@ -101,7 +108,7 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
 /* Pure 2^n version of get_order */
-extern __inline__ int get_order(unsigned long size)
+static inline int get_order(unsigned long size)
 {
 	int order;
 
@@ -124,6 +131,7 @@ extern __inline__ int get_order(unsigned long size)
 
 #ifndef CONFIG_SUN3
 
+#define WANT_PAGE_VIRTUAL
 #ifdef CONFIG_SINGLE_MEMORY_CHUNK
 extern unsigned long m68k_memoffset;
 
@@ -141,7 +149,7 @@ static inline unsigned long ___pa(unsigned long x)
 {
      if(x == 0)
 	  return 0;
-     if(x > PAGE_OFFSET)
+     if(x >= PAGE_OFFSET)
         return (x-PAGE_OFFSET);
      else
         return (x+0x2000000);
@@ -159,27 +167,28 @@ static inline void *__va(unsigned long x)
 }
 #endif	/* CONFIG_SUN3 */
 
-#define MAP_NR(addr)		(((unsigned long)(addr)-PAGE_OFFSET) >> PAGE_SHIFT)
+/*
+ * NOTE: virtual isn't really correct, actually it should be the offset into the
+ * memory node, but we have no highmem, so that works for now.
+ * TODO: implement (fast) pfn<->pgdat_idx conversion functions, this makes lots
+ * of the shifts unnecessary.
+ */
+#define virt_to_pfn(kaddr)	(__pa(kaddr) >> PAGE_SHIFT)
+#define pfn_to_virt(pfn)	__va((pfn) << PAGE_SHIFT)
+
 #define virt_to_page(kaddr)	(mem_map + (((unsigned long)(kaddr)-PAGE_OFFSET) >> PAGE_SHIFT))
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+#define page_to_virt(page)	((((page) - mem_map) << PAGE_SHIFT) + PAGE_OFFSET)
 
-#ifndef CONFIG_SUN3
-#define BUG() do { \
-	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-	asm volatile("illegal"); \
-} while (0)
-#else
-#define BUG() do { \
-	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-	panic("BUG!"); \
-} while (0)
-#endif
+#define pfn_to_page(pfn)	virt_to_page(pfn_to_virt(pfn))
+#define page_to_pfn(page)	virt_to_pfn(page_to_virt(page))
 
-#define PAGE_BUG(page) do { \
-	BUG(); \
-} while (0)
+#define virt_addr_valid(kaddr)	((void *)(kaddr) >= (void *)PAGE_OFFSET && (void *)(kaddr) < high_memory)
+#define pfn_valid(pfn)		virt_addr_valid(pfn_to_virt(pfn))
 
 #endif /* __ASSEMBLY__ */
+
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #endif /* __KERNEL__ */
 

@@ -1,45 +1,54 @@
 /*
  * linux/arch/ia64/kernel/irq.c
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 Stephane Eranian <eranian@hpl.hp.com>
- * Copyright (C) 1999-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2001 Hewlett-Packard Co
+ *	Stephane Eranian <eranian@hpl.hp.com>
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
  *  6/10/99: Updated to bring in sync with x86 version to facilitate
  *	     support for SMP and different interrupt controllers.
  *
  * 09/15/00 Goutham Rao <goutham.rao@intel.com> Implemented pci_irq_to_vector
  *                      PCI to vector allocation routine.
+ * 04/14/2004 Ashok Raj <ashok.raj@intel.com>
+ *						Added CPU Hotplug handling for IPF.
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/kernel_stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ptrace.h>
 #include <linux/random.h>	/* for rand_initialize_irq() */
 #include <linux/signal.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/threads.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
 #include <asm/delay.h>
+#include <asm/intrinsics.h>
 #include <asm/io.h>
 #include <asm/hw_irq.h>
 #include <asm/machvec.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
 
+#ifdef CONFIG_PERFMON
+# include <asm/perfmon.h>
+#endif
+
 #define IRQ_DEBUG	0
 
 /* default base addr of IPI table */
-unsigned long ipi_base_addr = (__IA64_UNCACHED_OFFSET | IPI_DEFAULT_BASE_ADDR);	
+void __iomem *ipi_base_addr = ((void __iomem *)
+			       (__IA64_UNCACHED_OFFSET | IA64_IPI_DEFAULT_BASE_ADDR));
 
 /*
  * Legacy IRQ to IA-64 vector translation table.
@@ -49,25 +58,50 @@ __u8 isa_irq_to_vector_map[16] = {
 	0x2f, 0x20, 0x2e, 0x2d, 0x2c, 0x2b, 0x2a, 0x29,
 	0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21
 };
+EXPORT_SYMBOL(isa_irq_to_vector_map);
+
+static unsigned long ia64_vector_mask[BITS_TO_LONGS(IA64_NUM_DEVICE_VECTORS)];
 
 int
-ia64_alloc_irq (void)
+assign_irq_vector (int irq)
 {
-	static int next_irq = FIRST_DEVICE_IRQ;
-
-	if (next_irq > LAST_DEVICE_IRQ)
+	int pos, vector;
+ again:
+	pos = find_first_zero_bit(ia64_vector_mask, IA64_NUM_DEVICE_VECTORS);
+	vector = IA64_FIRST_DEVICE_VECTOR + pos;
+	if (vector > IA64_LAST_DEVICE_VECTOR)
 		/* XXX could look for sharable vectors instead of panic'ing... */
-		panic("ia64_alloc_irq: out of interrupt vectors!");
-	return next_irq++;
+		panic("assign_irq_vector: out of interrupt vectors!");
+	if (test_and_set_bit(pos, ia64_vector_mask))
+		goto again;
+	return vector;
 }
 
+void
+free_irq_vector (int vector)
+{
+	int pos;
+
+	if (vector < IA64_FIRST_DEVICE_VECTOR || vector > IA64_LAST_DEVICE_VECTOR)
+		return;
+
+	pos = vector - IA64_FIRST_DEVICE_VECTOR;
+	if (!test_and_clear_bit(pos, ia64_vector_mask))
+		printk(KERN_WARNING "%s: double free!\n", __FUNCTION__);
+}
+
+#ifdef CONFIG_SMP
+#	define IS_RESCHEDULE(vec)	(vec == IA64_IPI_RESCHEDULE)
+#else
+#	define IS_RESCHEDULE(vec)	(0)
+#endif
 /*
  * That's where the IVT branches when we get an external
  * interrupt. This branches to the correct hardware IRQ handler via
  * function ptr.
  */
 void
-ia64_handle_irq (unsigned long vector, struct pt_regs *regs)
+ia64_handle_irq (ia64_vector vector, struct pt_regs *regs)
 {
 	unsigned long saved_tpr;
 
@@ -82,14 +116,14 @@ ia64_handle_irq (unsigned long vector, struct pt_regs *regs)
 		 * because the register and the memory stack are not
 		 * switched atomically.
 		 */
-		asm ("mov %0=ar.bsp" : "=r"(bsp));
-		asm ("mov %0=sp" : "=r"(sp));
+		bsp = ia64_getreg(_IA64_REG_AR_BSP);
+		sp = ia64_getreg(_IA64_REG_SP);
 
 		if ((sp - bsp) < 1024) {
 			static unsigned char count;
 			static long last_time;
 
-			if (count > 5 && jiffies - last_time > 5*HZ)
+			if (jiffies - last_time > 5*HZ)
 				count = 0;
 			if (++count < 5) {
 				last_time = jiffies;
@@ -106,84 +140,131 @@ ia64_handle_irq (unsigned long vector, struct pt_regs *regs)
 	 * 16 (without this, it would be ~240, which could easily lead
 	 * to kernel stack overflows).
 	 */
-	saved_tpr = ia64_get_tpr();
+	irq_enter();
+	saved_tpr = ia64_getreg(_IA64_REG_CR_TPR);
 	ia64_srlz_d();
-	do {
-		if (vector >= NR_IRQS) {
-			printk("handle_irq: invalid vector %lu\n", vector);
-			ia64_set_tpr(saved_tpr);
+	while (vector != IA64_SPURIOUS_INT_VECTOR) {
+		if (!IS_RESCHEDULE(vector)) {
+			ia64_setreg(_IA64_REG_CR_TPR, vector);
 			ia64_srlz_d();
-			return;
+
+			__do_IRQ(local_vector_to_irq(vector), regs);
+
+			/*
+			 * Disable interrupts and send EOI:
+			 */
+			local_irq_disable();
+			ia64_setreg(_IA64_REG_CR_TPR, saved_tpr);
 		}
-		ia64_set_tpr(vector);
-		ia64_srlz_d();
-
-		if ((irq_desc[vector].status & IRQ_PER_CPU) != 0)
-			do_IRQ_per_cpu(vector, regs);
-		else
-			do_IRQ(vector, regs);
-
-		/*
-		 * Disable interrupts and send EOI:
-		 */
-		local_irq_disable();
-		ia64_set_tpr(saved_tpr);
 		ia64_eoi();
 		vector = ia64_get_ivr();
-	} while (vector != IA64_SPURIOUS_INT);
+	}
+	/*
+	 * This must be done *after* the ia64_eoi().  For example, the keyboard softirq
+	 * handler needs to be able to wait for further keyboard interrupts, which can't
+	 * come through until ia64_eoi() has been done.
+	 */
+	irq_exit();
 }
 
-#ifdef CONFIG_SMP
+#ifdef CONFIG_HOTPLUG_CPU
+/*
+ * This function emulates a interrupt processing when a cpu is about to be
+ * brought down.
+ */
+void ia64_process_pending_intr(void)
+{
+	ia64_vector vector;
+	unsigned long saved_tpr;
+	extern unsigned int vectors_in_migration[NR_IRQS];
 
-extern void handle_IPI (int irq, void *dev_id, struct pt_regs *regs);
+	vector = ia64_get_ivr();
+
+	 irq_enter();
+	 saved_tpr = ia64_getreg(_IA64_REG_CR_TPR);
+	 ia64_srlz_d();
+
+	 /*
+	  * Perform normal interrupt style processing
+	  */
+	while (vector != IA64_SPURIOUS_INT_VECTOR) {
+		if (!IS_RESCHEDULE(vector)) {
+			ia64_setreg(_IA64_REG_CR_TPR, vector);
+			ia64_srlz_d();
+
+			/*
+			 * Now try calling normal ia64_handle_irq as it would have got called
+			 * from a real intr handler. Try passing null for pt_regs, hopefully
+			 * it will work. I hope it works!.
+			 * Probably could shared code.
+			 */
+			vectors_in_migration[local_vector_to_irq(vector)]=0;
+			__do_IRQ(local_vector_to_irq(vector), NULL);
+
+			/*
+			 * Disable interrupts and send EOI
+			 */
+			local_irq_disable();
+			ia64_setreg(_IA64_REG_CR_TPR, saved_tpr);
+		}
+		ia64_eoi();
+		vector = ia64_get_ivr();
+	}
+	irq_exit();
+}
+#endif
+
+
+#ifdef CONFIG_SMP
+extern irqreturn_t handle_IPI (int irq, void *dev_id, struct pt_regs *regs);
 
 static struct irqaction ipi_irqaction = {
-	handler:	handle_IPI,
-	flags:		SA_INTERRUPT,
-	name:		"IPI"
+	.handler =	handle_IPI,
+	.flags =	SA_INTERRUPT,
+	.name =		"IPI"
 };
 #endif
+
+void
+register_percpu_irq (ia64_vector vec, struct irqaction *action)
+{
+	irq_desc_t *desc;
+	unsigned int irq;
+
+	for (irq = 0; irq < NR_IRQS; ++irq)
+		if (irq_to_vector(irq) == vec) {
+			desc = irq_descp(irq);
+			desc->status |= IRQ_PER_CPU;
+			desc->handler = &irq_type_ia64_lsapic;
+			if (action)
+				setup_irq(irq, action);
+		}
+}
 
 void __init
 init_IRQ (void)
 {
-	/*
-	 * Disable all local interrupts
-	 */
-	ia64_set_itv(0, 1);
-	ia64_set_lrr0(0, 1);
-	ia64_set_lrr1(0, 1);
-
-	irq_desc[IA64_SPURIOUS_INT].handler = &irq_type_ia64_sapic;
+	register_percpu_irq(IA64_SPURIOUS_INT_VECTOR, NULL);
 #ifdef CONFIG_SMP
-	/* 
-	 * Configure the IPI vector and handler
-	 */
-	irq_desc[IPI_IRQ].status |= IRQ_PER_CPU;
-	irq_desc[IPI_IRQ].handler = &irq_type_ia64_sapic;
-	setup_irq(IPI_IRQ, &ipi_irqaction);
+	register_percpu_irq(IA64_IPI_VECTOR, &ipi_irqaction);
 #endif
-
-	ia64_set_pmv(1 << 16);
-	ia64_set_cmcv(CMC_IRQ);			/* XXX fix me */
-
+#ifdef CONFIG_PERFMON
+	pfm_init_percpu();
+#endif
 	platform_irq_init();
-
-	/* clear TPR to enable all interrupt classes: */
-	ia64_set_tpr(0);
 }
 
 void
 ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect)
 {
-	unsigned long ipi_addr;
+	void __iomem *ipi_addr;
 	unsigned long ipi_data;
 	unsigned long phys_cpu_id;
 
 #ifdef CONFIG_SMP
 	phys_cpu_id = cpu_physical_id(cpu);
 #else
-	phys_cpu_id = (ia64_get_lid() >> 16) & 0xffff;
+	phys_cpu_id = (ia64_getreg(_IA64_REG_CR_LID) >> 16) & 0xffff;
 #endif
 
 	/*
@@ -191,7 +272,7 @@ ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect)
 	 */
 
 	ipi_data = (delivery_mode << 8) | (vector & 0xff);
-	ipi_addr = ipi_base_addr | (phys_cpu_id << 4) | ((redirect & 1)  << 3);
+	ipi_addr = ipi_base_addr + ((phys_cpu_id << 4) | ((redirect & 1) << 3));
 
 	writeq(ipi_data, ipi_addr);
 }

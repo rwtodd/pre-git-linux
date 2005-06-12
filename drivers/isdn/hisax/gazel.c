@@ -1,16 +1,18 @@
-/* $Id: gazel.c,v 2.11.6.2 2000/11/29 16:00:14 kai Exp $
+/* $Id: gazel.c,v 2.19.2.4 2004/01/14 16:04:48 keil Exp $
  *
- * gazel.c     low level stuff for Gazel isdn cards
+ * low level stuff for Gazel isdn cards
  *
  * Author       BeWan Systems
  *              based on source code from Karsten Keil
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Copyright    by BeWan Systems
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #include <linux/config.h>
 #include <linux/init.h>
-#define __NO_VERSION__
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
@@ -19,7 +21,7 @@
 #include <linux/pci.h>
 
 extern const char *CardType[];
-const char *gazel_revision = "$Revision: 2.11.6.2 $";
+const char *gazel_revision = "$Revision: 2.19.2.4 $";
 
 #define R647      1
 #define R685      2
@@ -70,26 +72,17 @@ static inline u_char
 readreg_ipac(unsigned int adr, u_short off)
 {
 	register u_char ret;
-	long flags;
 
-	save_flags(flags);
-	cli();
 	byteout(adr, off);
 	ret = bytein(adr + 4);
-	restore_flags(flags);
 	return ret;
 }
 
 static inline void
 writereg_ipac(unsigned int adr, u_short off, u_char data)
 {
-	long flags;
-
-	save_flags(flags);
-	cli();
 	byteout(adr, off);
 	byteout(adr + 4, data);
-	restore_flags(flags);
 }
 
 
@@ -250,18 +243,16 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 
 #include "hscx_irq.c"
 
-static void
+static irqreturn_t
 gazel_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 #define MAXCOUNT 5
 	struct IsdnCardState *cs = dev_id;
 	u_char valisac, valhscx;
 	int count = 0;
+	u_long flags;
 
-	if (!cs) {
-		printk(KERN_WARNING "Gazel: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	do {
 		valhscx = ReadHSCX(cs, 1, HSCX_ISTA);
 		if (valhscx)
@@ -278,20 +269,20 @@ gazel_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	WriteISAC(cs, ISAC_MASK, 0x0);
 	WriteHSCX(cs, 0, HSCX_MASK, 0x0);
 	WriteHSCX(cs, 1, HSCX_MASK, 0x0);
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 
-static void
+static irqreturn_t
 gazel_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char ista, val;
 	int count = 0;
-
-	if (!cs) {
-		printk(KERN_WARNING "Gazel: Spurious interrupt!\n");
-		return;
-	}
+	u_long flags;
+	
+	spin_lock_irqsave(&cs->lock, flags);
 	ista = ReadISAC(cs, IPAC_ISTA - 0x80);
 	do {
 		if (ista & 0x0f) {
@@ -323,6 +314,8 @@ gazel_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
 
 	WriteISAC(cs, IPAC_MASK - 0x80, 0xFF);
 	WriteISAC(cs, IPAC_MASK - 0x80, 0xC0);
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 void
 release_io_gazel(struct IsdnCardState *cs)
@@ -355,18 +348,14 @@ release_io_gazel(struct IsdnCardState *cs)
 static int
 reset_gazel(struct IsdnCardState *cs)
 {
-	long flags;
 	unsigned long plxcntrl, addr = cs->hw.gazel.cfg_reg;
 
 	switch (cs->subtyp) {
 		case R647:
-			save_flags(flags);
-			cli();
 			writereg(addr, 0, 0);
 			HZDELAY(10);
 			writereg(addr, 0, 1);
 			HZDELAY(2);
-			restore_flags(flags);
 			break;
 		case R685:
 			plxcntrl = inl(addr + PLX_CNTRL);
@@ -412,14 +401,19 @@ reset_gazel(struct IsdnCardState *cs)
 static int
 Gazel_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+
 	switch (mt) {
 		case CARD_RESET:
+			spin_lock_irqsave(&cs->lock, flags);
 			reset_gazel(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_RELEASE:
 			release_io_gazel(cs);
 			return (0);
 		case CARD_INIT:
+			spin_lock_irqsave(&cs->lock, flags);
 			inithscxisac(cs, 1);
 			if ((cs->subtyp==R647)||(cs->subtyp==R685)) {
 				int i;
@@ -428,6 +422,7 @@ Gazel_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 					cs->bcs[i].hw.hscx.tsaxr1 = 0x23;
 				}
 			}
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_TEST:
 			return (0);
@@ -438,66 +433,58 @@ Gazel_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 static int
 reserve_regions(struct IsdnCard *card, struct IsdnCardState *cs)
 {
-	unsigned int i, base = 0, adr = 0, len = 0;
-	long flags;
-
-	save_flags(flags);
-	cli();
+	unsigned int i, j, base = 0, adr = 0, len = 0;
 
 	switch (cs->subtyp) {
 		case R647:
 			base = cs->hw.gazel.hscx[0];
+			if (!request_region(adr = (0xC000 + base), len = 1, "gazel"))
+				goto error;
 			for (i = 0x0000; i < 0xC000; i += 0x1000) {
-				if (check_region(adr = (i + base), len = 16))
+				if (!request_region(adr = (i + base), len = 16, "gazel"))
 					goto error;
 			}
-			if (check_region(adr = (0xC000 + base), len = 1))
+			if (i != 0xC000) {
+				for (j = 0; j < i; j+= 0x1000)
+					release_region(j + base, 16);
+				release_region(0xC000 + base, 1);
 				goto error;
-
-			for (i = 0x0000; i < 0xC000; i += 0x1000)
-				request_region(i + base, 16, "gazel");
-			request_region(0xC000 + base, 1, "gazel");
-
+			}
 			break;
 
 		case R685:
-			if (check_region(adr = cs->hw.gazel.hscx[0], len = 0x100))
+			if (!request_region(adr = cs->hw.gazel.hscx[0], len = 0x100, "gazel"))
 				goto error;
-			if (check_region(adr = cs->hw.gazel.cfg_reg, len = 0x80))
+			if (!request_region(adr = cs->hw.gazel.cfg_reg, len = 0x80, "gazel")) {
+				release_region(cs->hw.gazel.hscx[0],0x100);
 				goto error;
-
-			request_region(cs->hw.gazel.hscx[0], 0x100, "gazel");
-			request_region(cs->hw.gazel.cfg_reg, 0x80, "gazel");
+			}
 			break;
 
 		case R753:
-			if (check_region(adr = cs->hw.gazel.ipac, len = 0x8))
+			if (!request_region(adr = cs->hw.gazel.ipac, len = 0x8, "gazel"))
 				goto error;
-			if (check_region(adr = cs->hw.gazel.cfg_reg, len = 0x80))
+			if (!request_region(adr = cs->hw.gazel.cfg_reg, len = 0x80, "gazel")) {
+				release_region(cs->hw.gazel.ipac, 8);
 				goto error;
-
-			request_region(cs->hw.gazel.ipac, 0x8, "gazel");
-			request_region(cs->hw.gazel.cfg_reg, 0x80, "gazel");
+			}
 			break;
 
 		case R742:
-			if (check_region(adr = cs->hw.gazel.ipac, len = 0x8))
+			if (!request_region(adr = cs->hw.gazel.ipac, len = 0x8, "gazel"))
 				goto error;
-			request_region(cs->hw.gazel.ipac, 0x8, "gazel");
 			break;
 	}
 
-	restore_flags(flags);
 	return 0;
 
       error:
-	restore_flags(flags);
 	printk(KERN_WARNING "Gazel: %s io ports 0x%x-0x%x already in use\n",
 	       CardType[cs->typ], adr, adr + len);
 	return 1;
 }
 
-static int
+static int __init
 setup_gazelisa(struct IsdnCard *card, struct IsdnCardState *cs)
 {
 	printk(KERN_INFO "Gazel: ISA PnP card automatic recognition\n");
@@ -510,6 +497,7 @@ setup_gazelisa(struct IsdnCard *card, struct IsdnCardState *cs)
 	else
 		cs->subtyp = R647;
 
+	setup_isac(cs);
 	cs->hw.gazel.cfg_reg = card->para[1] + 0xC000;
 	cs->hw.gazel.ipac = card->para[1];
 	cs->hw.gazel.isac = card->para[1] + 0x8000;
@@ -546,7 +534,7 @@ setup_gazelisa(struct IsdnCard *card, struct IsdnCardState *cs)
 
 static struct pci_dev *dev_tel __initdata = NULL;
 
-static int
+static int __init
 setup_gazelpci(struct IsdnCardState *cs)
 {
 	u_int pci_ioaddr0 = 0, pci_ioaddr1 = 0;
@@ -556,10 +544,6 @@ setup_gazelpci(struct IsdnCardState *cs)
 	printk(KERN_WARNING "Gazel: PCI card automatic recognition\n");
 
 	found = 0;
-	if (!pci_present()) {
-		printk(KERN_WARNING "Gazel: No PCI bus present\n");
-		return 1;
-	}
 	seekcard = PCI_DEVICE_ID_PLX_R685;
 	for (nbseek = 0; nbseek < 3; nbseek++) {
 		if ((dev_tel = pci_find_device(PCI_VENDOR_ID_PLX, seekcard, dev_tel))) {
@@ -593,7 +577,7 @@ setup_gazelpci(struct IsdnCardState *cs)
 	}
 	cs->hw.gazel.pciaddr[0] = pci_ioaddr0;
 	cs->hw.gazel.pciaddr[1] = pci_ioaddr1;
-
+	setup_isac(cs);
 	pci_ioaddr1 &= 0xfffe;
 	cs->hw.gazel.cfg_reg = pci_ioaddr0 & 0xfffe;
 	cs->hw.gazel.ipac = pci_ioaddr1;
@@ -650,7 +634,7 @@ setup_gazel(struct IsdnCard *card)
 			return (0);
 	} else {
 
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 		if (setup_gazelpci(cs))
 			return (0);
 #else

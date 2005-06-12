@@ -15,9 +15,12 @@
 #define RLIMIT_AS	7		/* address space limit(?) */
 #define RLIMIT_NPROC	8		/* max number of processes */
 #define RLIMIT_MEMLOCK	9		/* max locked-in-memory address space */
-#define RLIMIT_LOCKS   10              /* maximum file locks held */
+#define RLIMIT_LOCKS	10		/* maximum file locks held */
+#define RLIMIT_SIGPENDING 11		/* max number of pending signals */
+#define RLIMIT_MSGQUEUE 12		/* maximum bytes in POSIX mqueues */
 
-#define RLIM_NLIMITS	11
+#define RLIM_NLIMITS	13
+#define __ARCH_RLIMIT_ORDER
 
 /*
  * SuS says limits have to be unsigned.  Fine, it's unsigned, but
@@ -26,23 +29,6 @@
  */
 #define RLIM_INFINITY	0x7ffffffffffffffful
 
-#ifdef __KERNEL__
-
-#define INIT_RLIMITS							\
-{									\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_CPU */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_FSIZE */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_DATA */	\
-    {_STK_LIM, LONG_MAX},			/* RLIMIT_STACK */	\
-    {       0, LONG_MAX},			/* RLIMIT_CORE */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_RSS */	\
-    {INR_OPEN, INR_OPEN},			/* RLIMIT_NOFILE */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_AS */		\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_NPROC */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_MEMLOCK */	\
-    {LONG_MAX, LONG_MAX},                       /* RLIMIT_LOCKS */      \
-}
-
-#endif /* __KERNEL__ */
+#include <asm-generic/resource.h>
 
 #endif /* _ALPHA_RESOURCE_H */

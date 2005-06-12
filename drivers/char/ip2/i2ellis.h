@@ -400,11 +400,11 @@ typedef struct _i2eBordStr
 	rwlock_t	read_fifo_spinlock;
 	rwlock_t	write_fifo_spinlock;
 
-#ifdef	CONFIG_DEVFS_FS
-	/* Device handles into devfs */
-	devfs_handle_t	devfs_ipl_handle;
-	devfs_handle_t	devfs_stat_handle;
-#endif
+//	For queuing interrupt bottom half handlers.	/\/\|=mhw=|\/\/
+	struct work_struct	tqueue_interrupt;
+
+	struct timer_list  SendPendingTimer;   // Used by iiSendPending
+	unsigned int	SendPendingRetry;
 } i2eBordStr, *i2eBordStrPtr;
 
 //-------------------------------------------------------------------

@@ -131,14 +131,14 @@ static inline void set_restdata_reg(unsigned char *cur_addr)
  * 
  * 4. When this function is left, the address pointer (start_addr) is
  *    converted to a physical address. Because it points one byte
- *    further than the last transfered byte, it can point outside the
+ *    further than the last transferred byte, it can point outside the
  *    current page. If virt_to_phys() is called with this address we
  *    might get an access error. Therefore virt_to_phys() is called with
  *    start_addr - 1 if the count has reached zero. The result is
  *    increased with one.
  */
 
-static void hades_dma_emulator(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t hades_dma_emulator(int irq, void *dummy, struct pt_regs *fp)
 {
 	unsigned long dma_base;
 	register unsigned long dma_cnt asm ("d3");
@@ -166,7 +166,7 @@ static void hades_dma_emulator(int irq, void *dummy, struct pt_regs *fp)
 	if ((tt_scsi_dma.dma_ctrl & 2) == 0)
 	{
 		atari_enable_irq(IRQ_TT_MFP_SCSI);
-		return;
+		return IRQ_HANDLED;
 	}
 
 	if (dma_cnt == 0)
@@ -174,7 +174,7 @@ static void hades_dma_emulator(int irq, void *dummy, struct pt_regs *fp)
 		printk(KERN_NOTICE "DMA emulation: count is zero.\n");
 		tt_scsi_dma.dma_ctrl &= 0xfd;	/* DMA ready. */
 		atari_enable_irq(IRQ_TT_MFP_SCSI);
-		return;
+		return IRQ_HANDLED;
 	}
 
 	/*
@@ -338,7 +338,7 @@ scsi_end:
 
 	atari_enable_irq(IRQ_TT_MFP_SCSI);
 
-	return;
+	return IRQ_HANDLED;
 
 scsi_bus_error:
 	/*

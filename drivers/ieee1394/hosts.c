@@ -11,310 +11,223 @@
  */
 
 #include <linux/config.h>
-
+#include <linux/module.h>
 #include <linux/types.h>
+#include <linux/list.h>
 #include <linux/init.h>
-#include <linux/vmalloc.h>
-#include <linux/wait.h>
+#include <linux/slab.h>
+#include <linux/pci.h>
+#include <linux/timer.h>
 
+#include "csr1212.h"
+#include "ieee1394.h"
 #include "ieee1394_types.h"
 #include "hosts.h"
 #include "ieee1394_core.h"
 #include "highlevel.h"
+#include "nodemgr.h"
+#include "csr.h"
+#include "config_roms.h"
 
 
-static struct hpsb_host_template *templates = NULL;
-spinlock_t templates_lock = SPIN_LOCK_UNLOCKED;
+static void delayed_reset_bus(void * __reset_info)
+{
+	struct hpsb_host *host = (struct hpsb_host*)__reset_info;
+	int generation = host->csr.generation + 1;
 
-/*
- * This function calls the add_host/remove_host hooks for every host currently
- * registered.  Init == TRUE means add_host.
+	/* The generation field rolls over to 2 rather than 0 per IEEE
+	 * 1394a-2000. */
+	if (generation > 0xf || generation < 2)
+		generation = 2;
+
+	CSR_SET_BUS_INFO_GENERATION(host->csr.rom, generation);
+	if (csr1212_generate_csr_image(host->csr.rom) != CSR1212_SUCCESS) {
+		/* CSR image creation failed, reset generation field and do not
+		 * issue a bus reset. */
+		CSR_SET_BUS_INFO_GENERATION(host->csr.rom, host->csr.generation);
+		return;
+	}
+
+	host->csr.generation = generation;
+
+	host->update_config_rom = 0;
+	if (host->driver->set_hw_config_rom)
+		host->driver->set_hw_config_rom(host, host->csr.rom->bus_info_data);
+
+	host->csr.gen_timestamp[host->csr.generation] = jiffies;
+	hpsb_reset_bus(host, SHORT_RESET);
+}
+
+static int dummy_transmit_packet(struct hpsb_host *h, struct hpsb_packet *p)
+{
+        return 0;
+}
+
+static int dummy_devctl(struct hpsb_host *h, enum devctl_cmd c, int arg)
+{
+        return -1;
+}
+
+static int dummy_isoctl(struct hpsb_iso *iso, enum isoctl_cmd command, unsigned long arg)
+{
+	return -1;
+}
+
+static struct hpsb_host_driver dummy_driver = {
+        .transmit_packet = dummy_transmit_packet,
+        .devctl =          dummy_devctl,
+	.isoctl =          dummy_isoctl
+};
+
+static int alloc_hostnum_cb(struct hpsb_host *host, void *__data)
+{
+	int *hostnum = __data;
+
+	if (host->id == *hostnum)
+		return 1;
+
+	return 0;
+}
+
+/**
+ * hpsb_alloc_host - allocate a new host controller.
+ * @drv: the driver that will manage the host controller
+ * @extra: number of extra bytes to allocate for the driver
+ *
+ * Allocate a &hpsb_host and initialize the general subsystem specific
+ * fields.  If the driver needs to store per host data, as drivers
+ * usually do, the amount of memory required can be specified by the
+ * @extra parameter.  Once allocated, the driver should initialize the
+ * driver specific parts, enable the controller and make it available
+ * to the general subsystem using hpsb_add_host().
+ *
+ * Return Value: a pointer to the &hpsb_host if succesful, %NULL if
+ * no memory was available.
  */
-void hl_all_hosts(struct hpsb_highlevel *hl, int init)
-{
-        struct hpsb_host_template *tmpl;
-        struct hpsb_host *host;
+static DECLARE_MUTEX(host_num_alloc);
 
-        spin_lock(&templates_lock);
-
-        for (tmpl = templates; tmpl != NULL; tmpl = tmpl->next) {
-                for (host = tmpl->hosts; host != NULL; host = host->next) {
-                        if (host->initialized) {
-                                if (init) {
-                                        if (hl->op->add_host) {
-                                                hl->op->add_host(host);
-                                        }
-                                } else {
-                                        if (hl->op->remove_host) {
-                                                hl->op->remove_host(host);
-                                        }
-                                }
-                        }
-                }
-        }
-
-        spin_unlock(&templates_lock);
-}
-
-int hpsb_inc_host_usage(struct hpsb_host *host)
-{
-        struct hpsb_host_template *tmpl;
-        struct hpsb_host *h;
-        int retval = 0;
-	unsigned long flags;
-
-        spin_lock_irqsave(&templates_lock, flags);
-
-        for (tmpl = templates; (tmpl != NULL) && !retval; tmpl = tmpl->next) {
-                for (h = tmpl->hosts; h != NULL; h = h->next) {
-                        if (h == host) {
-                                tmpl->devctl(h, MODIFY_USAGE, 1);
-                                retval = 1;
-                                break;
-                        }
-                }
-        }
-
-        spin_unlock_irqrestore(&templates_lock, flags);
-
-        return retval;
-}
-
-void hpsb_dec_host_usage(struct hpsb_host *host)
-{
-        host->template->devctl(host, MODIFY_USAGE, 0);
-}
-
-/*
- * The following function is exported for module usage.  It will be called from
- * the detect function of a adapter driver.
- */
-struct hpsb_host *hpsb_get_host(struct hpsb_host_template *tmpl, 
-                                size_t hd_size)
+struct hpsb_host *hpsb_alloc_host(struct hpsb_host_driver *drv, size_t extra,
+				  struct device *dev)
 {
         struct hpsb_host *h;
+	int i;
+	int hostnum = 0;
 
-        h = vmalloc(sizeof(struct hpsb_host) + hd_size);
-        if (h == NULL) {
-                return NULL;
-        }
+        h = kmalloc(sizeof(struct hpsb_host) + extra, SLAB_KERNEL);
+        if (!h) return NULL;
+        memset(h, 0, sizeof(struct hpsb_host) + extra);
 
-        memset(h, 0, sizeof(struct hpsb_host) + hd_size);
-        INIT_LIST_HEAD(&h->pending_packets);
-        spin_lock_init(&h->pending_pkt_lock);
+	h->csr.rom = csr1212_create_csr(&csr_bus_ops, CSR_BUS_INFO_SIZE, h);
+	if (!h->csr.rom) {
+		kfree(h);
+		return NULL;
+	}
 
-        sema_init(&h->tlabel_count, 64);
-        spin_lock_init(&h->tlabel_lock);
+	h->hostdata = h + 1;
+        h->driver = drv;
 
-        h->timeout_tq.routine = (void (*)(void*))abort_timedouts;
-        h->timeout_tq.data = h;
+	skb_queue_head_init(&h->pending_packet_queue);
+	INIT_LIST_HEAD(&h->addr_space);
+
+	for (i = 2; i < 16; i++)
+		h->csr.gen_timestamp[i] = jiffies - 60 * HZ;
+
+	for (i = 0; i < ARRAY_SIZE(h->tpool); i++)
+		HPSB_TPOOL_INIT(&h->tpool[i]);
+
+	atomic_set(&h->generation, 0);
+
+	INIT_WORK(&h->delayed_reset, delayed_reset_bus, h);
+	
+	init_timer(&h->timeout);
+	h->timeout.data = (unsigned long) h;
+	h->timeout.function = abort_timedouts;
+	h->timeout_interval = HZ / 20; // 50ms by default
 
         h->topology_map = h->csr.topology_map + 3;
         h->speed_map = (u8 *)(h->csr.speed_map + 2);
 
-        h->template = tmpl;
-        if (hd_size) {
-                h->hostdata = &h->embedded_hostdata[0];
-        }
+	down(&host_num_alloc);
 
-        if (tmpl->hosts == NULL) {
-                tmpl->hosts = h;
-        } else {
-                struct hpsb_host *last = tmpl->hosts;
+	while (nodemgr_for_each_host(&hostnum, alloc_hostnum_cb))
+		hostnum++;
 
-                while (last->next != NULL) {
-                        last = last->next;
-                }
-                last->next = h;
-        }
+	h->id = hostnum;
 
-        return h;
+	memcpy(&h->device, &nodemgr_dev_template_host, sizeof(h->device));
+	h->device.parent = dev;
+	snprintf(h->device.bus_id, BUS_ID_SIZE, "fw-host%d", h->id);
+
+	h->class_dev.dev = &h->device;
+	h->class_dev.class = &hpsb_host_class;
+	snprintf(h->class_dev.class_id, BUS_ID_SIZE, "fw-host%d", h->id);
+
+	device_register(&h->device);
+	class_device_register(&h->class_dev);
+	get_device(&h->device);
+
+	up(&host_num_alloc);
+
+	return h;
 }
 
-static void free_all_hosts(struct hpsb_host_template *tmpl)
+int hpsb_add_host(struct hpsb_host *host)
 {
-        struct hpsb_host *next, *host = tmpl->hosts;
+	if (hpsb_default_host_entry(host))
+		return -ENOMEM;
 
-        while (host) {
-                next = host->next;
-                vfree(host);
-                host = next;
-        }
+	hpsb_add_extra_config_roms(host);
+
+	highlevel_add_host(host);
+
+	return 0;
 }
 
-
-static void init_hosts(struct hpsb_host_template *tmpl)
+void hpsb_remove_host(struct hpsb_host *host)
 {
-        int count;
-        struct hpsb_host *host;
+        host->is_shutdown = 1;
 
-        count = tmpl->detect_hosts(tmpl);
+	cancel_delayed_work(&host->delayed_reset);
+	flush_scheduled_work();
 
-        for (host = tmpl->hosts; host != NULL; host = host->next) {
-                if (tmpl->initialize_host(host)) {
-                        host->initialized = 1;
+        host->driver = &dummy_driver;
 
-                        highlevel_add_host(host);
-                        hpsb_reset_bus(host);
-                }
-        }
+        highlevel_remove_host(host);
 
-        tmpl->number_of_hosts = count;
-        HPSB_INFO("detected %d %s adapter%c", count, tmpl->name,
-                  (count != 1 ? 's' : ' '));
+	hpsb_remove_extra_config_roms(host);
+
+	class_device_unregister(&host->class_dev);
+	device_unregister(&host->device);
 }
 
-static void shutdown_hosts(struct hpsb_host_template *tmpl)
+int hpsb_update_config_rom_image(struct hpsb_host *host)
 {
-        struct hpsb_host *host;
+	unsigned long reset_delay;
+	int next_gen = host->csr.generation + 1;
 
-        for (host = tmpl->hosts; host != NULL; host = host->next) {
-                if (host->initialized) {
-                        host->initialized = 0;
-                        abort_requests(host);
+	if (!host->update_config_rom)
+		return -EINVAL;
 
-                        highlevel_remove_host(host);
+	if (next_gen > 0xf)
+		next_gen = 2;
 
-                        tmpl->release_host(host);
-                        while (test_bit(0, &host->timeout_tq.sync)) {
-                                schedule();
-                        }
-                }
-        }
-        free_all_hosts(tmpl);
-        tmpl->release_host(NULL);
+	/* Stop the delayed interrupt, we're about to change the config rom and
+	 * it would be a waste to do a bus reset twice. */
+	cancel_delayed_work(&host->delayed_reset);
 
-        tmpl->number_of_hosts = 0;
+	/* IEEE 1394a-2000 prohibits using the same generation number
+	 * twice in a 60 second period. */
+	if (jiffies - host->csr.gen_timestamp[next_gen] < 60 * HZ)
+		/* Wait 60 seconds from the last time this generation number was
+		 * used. */
+		reset_delay = (60 * HZ) + host->csr.gen_timestamp[next_gen] - jiffies;
+	else
+		/* Wait 1 second in case some other code wants to change the
+		 * Config ROM in the near future. */
+		reset_delay = HZ;
+
+	PREPARE_WORK(&host->delayed_reset, delayed_reset_bus, host);
+	schedule_delayed_work(&host->delayed_reset, reset_delay);
+
+	return 0;
 }
-
-
-static int add_template(struct hpsb_host_template *new)
-{
-        new->next = NULL;
-        new->hosts = NULL;
-        new->number_of_hosts = 0;
-
-        spin_lock(&templates_lock);
-        if (templates == NULL) {
-                templates = new;
-        } else {
-                struct hpsb_host_template *last = templates;
-                while (last->next != NULL) {
-                        last = last->next;
-                }
-                last->next = new;
-        }
-        spin_unlock(&templates_lock);
-
-        return 0;
-}
-
-static int remove_template(struct hpsb_host_template *tmpl)
-{
-        int retval = 0;
-
-        if (tmpl->number_of_hosts) {
-                HPSB_ERR("attempted to remove busy host template "
-                         "of %s at address 0x%p", tmpl->name, tmpl);
-                return 1;
-        }
-
-        spin_lock(&templates_lock);
-        if (templates == tmpl) {
-                templates = tmpl->next;
-        } else {
-                struct hpsb_host_template *t;
-
-                t = templates;
-                while (t->next != tmpl && t->next != NULL) {
-                        t = t->next;
-                }
-
-                if (t->next == NULL) {
-                        HPSB_ERR("attempted to remove unregistered host template "
-                                 "of %s at address 0x%p", tmpl->name, tmpl);
-                        retval = -1;
-                } else {
-                        t->next = tmpl->next;
-                }
-        }
-        spin_unlock(&templates_lock);
-
-        inc_hpsb_generation();
-        return retval;
-}
-
-
-/*
- * The following two functions are exported symbols for module usage.
- */
-int hpsb_register_lowlevel(struct hpsb_host_template *tmpl)
-{
-        add_template(tmpl);
-        HPSB_INFO("registered %s driver, initializing now", tmpl->name);
-        init_hosts(tmpl);
-
-        return 0;
-}
-
-void hpsb_unregister_lowlevel(struct hpsb_host_template *tmpl)
-{
-        shutdown_hosts(tmpl);
-
-        if (remove_template(tmpl)) {
-                HPSB_PANIC("remove_template failed on %s", tmpl->name);
-        }
-}
-
-
-
-#ifndef MODULE
-
-/*
- * This is the init function for builtin lowlevel drivers.  To add new drivers
- * put their setup code (get and register template) here.  Module only
- * drivers don't need to touch this.
- */
-
-#define SETUP_TEMPLATE(name, visname) \
-do {                                                                       \
-        extern struct hpsb_host_template *get_ ## name ## _template(void); \
-        t = get_ ## name ## _template();                                   \
-                                                                           \
-        if (t != NULL) {                                                   \
-                if(!hpsb_register_lowlevel(t)) {                           \
-                        count++;                                           \
-                }                                                          \
-        } else {                                                           \
-                HPSB_WARN(visname " driver returned no host template");    \
-        }                                                                  \
-} while (0)
-
-void __init register_builtin_lowlevels()
-{
-        struct hpsb_host_template *t;
-        int count = 0;
-
-        /* Touch t to avoid warning if no drivers are configured to
-         * be built directly into the kernel. */
-        t = NULL;
-
-#ifdef CONFIG_IEEE1394_PCILYNX
-        SETUP_TEMPLATE(lynx, "Lynx");
-#endif
-
-#ifdef CONFIG_IEEE1394_AIC5800
-        SETUP_TEMPLATE(aic, "AIC-5800");
-#endif
- 
-#ifdef CONFIG_IEEE1394_OHCI1394
-        SETUP_TEMPLATE(ohci, "OHCI-1394");
-#endif
-
-        HPSB_INFO("%d host adapter%s initialized", count,
-                  (count != 1 ? "s" : ""));
-}
-
-#undef SETUP_TEMPLATE
-
-#endif /* !MODULE */

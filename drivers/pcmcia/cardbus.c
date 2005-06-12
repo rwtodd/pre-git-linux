@@ -1,57 +1,29 @@
-/*======================================================================
-  
-    Cardbus device configuration
-    
-    cardbus.c 1.63 1999/11/08 20:47:02
-
-    The contents of this file are subject to the Mozilla Public
-    License Version 1.1 (the "License"); you may not use this file
-    except in compliance with the License. You may obtain a copy of
-    the License at http://www.mozilla.org/MPL/
-
-    Software distributed under the License is distributed on an "AS
-    IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
-    implied. See the License for the specific language governing
-    rights and limitations under the License.
-
-    The initial developer of the original code is David A. Hinds
-    <dhinds@pcmcia.sourceforge.org>.  Portions created by David A. Hinds
-    are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
-
-    Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
-    case the provisions of the GPL are applicable instead of the
-    above.  If you wish to allow the use of your version of this file
-    only under the terms of the GPL and not to allow others to use
-    your version of this file under the MPL, indicate your decision
-    by deleting the provisions above and replace them with the notice
-    and other provisions required by the GPL.  If you do not delete
-    the provisions above, a recipient may use your version of this
-    file under either the MPL or the GPL.
-    
-    These routines handle allocating resources for Cardbus cards, as
-    well as setting up and shutting down Cardbus sockets.  They are
-    called from cs.c in response to Request/ReleaseConfiguration and
-    Request/ReleaseIO calls.
-
-======================================================================*/
+/*
+ * cardbus.c -- 16-bit PCMCIA core support
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * The initial developer of the original code is David A. Hinds
+ * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
+ * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
+ *
+ * (C) 1999		David A. Hinds
+ */
 
 /*
- * This file is going away.  Cardbus handling has been re-written to be
- * more of a PCI bridge thing, and the PCI code basically does all the
- * resource handling. This has wrappers to make the rest of the PCMCIA
- * subsystem not notice that it's not here any more.
+ * Cardbus handling has been re-written to be more of a PCI bridge thing,
+ * and the PCI code basically does all the resource handling.
  *
  *		Linus, Jan 2000
  */
 
 
-#define __NO_VERSION__
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
@@ -66,22 +38,10 @@
 #include <pcmcia/bulkmem.h>
 #include <pcmcia/cistpl.h>
 #include "cs_internal.h"
-#include "rsrc_mgr.h"
-
-#ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-#endif
 
 /*====================================================================*/
 
 #define FIND_FIRST_BIT(n)	((n) - ((n) & ((n)-1)))
-
-#define pci_readb		pci_read_config_byte
-#define pci_writeb		pci_write_config_byte
-#define pci_readw		pci_read_config_word
-#define pci_writew		pci_write_config_word
-#define pci_readl		pci_read_config_dword
-#define pci_writel		pci_write_config_dword
 
 /* Offsets in the Expansion ROM Image Header */
 #define ROM_SIGNATURE		0x0000	/* 2 bytes */
@@ -97,10 +57,6 @@ static int pc_debug = PCMCIA_DEBUG;
 #define PCDATA_CODE_TYPE	0x0014
 #define PCDATA_INDICATOR	0x0015
 
-typedef struct cb_config_t {
-	struct pci_dev dev;
-} cb_config_t;
-
 /*=====================================================================
 
     Expansion ROM's have a special layout, and pointers specify an
@@ -110,7 +66,7 @@ typedef struct cb_config_t {
     
 =====================================================================*/
 
-static u_int xlate_rom_addr(u_char * b, u_int addr)
+static u_int xlate_rom_addr(void __iomem *b, u_int addr)
 {
 	u_int img = 0, ofs = 0, sz;
 	u_short data;
@@ -133,21 +89,21 @@ static u_int xlate_rom_addr(u_char * b, u_int addr)
 
     These are similar to setup_cis_mem and release_cis_mem for 16-bit
     cards.  The "result" that is used externally is the cb_cis_virt
-    pointer in the socket_info_t structure.
+    pointer in the struct pcmcia_socket structure.
     
 =====================================================================*/
 
-void cb_release_cis_mem(socket_info_t * s)
+static void cb_release_cis_mem(struct pcmcia_socket * s)
 {
 	if (s->cb_cis_virt) {
-		DEBUG(1, "cs: cb_release_cis_mem()\n");
+		cs_dbg(s, 1, "cb_release_cis_mem()\n");
 		iounmap(s->cb_cis_virt);
 		s->cb_cis_virt = NULL;
-		s->cb_cis_res = 0;
+		s->cb_cis_res = NULL;
 	}
 }
 
-static int cb_setup_cis_mem(socket_info_t * s, struct pci_dev *dev, struct resource *res)
+static int cb_setup_cis_mem(struct pcmcia_socket * s, struct resource *res)
 {
 	unsigned int start, size;
 
@@ -176,33 +132,31 @@ static int cb_setup_cis_mem(socket_info_t * s, struct pci_dev *dev, struct resou
     
 =====================================================================*/
 
-void read_cb_mem(socket_info_t * s, u_char fn, int space,
-		 u_int addr, u_int len, void *ptr)
+int read_cb_mem(struct pcmcia_socket * s, int space, u_int addr, u_int len, void *ptr)
 {
 	struct pci_dev *dev;
 	struct resource *res;
 
-	DEBUG(3, "cs: read_cb_mem(%d, %#x, %u)\n", space, addr, len);
+	cs_dbg(s, 3, "read_cb_mem(%d, %#x, %u)\n", space, addr, len);
 
-	if (!s->cb_config)
+	dev = pci_find_slot(s->cb_dev->subordinate->number, 0);
+	if (!dev)
 		goto fail;
-
-	dev = &s->cb_config[fn].dev;
 
 	/* Config space? */
 	if (space == 0) {
 		if (addr + len > 0x100)
 			goto fail;
 		for (; len; addr++, ptr++, len--)
-			pci_readb(dev, addr, (u_char *) ptr);
-		return;
+			pci_read_config_byte(dev, addr, ptr);
+		return 0;
 	}
 
 	res = dev->resource + space - 1;
 	if (!res->flags)
 		goto fail;
 
-	if (cb_setup_cis_mem(s, dev, res) != 0)
+	if (cb_setup_cis_mem(s, res) != 0)
 		goto fail;
 
 	if (space == 7) {
@@ -215,11 +169,11 @@ void read_cb_mem(socket_info_t * s, u_char fn, int space,
 		goto fail;
 
 	memcpy_fromio(ptr, s->cb_cis_virt + addr, len);
-	return;
+	return 0;
 
 fail:
 	memset(ptr, 0xff, len);
-	return;
+	return -1;
 }
 
 /*=====================================================================
@@ -230,185 +184,64 @@ fail:
     
 =====================================================================*/
 
-int cb_alloc(socket_info_t * s)
-{
-	struct pci_bus *bus;
-	struct pci_dev tmp;
-	u_short vend, v, dev;
-	u_char i, hdr, fn;
-	cb_config_t *c;
-	int irq;
-
-	bus = s->cap.cb_dev->subordinate;
-	memset(&tmp, 0, sizeof(tmp));
-	tmp.bus = bus;
-	tmp.sysdata = bus->sysdata;
-	tmp.devfn = 0;
-
-	pci_readw(&tmp, PCI_VENDOR_ID, &vend);
-	pci_readw(&tmp, PCI_DEVICE_ID, &dev);
-	printk(KERN_INFO "cs: cb_alloc(bus %d): vendor 0x%04x, "
-	       "device 0x%04x\n", bus->number, vend, dev);
-
-	pci_readb(&tmp, PCI_HEADER_TYPE, &hdr);
-	fn = 1;
-	if (hdr & 0x80) {
-		do {
-			tmp.devfn = fn;
-			if (pci_readw(&tmp, PCI_VENDOR_ID, &v) || !v || v == 0xffff)
-				break;
-			fn++;
-		} while (fn < 8);
-	}
-	s->functions = fn;
-
-	c = kmalloc(fn * sizeof(struct cb_config_t), GFP_ATOMIC);
-	if (!c)
-		return CS_OUT_OF_RESOURCE;
-	memset(c, 0, fn * sizeof(struct cb_config_t));
-
-	irq = s->cap.pci_irq;
-	for (i = 0; i < fn; i++) {
-		struct pci_dev *dev = &c[i].dev;
-		u8 irq_pin;
-		int r;
-
-		dev->bus = bus;
-		dev->sysdata = bus->sysdata;
-		dev->devfn = i;
-		dev->vendor = vend;
-		pci_readw(dev, PCI_DEVICE_ID, &dev->device);
-		dev->hdr_type = hdr & 0x7f;
-
-		pci_setup_device(dev);
-
-		/* FIXME: Do we need to enable the expansion ROM? */
-		for (r = 0; r < 7; r++) {
-			struct resource *res = dev->resource + r;
-			if (res->flags)
-				pci_assign_resource(dev, r);
-		}
-		pci_enable_device(dev); /* XXX check return */
-
-		/* Does this function have an interrupt at all? */
-		pci_readb(dev, PCI_INTERRUPT_PIN, &irq_pin);
-		if (irq_pin) {
-			dev->irq = irq;
-			pci_writeb(dev, PCI_INTERRUPT_LINE, irq);
-		}
-
-		pci_insert_device(dev, bus);
-	}
-
-	s->cb_config = c;
-	s->irq.AssignedIRQ = irq;
-	return CS_SUCCESS;
-}
-
-void cb_free(socket_info_t * s)
-{
-	cb_config_t *c = s->cb_config;
-
-	if (c) {
-		int i;
-
-		s->cb_config = NULL;
-		for (i = 0 ; i < s->functions ; i++)
-			pci_remove_device(&c[i].dev);
-
-		kfree(c);
-		printk(KERN_INFO "cs: cb_free(bus %d)\n", s->cap.cb_dev->subordinate->number);
-	}
-}
-
-/*=====================================================================
-
-    cb_config() has the job of allocating all system resources that
-    a Cardbus card requires.  Rather than using the CIS (which seems
-    to not always be present), it treats the card as an ordinary PCI
-    device, and probes the base address registers to determine each
-    function's IO and memory space needs.
-
-    It is called from the RequestIO card service.
-    
-======================================================================*/
-
-int cb_config(socket_info_t * s)
-{
-	return CS_SUCCESS;
-}
-
-/*======================================================================
-
-    cb_release() releases all the system resources (IO and memory
-    space, and interrupt) committed for a Cardbus card by a prior call
-    to cb_config().
-
-    It is called from the ReleaseIO() service.
-    
-======================================================================*/
-
-void cb_release(socket_info_t * s)
-{
-	DEBUG(0, "cs: cb_release(bus %d)\n", s->cap.cb_dev->subordinate->number);
-}
-
-/*=====================================================================
-
-    cb_enable() has the job of configuring a socket for a Cardbus
-    card, and initializing the card's PCI configuration registers.
-
-    It first sets up the Cardbus bridge windows, for IO and memory
-    accesses.  Then, it initializes each card function's base address
-    registers, interrupt line register, and command register.
-
-    It is called as part of the RequestConfiguration card service.
-    It should be called after a previous call to cb_config() (via the
-    RequestIO service).
-    
-======================================================================*/
-
-void cb_enable(socket_info_t * s)
+/*
+ * Since there is only one interrupt available to CardBus
+ * devices, all devices downstream of this device must
+ * be using this IRQ.
+ */
+static void cardbus_assign_irqs(struct pci_bus *bus, int irq)
 {
 	struct pci_dev *dev;
-	u_char i;
 
-	DEBUG(0, "cs: cb_enable(bus %d)\n", s->cap.cb_dev->subordinate->number);
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		u8 irq_pin;
 
-	/* Configure bridge */
-	cb_release_cis_mem(s);
-
-	/* Set up PCI interrupt and command registers */
-	for (i = 0; i < s->functions; i++) {
-		dev = &s->cb_config[i].dev;
-		pci_writeb(dev, PCI_COMMAND, PCI_COMMAND_MASTER |
-			   PCI_COMMAND_IO | PCI_COMMAND_MEMORY);
-		pci_writeb(dev, PCI_CACHE_LINE_SIZE, L1_CACHE_BYTES / 4);
-	}
-
-	if (s->irq.AssignedIRQ) {
-		for (i = 0; i < s->functions; i++) {
-			dev = &s->cb_config[i].dev;
-			pci_writeb(dev, PCI_INTERRUPT_LINE, s->irq.AssignedIRQ);
+		pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &irq_pin);
+		if (irq_pin) {
+			dev->irq = irq;
+			pci_write_config_byte(dev, PCI_INTERRUPT_LINE, dev->irq);
 		}
-		s->socket.io_irq = s->irq.AssignedIRQ;
-		s->ss_entry->set_socket(s->sock, &s->socket);
+
+		if (dev->subordinate)
+			cardbus_assign_irqs(dev->subordinate, irq);
 	}
 }
 
-/*======================================================================
-
-    cb_disable() unconfigures a Cardbus card previously set up by
-    cb_enable().
-
-    It is called from the ReleaseConfiguration service.
-    
-======================================================================*/
-
-void cb_disable(socket_info_t * s)
+int cb_alloc(struct pcmcia_socket * s)
 {
-	DEBUG(0, "cs: cb_disable(bus %d)\n", s->cap.cb_dev->subordinate->number);
+	struct pci_bus *bus = s->cb_dev->subordinate;
+	struct pci_dev *dev;
+	unsigned int max, pass;
 
-	/* Turn off bridge windows */
+	s->functions = pci_scan_slot(bus, PCI_DEVFN(0, 0));
+//	pcibios_fixup_bus(bus);
+
+	max = bus->secondary;
+	for (pass = 0; pass < 2; pass++)
+		list_for_each_entry(dev, &bus->devices, bus_list)
+			if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE ||
+			    dev->hdr_type == PCI_HEADER_TYPE_CARDBUS)
+				max = pci_scan_bridge(bus, dev, max, pass);
+
+	/*
+	 * Size all resources below the CardBus controller.
+	 */
+	pci_bus_size_bridges(bus);
+	pci_bus_assign_resources(bus);
+	cardbus_assign_irqs(bus, s->pci_irq);
+	pci_enable_bridges(bus);
+	pci_bus_add_devices(bus);
+
+	s->irq.AssignedIRQ = s->pci_irq;
+	return CS_SUCCESS;
+}
+
+void cb_free(struct pcmcia_socket * s)
+{
+	struct pci_dev *bridge = s->cb_dev;
+
 	cb_release_cis_mem(s);
+
+	if (bridge)
+		pci_remove_behind_bridge(bridge);
 }

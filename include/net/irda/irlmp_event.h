@@ -11,6 +11,7 @@
  * 
  *     Copyright (c) 1997, 1999 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
+ *     Copyright (c) 2000-2002 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -26,9 +27,11 @@
 #ifndef IRLMP_EVENT_H
 #define IRLMP_EVENT_H
 
+/* A few forward declarations (to make compiler happy) */
 struct irlmp_cb;
 struct lsap_cb;
 struct lap_cb;
+struct discovery_t;
 
 /* LAP states */
 typedef enum {
@@ -76,36 +79,12 @@ typedef enum {
 	LM_LAP_IDLE_TIMEOUT,
 } IRLMP_EVENT;
 
-/*
- *  Information which is used by the current thread, when executing in the
- *  state machine.
- */
-struct irlmp_event {
-	IRLMP_EVENT *event;
-	struct sk_buff *skb;
-
-	__u8 hint;
-	__u32 daddr;
-	__u32 saddr;
-
-	__u8 slsap;
-	__u8 dlsap;
-
-	int reason;
-
-	discovery_t *discovery;
-};
-
 extern const char *irlmp_state[];
 extern const char *irlsap_state[];
 
 void irlmp_watchdog_timer_expired(void *data);
 void irlmp_discovery_timer_expired(void *data);
 void irlmp_idle_timer_expired(void *data);
-
-void irlmp_next_station_state(IRLMP_STATE state);
-void irlmp_next_lsap_state(struct lsap_cb *self, LSAP_STATE state);
-void irlmp_next_lap_state(struct lap_cb *self, IRLMP_STATE state);
 
 void irlmp_do_lap_event(struct lap_cb *self, IRLMP_EVENT event, 
 			struct sk_buff *skb);

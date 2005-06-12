@@ -86,6 +86,16 @@ struct icmp6hdr {
 #define ICMPV6_MGM_REPORT       	131
 #define ICMPV6_MGM_REDUCTION    	132
 
+#define ICMPV6_NI_QUERY			139
+#define ICMPV6_NI_REPLY			140
+
+#define ICMPV6_MLD2_REPORT		143
+
+#define ICMPV6_DHAAD_REQUEST		144
+#define ICMPV6_DHAAD_REPLY		145
+#define ICMPV6_MOBILE_PREFIX_SOL	146
+#define ICMPV6_MOBILE_PREFIX_ADV	147
+
 /*
  *	Codes for Destination Unreachable
  */
@@ -127,6 +137,18 @@ struct icmp6_filter {
 	__u32		data[8];
 };
 
+/*
+ *	Definitions for MLDv2
+ */
+#define MLD2_MODE_IS_INCLUDE	1
+#define MLD2_MODE_IS_EXCLUDE	2
+#define MLD2_CHANGE_TO_INCLUDE	3
+#define MLD2_CHANGE_TO_EXCLUDE	4
+#define MLD2_ALLOW_NEW_SOURCES	5
+#define MLD2_BLOCK_OLD_SOURCES	6
+
+#define MLD2_ALL_MCR_INIT { { { 0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x16 } } }
+
 #ifdef __KERNEL__
 
 #include <linux/netdevice.h>
@@ -143,7 +165,7 @@ extern int				icmpv6_err_convert(int type, int code,
 							   int *err);
 extern void				icmpv6_cleanup(void);
 extern void				icmpv6_param_prob(struct sk_buff *skb,
-							  int code, void *pos);
+							  int code, int pos);
 #endif
 
 #endif

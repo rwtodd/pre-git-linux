@@ -7,14 +7,17 @@
  * Copyright (C) 2000 Hewlett Packard (Paul Bame bame@puffin.external.hp.com)
  *
  */
-#define __ASSEMBLY__
 #include <asm/assembly.h>
 #include <asm/psw.h>
 
 	.section	.bss
 	.export real_stack
+	.export real32_stack
+	.export real64_stack
 	.align	64
 real_stack:
+real32_stack:
+real64_stack:
 	.block	8192
 
 #ifdef __LP64__
@@ -27,12 +30,16 @@ real_stack:
 
 save_cr_space:
 	.block	REG_SZ * N_SAVED_REGS
+save_cr_end:
 
 
 /************************ 32-bit real-mode calls ***********************/
 /* This can be called in both narrow and wide kernels */
+
 	.text
+
 	.export real32_call_asm
+
 	/* unsigned long real32_call_asm(unsigned int *sp,
 	 *		unsigned int *arg0p,
 	 *		unsigned int iodc_fn)
@@ -40,6 +47,7 @@ save_cr_space:
 	 *	arg0p points to where saved arg values may be found
 	 *	iodc_fn is the IODC function to call
 	 */
+
 real32_call_asm:
 	STREG	%rp, -RP_OFFSET(%sp)	/* save RP */
 #ifdef __LP64__
@@ -61,7 +69,7 @@ real32_call_asm:
 	ldw	-12(%arg1), %arg3
 	ldw	-4(%arg1), %arg1	/* obviously must do this one last! */
 
-	tophys	%sp
+	tophys_r1  %sp
 
 	b,l	rfi_virt2real,%r2
 	nop
@@ -88,7 +96,7 @@ ric_ret:
 	b,l	rfi_real2virt,%r2
 	nop
 
-	tovirt	%sp
+	tovirt_r1 %sp
 	LDREG	-REG_SZ(%sp), %sp	/* restore SP */
 #ifdef __LP64__
 	LDREG	-1*REG_SZ(%sp), %r27
@@ -120,7 +128,7 @@ save_control_regs:
 	nop
 
 restore_control_regs:
-	load32	PA(save_cr_space + (N_SAVED_REGS * REG_SZ)), %r26
+	load32	PA(save_cr_end), %r26
 	POP_CR(%cr15, %r26)
 	POP_CR(%cr31, %r26)
 	POP_CR(%cr30, %r26)
@@ -141,7 +149,7 @@ restore_control_regs:
 rfi_virt2real:
 	/* switch to real mode... */
 	ssm		0,0		/* See "relied upon translation" */
-	nop				/* comment in interruption.S */
+	nop				/* PA 2.0 Arch. F-5 */
 	nop
 	nop
 	nop
@@ -150,14 +158,14 @@ rfi_virt2real:
 	nop
 	nop
 	
-	mtsm		0		/* disable interruptions */
-	mtctl		0, %cr17	/* space 0 */
-	mtctl		0, %cr17
+	rsm             (PSW_SM_Q|PSW_SM_I),%r0  /* disable Q & I bits to load iia queue */
+	mtctl		%r0, %cr17	/* Clear IIASQ tail */
+	mtctl		%r0, %cr17	/* Clear IIASQ head */
 	load32		PA(rfi_v2r_1), %r1
-	mtctl		%r1, %cr18
+	mtctl		%r1, %cr18	/* IIAOQ head */
 	ldo		4(%r1), %r1
-	mtctl		%r1, %cr18
-	load32		PDC_PSW, %r1
+	mtctl		%r1, %cr18	/* IIAOQ tail */
+	load32          REAL_MODE_PSW, %r1
 	mtctl		%r1, %cr22
 	rfi
 	
@@ -170,7 +178,7 @@ rfi_virt2real:
 	nop
 	nop
 rfi_v2r_1:
-	tophys	%r2
+	tophys_r1 %r2
 	bv	0(%r2)
 	nop
 
@@ -178,7 +186,7 @@ rfi_v2r_1:
 	.align 128
 rfi_real2virt:
 	ssm		0,0		/* See "relied upon translation" */
-	nop				/* comment in interruption.S */
+	nop				/* PA 2.0 Arch. F-5 */
 	nop
 	nop
 	nop
@@ -187,13 +195,13 @@ rfi_real2virt:
 	nop
 	nop
 	
-	mtsm		0		/* disable interruptions */
-	mtctl		0, %cr17	/* space 0 */
-	mtctl		0, %cr17
+	rsm             PSW_SM_Q,%r0    /* disable Q bit to load iia queue */
+	mtctl		%r0, %cr17	/* Clear IIASQ tail */
+	mtctl		%r0, %cr17	/* Clear IIASQ head */
 	load32		(rfi_r2v_1), %r1
-	mtctl		%r1, %cr18
+	mtctl		%r1, %cr18	/* IIAOQ head */
 	ldo		4(%r1), %r1
-	mtctl		%r1, %cr18
+	mtctl		%r1, %cr18	/* IIAOQ tail */
 	load32		KERNEL_PSW, %r1
 	mtctl		%r1, %cr22
 	rfi
@@ -207,7 +215,7 @@ rfi_real2virt:
 	nop
 	nop
 rfi_r2v_1:
-	tovirt	%r2
+	tovirt_r1 %r2
 	bv	0(%r2)
 	nop
 
@@ -246,7 +254,7 @@ real64_call_asm:
 	ldd	7*REG_SZ(%arg1), %r19
 	ldd	1*REG_SZ(%arg1), %arg1		/* do this one last! */
 
-	tophys	%sp
+	tophys_r1 %sp
 
 	b,l	rfi_virt2real,%r2
 	nop
@@ -265,10 +273,33 @@ r64_ret:
 	b,l	rfi_real2virt,%r2
 	nop
 
-	tovirt	%sp
+	tovirt_r1 %sp
 	ldd	-8(%sp), %sp		/* restore SP */
 	ldd	-0x10(%sp), %rp		/* restore RP */
 	bv	0(%rp)
 	nop
 
 #endif
+
+	.export pc_in_user_space
+	.text
+	/* Doesn't belong here but I couldn't find a nicer spot. */
+	/* Should never get called, only used by profile stuff in time.c */
+pc_in_user_space:
+	bv,n	0(%rp)
+	nop
+
+
+	.export __canonicalize_funcptr_for_compare
+	.text
+	/* http://lists.parisc-linux.org/hypermail/parisc-linux/10916.html
+	**	GCC 3.3 and later has a new function in libgcc.a for
+	**	comparing function pointers.
+	*/
+__canonicalize_funcptr_for_compare:
+#ifdef __LP64__
+	bve (%r2)
+#else
+	bv %r0(%r2)
+#endif
+	copy %r26,%r28

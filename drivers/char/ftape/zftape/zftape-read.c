@@ -29,11 +29,7 @@
 
 #include <linux/zftape.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,6)
 #include <asm/uaccess.h>
-#else
-#include <asm/segment.h>
-#endif
 
 #include "../zftape/zftape-init.h"
 #include "../zftape/zftape-eof.h"
@@ -158,7 +154,7 @@ int zft_fetch_segment_fraction(const unsigned int segment, void *buffer,
  * amount of data actually * copied to the user-buffer
  */
 static int zft_simple_read (int *read_cnt, 
-			    __u8  *dst_buf, 
+			    __u8  __user *dst_buf, 
 			    const int to_do, 
 			    const __u8 *src_buf, 
 			    const int seg_sz, 
@@ -172,15 +168,10 @@ static int zft_simple_read (int *read_cnt,
 	} else {
 		*read_cnt = to_do;
 	}
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 	if (copy_to_user(dst_buf, 
 			 src_buf + pos->seg_byte_pos, *read_cnt) != 0) {
 		TRACE_EXIT -EFAULT;
 	}
-#else
-	TRACE_CATCH(verify_area(VERIFY_WRITE, dst_buf, *read_cnt),);
-	memcpy_tofs(dst_buf, src_buf +  pos->seg_byte_pos, *read_cnt);
-#endif
 	TRACE(ft_t_noise, "nr bytes just read: %d", *read_cnt);
 	TRACE_EXIT *read_cnt;
 }
@@ -261,7 +252,7 @@ static int check_read_access(int *req_len,
  * req_len: how much data should be read at most.
  * volume: contains information on current volume (blk_sz etc.)
  */  
-static int empty_deblock_buf(__u8 *usr_buf, const int req_len,
+static int empty_deblock_buf(__u8 __user *usr_buf, const int req_len,
 			     const __u8 *src_buf, const int seg_sz,
 			     zft_position *pos,
 			     const zft_volinfo *volume)
@@ -302,7 +293,7 @@ static int empty_deblock_buf(__u8 *usr_buf, const int req_len,
  * use small block-sizes. The block-size may be 1kb (SECTOR_SIZE). In
  * this case a MTFSR 28 maybe still inside the same segment.
  */
-int _zft_read(char* buff, int req_len)
+int _zft_read(char __user *buff, int req_len)
 {
 	int req_clipped;
 	int result     = 0;

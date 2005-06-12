@@ -1,4 +1,4 @@
-/* $Id: fcntl.h,v 1.11 2000/09/23 02:09:21 davem Exp $ */
+/* $Id: fcntl.h,v 1.12 2001/09/20 00:35:34 davem Exp $ */
 #ifndef _SPARC64_FCNTL_H
 #define _SPARC64_FCNTL_H
 
@@ -20,6 +20,9 @@
 #define O_DIRECTORY	0x10000	/* must be a directory */
 #define O_NOFOLLOW	0x20000	/* don't follow links */
 #define O_LARGEFILE	0x40000
+#define O_DIRECT        0x100000 /* direct disk access hint */
+#define O_NOATIME	0x200000
+
 
 #define F_DUPFD		0	/* dup */
 #define F_GETFD		1	/* get close_on_exec */
@@ -33,12 +36,6 @@
 #define F_SETLKW	9
 #define F_SETSIG	10	/*  for sockets. */
 #define F_GETSIG	11	/*  for sockets. */
-
-#ifdef __KERNEL__
-#define F_GETLK64	12
-#define F_SETLK64	13
-#define F_SETLKW64	14
-#endif
 
 /* for F_[GET|SET]FL */
 #define FD_CLOEXEC	1	/* actually anything with low bit set goes */
@@ -76,20 +73,6 @@ struct flock {
 	short __unused;
 };
 
-#ifdef __KERNEL__
-struct flock32 {
-	short l_type;
-	short l_whence;
-	__kernel_off_t32 l_start;
-	__kernel_off_t32 l_len;
-	__kernel_pid_t32 l_pid;
-	short __unused;
-};
-#endif
-
-#ifdef __KERNEL__
-#define flock64	flock
-#endif
-
 #define F_LINUX_SPECIFIC_BASE	1024
+
 #endif /* !(_SPARC64_FCNTL_H) */

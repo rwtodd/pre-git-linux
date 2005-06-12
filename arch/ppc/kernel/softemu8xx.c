@@ -21,7 +21,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/interrupt.h>
@@ -30,7 +30,11 @@
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/processor.h>
+
+extern void
+print_8xx_pte(struct mm_struct *mm, unsigned long addr);
+extern int
+get_8xx_pte(struct mm_struct *mm, unsigned long addr);
 
 /* Eventually we may need a look-up table, but this works for now.
 */
@@ -75,12 +79,12 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		sdisp = (instword & 0xffff);
 		ea = (uint *)(regs->gpr[idxreg] + sdisp);
 		if (copy_from_user(ip, ea, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		break;
 		
 	case LFDU:
 		if (copy_from_user(ip, ea, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		else
 			regs->gpr[idxreg] = (uint)ea;
 		break;
@@ -88,7 +92,7 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		sdisp = (instword & 0xffff);
 		ea = (uint *)(regs->gpr[idxreg] + sdisp);
 		if (copy_from_user(ip, ea, sizeof(float)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		break;
 	case STFD:
 		/* this is a 16 bit quantity that is sign extended
@@ -97,12 +101,12 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		sdisp = (instword & 0xffff);
 		ea = (uint *)(regs->gpr[idxreg] + sdisp);
 		if (copy_to_user(ea, ip, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		break;
 
 	case STFDU:
 		if (copy_to_user(ea, ip, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		else
 			regs->gpr[idxreg] = (uint)ea;
 		break;
@@ -114,7 +118,7 @@ Soft_emulate_8xx(struct pt_regs *regs)
 	default:
 		retval = 1;
 		printk("Bad emulation %s/%d\n"
-		       " NIP: %08x instruction: %08x opcode: %x "
+		       " NIP: %08lx instruction: %08x opcode: %x "
 		       "A: %x B: %x C: %x code: %x rc: %x\n",
 		       current->comm,current->pid,
 		       regs->nip,
@@ -129,7 +133,7 @@ Soft_emulate_8xx(struct pt_regs *regs)
 			print_8xx_pte(current->mm,regs->nip);
 			pa = get_8xx_pte(current->mm,regs->nip) & PAGE_MASK;
 			pa |= (regs->nip & ~PAGE_MASK);
-			pa = __va(pa);
+			pa = (unsigned long)__va(pa);
 			printk("Kernel VA for NIP %x ", pa);
 			print_8xx_pte(current->mm,pa);
 		}

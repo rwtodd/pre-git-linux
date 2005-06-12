@@ -1,20 +1,18 @@
 /*
+ * PCBIT-D low-layer interface
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  *
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of
- * the GNU Public License, incorporated herein by reference.
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
  * 19991203 - Fernando Carvalho - takion@superbofh.org
  * Hacked to compile with egcs and run with current version of isdn modules
 */
-
-/*
- *        PCBIT-D low-layer interface
- */
 
 /*
  *        Based on documentation provided by Inesc:
@@ -26,23 +24,13 @@
  *              re-write/remove debug printks
  */
 
-#define __NO_VERSION__
-
-
-#ifdef MODULE
-#define INCLUDE_INLINE_FUNCS
-#endif
-
-
-#include <linux/module.h>
-
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/mm.h>
 #include <linux/skbuff.h>
 
@@ -93,8 +81,7 @@ static void pcbit_firmware_bug(struct pcbit_dev *dev);
 static __inline__ void
 pcbit_sched_delivery(struct pcbit_dev *dev)
 {
-	queue_task(&dev->qdelivery, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+	schedule_work(&dev->qdelivery);
 }
 
 
@@ -134,18 +121,17 @@ pcbit_l2_write(struct pcbit_dev *dev, ulong msg, ushort refnum,
 
 	frame->next = NULL;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&dev->lock, flags);
 
 	if (dev->write_queue == NULL) {
 		dev->write_queue = frame;
-		restore_flags(flags);
+		spin_unlock_irqrestore(&dev->lock, flags);
 		pcbit_transmit(dev);
 	} else {
 		for (ptr = dev->write_queue; ptr->next; ptr = ptr->next);
 		ptr->next = frame;
 
-		restore_flags(flags);
+		spin_unlock_irqrestore(&dev->lock, flags);
 	}
 	return 0;
 }
@@ -176,7 +162,6 @@ pcbit_transmit(struct pcbit_dev *dev)
 	struct frame_buf *frame = NULL;
 	unsigned char unacked;
 	int flen;               /* fragment frame length including all headers */
-	int totlen;             /* non-fragmented frame length */
 	int free;
 	int count,
 	 cp_len;
@@ -188,15 +173,14 @@ pcbit_transmit(struct pcbit_dev *dev)
 
 	unacked = (dev->send_seq + (8 - dev->unack_seq)) & 0x07;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&dev->lock, flags);
 
 	if (dev->free > 16 && dev->write_queue && unacked < 7) {
 
 		if (!dev->w_busy)
 			dev->w_busy = 1;
 		else {
-			restore_flags(flags);
+			spin_unlock_irqrestore(&dev->lock, flags);
 			return;
 		}
 
@@ -204,7 +188,7 @@ pcbit_transmit(struct pcbit_dev *dev)
 		frame = dev->write_queue;
 		free = dev->free;
 
-		restore_flags(flags);
+		spin_unlock_irqrestore(&dev->lock, flags);
 
 		if (frame->copied == 0) {
 
@@ -213,11 +197,12 @@ pcbit_transmit(struct pcbit_dev *dev)
 			ulong 	msg;
 
 			if (frame->skb)
-				totlen = FRAME_HDR_LEN + PREHDR_LEN + frame->skb->len;
+				flen = FRAME_HDR_LEN + PREHDR_LEN + frame->skb->len;
 			else
-				totlen = FRAME_HDR_LEN + PREHDR_LEN;
+				flen = FRAME_HDR_LEN + PREHDR_LEN;
 
-			flen = MIN(totlen, free);
+			if (flen > free)
+				flen = free;
 
 			msg = frame->msg;
 
@@ -259,9 +244,10 @@ pcbit_transmit(struct pcbit_dev *dev)
 		} else {
 			/* Type 1 frame */
 
-			totlen = 2 + (frame->skb->len - frame->copied);
+			flen = 2 + (frame->skb->len - frame->copied);
 
-			flen = MIN(totlen, free);
+			if (flen > free)
+				flen = free;
 
 			/* TT */
 			tt = ((ushort) (flen - 2)) | 0x8000U;	/* Type 1 */
@@ -271,8 +257,9 @@ pcbit_transmit(struct pcbit_dev *dev)
 		}
 
 		if (frame->skb) {
-			cp_len = MIN(frame->skb->len - frame->copied,
-				     flen - count);
+			cp_len = frame->skb->len - frame->copied;
+			if (cp_len > flen - count)
+				cp_len = flen - count;
 
 			memcpy_topcbit(dev, frame->skb->data + frame->copied,
 				       cp_len);
@@ -282,9 +269,7 @@ pcbit_transmit(struct pcbit_dev *dev)
 		dev->free -= flen;
 		pcbit_tx_update(dev, flen);
 
-		save_flags(flags);
-		cli();
-
+		spin_lock_irqsave(&dev->lock, flags);
 
 		if (frame->skb == NULL || frame->copied == frame->skb->len) {
 
@@ -297,9 +282,9 @@ pcbit_transmit(struct pcbit_dev *dev)
 			kfree(frame);
 		}
 		dev->w_busy = 0;
-		restore_flags(flags);
+		spin_unlock_irqrestore(&dev->lock, flags);
 	} else {
-		restore_flags(flags);
+		spin_unlock_irqrestore(&dev->lock, flags);
 #ifdef DEBUG
 		printk(KERN_DEBUG "unacked %d free %d write_queue %s\n",
 		     unacked, dev->free, dev->write_queue ? "not empty" :
@@ -320,12 +305,11 @@ pcbit_deliver(void *data)
 	unsigned long flags, msg;
 	struct pcbit_dev *dev = (struct pcbit_dev *) data;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&dev->lock, flags);
 
 	while ((frame = dev->read_queue)) {
 		dev->read_queue = frame->next;
-		restore_flags(flags);
+		spin_unlock_irqrestore(&dev->lock, flags);
 
 		SET_MSG_CPU(msg, 0);
 		SET_MSG_PROC(msg, 0);
@@ -342,11 +326,10 @@ pcbit_deliver(void *data)
 
 		kfree(frame);
 
-		save_flags(flags);
-		cli();
+		spin_lock_irqsave(&dev->lock, flags);
 	}
 
-	restore_flags(flags);
+	spin_unlock_irqrestore(&dev->lock, flags);
 }
 
 /*
@@ -471,11 +454,8 @@ pcbit_receive(struct pcbit_dev *dev)
 	memcpy_frompcbit(dev, skb_put(frame->skb, tt), tt);
 
 	frame->copied += tt;
-
+	spin_lock_irqsave(&dev->lock, flags);
 	if (frame->copied == frame->hdr_len + frame->dt_len) {
-
-		save_flags(flags);
-		cli();
 
 		if (type1) {
 			dev->read_frame = NULL;
@@ -487,14 +467,10 @@ pcbit_receive(struct pcbit_dev *dev)
 		} else
 			dev->read_queue = frame;
 
-		restore_flags(flags);
-
 	} else {
-		save_flags(flags);
-		cli();
 		dev->read_frame = frame;
-		restore_flags(flags);
 	}
+	spin_unlock_irqrestore(&dev->lock, flags);
 }
 
 /*
@@ -535,7 +511,7 @@ pcbit_firmware_bug(struct pcbit_dev *dev)
 	}
 }
 
-void
+irqreturn_t
 pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 {
 	struct pcbit_dev *dev;
@@ -547,11 +523,11 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 
 	if (!dev) {
 		printk(KERN_WARNING "pcbit_irq_handler: wrong device\n");
-		return;
+		return IRQ_NONE;
 	}
 	if (dev->interrupt) {
 		printk(KERN_DEBUG "pcbit: reentering interrupt hander\n");
-		return;
+		return IRQ_HANDLED;
 	}
 	dev->interrupt = 1;
 
@@ -560,7 +536,7 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 	if (dev->l2_state == L2_STARTING || dev->l2_state == L2_ERROR) {
 		pcbit_l2_active_conf(dev, info);
 		dev->interrupt = 0;
-		return;
+		return IRQ_HANDLED;
 	}
 	if (info & 0x40U) {     /* E bit set */
 #ifdef DEBUG
@@ -568,11 +544,11 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 #endif
 		pcbit_l2_error(dev);
 		dev->interrupt = 0;
-		return;
+		return IRQ_HANDLED;
 	}
 	if (dev->l2_state != L2_RUNNING && dev->l2_state != L2_LOADING) {
 		dev->interrupt = 0;
-		return;
+		return IRQ_HANDLED;
 	}
 	ack_seq = (info >> 3) & 0x07U;
 	read_seq = (info & 0x07U);
@@ -593,6 +569,7 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 	info |= dev->send_seq;
 
 	writeb(info, dev->sh_mem + BANK4);
+	return IRQ_HANDLED;
 }
 
 

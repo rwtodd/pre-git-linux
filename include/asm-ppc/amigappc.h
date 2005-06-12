@@ -1,5 +1,5 @@
 /*
-** asm-m68k/amigappc.h -- This header defines some values and pointers for
+** asm-ppc/amigappc.h -- This header defines some values and pointers for
 **                        the Phase 5 PowerUp card.
 **
 ** Copyright 1997, 1998 by Phase5, Germany.

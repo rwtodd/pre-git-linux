@@ -3,7 +3,7 @@
 
 /*
  * Include file for the interface to an APM BIOS
- * Copyright 1994-2000 Stephen Rothwell (sfr@linuxcare.com)
+ * Copyright 1994-2001 Stephen Rothwell (sfr@canb.auug.org.au)
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -21,8 +21,7 @@ typedef unsigned short	apm_eventinfo_t;
 
 #ifdef __KERNEL__
 
-#define APM_40		0x40
-#define APM_CS		(APM_40 + 8)
+#define APM_CS		(GDT_ENTRY_APMBIOS_BASE * 8)
 #define APM_CS_16	(APM_CS + 8)
 #define APM_DS		(APM_CS_16 + 8)
 
@@ -46,12 +45,17 @@ struct apm_bios_info {
 #define APM_BIOS_DISENGAGED     0x0010
 
 /*
- * Data for APM that is persistant across module unload/load
+ * Data for APM that is persistent across module unload/load
  */
 struct apm_info {
 	struct apm_bios_info	bios;
 	unsigned short		connection_version;
 	int			get_power_status_broken;
+	int			get_power_status_swabinminutes;
+	int			allow_ints;
+	int			forbid_idle;
+	int			realmode_power_off;
+	int			disabled;
 };
 
 /*

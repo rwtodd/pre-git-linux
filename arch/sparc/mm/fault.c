@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.118 2000/12/29 07:52:41 anton Exp $
+/* $Id: fault.c,v 1.122 2001/11/17 07:19:26 davem Exp $
  * fault.c:  Page fault handlers for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -10,6 +10,7 @@
 
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/mman.h>
 #include <linux/threads.h>
@@ -19,6 +20,7 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
@@ -34,10 +36,7 @@
 
 #define ELEMENTS(arr) (sizeof (arr)/sizeof (arr[0]))
 
-extern struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
 extern int prom_node_root;
-
-struct linux_romvec *romvec;
 
 /* At boot time we determine these two values necessary for setting
  * up the segment maps and page table entries (pte's).
@@ -72,7 +71,7 @@ int prom_probe_memory (void)
 		mlist = mlist->theres_more;
 		bytes = mlist->num_bytes;
 		tally += bytes;
-		if (i >= SPARC_PHYS_BANKS-1) {
+		if (i > SPARC_PHYS_BANKS-1) {
 			printk ("The machine has more banks than "
 				"this kernel can support\n"
 				"Increase the SPARC_PHYS_BANKS "
@@ -140,8 +139,8 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
                      struct pt_regs *regs)
 {
 	if((unsigned long) address < PAGE_SIZE) {
-		printk(KERN_ALERT "Unable to handle kernel NULL "
-		       "pointer dereference");
+		printk(KERN_ALERT
+		    "Unable to handle kernel NULL pointer dereference\n");
 	} else {
 		printk(KERN_ALERT "Unable to handle kernel paging request "
 		       "at virtual address %08lx\n", address);
@@ -157,36 +156,68 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
 asmlinkage int lookup_fault(unsigned long pc, unsigned long ret_pc, 
 			    unsigned long address)
 {
-	unsigned long g2;
-	int i;
-	unsigned insn;
 	struct pt_regs regs;
+	unsigned long g2;
+	unsigned int insn;
+	int i;
 	
-	i = search_exception_table (ret_pc, &g2);
+	i = search_extables_range(ret_pc, &g2);
 	switch (i) {
-	/* load & store will be handled by fixup */
-	case 3: return 3;
-	/* store will be handled by fixup, load will bump out */
-	/* for _to_ macros */
-	case 1: insn = (unsigned)pc; if ((insn >> 21) & 1) return 1; break;
-	/* load will be handled by fixup, store will bump out */
-	/* for _from_ macros */
-	case 2: insn = (unsigned)pc; 
-		if (!((insn >> 21) & 1) || ((insn>>19)&0x3f) == 15) return 2; 
+	case 3:
+		/* load & store will be handled by fixup */
+		return 3;
+
+	case 1:
+		/* store will be handled by fixup, load will bump out */
+		/* for _to_ macros */
+		insn = *((unsigned int *) pc);
+		if ((insn >> 21) & 1)
+			return 1;
+		break;
+
+	case 2:
+		/* load will be handled by fixup, store will bump out */
+		/* for _from_ macros */
+		insn = *((unsigned int *) pc);
+		if (!((insn >> 21) & 1) || ((insn>>19)&0x3f) == 15)
+			return 2; 
 		break; 
-	default: break;
-	}
-	memset (&regs, 0, sizeof (regs));
+
+	default:
+		break;
+	};
+
+	memset(&regs, 0, sizeof (regs));
 	regs.pc = pc;
 	regs.npc = pc + 4;
-	__asm__ __volatile__ ("
-		rd %%psr, %0
-		nop
-		nop
-		nop" : "=r" (regs.psr));
-	unhandled_fault (address, current, &regs);
+	__asm__ __volatile__(
+		"rd %%psr, %0\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"nop\n" : "=r" (regs.psr));
+	unhandled_fault(address, current, &regs);
+
 	/* Not reached */
 	return 0;
+}
+
+extern unsigned long safe_compute_effective_address(struct pt_regs *,
+						    unsigned int);
+
+static unsigned long compute_si_addr(struct pt_regs *regs, int text_fault)
+{
+	unsigned int insn;
+
+	if (text_fault)
+		return regs->pc;
+
+	if (regs->psr & PSR_PS) {
+		insn = *(unsigned int *) regs->pc;
+	} else {
+		__get_user(insn, (unsigned int *) regs->pc);
+	}
+
+	return safe_compute_effective_address(regs, insn);
 }
 
 asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
@@ -221,10 +252,10 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-        if (in_interrupt() || !mm)
+        if (in_atomic() || !mm)
                 goto no_context;
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 
 	/*
 	 * The kernel referencing a bad kernel pointer can lock up
@@ -263,18 +294,19 @@ good_area:
 	 * the fault.
 	 */
 	switch (handle_mm_fault(mm, vma, address, write)) {
-	case 1:
-		current->min_flt++;
-		break;
-	case 2:
+	case VM_FAULT_SIGBUS:
+		goto do_sigbus;
+	case VM_FAULT_OOM:
+		goto out_of_memory;
+	case VM_FAULT_MAJOR:
 		current->maj_flt++;
 		break;
-	case 0:
-		goto do_sigbus;
+	case VM_FAULT_MINOR:
 	default:
-		goto out_of_memory;
+		current->min_flt++;
+		break;
 	}
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 	/*
@@ -282,7 +314,7 @@ good_area:
 	 * Fix it, but check if it's kernel or user first..
 	 */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
@@ -295,7 +327,7 @@ bad_area_nosemaphore:
 		info.si_errno = 0;
 		/* info.si_code set above to make clear whether
 		   this was a SEGV_MAPERR or SEGV_ACCERR fault.  */
-		info.si_addr = (void *)address;
+		info.si_addr = (void __user *)compute_si_addr(regs, text_fault);
 		info.si_trapno = 0;
 		force_sig_info (SIGSEGV, &info, tsk);
 		return;
@@ -304,7 +336,7 @@ bad_area_nosemaphore:
 	/* Is this in ex_table? */
 no_context:
 	g2 = regs->u_regs[UREG_G2];
-	if (!from_user && (fixup = search_exception_table (regs->pc, &g2))) {
+	if (!from_user && (fixup = search_extables_range(regs->pc, &g2))) {
 		if (fixup > 10) { /* Values below are reserved for other things */
 			extern const unsigned __memset_start[];
 			extern const unsigned __memset_end[];
@@ -338,18 +370,18 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (from_user)
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
-	info.si_addr = (void *)address;
+	info.si_addr = (void __user *) compute_si_addr(regs, text_fault);
 	info.si_trapno = 0;
 	force_sig_info (SIGBUS, &info, tsk);
 	if (!from_user)
@@ -380,7 +412,7 @@ vmalloc_fault:
 
 		if (pmd_present(*pmd) || !pmd_present(*pmd_k))
 			goto bad_area_nosemaphore;
-		pmd_val(*pmd) = pmd_val(*pmd_k);
+		*pmd = *pmd_k;
 		return;
 	}
 }
@@ -390,7 +422,7 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 {
 	extern void sun4c_update_mmu_cache(struct vm_area_struct *,
 					   unsigned long,pte_t);
-	extern pte_t *sun4c_pte_offset(pmd_t *,unsigned long);
+	extern pte_t *sun4c_pte_offset_kernel(pmd_t *,unsigned long);
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
 	pgd_t *pgdp;
@@ -400,17 +432,23 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 		address = regs->pc;
 	} else if (!write &&
 		   !(regs->psr & PSR_PS)) {
-		unsigned int insn, *ip;
+		unsigned int insn, __user *ip;
 
-		ip = (unsigned int *)regs->pc;
-		if (! get_user(insn, ip)) {
+		ip = (unsigned int __user *)regs->pc;
+		if (!get_user(insn, ip)) {
 			if ((insn & 0xc1680000) == 0xc0680000)
 				write = 1;
 		}
 	}
 
+	if (!mm) {
+		/* We are oopsing. */
+		do_sparc_fault(regs, text_fault, write, address);
+		BUG();	/* P3 Oops already, you bitch */
+	}
+
 	pgdp = pgd_offset(mm, address);
-	ptep = sun4c_pte_offset((pmd_t *) pgdp, address);
+	ptep = sun4c_pte_offset_kernel((pmd_t *) pgdp, address);
 
 	if (pgd_val(*pgdp)) {
 	    if (write) {
@@ -423,13 +461,13 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 				      _SUN4C_PAGE_VALID |
 				      _SUN4C_PAGE_DIRTY);
 
-			save_and_cli(flags);
+			local_irq_save(flags);
 			if (sun4c_get_segmap(address) != invalid_segment) {
 				sun4c_put_pte(address, pte_val(*ptep));
-				restore_flags(flags);
+				local_irq_restore(flags);
 				return;
 			}
-			restore_flags(flags);
+			local_irq_restore(flags);
 		}
 	    } else {
 		if ((pte_val(*ptep) & (_SUN4C_PAGE_READ|_SUN4C_PAGE_PRESENT))
@@ -439,13 +477,13 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 			*ptep = __pte(pte_val(*ptep) | _SUN4C_PAGE_ACCESSED |
 				      _SUN4C_PAGE_VALID);
 
-			save_and_cli(flags);
+			local_irq_save(flags);
 			if (sun4c_get_segmap(address) != invalid_segment) {
 				sun4c_put_pte(address, pte_val(*ptep));
-				restore_flags(flags);
+				local_irq_restore(flags);
 				return;
 			}
-			restore_flags(flags);
+			local_irq_restore(flags);
 		}
 	    }
 	}
@@ -479,7 +517,7 @@ inline void force_user_fault(unsigned long address, int write)
 	printk("wf<pid=%d,wr=%d,addr=%08lx>\n",
 	       tsk->pid, write, address);
 #endif
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if(!vma)
 		goto bad_area;
@@ -498,12 +536,15 @@ good_area:
 		if(!(vma->vm_flags & (VM_READ | VM_EXEC)))
 			goto bad_area;
 	}
-	if (!handle_mm_fault(mm, vma, address, write))
+	switch (handle_mm_fault(mm, vma, address, write)) {
+	case VM_FAULT_SIGBUS:
+	case VM_FAULT_OOM:
 		goto do_sigbus;
-	up(&mm->mmap_sem);
+	}
+	up_read(&mm->mmap_sem);
 	return;
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 #if 0
 	printk("Window whee %s [%d]: segfaults at %08lx\n",
 	       tsk->comm, tsk->pid, address);
@@ -512,17 +553,17 @@ bad_area:
 	info.si_errno = 0;
 	/* info.si_code set above to make clear whether
 	   this was a SEGV_MAPERR or SEGV_ACCERR fault.  */
-	info.si_addr = (void *)address;
+	info.si_addr = (void __user *) address;
 	info.si_trapno = 0;
 	force_sig_info (SIGSEGV, &info, tsk);
 	return;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
-	info.si_addr = (void *)address;
+	info.si_addr = (void __user *) address;
 	info.si_trapno = 0;
 	force_sig_info (SIGBUS, &info, tsk);
 }
@@ -531,7 +572,7 @@ void window_overflow_fault(void)
 {
 	unsigned long sp;
 
-	sp = current->thread.rwbuf_stkptrs[0];
+	sp = current_thread_info()->rwbuf_stkptrs[0];
 	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
 		force_user_fault(sp + 0x38, 1);
 	force_user_fault(sp, 1);

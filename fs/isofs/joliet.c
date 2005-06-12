@@ -8,8 +8,9 @@
 
 #include <linux/string.h>
 #include <linux/nls.h>
-#include <linux/malloc.h>
+#include <linux/mm.h>
 #include <linux/iso_fs.h>
+#include <asm/unaligned.h>
 
 /*
  * Convert Unicode 16 to UTF8 or ASCII.
@@ -17,15 +18,15 @@
 static int
 uni16_to_x8(unsigned char *ascii, u16 *uni, int len, struct nls_table *nls)
 {
-	wchar_t *ip;
+	wchar_t *ip, ch;
 	unsigned char *op;
 
 	ip = uni;
 	op = ascii;
 
-	while (*ip && len) {
+	while ((ch = get_unaligned(ip)) && len) {
 		int llen;
-		wchar_t ch = be16_to_cpu(*ip);
+		ch = be16_to_cpu(ch);
 		if ((llen = nls->uni2char(ch, op, NLS_MAX_CHARSET_SIZE)) > 0)
 			op += llen;
 		else
@@ -76,8 +77,8 @@ get_joliet_filename(struct iso_directory_record * de, unsigned char *outname, st
 	struct nls_table *nls;
 	unsigned char len = 0;
 
-	utf8 = inode->i_sb->u.isofs_sb.s_utf8;
-	nls = inode->i_sb->u.isofs_sb.s_nls_iocharset;
+	utf8 = ISOFS_SB(inode->i_sb)->s_utf8;
+	nls = ISOFS_SB(inode->i_sb)->s_nls_iocharset;
 
 	if (utf8) {
 		len = wcsntombs_be(outname, de->name,

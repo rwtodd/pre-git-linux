@@ -3,11 +3,12 @@
  *
  *  This source is covered by the GNU GPL, the same as all kernel sources.
  *
- *  Version:	$Id: inetpeer.c,v 1.3 2000/10/03 07:29:00 anton Exp $
+ *  Version:	$Id: inetpeer.c,v 1.7 2001/09/20 21:22:50 davem Exp $
  *
  *  Authors:	Andrey V. Savochkin <saw@msu.ru>
  */
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
@@ -18,6 +19,7 @@
 #include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/net.h>
 #include <net/inetpeer.h>
 
 /*
@@ -67,38 +69,44 @@
  *		ip_id_count: idlock
  */
 
-spinlock_t inet_peer_idlock = SPIN_LOCK_UNLOCKED;
+/* Exported for inet_getid inline function.  */
+DEFINE_SPINLOCK(inet_peer_idlock);
 
 static kmem_cache_t *peer_cachep;
 
 #define node_height(x) x->avl_height
 static struct inet_peer peer_fake_node = {
-	avl_left : &peer_fake_node,
-	avl_right : &peer_fake_node,
-	avl_height : 0
+	.avl_left	= &peer_fake_node,
+	.avl_right	= &peer_fake_node,
+	.avl_height	= 0
 };
 #define peer_avl_empty (&peer_fake_node)
 static struct inet_peer *peer_root = peer_avl_empty;
-static rwlock_t peer_pool_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(peer_pool_lock);
 #define PEER_MAXDEPTH 40 /* sufficient for about 2^27 nodes */
 
 static volatile int peer_total;
+/* Exported for sysctl_net_ipv4.  */
 int inet_peer_threshold = 65536 + 128;	/* start to throw entries more
 					 * aggressively at this stage */
 int inet_peer_minttl = 120 * HZ;	/* TTL under high load: 120 sec */
 int inet_peer_maxttl = 10 * 60 * HZ;	/* usual time to live: 10 min */
+
+/* Exported for inet_putpeer inline function.  */
 struct inet_peer *inet_peer_unused_head,
 		**inet_peer_unused_tailp = &inet_peer_unused_head;
-spinlock_t inet_peer_unused_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(inet_peer_unused_lock);
 #define PEER_MAX_CLEANUP_WORK 30
 
 static void peer_check_expire(unsigned long dummy);
 static struct timer_list peer_periodic_timer =
-	{ { NULL, NULL }, 0, 0, &peer_check_expire };
+	TIMER_INITIALIZER(peer_check_expire, 0, 0);
+
+/* Exported for sysctl_net_ipv4.  */
 int inet_peer_gc_mintime = 10 * HZ,
     inet_peer_gc_maxtime = 120 * HZ;
 
-
+/* Called from ip_output.c:ip_init  */
 void __init inet_initpeers(void)
 {
 	struct sysinfo si;
@@ -109,17 +117,20 @@ void __init inet_initpeers(void)
 	 * <kuznet@ms2.inr.ac.ru>.  I don't have any opinion about the values
 	 * myself.  --SAW
 	 */
-	if (si.totalram <= 32768*1024)
+	if (si.totalram <= (32768*1024)/PAGE_SIZE)
 		inet_peer_threshold >>= 1; /* max pool size about 1MB on IA32 */
-	if (si.totalram <= 16384*1024)
+	if (si.totalram <= (16384*1024)/PAGE_SIZE)
 		inet_peer_threshold >>= 1; /* about 512KB */
-	if (si.totalram <= 8192*1024)
+	if (si.totalram <= (8192*1024)/PAGE_SIZE)
 		inet_peer_threshold >>= 2; /* about 128KB */
 
 	peer_cachep = kmem_cache_create("inet_peer_cache",
 			sizeof(struct inet_peer),
 			0, SLAB_HWCACHE_ALIGN,
 			NULL, NULL);
+
+	if (!peer_cachep)
+		panic("cannot create inet_peer_cache");
 
 	/* All the timers, started at system startup tend
 	   to synchronize. Perturb it a bit.
@@ -445,3 +456,5 @@ static void peer_check_expire(unsigned long dummy)
 			peer_total / inet_peer_threshold * HZ;
 	add_timer(&peer_periodic_timer);
 }
+
+EXPORT_SYMBOL(inet_peer_idlock);

@@ -3,368 +3,569 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995  Linus Torvalds
- * Copyright (C) 1995, 1996, 1997, 1998  Ralf Baechle
- * Copyright (C) 1996  Stoned Elipot
+ * Copyright (C) 1995 Linus Torvalds
+ * Copyright (C) 1995 Waldorf Electronics
+ * Copyright (C) 1994, 95, 96, 97, 98, 99, 2000, 01, 02, 03  Ralf Baechle
+ * Copyright (C) 1996 Stoned Elipot
+ * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 2000 2001, 2002  Maciej W. Rozycki
  */
 #include <linux/config.h>
 #include <linux/errno.h>
-#include <linux/hdreg.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/unistd.h>
-#include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/utsname.h>
 #include <linux/a.out.h>
 #include <linux/tty.h>
 #include <linux/bootmem.h>
-#ifdef CONFIG_BLK_DEV_RAM
-#include <linux/blk.h>
-#endif
-#include <linux/ide.h>
-#ifdef CONFIG_RTC
-#include <linux/timex.h>
-#endif
+#include <linux/initrd.h>
+#include <linux/major.h>
+#include <linux/kdev_t.h>
+#include <linux/root_dev.h>
+#include <linux/highmem.h>
+#include <linux/console.h>
 
-#include <asm/asm.h>
+#include <asm/addrspace.h>
 #include <asm/bootinfo.h>
-#include <asm/cachectl.h>
-#include <asm/io.h>
-#include <asm/stackframe.h>
-#include <asm/system.h>
 #include <asm/cpu.h>
-#ifdef CONFIG_SGI_IP22
-#include <asm/sgialib.h>
-#endif
+#include <asm/sections.h>
+#include <asm/setup.h>
+#include <asm/system.h>
 
-struct mips_cpuinfo boot_cpu_data = { NULL, NULL, 0 };
+struct cpuinfo_mips cpu_data[NR_CPUS];
 
-/*
- * Not all of the MIPS CPUs have the "wait" instruction available. Moreover,
- * the implementation of the "wait" feature differs between CPU families. This
- * points to the function that implements CPU specific wait. 
- * The wait instruction stops the pipeline and reduces the power consumption of
- * the CPU very much.
- */
-void (*cpu_wait)(void) = NULL;
+EXPORT_SYMBOL(cpu_data);
 
-/*
- * Do we have a cyclecounter available?
- */
-char cyclecounter_available;
-
-/*
- * There are several bus types available for MIPS machines.  "RISC PC"
- * type machines have ISA, EISA, VLB or PCI available, DECstations
- * have Turbochannel or Q-Bus, SGI has GIO, there are lots of VME
- * boxes ...
- * This flag is set if a EISA slots are available.
- */
-int EISA_bus = 0;
-
+#ifdef CONFIG_VT
 struct screen_info screen_info;
-
-#ifdef CONFIG_BLK_DEV_FD
-extern struct fd_ops no_fd_ops;
-struct fd_ops *fd_ops;
 #endif
 
-#if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
-extern struct ide_ops no_ide_ops;
-struct ide_ops *ide_ops;
-#endif
+/*
+ * Despite it's name this variable is even if we don't have PCI
+ */
+unsigned int PCI_DMA_BUS_IS_PHYS;
 
-extern struct rtc_ops no_rtc_ops;
-struct rtc_ops *rtc_ops;
-
-#ifdef CONFIG_PC_KEYB
-extern struct kbd_ops no_kbd_ops;
-struct kbd_ops *kbd_ops;
-#endif
+EXPORT_SYMBOL(PCI_DMA_BUS_IS_PHYS);
 
 /*
  * Setup information
  *
  * These are initialized so they are in the .data section
  */
-unsigned long mips_memory_upper = KSEG0; /* this is set by kernel_entry() */
-unsigned long mips_cputype = CPU_UNKNOWN;
 unsigned long mips_machtype = MACH_UNKNOWN;
 unsigned long mips_machgroup = MACH_GROUP_UNKNOWN;
 
-unsigned char aux_device_present;
-extern int _end;
+EXPORT_SYMBOL(mips_machtype);
+EXPORT_SYMBOL(mips_machgroup);
 
-static char command_line[CL_SIZE] = { 0, };
-       char saved_command_line[CL_SIZE];
-extern char arcs_cmdline[CL_SIZE];
+struct boot_mem_map boot_mem_map;
 
-/*
- * The board specific setup routine sets irq_setup to point to a board
- * specific setup routine.
- */
-void (*irq_setup)(void);
+static char command_line[CL_SIZE];
+       char arcs_cmdline[CL_SIZE]=CONFIG_CMDLINE;
 
 /*
  * mips_io_port_base is the begin of the address space to which x86 style
  * I/O ports are mapped.
  */
-unsigned long mips_io_port_base;
+const unsigned long mips_io_port_base = -1;
+EXPORT_SYMBOL(mips_io_port_base);
 
 /*
- * isa_slot_offset is the address where E(ISA) busaddress 0 is is mapped
+ * isa_slot_offset is the address where E(ISA) busaddress 0 is mapped
  * for the processor.
  */
 unsigned long isa_slot_offset;
+EXPORT_SYMBOL(isa_slot_offset);
 
-extern void sgi_sysinit(void);
-extern void SetUpBootInfo(void);
-extern void loadmmu(void);
-extern asmlinkage void start_kernel(void);
-extern int prom_init(int, char **, char **, int *);
+static struct resource code_resource = { "Kernel code" };
+static struct resource data_resource = { "Kernel data" };
 
-/*
- * Probe whether cpu has config register by trying to play with
- * alternate cache bit and see whether it matters.
- * It's used by cpu_probe to distinguish between R3000A and R3081.
- */
-static inline int cpu_has_confreg(void)
+void __init add_memory_region(phys_t start, phys_t size, long type)
 {
-#ifdef CONFIG_CPU_R3000
-	extern unsigned long r3k_cache_size(unsigned long);
-	unsigned long size1, size2; 
-	unsigned long cfg = read_32bit_cp0_register(CP0_CONF);
+	int x = boot_mem_map.nr_map;
+	struct boot_mem_map_entry *prev = boot_mem_map.map + x - 1;
 
-	size1 = r3k_cache_size(ST0_DE);
-	write_32bit_cp0_register(CP0_CONF, cfg^CONF_AC);
-	size2 = r3k_cache_size(ST0_DE);
-	write_32bit_cp0_register(CP0_CONF, cfg);
-	return size1 != size2;
-#else
-	return 0;
-#endif
+	/*
+	 * Try to merge with previous entry if any.  This is far less than
+	 * perfect but is sufficient for most real world cases.
+	 */
+	if (x && prev->addr + prev->size == start && prev->type == type) {
+		prev->size += size;
+		return;
+	}
+
+	if (x == BOOT_MEM_MAP_MAX) {
+		printk("Ooops! Too many entries in the memory map!\n");
+		return;
+	}
+
+	boot_mem_map.map[x].addr = start;
+	boot_mem_map.map[x].size = size;
+	boot_mem_map.map[x].type = type;
+	boot_mem_map.nr_map++;
 }
 
-static inline void cpu_probe(void)
+static void __init print_memory_map(void)
 {
-	unsigned int prid = read_32bit_cp0_register(CP0_PRID);
-	switch(prid & 0xff00) {
-	case PRID_IMP_R2000:
-		mips_cputype = CPU_R2000;
-		break;
-	case PRID_IMP_R3000:
-		if((prid & 0xff) == PRID_REV_R3000A)
-			if(cpu_has_confreg())
-				mips_cputype = CPU_R3081E;
-			else
-				mips_cputype = CPU_R3000A;
-		else
-			 mips_cputype = CPU_R3000;
-		break;
-	case PRID_IMP_R4000:
-		if((prid & 0xff) == PRID_REV_R4400)
-			mips_cputype = CPU_R4400SC;
-		else
-			mips_cputype = CPU_R4000SC;
-		break;
-	case PRID_IMP_R4600:
-		mips_cputype = CPU_R4600;
-		break;
-	case PRID_IMP_R4650:
-		mips_cputype = CPU_R4650;
-		break;
-	case PRID_IMP_R4700:
-		mips_cputype = CPU_R4700;
-		break;
-	case PRID_IMP_R5000:
-		mips_cputype = CPU_R5000;
-		break;
-	case PRID_IMP_NEVADA:
-		mips_cputype = CPU_NEVADA;
-		break;
-	case PRID_IMP_R6000:
-		mips_cputype = CPU_R6000;
-		break;
-	case PRID_IMP_R6000A:
-		mips_cputype = CPU_R6000A;
-		break;
-	case PRID_IMP_R8000:
-		mips_cputype = CPU_R8000;
-		break;
-	case PRID_IMP_R10000:
-		mips_cputype = CPU_R10000;
-		break;
-	case PRID_IMP_RM7000:
-		mips_cputype = CPU_R5000;
-		break;
-	default:
-		mips_cputype = CPU_UNKNOWN;
+	int i;
+	const int field = 2 * sizeof(unsigned long);
+
+	for (i = 0; i < boot_mem_map.nr_map; i++) {
+		printk(" memory: %0*Lx @ %0*Lx ",
+		       field, (unsigned long long) boot_mem_map.map[i].size,
+		       field, (unsigned long long) boot_mem_map.map[i].addr);
+
+		switch (boot_mem_map.map[i].type) {
+		case BOOT_MEM_RAM:
+			printk("(usable)\n");
+			break;
+		case BOOT_MEM_ROM_DATA:
+			printk("(ROM data)\n");
+			break;
+		case BOOT_MEM_RESERVED:
+			printk("(reserved)\n");
+			break;
+		default:
+			printk("type %lu\n", boot_mem_map.map[i].type);
+			break;
+		}
 	}
 }
 
-asmlinkage void __init init_arch(int argc, char **argv, char **envp, int *prom_vec)
+static inline void parse_cmdline_early(void)
 {
-	unsigned int s;
+	char c = ' ', *to = command_line, *from = saved_command_line;
+	unsigned long start_at, mem_size;
+	int len = 0;
+	int usermem = 0;
 
-	/* Determine which MIPS variant we are running on. */
-	cpu_probe();
+	printk("Determined physical RAM map:\n");
+	print_memory_map();
 
-	prom_init(argc, argv, envp, prom_vec);
+	for (;;) {
+		/*
+		 * "mem=XXX[kKmM]" defines a memory region from
+		 * 0 to <XXX>, overriding the determined size.
+		 * "mem=XXX[KkmM]@YYY[KkmM]" defines a memory region from
+		 * <YYY> to <YYY>+<XXX>, overriding the determined size.
+		 */
+		if (c == ' ' && !memcmp(from, "mem=", 4)) {
+			if (to != command_line)
+				to--;
+			/*
+			 * If a user specifies memory size, we
+			 * blow away any automatically generated
+			 * size.
+			 */
+			if (usermem == 0) {
+				boot_mem_map.nr_map = 0;
+				usermem = 1;
+			}
+			mem_size = memparse(from + 4, &from);
+			if (*from == '@')
+				start_at = memparse(from + 1, &from);
+			else
+				start_at = 0;
+			add_memory_region(start_at, mem_size, BOOT_MEM_RAM);
+		}
+		c = *(from++);
+		if (!c)
+			break;
+		if (CL_SIZE <= ++len)
+			break;
+		*(to++) = c;
+	}
+	*to = '\0';
 
-#ifdef CONFIG_SGI_IP22
-	sgi_sysinit();
-#endif
-#ifdef CONFIG_COBALT_MICRO_SERVER
-	SetUpBootInfo();
-#endif
-
-	/*
-	 * Determine the mmu/cache attached to this machine,
-	 * then flush the tlb and caches.  On the r4xx0
-	 * variants this also sets CP0_WIRED to zero.
-	 */
-	loadmmu();
-
-	/* Disable coprocessors */
-	s = read_32bit_cp0_register(CP0_STATUS);
-	s &= ~(ST0_CU1|ST0_CU2|ST0_CU3|ST0_KX|ST0_SX);
-	s |= ST0_CU0;
-	write_32bit_cp0_register(CP0_STATUS, s);
-
-	/*
-	 * Main should never return here, but
-	 * just in case, we know what happens.
-	 */
-	for(;;)
-		start_kernel();
+	if (usermem) {
+		printk("User-defined physical RAM map:\n");
+		print_memory_map();
+	}
 }
 
-static void __init default_irq_setup(void)
+static inline int parse_rd_cmdline(unsigned long* rd_start, unsigned long* rd_end)
 {
-	panic("Unknown machtype in init_IRQ");
+	/*
+	 * "rd_start=0xNNNNNNNN" defines the memory address of an initrd
+	 * "rd_size=0xNN" it's size
+	 */
+	unsigned long start = 0;
+	unsigned long size = 0;
+	unsigned long end;
+	char cmd_line[CL_SIZE];
+	char *start_str;
+	char *size_str;
+	char *tmp;
+
+	strcpy(cmd_line, command_line);
+	*command_line = 0;
+	tmp = cmd_line;
+	/* Ignore "rd_start=" strings in other parameters. */
+	start_str = strstr(cmd_line, "rd_start=");
+	if (start_str && start_str != cmd_line && *(start_str - 1) != ' ')
+		start_str = strstr(start_str, " rd_start=");
+	while (start_str) {
+		if (start_str != cmd_line)
+			strncat(command_line, tmp, start_str - tmp);
+		start = memparse(start_str + 9, &start_str);
+		tmp = start_str + 1;
+		start_str = strstr(start_str, " rd_start=");
+	}
+	if (*tmp)
+		strcat(command_line, tmp);
+
+	strcpy(cmd_line, command_line);
+	*command_line = 0;
+	tmp = cmd_line;
+	/* Ignore "rd_size" strings in other parameters. */
+	size_str = strstr(cmd_line, "rd_size=");
+	if (size_str && size_str != cmd_line && *(size_str - 1) != ' ')
+		size_str = strstr(size_str, " rd_size=");
+	while (size_str) {
+		if (size_str != cmd_line)
+			strncat(command_line, tmp, size_str - tmp);
+		size = memparse(size_str + 8, &size_str);
+		tmp = size_str + 1;
+		size_str = strstr(size_str, " rd_size=");
+	}
+	if (*tmp)
+		strcat(command_line, tmp);
+
+#ifdef CONFIG_MIPS64
+	/* HACK: Guess if the sign extension was forgotten */
+	if (start > 0x0000000080000000 && start < 0x00000000ffffffff)
+		start |= 0xffffffff00000000;
+#endif
+
+	end = start + size;
+	if (start && end) {
+		*rd_start = start;
+		*rd_end = end;
+		return 1;
+	}
+	return 0;
+}
+
+#define PFN_UP(x)	(((x) + PAGE_SIZE - 1) >> PAGE_SHIFT)
+#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
+#define PFN_PHYS(x)	((x) << PAGE_SHIFT)
+
+#define MAXMEM		HIGHMEM_START
+#define MAXMEM_PFN	PFN_DOWN(MAXMEM)
+
+static inline void bootmem_init(void)
+{
+	unsigned long start_pfn;
+	unsigned long reserved_end = (unsigned long)&_end;
+#ifndef CONFIG_SGI_IP27
+	unsigned long first_usable_pfn;
+	unsigned long bootmap_size;
+	int i;
+#endif
+#ifdef CONFIG_BLK_DEV_INITRD
+	int initrd_reserve_bootmem = 0;
+
+	/* Board specific code should have set up initrd_start and initrd_end */
+ 	ROOT_DEV = Root_RAM0;
+	if (parse_rd_cmdline(&initrd_start, &initrd_end)) {
+		reserved_end = max(reserved_end, initrd_end);
+		initrd_reserve_bootmem = 1;
+	} else {
+		unsigned long tmp;
+		u32 *initrd_header;
+
+		tmp = ((reserved_end + PAGE_SIZE-1) & PAGE_MASK) - sizeof(u32) * 2;
+		if (tmp < reserved_end)
+			tmp += PAGE_SIZE;
+		initrd_header = (u32 *)tmp;
+		if (initrd_header[0] == 0x494E5244) {
+			initrd_start = (unsigned long)&initrd_header[2];
+			initrd_end = initrd_start + initrd_header[1];
+			reserved_end = max(reserved_end, initrd_end);
+			initrd_reserve_bootmem = 1;
+		}
+	}
+#endif	/* CONFIG_BLK_DEV_INITRD */
+
+	/*
+	 * Partially used pages are not usable - thus
+	 * we are rounding upwards.
+	 */
+	start_pfn = PFN_UP(CPHYSADDR(reserved_end));
+
+#ifndef CONFIG_SGI_IP27
+	/* Find the highest page frame number we have available.  */
+	max_pfn = 0;
+	first_usable_pfn = -1UL;
+	for (i = 0; i < boot_mem_map.nr_map; i++) {
+		unsigned long start, end;
+
+		if (boot_mem_map.map[i].type != BOOT_MEM_RAM)
+			continue;
+
+		start = PFN_UP(boot_mem_map.map[i].addr);
+		end = PFN_DOWN(boot_mem_map.map[i].addr
+		      + boot_mem_map.map[i].size);
+
+		if (start >= end)
+			continue;
+		if (end > max_pfn)
+			max_pfn = end;
+		if (start < first_usable_pfn) {
+			if (start > start_pfn) {
+				first_usable_pfn = start;
+			} else if (end > start_pfn) {
+				first_usable_pfn = start_pfn;
+			}
+		}
+	}
+
+	/*
+	 * Determine low and high memory ranges
+	 */
+	max_low_pfn = max_pfn;
+	if (max_low_pfn > MAXMEM_PFN) {
+		max_low_pfn = MAXMEM_PFN;
+#ifndef CONFIG_HIGHMEM
+		/* Maximum memory usable is what is directly addressable */
+		printk(KERN_WARNING "Warning only %ldMB will be used.\n",
+		       MAXMEM >> 20);
+		printk(KERN_WARNING "Use a HIGHMEM enabled kernel.\n");
+#endif
+	}
+
+#ifdef CONFIG_HIGHMEM
+	/*
+	 * Crude, we really should make a better attempt at detecting
+	 * highstart_pfn
+	 */
+	highstart_pfn = highend_pfn = max_pfn;
+	if (max_pfn > MAXMEM_PFN) {
+		highstart_pfn = MAXMEM_PFN;
+		printk(KERN_NOTICE "%ldMB HIGHMEM available.\n",
+		       (highend_pfn - highstart_pfn) >> (20 - PAGE_SHIFT));
+	}
+#endif
+
+	/* Initialize the boot-time allocator with low memory only.  */
+	bootmap_size = init_bootmem(first_usable_pfn, max_low_pfn);
+
+	/*
+	 * Register fully available low RAM pages with the bootmem allocator.
+	 */
+	for (i = 0; i < boot_mem_map.nr_map; i++) {
+		unsigned long curr_pfn, last_pfn, size;
+
+		/*
+		 * Reserve usable memory.
+		 */
+		if (boot_mem_map.map[i].type != BOOT_MEM_RAM)
+			continue;
+
+		/*
+		 * We are rounding up the start address of usable memory:
+		 */
+		curr_pfn = PFN_UP(boot_mem_map.map[i].addr);
+		if (curr_pfn >= max_low_pfn)
+			continue;
+		if (curr_pfn < start_pfn)
+			curr_pfn = start_pfn;
+
+		/*
+		 * ... and at the end of the usable range downwards:
+		 */
+		last_pfn = PFN_DOWN(boot_mem_map.map[i].addr
+				    + boot_mem_map.map[i].size);
+
+		if (last_pfn > max_low_pfn)
+			last_pfn = max_low_pfn;
+
+		/*
+		 * Only register lowmem part of lowmem segment with bootmem.
+		 */
+		size = last_pfn - curr_pfn;
+		if (curr_pfn > PFN_DOWN(HIGHMEM_START))
+			continue;
+		if (curr_pfn + size - 1 > PFN_DOWN(HIGHMEM_START))
+			size = PFN_DOWN(HIGHMEM_START) - curr_pfn;
+		if (!size)
+			continue;
+
+		/*
+		 * ... finally, did all the rounding and playing
+		 * around just make the area go away?
+		 */
+		if (last_pfn <= curr_pfn)
+			continue;
+
+		/* Register lowmem ranges */
+		free_bootmem(PFN_PHYS(curr_pfn), PFN_PHYS(size));
+	}
+
+	/* Reserve the bootmap memory.  */
+	reserve_bootmem(PFN_PHYS(first_usable_pfn), bootmap_size);
+#endif /* CONFIG_SGI_IP27 */
+
+#ifdef CONFIG_BLK_DEV_INITRD
+	initrd_below_start_ok = 1;
+	if (initrd_start) {
+		unsigned long initrd_size = ((unsigned char *)initrd_end) - ((unsigned char *)initrd_start);
+		printk("Initial ramdisk at: 0x%p (%lu bytes)\n",
+		       (void *)initrd_start, initrd_size);
+
+		if (CPHYSADDR(initrd_end) > PFN_PHYS(max_low_pfn)) {
+			printk("initrd extends beyond end of memory "
+			       "(0x%0*Lx > 0x%0*Lx)\ndisabling initrd\n",
+			       sizeof(long) * 2,
+			       (unsigned long long)CPHYSADDR(initrd_end),
+			       sizeof(long) * 2,
+			       (unsigned long long)PFN_PHYS(max_low_pfn));
+			initrd_start = initrd_end = 0;
+			initrd_reserve_bootmem = 0;
+		}
+
+		if (initrd_reserve_bootmem)
+			reserve_bootmem(CPHYSADDR(initrd_start), initrd_size);
+	}
+#endif /* CONFIG_BLK_DEV_INITRD  */
+}
+
+static inline void resource_init(void)
+{
+	int i;
+
+#if defined(CONFIG_MIPS64) && !defined(CONFIG_BUILD_ELF64)
+	/*
+	 * The 64bit code in 32bit object format trick can't represent
+	 * 64bit wide relocations for linker script symbols.
+	 */
+	code_resource.start = CPHYSADDR(&_text);
+	code_resource.end = CPHYSADDR(&_etext) - 1;
+	data_resource.start = CPHYSADDR(&_etext);
+	data_resource.end = CPHYSADDR(&_edata) - 1;
+#else
+	code_resource.start = virt_to_phys(&_text);
+	code_resource.end = virt_to_phys(&_etext) - 1;
+	data_resource.start = virt_to_phys(&_etext);
+	data_resource.end = virt_to_phys(&_edata) - 1;
+#endif
+
+	/*
+	 * Request address space for all standard RAM.
+	 */
+	for (i = 0; i < boot_mem_map.nr_map; i++) {
+		struct resource *res;
+		unsigned long start, end;
+
+		start = boot_mem_map.map[i].addr;
+		end = boot_mem_map.map[i].addr + boot_mem_map.map[i].size - 1;
+		if (start >= MAXMEM)
+			continue;
+		if (end >= MAXMEM)
+			end = MAXMEM - 1;
+
+		res = alloc_bootmem(sizeof(struct resource));
+		switch (boot_mem_map.map[i].type) {
+		case BOOT_MEM_RAM:
+		case BOOT_MEM_ROM_DATA:
+			res->name = "System RAM";
+			break;
+		case BOOT_MEM_RESERVED:
+		default:
+			res->name = "reserved";
+		}
+
+		res->start = start;
+		res->end = end;
+
+		res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
+		request_resource(&iomem_resource, res);
+
+		/*
+		 *  We don't know which RAM region contains kernel data,
+		 *  so we try it repeatedly and let the resource manager
+		 *  test it.
+		 */
+		request_resource(res, &code_resource);
+		request_resource(res, &data_resource);
+	}
+}
+
+#undef PFN_UP
+#undef PFN_DOWN
+#undef PFN_PHYS
+
+#undef MAXMEM
+#undef MAXMEM_PFN
+
+static int __initdata earlyinit_debug;
+
+static int __init earlyinit_debug_setup(char *str)
+{
+	earlyinit_debug = 1;
+	return 1;
+}
+__setup("earlyinit_debug", earlyinit_debug_setup);
+
+extern initcall_t __earlyinitcall_start, __earlyinitcall_end;
+
+static void __init do_earlyinitcalls(void)
+{
+	initcall_t *call, *start, *end;
+
+	start = &__earlyinitcall_start;
+	end = &__earlyinitcall_end;
+
+	for (call = start; call < end; call++) {
+		if (earlyinit_debug)
+			printk("calling earlyinitcall 0x%p\n", *call);
+
+		(*call)();
+	}
 }
 
 void __init setup_arch(char **cmdline_p)
 {
-	void baget_setup(void);
-	void cobalt_setup(void);
-	void decstation_setup(void);
-	void deskstation_setup(void);
-	void jazz_setup(void);
-	void sni_rm200_pci_setup(void);
-	void sgi_setup(void);
-	void ddb_setup(void);
-	void orion_setup(void);
+	cpu_probe();
+	prom_init();
+	cpu_report();
 
-	/* Save defaults for configuration-dependent routines.  */
-	irq_setup = default_irq_setup;
-
-#ifdef CONFIG_BLK_DEV_FD
-	fd_ops = &no_fd_ops;
+#if defined(CONFIG_VT)
+#if defined(CONFIG_VGA_CONSOLE)
+        conswitchp = &vga_con;
+#elif defined(CONFIG_DUMMY_CONSOLE)
+        conswitchp = &dummy_con;
+#endif
 #endif
 
-#ifdef CONFIG_BLK_DEV_IDE
-	ide_ops = &no_ide_ops;
-#endif
+	/* call board setup routine */
+	do_earlyinitcalls();
 
-#ifdef CONFIG_PC_KEYB
-	kbd_ops = &no_kbd_ops;
-#endif
-	
-	rtc_ops = &no_rtc_ops;
-
-	switch(mips_machgroup)
-	{
-#ifdef CONFIG_BAGET_MIPS
-	case MACH_GROUP_BAGET: 
-		baget_setup();
-		break;
-#endif
-#ifdef CONFIG_COBALT_MICRO_SERVER
-	case MACH_GROUP_COBALT:
-		cobalt_setup();
-		break;
-#endif
-#ifdef CONFIG_DECSTATION
-	case MACH_GROUP_DEC:
-		decstation_setup();
-		break;
-#endif
-#ifdef CONFIG_MIPS_JAZZ
-	case MACH_GROUP_JAZZ:
-		jazz_setup();
-		break;
-#endif
-#ifdef CONFIG_SGI_IP22
-	/* As of now this is only IP22.  */
-	case MACH_GROUP_SGI:
-		sgi_setup();
-		break;
-#endif
-#ifdef CONFIG_SNI_RM200_PCI
-	case MACH_GROUP_SNI_RM:
-		sni_rm200_pci_setup();
-		break;
-#endif
-#ifdef CONFIG_DDB5074
-	case MACH_GROUP_NEC_DDB:
-		ddb_setup();
-		break;
-#endif
-#ifdef CONFIG_ORION
-	case MACH_GROUP_ORION:
-		orion_setup();
-		break;
-#endif
-	default:
-		panic("Unsupported architecture");
-	}
-
-        strncpy (command_line, arcs_cmdline, CL_SIZE);
-	memcpy(saved_command_line, command_line, CL_SIZE);
-	saved_command_line[CL_SIZE-1] = '\0';
+	strlcpy(command_line, arcs_cmdline, sizeof(command_line));
+	strlcpy(saved_command_line, command_line, COMMAND_LINE_SIZE);
 
 	*cmdline_p = command_line;
 
-#ifdef CONFIG_BLK_DEV_INITRD
-#error "Fixme, I'm broken."
-	tmp = (((unsigned long)&_end + PAGE_SIZE-1) & PAGE_MASK) - 8;
-	if (tmp < (unsigned long)&_end)
-		tmp += PAGE_SIZE;
-	initrd_header = (unsigned long *)tmp;
-	if (initrd_header[0] == 0x494E5244) {
-		initrd_start = (unsigned long)&initrd_header[2];
-		initrd_end = initrd_start + initrd_header[1];
-		initrd_below_start_ok = 1;
-		if (initrd_end > memory_end) {
-			printk("initrd extends beyond end of memory "
-			       "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
-			       initrd_end,memory_end);
-			initrd_start = 0;
-		} else
-			*memory_start_p = initrd_end;
-	}
-#endif
-
+	parse_cmdline_early();
+	bootmem_init();
 	paging_init();
+	resource_init();
 }
 
-void r3081_wait(void) 
+int __init fpu_disable(char *s)
 {
-	unsigned long cfg = read_32bit_cp0_register(CP0_CONF);
-	write_32bit_cp0_register(CP0_CONF, cfg|CONF_HALT);
+	cpu_data[0].options &= ~MIPS_CPU_FPU;
+
+	return 1;
 }
 
-void r4k_wait(void)
-{
-	__asm__(".set\tmips3\n\t"
-		"wait\n\t"
-		".set\tmips0");
-}
+__setup("nofpu", fpu_disable);

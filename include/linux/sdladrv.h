@@ -3,7 +3,7 @@
 *
 * Author: 	Gideon Hack	
 *
-* Copyright:	(c) 1995-1999 Sangoma Technologies Inc.
+* Copyright:	(c) 1995-2000 Sangoma Technologies Inc.
 *
 *		This program is free software; you can redistribute it and/or
 *		modify it under the terms of the GNU General Public License
@@ -19,14 +19,9 @@
 #ifndef	_SDLADRV_H
 #define	_SDLADRV_H
 
-#include <linux/version.h>
-#if LINUX_VERSION_CODE >= 0x020100
-#define LINUX_2_1
-#endif
 
 #define	SDLA_MAXIORANGE	4	/* maximum I/O port range */
 #define	SDLA_WINDOWSIZE	0x2000	/* default dual-port memory window size */
-
 /****** Data Structures *****************************************************/
 
 /*----------------------------------------------------------------------------
@@ -41,12 +36,8 @@ typedef struct sdlahw
 	int irq;			/* interrupt request level */
 	char S514_cpu_no[1];		/* PCI CPU Number */
 	unsigned char S514_slot_no;	/* PCI Slot Number */
-#ifdef LINUX_2_1
+	char auto_pci_cfg;		/* Autodetect PCI Slot */
 	struct pci_dev *pci_dev;	/* PCI device */
-#else
-	unsigned char pci_bus;		/* PCI bus number */
-	unsigned char pci_dev_func;	/* PCI device/function number */
-#endif
 	void * dpmbase;			/* dual-port memory base */
 	unsigned dpmsize;		/* dual-port memory size */
 	unsigned pclk;			/* CPU clock rate, kHz */
@@ -73,5 +64,7 @@ extern int sdla_peek	(sdlahw_t* hw, unsigned long addr, void* buf,
 extern int sdla_poke	(sdlahw_t* hw, unsigned long addr, void* buf,
 			 unsigned len);
 extern int sdla_exec	(void* opflag);
+
+extern unsigned wanpipe_hw_probe(void);
 
 #endif	/* _SDLADRV_H */

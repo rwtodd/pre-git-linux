@@ -5,7 +5,7 @@
  *
  *		IPv4 Forwarding Information Base: policy rules.
  *
- * Version:	$Id: fib_rules.c,v 1.15 2000/04/15 01:48:10 davem Exp $
+ * Version:	$Id: fib_rules.c,v 1.17 2001/10/31 21:55:54 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -22,7 +22,7 @@
 #include <linux/config.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -76,12 +76,30 @@ struct fib_rule
 	int		r_dead;
 };
 
-static struct fib_rule default_rule = { NULL, ATOMIC_INIT(2), 0x7FFF, RT_TABLE_DEFAULT, RTN_UNICAST, };
-static struct fib_rule main_rule = { &default_rule, ATOMIC_INIT(2), 0x7FFE, RT_TABLE_MAIN, RTN_UNICAST, };
-static struct fib_rule local_rule = { &main_rule, ATOMIC_INIT(2), 0, RT_TABLE_LOCAL, RTN_UNICAST, };
+static struct fib_rule default_rule = {
+	.r_clntref =	ATOMIC_INIT(2),
+	.r_preference =	0x7FFF,
+	.r_table =	RT_TABLE_DEFAULT,
+	.r_action =	RTN_UNICAST,
+};
+
+static struct fib_rule main_rule = {
+	.r_next =	&default_rule,
+	.r_clntref =	ATOMIC_INIT(2),
+	.r_preference =	0x7FFE,
+	.r_table =	RT_TABLE_MAIN,
+	.r_action =	RTN_UNICAST,
+};
+
+static struct fib_rule local_rule = {
+	.r_next =	&main_rule,
+	.r_clntref =	ATOMIC_INIT(2),
+	.r_table =	RT_TABLE_LOCAL,
+	.r_action =	RTN_UNICAST,
+};
 
 static struct fib_rule *fib_rules = &local_rule;
-static rwlock_t fib_rules_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(fib_rules_lock);
 
 int inet_rtm_delrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 {
@@ -101,7 +119,7 @@ int inet_rtm_delrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 #endif
 		    (!rtm->rtm_type || rtm->rtm_type == r->r_action) &&
 		    (!rta[RTA_PRIORITY-1] || memcmp(RTA_DATA(rta[RTA_PRIORITY-1]), &r->r_preference, 4) == 0) &&
-		    (!rta[RTA_IIF-1] || strcmp(RTA_DATA(rta[RTA_IIF-1]), r->r_ifname) == 0) &&
+		    (!rta[RTA_IIF-1] || rtattr_strcmp(rta[RTA_IIF-1], r->r_ifname) == 0) &&
 		    (!rtm->rtm_table || (r && rtm->rtm_table == r->r_table))) {
 			err = -EPERM;
 			if (r == &local_rule)
@@ -158,7 +176,7 @@ int inet_rtm_newrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 	table_id = rtm->rtm_table;
 	if (table_id == RT_TABLE_UNSPEC) {
 		struct fib_table *table;
-		if (rtm->rtm_type == RTN_UNICAST || rtm->rtm_type == RTN_NAT) {
+		if (rtm->rtm_type == RTN_UNICAST) {
 			if ((table = fib_empty_table()) == NULL)
 				return -ENOBUFS;
 			table_id = table->tb_id;
@@ -191,8 +209,7 @@ int inet_rtm_newrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 	new_r->r_table = table_id;
 	if (rta[RTA_IIF-1]) {
 		struct net_device *dev;
-		memcpy(new_r->r_ifname, RTA_DATA(rta[RTA_IIF-1]), IFNAMSIZ);
-		new_r->r_ifname[IFNAMSIZ-1] = 0;
+		rtattr_strlcpy(new_r->r_ifname, rta[RTA_IIF-1], IFNAMSIZ);
 		new_r->r_ifindex = -1;
 		dev = __dev_get_by_name(new_r->r_ifname);
 		if (dev)
@@ -225,32 +242,6 @@ int inet_rtm_newrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 	*rp = new_r;
 	write_unlock_bh(&fib_rules_lock);
 	return 0;
-}
-
-u32 fib_rules_map_destination(u32 daddr, struct fib_result *res)
-{
-	u32 mask = inet_make_mask(res->prefixlen);
-	return (daddr&~mask)|res->fi->fib_nh->nh_gw;
-}
-
-u32 fib_rules_policy(u32 saddr, struct fib_result *res, unsigned *flags)
-{
-	struct fib_rule *r = res->r;
-
-	if (r->r_action == RTN_NAT) {
-		int addrtype = inet_addr_type(r->r_srcmap);
-
-		if (addrtype == RTN_NAT) {
-			/* Packet is from  translated source; remember it */
-			saddr = (saddr&~r->r_srcmask)|r->r_srcmap;
-			*flags |= RTCF_SNAT;
-		} else if (addrtype == RTN_LOCAL || r->r_srcmap == 0) {
-			/* Packet is from masqueraded source; remember it */
-			saddr = r->r_srcmap;
-			*flags |= RTCF_MASQ;
-		}
-	}
-	return saddr;
 }
 
 #ifdef CONFIG_NET_CLS_ROUTE
@@ -289,34 +280,31 @@ static void fib_rules_attach(struct net_device *dev)
 	}
 }
 
-int fib_lookup(const struct rt_key *key, struct fib_result *res)
+int fib_lookup(const struct flowi *flp, struct fib_result *res)
 {
 	int err;
 	struct fib_rule *r, *policy;
 	struct fib_table *tb;
 
-	u32 daddr = key->dst;
-	u32 saddr = key->src;
+	u32 daddr = flp->fl4_dst;
+	u32 saddr = flp->fl4_src;
 
 FRprintk("Lookup: %u.%u.%u.%u <- %u.%u.%u.%u ",
-	NIPQUAD(key->dst), NIPQUAD(key->src));
+	NIPQUAD(flp->fl4_dst), NIPQUAD(flp->fl4_src));
 	read_lock(&fib_rules_lock);
 	for (r = fib_rules; r; r=r->r_next) {
 		if (((saddr^r->r_src) & r->r_srcmask) ||
 		    ((daddr^r->r_dst) & r->r_dstmask) ||
-#ifdef CONFIG_IP_ROUTE_TOS
-		    (r->r_tos && r->r_tos != key->tos) ||
-#endif
+		    (r->r_tos && r->r_tos != flp->fl4_tos) ||
 #ifdef CONFIG_IP_ROUTE_FWMARK
-		    (r->r_fwmark && r->r_fwmark != key->fwmark) ||
+		    (r->r_fwmark && r->r_fwmark != flp->fl4_fwmark) ||
 #endif
-		    (r->r_ifindex && r->r_ifindex != key->iif))
+		    (r->r_ifindex && r->r_ifindex != flp->iif))
 			continue;
 
 FRprintk("tb %d r %d ", r->r_table, r->r_action);
 		switch (r->r_action) {
 		case RTN_UNICAST:
-		case RTN_NAT:
 			policy = r;
 			break;
 		case RTN_UNREACHABLE:
@@ -333,7 +321,7 @@ FRprintk("tb %d r %d ", r->r_table, r->r_action);
 
 		if ((tb = fib_get_table(r->r_table)) == NULL)
 			continue;
-		err = tb->tb_lookup(tb, key, res);
+		err = tb->tb_lookup(tb, flp, res);
 		if (err == 0) {
 			res->r = policy;
 			if (policy)
@@ -351,13 +339,13 @@ FRprintk("FAILURE\n");
 	return -ENETUNREACH;
 }
 
-void fib_select_default(const struct rt_key *key, struct fib_result *res)
+void fib_select_default(const struct flowi *flp, struct fib_result *res)
 {
 	if (res->r && res->r->r_action == RTN_UNICAST &&
 	    FIB_RES_GW(*res) && FIB_RES_NH(*res).nh_scope == RT_SCOPE_LINK) {
 		struct fib_table *tb;
 		if ((tb = fib_get_table(res->r->r_table)) != NULL)
-			tb->tb_select_default(tb, key, res);
+			tb->tb_select_default(tb, flp, res);
 	}
 }
 
@@ -373,15 +361,11 @@ static int fib_rules_event(struct notifier_block *this, unsigned long event, voi
 }
 
 
-struct notifier_block fib_rules_notifier = {
-	fib_rules_event,
-	NULL,
-	0
+static struct notifier_block fib_rules_notifier = {
+	.notifier_call =fib_rules_event,
 };
 
-#ifdef CONFIG_RTNETLINK
-
-extern __inline__ int inet_fill_rule(struct sk_buff *skb,
+static __inline__ int inet_fill_rule(struct sk_buff *skb,
 				     struct fib_rule *r,
 				     struct netlink_callback *cb)
 {
@@ -424,7 +408,7 @@ extern __inline__ int inet_fill_rule(struct sk_buff *skb,
 
 nlmsg_failure:
 rtattr_failure:
-	skb_put(skb, b - skb->tail);
+	skb_trim(skb, b - skb->data);
 	return -1;
 }
 
@@ -446,8 +430,6 @@ int inet_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
-
-#endif /* CONFIG_RTNETLINK */
 
 void __init fib_rules_init(void)
 {

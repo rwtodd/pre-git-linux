@@ -3,9 +3,10 @@
 	Original: at1700.c (1993-94 by Donald Becker).
 		Copyright 1993 United States Government as represented by the
 		Director, National Security Agency.
-		The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-		Center of Excellence in Space Data and Information Sciences
-		   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+		The author may be reached as becker@scyld.com, or C/O
+			Scyld Computing Corporation
+			410 Severn Ave., Suite 210
+			Annapolis MD 21403
 
 	Modified by Yutaka TAMIYA (tamy@flab.fujitsu.co.jp)
 		Copyright 1994 Fujitsu Laboratories Ltd.
@@ -20,7 +21,7 @@
 			for testing this driver.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	This is a device driver for the Fujitsu FMV-181/182/183/184, which
 	is a straight-forward Fujitsu MB86965 implementation.
@@ -31,34 +32,34 @@
     The Fujitsu FMV-181/182 user's guide
 */
 
-static const char *version =
+static const char version[] =
 	"fmv18x.c:v2.2.0 09/24/98  Yutaka TAMIYA (tamy@flab.fujitsu.co.jp)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
 #include <linux/errno.h>
-
+#include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
+#include <linux/bitops.h>
 
-static int fmv18x_probe_list[] __initdata = {
+#include <asm/system.h>
+#include <asm/io.h>
+#include <asm/dma.h>
+
+#define DRV_NAME "fmv18x"
+
+static unsigned fmv18x_probe_list[] __initdata = {
 	0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x300, 0x340, 0
 };
 
@@ -79,6 +80,7 @@ struct net_local {
 	uint rx_started:1;			/* Packets are Rxing. */
 	uchar tx_queue;				/* Number of packet on the Tx queue. */
 	ushort tx_queue_len;		/* Current length of the Tx queue. */
+	spinlock_t lock;
 };
 
 
@@ -109,12 +111,10 @@ struct net_local {
 
 /* Index to functions, as function prototypes. */
 
-extern int fmv18x_probe(struct net_device *dev);
-
 static int fmv18x_probe1(struct net_device *dev, short ioaddr);
 static int net_open(struct net_device *dev);
 static int net_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void net_rx(struct net_device *dev);
 static void net_timeout(struct net_device *dev);
 static int net_close(struct net_device *dev);
@@ -129,23 +129,50 @@ static void set_multicast_list(struct net_device *dev);
    (detachable devices only).
    */
 
-int __init fmv18x_probe(struct net_device *dev)
+static int io = 0x220;
+static int irq;
+
+struct net_device * __init fmv18x_probe(int unit)
 {
-	int i;
-	int base_addr = dev->base_addr;
+	struct net_device *dev = alloc_etherdev(sizeof(struct net_local));
+	unsigned *port;
+	int err = 0;
+
+	if (!dev)
+		return ERR_PTR(-ENODEV);
+
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+		io = dev->base_addr;
+		irq = dev->irq;
+	}
 
 	SET_MODULE_OWNER(dev);
 
-	if (base_addr > 0x1ff)		/* Check a single specified location. */
-		return fmv18x_probe1(dev, base_addr);
-	else if (base_addr != 0)	/* Don't probe at all. */
-		return -ENXIO;
-
-	for (i = 0; fmv18x_probe_list[i]; i++)
-		if (fmv18x_probe1(dev, fmv18x_probe_list[i]) == 0)
-			return 0;
-
-	return -ENODEV;
+	if (io > 0x1ff) {	/* Check a single specified location. */
+		err = fmv18x_probe1(dev, io);
+	} else if (io != 0) {	/* Don't probe at all. */
+		err = -ENXIO;
+	} else {
+		for (port = fmv18x_probe_list; *port; port++)
+			if (fmv18x_probe1(dev, *port) == 0)
+				break;
+		if (!*port)
+			err = -ENODEV;
+	}
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, FMV18X_IO_EXTENT);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
 
 /* The Fujitsu datasheet suggests that the NIC be probed for by checking its
@@ -160,14 +187,18 @@ static int __init fmv18x_probe1(struct net_device *dev, short ioaddr)
 {
 	char irqmap[4] = {3, 7, 10, 15};
 	char irqmap_pnp[8] = {3, 4, 5, 7, 9, 10, 11, 15};
-	unsigned int i, irq, retval;
+	unsigned int i, retval;
+	struct net_local *lp;
 
 	/* Resetting the chip doesn't reset the ISA interface, so don't bother.
 	   That means we have to be careful with the register values we probe for.
 	   */
 
-	if (!request_region(ioaddr, FMV18X_IO_EXTENT, dev->name))
+	if (!request_region(ioaddr, FMV18X_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
+
+	dev->irq = irq;
+	dev->base_addr = ioaddr;
 
 	/* Check I/O address configuration and Fujitsu vendor code */
 	if (inb(ioaddr+FJ_MACADDR  ) != 0x00
@@ -180,9 +211,8 @@ static int __init fmv18x_probe1(struct net_device *dev, short ioaddr)
 	/* Check PnP mode for FMV-183/184/183A/184A. */
 	/* This PnP routine is very poor. IO and IRQ should be known. */
 	if (inb(ioaddr + FJ_STATUS1) & 0x20) {
-		irq = dev->irq;
 		for (i = 0; i < 8; i++) {
-			if (irq == irqmap_pnp[i])
+			if (dev->irq == irqmap_pnp[i])
 				break;
 		}
 		if (i == 8) {
@@ -192,22 +222,19 @@ static int __init fmv18x_probe1(struct net_device *dev, short ioaddr)
 	} else {
 		if (fmv18x_probe_list[inb(ioaddr + FJ_CONFIG0) & 0x07] != ioaddr)
 			return -ENODEV;
-		irq = irqmap[(inb(ioaddr + FJ_CONFIG0)>>6) & 0x03];
+		dev->irq = irqmap[(inb(ioaddr + FJ_CONFIG0)>>6) & 0x03];
 	}
 
 	/* Snarf the interrupt vector now. */
-	retval = request_irq(irq, &net_interrupt, 0, dev->name, dev);
+	retval = request_irq(dev->irq, &net_interrupt, 0, DRV_NAME, dev);
 	if (retval) {
 		printk ("FMV-18x found at %#3x, but it's unusable due to a conflict on"
-				"IRQ %d.\n", ioaddr, irq);
+				"IRQ %d.\n", ioaddr, dev->irq);
 		goto out;
 	}
 
 	printk("%s: FMV-18x found at %#3x, IRQ %d, address ", dev->name,
-		   ioaddr, irq);
-
-	dev->base_addr = ioaddr;
-	dev->irq = irq;
+		   ioaddr, dev->irq);
 
 	for(i = 0; i < 6; i++) {
 		unsigned char val = inb(ioaddr + FJ_MACADDR + i);
@@ -268,6 +295,8 @@ static int __init fmv18x_probe1(struct net_device *dev, short ioaddr)
 		goto out_irq;
 	}
 	memset(dev->priv, 0, sizeof(struct net_local));
+	lp = dev->priv;
+	spin_lock_init(&lp->lock);
 
 	dev->open		= net_open;
 	dev->stop		= net_close;
@@ -276,14 +305,10 @@ static int __init fmv18x_probe1(struct net_device *dev, short ioaddr)
 	dev->watchdog_timeo	= HZ/10;
 	dev->get_stats		= net_get_stats;
 	dev->set_multicast_list = set_multicast_list;
-
-	/* Fill in the fields of 'dev' with ethernet-generic values. */
-
-	ether_setup(dev);
 	return 0;
 
 out_irq:
-	free_irq(irq, dev);
+	free_irq(dev->irq, dev);
 out:
 	release_region(ioaddr, FMV18X_IO_EXTENT);
 	return retval;
@@ -292,7 +317,7 @@ out:
 
 static int net_open(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = dev->priv;
 	int ioaddr = dev->base_addr;
 
 	/* Set the configuration register 0 to 32K 100ns. byte-wide memory,
@@ -326,7 +351,7 @@ static int net_open(struct net_device *dev)
 
 static void net_timeout(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = dev->priv;
 	int ioaddr = dev->base_addr;
 	unsigned long flags;
 	
@@ -346,8 +371,7 @@ static void net_timeout(struct net_device *dev)
 		htons(inw(ioaddr+FJ_CONFIG0)));
 	lp->stats.tx_errors++;
 	/* ToDo: We should try to restart the adaptor... */
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&lp->lock, flags);
 
 	/* Initialize LAN Controller and LAN Card */
 	outb(0xda, ioaddr + CONFIG_0);   /* Initialize LAN Controller */
@@ -355,19 +379,20 @@ static void net_timeout(struct net_device *dev)
 	outb(0x00, ioaddr + FJ_CONFIG1); /* Disable IRQ of LAN Card */
 	outb(0x00, ioaddr + FJ_BUFCNTL); /* Reset ? I'm not sure */
 	net_open(dev);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&lp->lock, flags);
+
+	netif_wake_queue(dev);
 }
 
 static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = dev->priv;
 	int ioaddr = dev->base_addr;
-	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-	unsigned char *buf = skb->data;
+	short length = skb->len;
+	unsigned char *buf;
+	unsigned long flags;
 
 	/* Block a transmit from overlapping.  */
-	
-	netif_stop_queue(dev);
 	
 	if (length > ETH_FRAME_LEN) {
 		if (net_debug)
@@ -375,6 +400,15 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 				dev->name, length);
 		return 1;
 	}
+	
+	if (length < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
+	buf = skb->data;
+	
 	if (net_debug > 4)
 		printk("%s: Transmitting a packet of length %lu.\n", dev->name,
 			   (unsigned long)skb->len);
@@ -383,6 +417,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	   codes we possibly catch a Tx interrupt. Thus we flag off
 	   tx_queue_ready, so that we prevent the interrupt routine
 	   (net_interrupt) to start transmitting. */
+	spin_lock_irqsave(&lp->lock, flags);
 	lp->tx_queue_ready = 0;
 	{
 		outw(length, ioaddr + DATAPORT);
@@ -391,6 +426,8 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 		lp->tx_queue_len += length + 2;
 	}
 	lp->tx_queue_ready = 1;
+	spin_unlock_irqrestore(&lp->lock, flags);
+
 	if (lp->tx_started == 0) {
 		/* If the Tx is idle, always trigger a transmit. */
 		outb(0x80 | lp->tx_queue, ioaddr + TX_START);
@@ -398,10 +435,8 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 		lp->tx_queue_len = 0;
 		dev->trans_start = jiffies;
 		lp->tx_started = 1;
-		netif_wake_queue(dev);
-	} else if (lp->tx_queue_len < 4096 - 1502)
-		/* Yes, there is room for one more packet. */
-		netif_wake_queue(dev);
+	} else if (lp->tx_queue_len >= 4096 - 1502) /* No room for a packet */
+		netif_stop_queue(dev);
 
 	dev_kfree_skb(skb);
 	return 0;
@@ -409,7 +444,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
-static void
+static irqreturn_t
 net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
@@ -417,7 +452,7 @@ net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	int ioaddr, status;
 
 	ioaddr = dev->base_addr;
-	lp = (struct net_local *)dev->priv;
+	lp = dev->priv;
 	status = inw(ioaddr + TX_STATUS);
 	outw(status, ioaddr + TX_STATUS);
 
@@ -447,6 +482,7 @@ net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			lp->stats.collisions++;
 		}
 		if (status & 0x82) {
+			spin_lock(&lp->lock);
 			lp->stats.tx_packets++;
 			if (lp->tx_queue && lp->tx_queue_ready) {
 				outb(0x80 | lp->tx_queue, ioaddr + TX_START);
@@ -458,15 +494,16 @@ net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				lp->tx_started = 0;
 				netif_wake_queue(dev);	/* Inform upper layers. */
 			}
+			spin_unlock(&lp->lock);
 		}
 	}
-	return;
+	return IRQ_RETVAL(status);
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */
 static void net_rx(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = dev->priv;
 	int ioaddr = dev->base_addr;
 	int boguscount = 5;
 
@@ -526,7 +563,9 @@ static void net_rx(struct net_device *dev)
 
 			skb->protocol=eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 		}
 		if (--boguscount <= 0)
 			break;
@@ -579,7 +618,7 @@ static int net_close(struct net_device *dev)
    closed. */
 static struct net_device_stats *net_get_stats(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = dev->priv;
 	return &lp->stats;
 }
 
@@ -609,38 +648,33 @@ static void set_multicast_list(struct net_device *dev)
 }
 
 #ifdef MODULE
-static struct net_device dev_fmv18x;
-static int io = 0x220;
-static int irq;
+static struct net_device *dev_fmv18x;
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(net_debug, "i");
+MODULE_PARM_DESC(io, "FMV-18X I/O address");
+MODULE_PARM_DESC(irq, "FMV-18X IRQ number");
+MODULE_PARM_DESC(net_debug, "FMV-18X debug level (0-1,5-6)");
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {
 	if (io == 0)
 		printk("fmv18x: You should not use auto-probing with insmod!\n");
-	dev_fmv18x.base_addr	= io;
-	dev_fmv18x.irq		= irq;
-	dev_fmv18x.init		= fmv18x_probe;
-	if (register_netdev(&dev_fmv18x) != 0) {
-		printk("fmv18x: register_netdev() returned non-zero.\n");
-		return -EIO;
-	}
+	dev_fmv18x = fmv18x_probe(-1);
+	if (IS_ERR(dev_fmv18x))
+		return PTR_ERR(dev_fmv18x);
 	return 0;
 }
 
 void
 cleanup_module(void)
 {
-	unregister_netdev(&dev_fmv18x);
-	kfree(dev_fmv18x.priv);
-	dev_fmv18x.priv = NULL;
-
-	/* If we don't do this, we can't re-insmod it later. */
-	free_irq(dev_fmv18x.irq, &dev_fmv18x);
-	release_region(dev_fmv18x.base_addr, FMV18X_IO_EXTENT);
+	unregister_netdev(dev_fmv18x);
+	free_irq(dev_fmv18x->irq, dev_fmv18x);
+	release_region(dev_fmv18x->base_addr, FMV18X_IO_EXTENT);
+	free_netdev(dev_fmv18x);
 }
 #endif /* MODULE */
 

@@ -11,7 +11,7 @@
 #include <linux/module.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -31,6 +31,7 @@
 #include <net/ip.h>
 #include <net/route.h>
 #include <linux/skbuff.h>
+#include <linux/moduleparam.h>
 #include <net/sock.h>
 #include <net/pkt_sched.h>
 
@@ -67,8 +68,9 @@
 struct teql_master
 {
 	struct Qdisc_ops qops;
-	struct net_device dev;
+	struct net_device *dev;
 	struct Qdisc *slaves;
+	struct list_head master_list;
 	struct net_device_stats stats;
 };
 
@@ -80,7 +82,7 @@ struct teql_sched_data
 	struct sk_buff_head q;
 };
 
-#define NEXT_SLAVE(q) (((struct teql_sched_data*)((q)->data))->next)
+#define NEXT_SLAVE(q) (((struct teql_sched_data*)qdisc_priv(q))->next)
 
 #define FMASK (IFF_BROADCAST|IFF_POINTOPOINT|IFF_BROADCAST)
 
@@ -90,45 +92,46 @@ static int
 teql_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 {
 	struct net_device *dev = sch->dev;
-	struct teql_sched_data *q = (struct teql_sched_data *)sch->data;
+	struct teql_sched_data *q = qdisc_priv(sch);
 
 	__skb_queue_tail(&q->q, skb);
 	if (q->q.qlen <= dev->tx_queue_len) {
-		sch->stats.bytes += skb->len;
-		sch->stats.packets++;
+		sch->bstats.bytes += skb->len;
+		sch->bstats.packets++;
 		return 0;
 	}
 
 	__skb_unlink(skb, &q->q);
 	kfree_skb(skb);
-	sch->stats.drops++;
+	sch->qstats.drops++;
 	return NET_XMIT_DROP;
 }
 
 static int
 teql_requeue(struct sk_buff *skb, struct Qdisc* sch)
 {
-	struct teql_sched_data *q = (struct teql_sched_data *)sch->data;
+	struct teql_sched_data *q = qdisc_priv(sch);
 
 	__skb_queue_head(&q->q, skb);
+	sch->qstats.requeues++;
 	return 0;
 }
 
 static struct sk_buff *
 teql_dequeue(struct Qdisc* sch)
 {
-	struct teql_sched_data *dat = (struct teql_sched_data *)sch->data;
+	struct teql_sched_data *dat = qdisc_priv(sch);
 	struct sk_buff *skb;
 
 	skb = __skb_dequeue(&dat->q);
 	if (skb == NULL) {
-		struct net_device *m = dat->m->dev.qdisc->dev;
+		struct net_device *m = dat->m->dev->qdisc->dev;
 		if (m) {
 			dat->m->slaves = sch;
 			netif_wake_queue(m);
 		}
 	}
-	sch->q.qlen = dat->q.qlen + dat->m->dev.qdisc->q.qlen;
+	sch->q.qlen = dat->q.qlen + dat->m->dev->qdisc->q.qlen;
 	return skb;
 }
 
@@ -142,7 +145,7 @@ teql_neigh_release(struct neighbour *n)
 static void
 teql_reset(struct Qdisc* sch)
 {
-	struct teql_sched_data *dat = (struct teql_sched_data *)sch->data;
+	struct teql_sched_data *dat = qdisc_priv(sch);
 
 	skb_queue_purge(&dat->q);
 	sch->q.qlen = 0;
@@ -153,7 +156,7 @@ static void
 teql_destroy(struct Qdisc* sch)
 {
 	struct Qdisc *q, *prev;
-	struct teql_sched_data *dat = (struct teql_sched_data *)sch->data;
+	struct teql_sched_data *dat = qdisc_priv(sch);
 	struct teql_master *master = dat->m;
 
 	if ((prev = master->slaves) != NULL) {
@@ -165,9 +168,9 @@ teql_destroy(struct Qdisc* sch)
 					master->slaves = NEXT_SLAVE(q);
 					if (q == master->slaves) {
 						master->slaves = NULL;
-						spin_lock_bh(&master->dev.queue_lock);
-						qdisc_reset(master->dev.qdisc);
-						spin_unlock_bh(&master->dev.queue_lock);
+						spin_lock_bh(&master->dev->queue_lock);
+						qdisc_reset(master->dev->qdisc);
+						spin_unlock_bh(&master->dev->queue_lock);
 					}
 				}
 				skb_queue_purge(&dat->q);
@@ -177,20 +180,18 @@ teql_destroy(struct Qdisc* sch)
 				
 		} while ((prev = q) != master->slaves);
 	}
-
-	MOD_DEC_USE_COUNT;
 }
 
 static int teql_qdisc_init(struct Qdisc *sch, struct rtattr *opt)
 {
 	struct net_device *dev = sch->dev;
 	struct teql_master *m = (struct teql_master*)sch->ops;
-	struct teql_sched_data *q = (struct teql_sched_data *)sch->data;
+	struct teql_sched_data *q = qdisc_priv(sch);
 
-	if (dev->hard_header_len > m->dev.hard_header_len)
+	if (dev->hard_header_len > m->dev->hard_header_len)
 		return -EINVAL;
 
-	if (&m->dev == dev)
+	if (m->dev == dev)
 		return -ELOOP;
 
 	q->m = m;
@@ -198,32 +199,30 @@ static int teql_qdisc_init(struct Qdisc *sch, struct rtattr *opt)
 	skb_queue_head_init(&q->q);
 
 	if (m->slaves) {
-		if (m->dev.flags & IFF_UP) {
-			if ((m->dev.flags&IFF_POINTOPOINT && !(dev->flags&IFF_POINTOPOINT))
-			    || (m->dev.flags&IFF_BROADCAST && !(dev->flags&IFF_BROADCAST))
-			    || (m->dev.flags&IFF_MULTICAST && !(dev->flags&IFF_MULTICAST))
-			    || dev->mtu < m->dev.mtu)
+		if (m->dev->flags & IFF_UP) {
+			if ((m->dev->flags&IFF_POINTOPOINT && !(dev->flags&IFF_POINTOPOINT))
+			    || (m->dev->flags&IFF_BROADCAST && !(dev->flags&IFF_BROADCAST))
+			    || (m->dev->flags&IFF_MULTICAST && !(dev->flags&IFF_MULTICAST))
+			    || dev->mtu < m->dev->mtu)
 				return -EINVAL;
 		} else {
 			if (!(dev->flags&IFF_POINTOPOINT))
-				m->dev.flags &= ~IFF_POINTOPOINT;
+				m->dev->flags &= ~IFF_POINTOPOINT;
 			if (!(dev->flags&IFF_BROADCAST))
-				m->dev.flags &= ~IFF_BROADCAST;
+				m->dev->flags &= ~IFF_BROADCAST;
 			if (!(dev->flags&IFF_MULTICAST))
-				m->dev.flags &= ~IFF_MULTICAST;
-			if (dev->mtu < m->dev.mtu)
-				m->dev.mtu = dev->mtu;
+				m->dev->flags &= ~IFF_MULTICAST;
+			if (dev->mtu < m->dev->mtu)
+				m->dev->mtu = dev->mtu;
 		}
 		q->next = NEXT_SLAVE(m->slaves);
 		NEXT_SLAVE(m->slaves) = sch;
 	} else {
 		q->next = sch;
 		m->slaves = sch;
-		m->dev.mtu = dev->mtu;
-		m->dev.flags = (m->dev.flags&~FMASK)|(dev->flags&FMASK);
+		m->dev->mtu = dev->mtu;
+		m->dev->flags = (m->dev->flags&~FMASK)|(dev->flags&FMASK);
 	}
-	
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -232,7 +231,7 @@ static int teql_qdisc_init(struct Qdisc *sch, struct rtattr *opt)
 static int
 __teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *dev)
 {
-	struct teql_sched_data *q = (void*)dev->qdisc->data;
+	struct teql_sched_data *q = qdisc_priv(dev->qdisc);
 	struct neighbour *mn = skb->dst->neighbour;
 	struct neighbour *n = q->ncache;
 
@@ -383,17 +382,15 @@ static int teql_master_open(struct net_device *dev)
 			flags &= ~IFF_MULTICAST;
 	} while ((q = NEXT_SLAVE(q)) != m->slaves);
 
-	m->dev.mtu = mtu;
-	m->dev.flags = (m->dev.flags&~FMASK) | flags;
-	netif_start_queue(&m->dev);
-	MOD_INC_USE_COUNT;
+	m->dev->mtu = mtu;
+	m->dev->flags = (m->dev->flags&~FMASK) | flags;
+	netif_start_queue(m->dev);
 	return 0;
 }
 
 static int teql_master_close(struct net_device *dev)
 {
 	netif_stop_queue(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -423,8 +420,22 @@ static int teql_master_mtu(struct net_device *dev, int new_mtu)
 	return 0;
 }
 
-static int teql_master_init(struct net_device *dev)
+static __init void teql_master_setup(struct net_device *dev)
 {
+	struct teql_master *master = dev->priv;
+	struct Qdisc_ops *ops = &master->qops;
+
+	master->dev	= dev;
+	ops->priv_size  = sizeof(struct teql_sched_data);
+	
+	ops->enqueue	=	teql_enqueue;
+	ops->dequeue	=	teql_dequeue;
+	ops->requeue	=	teql_requeue;
+	ops->init	=	teql_qdisc_init;
+	ops->reset	=	teql_reset;
+	ops->destroy	=	teql_destroy;
+	ops->owner	=	THIS_MODULE;
+
 	dev->open		= teql_master_open;
 	dev->hard_start_xmit	= teql_master_xmit;
 	dev->stop		= teql_master_close;
@@ -435,61 +446,66 @@ static int teql_master_init(struct net_device *dev)
 	dev->tx_queue_len	= 100;
 	dev->flags		= IFF_NOARP;
 	dev->hard_header_len	= LL_MAX_HEADER;
-	return 0;
+	SET_MODULE_OWNER(dev);
 }
 
-static struct teql_master the_master = {
+static LIST_HEAD(master_dev_list);
+static int max_equalizers = 1;
+module_param(max_equalizers, int, 0);
+MODULE_PARM_DESC(max_equalizers, "Max number of link equalizers");
+
+static int __init teql_init(void)
 {
-	NULL,
-	NULL,
-	"",
-	sizeof(struct teql_sched_data),
+	int i;
+	int err = -ENODEV;
 
-	teql_enqueue,
-	teql_dequeue,
-	teql_requeue,
-	NULL,
+	for (i = 0; i < max_equalizers; i++) {
+		struct net_device *dev;
+		struct teql_master *master;
 
-	teql_qdisc_init,
-	teql_reset,
-	teql_destroy,
-	NULL,
-},};
+		dev = alloc_netdev(sizeof(struct teql_master),
+				  "teql%d", teql_master_setup);
+		if (!dev) {
+			err = -ENOMEM;
+			break;
+		}
 
+		if ((err = register_netdev(dev))) {
+			free_netdev(dev);
+			break;
+		}
 
-#ifdef MODULE
-int init_module(void)
-#else
-int __init teql_init(void)
-#endif
-{
-	int err;
+		master = dev->priv;
 
-	rtnl_lock();
+		strlcpy(master->qops.id, dev->name, IFNAMSIZ);
+		err = register_qdisc(&master->qops);
 
-	the_master.dev.priv = (void*)&the_master;
-	err = dev_alloc_name(&the_master.dev, "teql%d");
-	if (err < 0)
-		return err;
-	memcpy(the_master.qops.id, the_master.dev.name, IFNAMSIZ);
-	the_master.dev.init = teql_master_init;
+		if (err) {
+			unregister_netdev(dev);
+			free_netdev(dev);
+			break;
+		}
 
-	err = register_netdevice(&the_master.dev);
-	if (err == 0) {
-		err = register_qdisc(&the_master.qops);
-		if (err)
-			unregister_netdevice(&the_master.dev);
+		list_add_tail(&master->master_list, &master_dev_list);
 	}
-	rtnl_unlock();
-	return err;
+	return i ? 0 : err;
 }
 
-#ifdef MODULE
-void cleanup_module(void) 
+static void __exit teql_exit(void) 
 {
-	rtnl_lock();
-	unregister_qdisc(&the_master.qops);
-	unregister_netdevice(&the_master.dev);
-	rtnl_unlock();
+	struct teql_master *master, *nxt;
+
+	list_for_each_entry_safe(master, nxt, &master_dev_list, master_list) {
+
+		list_del(&master->master_list);
+
+		unregister_qdisc(&master->qops);
+		unregister_netdev(master->dev);
+		free_netdev(master->dev);
+	}
 }
-#endif
+
+module_init(teql_init);
+module_exit(teql_exit);
+
+MODULE_LICENSE("GPL");

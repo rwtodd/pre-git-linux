@@ -1,4 +1,4 @@
-/* 
+/*
     bt848.h - Bt848 register offsets
 
     Copyright (C) 1996,97,98 Ralph Metzler (rjkm@thp.uni-koeln.de)
@@ -22,10 +22,10 @@
 #define _BT848_H_
 
 #ifndef PCI_VENDOR_ID_BROOKTREE
-#define PCI_VENDOR_ID_BROOKTREE 0x109e 
+#define PCI_VENDOR_ID_BROOKTREE 0x109e
 #endif
 #ifndef PCI_DEVICE_ID_BT848
-#define PCI_DEVICE_ID_BT848     0x350	
+#define PCI_DEVICE_ID_BT848     0x350
 #endif
 #ifndef PCI_DEVICE_ID_BT849
 #define PCI_DEVICE_ID_BT849     0x351
@@ -50,7 +50,7 @@
 #define BT848_DSTATUS_LOF      (1<<1)
 #define BT848_DSTATUS_COF      (1<<0)
 
-#define BT848_IFORM            0x004  
+#define BT848_IFORM            0x004
 #define BT848_IFORM_HACTIVE    (1<<7)
 #define BT848_IFORM_MUXSEL     (3<<5)
 #define BT848_IFORM_MUX0       (2<<5)
@@ -71,7 +71,7 @@
 #define BT848_IFORM_AUTO       0
 #define BT848_IFORM_NORM       7
 
-#define BT848_TDEC             0x008  
+#define BT848_TDEC             0x008
 #define BT848_TDEC_DEC_FIELD   (1<<7)
 #define BT848_TDEC_FLDALIGN    (1<<6)
 #define BT848_TDEC_DEC_RAT     (0x1f)
@@ -158,6 +158,9 @@
 #define BT848_ADC_C_SLEEP      (1<<1)
 #define BT848_ADC_CRUSH        (1<<0)
 
+#define BT848_WC_UP            0x044
+#define BT848_WC_DOWN          0x078
+
 #define BT848_E_VTC            0x06C
 #define BT848_O_VTC            0x0EC
 #define BT848_VTC_HSFMT        (1<<7)
@@ -203,6 +206,9 @@
 #define BT848_COLOR_FMT_YCrCb422    0x88
 #define BT848_COLOR_FMT_YCrCb411    0x99
 #define BT848_COLOR_FMT_RAW         0xee
+
+#define BT848_VTOTAL_LO             0xB0
+#define BT848_VTOTAL_HI             0xB4
 
 #define BT848_COLOR_CTL                0x0D8
 #define BT848_COLOR_CTL_EXT_FRMRATE    (1<<7)
@@ -279,12 +285,15 @@
 #define BT848_GPIO_DMA_CTL_FIFO_ENABLE (1<<0)
 
 #define BT848_I2C              0x110
+#define BT878_I2C_MODE         (1<<7)
+#define BT878_I2C_RATE         (1<<6)
+#define BT878_I2C_NOSTOP       (1<<5)
+#define BT878_I2C_NOSTART      (1<<4)
 #define BT848_I2C_DIV          (0xf<<4)
 #define BT848_I2C_SYNC         (1<<3)
 #define BT848_I2C_W3B	       (1<<2)
 #define BT848_I2C_SCL          (1<<1)
 #define BT848_I2C_SDA          (1<<0)
-
 
 #define BT848_RISC_STRT_ADD    0x114
 #define BT848_GPIO_OUT_EN      0x118
@@ -311,29 +320,28 @@
 
 /* WRITE and SKIP */
 /* disable which bytes of each DWORD */
-#define BT848_RISC_BYTE0       (1<<12)
-#define BT848_RISC_BYTE1       (1<<13)
-#define BT848_RISC_BYTE2       (1<<14)
-#define BT848_RISC_BYTE3       (1<<15)
-#define BT848_RISC_BYTE_ALL    (0x0f<<12)
+#define BT848_RISC_BYTE0       (1U<<12)
+#define BT848_RISC_BYTE1       (1U<<13)
+#define BT848_RISC_BYTE2       (1U<<14)
+#define BT848_RISC_BYTE3       (1U<<15)
+#define BT848_RISC_BYTE_ALL    (0x0fU<<12)
 #define BT848_RISC_BYTE_NONE   0
 /* cause RISCI */
-#define BT848_RISC_IRQ         (1<<24)
+#define BT848_RISC_IRQ         (1U<<24)
 /* RISC command is last one in this line */
-#define BT848_RISC_EOL         (1<<26)
+#define BT848_RISC_EOL         (1U<<26)
 /* RISC command is first one in this line */
-#define BT848_RISC_SOL         (1<<27)
+#define BT848_RISC_SOL         (1U<<27)
 
-#define BT848_RISC_WRITE       (0x01<<28)
-#define BT848_RISC_SKIP        (0x02<<28)
-#define BT848_RISC_WRITEC      (0x05<<28)
-#define BT848_RISC_JUMP        (0x07<<28)
-#define BT848_RISC_SYNC        (0x08<<28)
+#define BT848_RISC_WRITE       (0x01U<<28)
+#define BT848_RISC_SKIP        (0x02U<<28)
+#define BT848_RISC_WRITEC      (0x05U<<28)
+#define BT848_RISC_JUMP        (0x07U<<28)
+#define BT848_RISC_SYNC        (0x08U<<28)
 
-#define BT848_RISC_WRITE123    (0x09<<28)
-#define BT848_RISC_SKIP123     (0x0a<<28)
-#define BT848_RISC_WRITE1S23   (0x0b<<28)
-
+#define BT848_RISC_WRITE123    (0x09U<<28)
+#define BT848_RISC_SKIP123     (0x0aU<<28)
+#define BT848_RISC_WRITE1S23   (0x0bU<<28)
 
 
 /* Bt848A and higher only !! */
@@ -347,9 +355,12 @@
 #define BT848_PLL_X            (1<<7)
 #define BT848_PLL_C            (1<<6)
 
+#define BT848_DVSIF            0x0FC
+
 /* Bt878 register */
 
 #define BT878_DEVCTRL 0x40
 #define BT878_EN_TBFX 0x02
+#define BT878_EN_VSFX 0x04
 
 #endif

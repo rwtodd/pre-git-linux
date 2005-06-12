@@ -12,39 +12,48 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/ptrace.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
+#include <linux/ptrace.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/profile.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/bitops.h>
 #include <asm/uaccess.h>
 
 /*
  * Controller mappings for all interrupt sources:
  */
 irq_desc_t irq_desc[NR_IRQS] __cacheline_aligned = {
-	[0 ... NR_IRQS-1] = { 0, &no_irq_type, NULL, 0, SPIN_LOCK_UNLOCKED}
+	[0 ... NR_IRQS-1] = {
+		.handler = &no_irq_type,
+		.lock = SPIN_LOCK_UNLOCKED
+	}
 };
 
 static void register_irq_proc(unsigned int irq);
 
-unsigned long irq_err_count;
+volatile unsigned long irq_err_count;
 
 /*
  * Special irq handlers.
  */
 
-void no_action(int cpl, void *dev_id, struct pt_regs *regs) { }
+irqreturn_t no_action(int cpl, void *dev_id, struct pt_regs *regs)
+{
+	return IRQ_NONE;
+}
 
 /*
  * Generic no controller code
@@ -61,42 +70,36 @@ no_irq_ack(unsigned int irq)
 }
 
 struct hw_interrupt_type no_irq_type = {
-	typename:	"none",
-	startup:	no_irq_startup,
-	shutdown:	no_irq_enable_disable,
-	enable:		no_irq_enable_disable,
-	disable:	no_irq_enable_disable,
-	ack:		no_irq_ack,
-	end:		no_irq_enable_disable,
+	.typename	= "none",
+	.startup	= no_irq_startup,
+	.shutdown	= no_irq_enable_disable,
+	.enable		= no_irq_enable_disable,
+	.disable	= no_irq_enable_disable,
+	.ack		= no_irq_ack,
+	.end		= no_irq_enable_disable,
 };
 
 int
 handle_IRQ_event(unsigned int irq, struct pt_regs *regs,
 		 struct irqaction *action)
 {
-	int status;
-	int cpu = smp_processor_id();
-
-	kstat.irqs[cpu][irq]++;
-	irq_enter(cpu, irq);
-
-	status = 1;	/* Force the "do bottom halves" bit */
+	int status = 1;	/* Force the "do bottom halves" bit */
+	int ret;
 
 	do {
 		if (!(action->flags & SA_INTERRUPT))
-			__sti();
+			local_irq_enable();
 		else
-			__cli();
+			local_irq_disable();
 
-		status |= action->flags;
-		action->handler(irq, action->dev_id, regs);
+		ret = action->handler(irq, action->dev_id, regs);
+		if (ret == IRQ_HANDLED)
+			status |= action->flags;
 		action = action->next;
 	} while (action);
 	if (status & SA_SAMPLE_RANDOM)
 		add_interrupt_randomness(irq);
-	__cli();
-
-	irq_exit(cpu, irq);
+	local_irq_disable();
 
 	return status;
 }
@@ -129,12 +132,7 @@ void
 disable_irq(unsigned int irq)
 {
 	disable_irq_nosync(irq);
-
-	if (!local_irq_count(smp_processor_id())) {
-		do {
-			barrier();
-		} while (irq_desc[irq].status & IRQ_INPROGRESS);
-	}
+	synchronize_irq(irq);
 }
 
 void
@@ -172,6 +170,9 @@ setup_irq(unsigned int irq, struct irqaction * new)
 	struct irqaction *old, **p;
 	unsigned long flags;
 	irq_desc_t *desc = irq_desc + irq;
+
+        if (desc->handler == &no_irq_type)
+		return -ENOSYS;
 
 	/*
 	 * Some drivers like serial.c use request_irq() heavily,
@@ -214,7 +215,8 @@ setup_irq(unsigned int irq, struct irqaction * new)
 
 	if (!shared) {
 		desc->depth = 0;
-		desc->status &= ~IRQ_DISABLED;
+		desc->status &=
+		    ~(IRQ_DISABLED|IRQ_AUTODETECT|IRQ_WAITING|IRQ_INPROGRESS);
 		desc->handler->startup(irq);
 	}
 	spin_unlock_irqrestore(&desc->lock,flags);
@@ -225,10 +227,10 @@ setup_irq(unsigned int irq, struct irqaction * new)
 static struct proc_dir_entry * root_irq_dir;
 static struct proc_dir_entry * irq_dir[NR_IRQS];
 
-#ifdef CONFIG_SMP
+#ifdef CONFIG_SMP 
 static struct proc_dir_entry * smp_affinity_entry[NR_IRQS];
 static char irq_user_affinity[NR_IRQS];
-static unsigned long irq_affinity[NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
+static cpumask_t irq_affinity[NR_IRQS] = { [0 ... NR_IRQS-1] = CPU_MASK_ALL };
 
 static void
 select_smp_affinity(int irq)
@@ -239,86 +241,47 @@ select_smp_affinity(int irq)
 	if (! irq_desc[irq].handler->set_affinity || irq_user_affinity[irq])
 		return;
 
-	while (((cpu_present_mask >> cpu) & 1) == 0)
+	while (!cpu_possible(cpu))
 		cpu = (cpu < (NR_CPUS-1) ? cpu + 1 : 0);
 	last_cpu = cpu;
 
-	irq_affinity[irq] = 1UL << cpu;
-	irq_desc[irq].handler->set_affinity(irq, 1UL << cpu);
+	irq_affinity[irq] = cpumask_of_cpu(cpu);
+	irq_desc[irq].handler->set_affinity(irq, cpumask_of_cpu(cpu));
 }
-
-#define HEX_DIGITS 16
 
 static int
 irq_affinity_read_proc (char *page, char **start, off_t off,
 			int count, int *eof, void *data)
 {
-	if (count < HEX_DIGITS+1)
+	int len = cpumask_scnprintf(page, count, irq_affinity[(long)data]);
+	if (count - len < 2)
 		return -EINVAL;
-	return sprintf (page, "%016lx\n", irq_affinity[(long)data]);
-}
-
-static unsigned int
-parse_hex_value (const char *buffer,
-		 unsigned long count, unsigned long *ret)
-{
-	unsigned char hexnum [HEX_DIGITS];
-	unsigned long value;
-	int i;
-
-	if (!count)
-		return -EINVAL;
-	if (count > HEX_DIGITS)
-		count = HEX_DIGITS;
-	if (copy_from_user(hexnum, buffer, count))
-		return -EFAULT;
-
-	/*
-	 * Parse the first 8 characters as a hex string, any non-hex char
-	 * is end-of-string. '00e1', 'e1', '00E1', 'E1' are all the same.
-	 */
-	value = 0;
-
-	for (i = 0; i < count; i++) {
-		unsigned int c = hexnum[i];
-
-		switch (c) {
-			case '0' ... '9': c -= '0'; break;
-			case 'a' ... 'f': c -= 'a'-10; break;
-			case 'A' ... 'F': c -= 'A'-10; break;
-		default:
-			goto out;
-		}
-		value = (value << 4) | c;
-	}
-out:
-	*ret = value;
-	return 0;
+	len += sprintf(page + len, "\n");
+	return len;
 }
 
 static int
-irq_affinity_write_proc(struct file *file, const char *buffer,
+irq_affinity_write_proc(struct file *file, const char __user *buffer,
 			unsigned long count, void *data)
 {
 	int irq = (long) data, full_count = count, err;
-	unsigned long new_value;
+	cpumask_t new_value;
 
 	if (!irq_desc[irq].handler->set_affinity)
 		return -EIO;
 
-	err = parse_hex_value(buffer, count, &new_value);
+	err = cpumask_parse(buffer, count, new_value);
 
 	/* The special value 0 means release control of the
 	   affinity to kernel.  */
-	if (new_value == 0) {
+	cpus_and(new_value, new_value, cpu_online_map);
+	if (cpus_empty(new_value)) {
 		irq_user_affinity[irq] = 0;
 		select_smp_affinity(irq);
 	}
 	/* Do not allow disabling IRQs completely - it's a too easy
 	   way to make the system unusable accidentally :-) At least
 	   one online CPU still has to be targeted.  */
-	else if (!(new_value & cpu_present_mask))
-		return -EINVAL;
 	else {
 		irq_affinity[irq] = new_value;
 		irq_user_affinity[irq] = 1;
@@ -328,30 +291,6 @@ irq_affinity_write_proc(struct file *file, const char *buffer,
 	return full_count;
 }
 
-static int
-prof_cpu_mask_read_proc(char *page, char **start, off_t off,
-			int count, int *eof, void *data)
-{
-	unsigned long *mask = (unsigned long *) data;
-	if (count < HEX_DIGITS+1)
-		return -EINVAL;
-	return sprintf (page, "%016lx\n", *mask);
-}
-
-static int
-prof_cpu_mask_write_proc(struct file *file, const char *buffer,
-			 unsigned long count, void *data)
-{
-	unsigned long *mask = (unsigned long *) data, full_count = count, err;
-	unsigned long new_value;
-
-	err = parse_hex_value(buffer, count, &new_value);
-	if (err)
-		return err;
-
-	*mask = new_value;
-	return full_count;
-}
 #endif /* CONFIG_SMP */
 
 #define MAX_NAMELEN 10
@@ -359,10 +298,10 @@ prof_cpu_mask_write_proc(struct file *file, const char *buffer,
 static void
 register_irq_proc (unsigned int irq)
 {
-	struct proc_dir_entry *entry;
 	char name [MAX_NAMELEN];
 
-	if (!root_irq_dir || (irq_desc[irq].handler == &no_irq_type))
+	if (!root_irq_dir || (irq_desc[irq].handler == &no_irq_type) ||
+	    irq_dir[irq])
 		return;
 
 	memset(name, 0, MAX_NAMELEN);
@@ -371,44 +310,41 @@ register_irq_proc (unsigned int irq)
 	/* create /proc/irq/1234 */
 	irq_dir[irq] = proc_mkdir(name, root_irq_dir);
 
-#ifdef CONFIG_SMP
-	/* create /proc/irq/1234/smp_affinity */
-	entry = create_proc_entry("smp_affinity", 0600, irq_dir[irq]);
+#ifdef CONFIG_SMP 
+	if (irq_desc[irq].handler->set_affinity) {
+		struct proc_dir_entry *entry;
+		/* create /proc/irq/1234/smp_affinity */
+		entry = create_proc_entry("smp_affinity", 0600, irq_dir[irq]);
 
-	entry->nlink = 1;
-	entry->data = (void *)(long)irq;
-	entry->read_proc = irq_affinity_read_proc;
-	entry->write_proc = irq_affinity_write_proc;
+		if (entry) {
+			entry->nlink = 1;
+			entry->data = (void *)(long)irq;
+			entry->read_proc = irq_affinity_read_proc;
+			entry->write_proc = irq_affinity_write_proc;
+		}
 
-	smp_affinity_entry[irq] = entry;
+		smp_affinity_entry[irq] = entry;
+	}
 #endif
 }
-
-unsigned long prof_cpu_mask = ~0UL;
 
 void
 init_irq_proc (void)
 {
-	struct proc_dir_entry *entry;
 	int i;
 
 	/* create /proc/irq */
-	root_irq_dir = proc_mkdir("irq", 0);
+	root_irq_dir = proc_mkdir("irq", NULL);
 
-#ifdef CONFIG_SMP
+#ifdef CONFIG_SMP 
 	/* create /proc/irq/prof_cpu_mask */
-	entry = create_proc_entry("prof_cpu_mask", 0600, root_irq_dir);
-
-	entry->nlink = 1;
-	entry->data = (void *)&prof_cpu_mask;
-	entry->read_proc = prof_cpu_mask_read_proc;
-	entry->write_proc = prof_cpu_mask_write_proc;
+	create_prof_cpu_mask(root_irq_dir);
 #endif
 
 	/*
 	 * Create entries for all existing IRQs.
 	 */
-	for (i = 0; i < NR_IRQS; i++) {
+	for (i = 0; i < ACTUAL_NR_IRQS; i++) {
 		if (irq_desc[i].handler == &no_irq_type)
 			continue;
 		register_irq_proc(i);
@@ -416,7 +352,7 @@ init_irq_proc (void)
 }
 
 int
-request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *),
 	    unsigned long irqflags, const char * devname, void *dev_id)
 {
 	int retval;
@@ -448,7 +384,7 @@ request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
 
 	action->handler = handler;
 	action->flags = irqflags;
-	action->mask = 0;
+	cpus_clear(action->mask);
 	action->name = devname;
 	action->next = NULL;
 	action->dev_id = dev_id;
@@ -462,6 +398,8 @@ request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
 		kfree(action);
 	return retval;
 }
+
+EXPORT_SYMBOL(request_irq);
 
 void
 free_irq(unsigned int irq, void *dev_id)
@@ -509,70 +447,77 @@ free_irq(unsigned int irq, void *dev_id)
 	}
 }
 
+EXPORT_SYMBOL(free_irq);
+
 int
-get_irq_list(char *buf)
+show_interrupts(struct seq_file *p, void *v)
 {
-	int i, j;
+#ifdef CONFIG_SMP
+	int j;
+#endif
+	int i = *(loff_t *) v;
 	struct irqaction * action;
-	char *p = buf;
+	unsigned long flags;
 
 #ifdef CONFIG_SMP
-	p += sprintf(p, "           ");
-	for (i = 0; i < smp_num_cpus; i++)
-		p += sprintf(p, "CPU%d       ", i);
-#ifdef DO_BROADCAST_INTS
-	for (i = 0; i < smp_num_cpus; i++)
-		p += sprintf(p, "TRY%d       ", i);
-#endif
-	*p++ = '\n';
+	if (i == 0) {
+		seq_puts(p, "           ");
+		for (i = 0; i < NR_CPUS; i++)
+			if (cpu_online(i))
+				seq_printf(p, "CPU%d       ", i);
+		seq_putc(p, '\n');
+	}
 #endif
 
-	for (i = 0; i < NR_IRQS; i++) {
+	if (i < ACTUAL_NR_IRQS) {
+		spin_lock_irqsave(&irq_desc[i].lock, flags);
 		action = irq_desc[i].action;
 		if (!action) 
-			continue;
-		p += sprintf(p, "%3d: ",i);
+			goto unlock;
+		seq_printf(p, "%3d: ",i);
 #ifndef CONFIG_SMP
-		p += sprintf(p, "%10u ", kstat_irqs(i));
+		seq_printf(p, "%10u ", kstat_irqs(i));
 #else
-		for (j = 0; j < smp_num_cpus; j++)
-			p += sprintf(p, "%10u ",
-				     kstat.irqs[cpu_logical_map(j)][i]);
-#ifdef DO_BROADCAST_INTS
-		for (j = 0; j < smp_num_cpus; j++)
-			p += sprintf(p, "%10lu ",
-				     irq_attempt(cpu_logical_map(j), i));
+		for (j = 0; j < NR_CPUS; j++)
+			if (cpu_online(j))
+				seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
 #endif
-#endif
-		p += sprintf(p, " %14s", irq_desc[i].handler->typename);
-		p += sprintf(p, "  %c%s",
-			     (action->flags & SA_INTERRUPT)?'+':' ',
-			     action->name);
+		seq_printf(p, " %14s", irq_desc[i].handler->typename);
+		seq_printf(p, "  %c%s",
+			(action->flags & SA_INTERRUPT)?'+':' ',
+			action->name);
 
 		for (action=action->next; action; action = action->next) {
-			p += sprintf(p, ", %c%s",
-				     (action->flags & SA_INTERRUPT)?'+':' ',
-				     action->name);
+			seq_printf(p, ", %c%s",
+				  (action->flags & SA_INTERRUPT)?'+':' ',
+				   action->name);
 		}
-		*p++ = '\n';
-	}
-#if CONFIG_SMP
-	p += sprintf(p, "IPI: ");
-	for (j = 0; j < smp_num_cpus; j++)
-		p += sprintf(p, "%10lu ",
-			     cpu_data[cpu_logical_map(j)].ipi_count);
-	p += sprintf(p, "\n");
+
+		seq_putc(p, '\n');
+unlock:
+		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
+	} else if (i == ACTUAL_NR_IRQS) {
+#ifdef CONFIG_SMP
+		seq_puts(p, "IPI: ");
+		for (i = 0; i < NR_CPUS; i++)
+			if (cpu_online(i))
+				seq_printf(p, "%10lu ", cpu_data[i].ipi_count);
+		seq_putc(p, '\n');
 #endif
-	p += sprintf(p, "ERR: %10lu\n", irq_err_count);
-	return p - buf;
+		seq_printf(p, "ERR: %10lu\n", irq_err_count);
+	}
+	return 0;
 }
 
 
 /*
- * do_IRQ handles all normal device IRQ's (the special
+ * handle_irq handles all normal device IRQ's (the special
  * SMP cross-CPU interrupts have their own specific
  * handlers).
  */
+
+#define MAX_ILLEGAL_IRQS 16
+
 void
 handle_irq(int irq, struct pt_regs * regs)
 {	
@@ -590,15 +535,18 @@ handle_irq(int irq, struct pt_regs * regs)
 	irq_desc_t *desc = irq_desc + irq;
 	struct irqaction * action;
 	unsigned int status;
-
-	if ((unsigned) irq > ACTUAL_NR_IRQS) {
+	static unsigned int illegal_count=0;
+	
+	if ((unsigned) irq > ACTUAL_NR_IRQS && illegal_count < MAX_ILLEGAL_IRQS ) {
 		irq_err_count++;
-		printk(KERN_CRIT "device_interrupt: illegal interrupt %d\n",
+		illegal_count++;
+		printk(KERN_CRIT "device_interrupt: invalid interrupt %d\n",
 		       irq);
 		return;
 	}
 
-	irq_attempt(cpu, irq)++;
+	irq_enter();
+	kstat_cpu(cpu).irqs[irq]++;
 	spin_lock_irq(&desc->lock); /* mask also the higher prio events */
 	desc->handler->ack(irq);
 	/*
@@ -632,7 +580,7 @@ handle_irq(int irq, struct pt_regs * regs)
 	/*
 	 * Edge triggered interrupts need to remember pending events.
 	 * This applies to any hw interrupts that allow a second
-	 * instance of the same irq to arrive while we are in do_IRQ
+	 * instance of the same irq to arrive while we are in handle_irq
 	 * or in the handler. But the code here only handles the _second_
 	 * instance of the irq, not the third or fourth. So it is mostly
 	 * useful for irq hardware that does not mask cleanly in an
@@ -656,6 +604,8 @@ out:
 	 */
 	desc->handler->end(irq);
 	spin_unlock(&desc->lock);
+
+	irq_exit();
 }
 
 /*
@@ -687,7 +637,7 @@ probe_irq_on(void)
 
 	/* Wait for longstanding interrupts to trigger. */
 	for (delay = jiffies + HZ/50; time_after(delay, jiffies); )
-		/* about 20ms delay */ synchronize_irq();
+		/* about 20ms delay */ barrier();
 
 	/* enable any unassigned irqs (we must startup again here because
 	   if a longstanding irq happened in the previous stage, it may have
@@ -708,7 +658,7 @@ probe_irq_on(void)
 	 * Wait for spurious interrupts to trigger
 	 */
 	for (delay = jiffies + HZ/10; time_after(delay, jiffies); )
-		/* about 100ms delay */ synchronize_irq();
+		/* about 100ms delay */ barrier();
 
 	/*
 	 * Now filter out any obviously spurious interrupts
@@ -735,6 +685,8 @@ probe_irq_on(void)
 
 	return val;
 }
+
+EXPORT_SYMBOL(probe_irq_on);
 
 /*
  * Return a mask of triggered interrupts (this
@@ -806,3 +758,17 @@ probe_irq_off(unsigned long val)
 		irq_found = -irq_found;
 	return irq_found;
 }
+
+EXPORT_SYMBOL(probe_irq_off);
+
+#ifdef CONFIG_SMP
+void synchronize_irq(unsigned int irq)
+{
+        /* is there anything to synchronize with? */
+	if (!irq_desc[irq].action)
+		return;
+
+	while (irq_desc[irq].status & IRQ_INPROGRESS)
+		barrier();
+}
+#endif

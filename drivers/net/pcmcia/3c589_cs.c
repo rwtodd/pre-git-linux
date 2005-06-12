@@ -4,39 +4,41 @@
     
     Copyright (C) 1999 David A. Hinds -- dahinds@users.sourceforge.net
 
-    3c589_cs.c 1.154 2000/09/30 17:39:04
+    3c589_cs.c 1.162 2001/10/13 00:08:50
 
     The network driver code is based on Donald Becker's 3c589 code:
     
     Written 1994 by Donald Becker.
     Copyright 1993 United States Government as represented by the
     Director, National Security Agency.  This software may be used and
-    distributed according to the terms of the GNU Public License,
+    distributed according to the terms of the GNU General Public License,
     incorporated herein by reference.
-    Donald Becker may be reached at becker@cesdis1.gsfc.nasa.gov
+    Donald Becker may be reached at becker@scyld.com
+    
+    Updated for 2.5.x by Alan Cox <alan@redhat.com>
 
 ======================================================================*/
+
+#define DRV_NAME	"3c589_cs"
+#define DRV_VERSION	"1.162-ac"
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/ioport.h>
+#include <linux/bitops.h>
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -45,6 +47,10 @@
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ciscode.h>
 #include <pcmcia/ds.h>
+
+#include <asm/uaccess.h>
+#include <asm/io.h>
+#include <asm/system.h>
 
 /* To minimize the size of the driver source I only define operating
    constants if they are used several times.  You'll need the manual
@@ -100,96 +106,68 @@ enum RxFilter {
 
 struct el3_private {
     dev_link_t		link;
-    struct net_device	dev;
     dev_node_t 		node;
     struct net_device_stats stats;
     /* For transceiver monitoring */
     struct timer_list	media;
-    u_short		media_status;
-    u_short		fast_poll;
-    u_long		last_irq;
+    u16			media_status;
+    u16			fast_poll;
+    unsigned long	last_irq;
+    spinlock_t		lock;
 };
 
 static char *if_names[] = { "auto", "10baseT", "10base2", "AUI" };
 
+/*====================================================================*/
+
+/* Module parameters */
+
+MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
+MODULE_DESCRIPTION("3Com 3c589 series PCMCIA ethernet driver");
+MODULE_LICENSE("GPL");
+
+#define INT_MODULE_PARM(n, v) static int n = v; module_param(n, int, 0)
+
+/* Special hook for setting if_port when module is loaded */
+INT_MODULE_PARM(if_port, 0);
+
 #ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-"3c589_cs.c 1.154 2000/09/30 17:39:04 (David Hinds)";
+DRV_NAME ".c " DRV_VERSION " 2001/10/13 00:08:50 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
 
 /*====================================================================*/
 
-/* Parameters that can be set with 'insmod' */
-
-/* Special hook for setting if_port when module is loaded */
-static int if_port = 0;
-
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0xdeb8;
-static int irq_list[4] = { -1 };
-
-MODULE_PARM(if_port, "i");
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-
-/*====================================================================*/
-
 static void tc589_config(dev_link_t *link);
-static void tc589_release(u_long arg);
+static void tc589_release(dev_link_t *link);
 static int tc589_event(event_t event, int priority,
 		       event_callback_args_t *args);
 
-static u_short read_eeprom(ioaddr_t ioaddr, int index);
+static u16 read_eeprom(kio_addr_t ioaddr, int index);
 static void tc589_reset(struct net_device *dev);
-static void media_check(u_long arg);
+static void media_check(unsigned long arg);
 static int el3_config(struct net_device *dev, struct ifmap *map);
 static int el3_open(struct net_device *dev);
 static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev);
-static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t el3_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void update_stats(struct net_device *dev);
 static struct net_device_stats *el3_get_stats(struct net_device *dev);
 static int el3_rx(struct net_device *dev);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
+static struct ethtool_ops netdev_ethtool_ops;
 
 static dev_info_t dev_info = "3c589_cs";
 
 static dev_link_t *tc589_attach(void);
 static void tc589_detach(dev_link_t *);
 
-static dev_link_t *dev_list = NULL;
-
-/*======================================================================
-
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    tc589_detach(link);
-    }
-}
-
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
-}
+static dev_link_t *dev_list;
 
 /*======================================================================
 
@@ -205,30 +183,25 @@ static dev_link_t *tc589_attach(void)
     client_reg_t client_reg;
     dev_link_t *link;
     struct net_device *dev;
-    int i, ret;
+    int ret;
 
     DEBUG(0, "3c589_attach()\n");
-    flush_stale_links();
     
     /* Create new ethernet device */
-    lp = kmalloc(sizeof(*lp), GFP_KERNEL);
-    if (!lp) return NULL;
-    memset(lp, 0, sizeof(*lp));
-    link = &lp->link; dev = &lp->dev;
-    link->priv = dev->priv = link->irq.Instance = lp;
-    
-    link->release.function = &tc589_release;
-    link->release.data = (u_long)link;
+    dev = alloc_etherdev(sizeof(struct el3_private));
+    if (!dev)
+	 return NULL;
+    lp = netdev_priv(dev);
+    link = &lp->link;
+    link->priv = dev;
+
+    spin_lock_init(&lp->lock);
     link->io.NumPorts1 = 16;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_16;
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] == -1)
-	link->irq.IRQInfo2 = irq_mask;
-    else
-	for (i = 0; i < 4; i++)
-	    link->irq.IRQInfo2 |= 1 << irq_list[i];
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->irq.Handler = &el3_interrupt;
+    link->irq.Instance = dev;
     link->conf.Attributes = CONF_ENABLE_IRQ;
     link->conf.Vcc = 50;
     link->conf.IntType = INT_MEMORY_AND_IO;
@@ -236,21 +209,23 @@ static dev_link_t *tc589_attach(void)
     link->conf.Present = PRESENT_OPTION;
     
     /* The EL3-specific entries in the device structure. */
+    SET_MODULE_OWNER(dev);
     dev->hard_start_xmit = &el3_start_xmit;
     dev->set_config = &el3_config;
     dev->get_stats = &el3_get_stats;
     dev->set_multicast_list = &set_multicast_list;
-    ether_setup(dev);
     dev->open = &el3_open;
     dev->stop = &el3_close;
+#ifdef HAVE_TX_TIMEOUT
     dev->tx_timeout = el3_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
-    
+#endif
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
+
     /* Register with Card Services */
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.EventMask =
 	CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 	CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -258,7 +233,7 @@ static dev_link_t *tc589_attach(void)
     client_reg.event_handler = &tc589_event;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != 0) {
 	cs_error(link->handle, RegisterClient, ret);
 	tc589_detach(link);
@@ -279,7 +254,7 @@ static dev_link_t *tc589_attach(void)
 
 static void tc589_detach(dev_link_t *link)
 {
-    struct el3_private *lp = link->priv;
+    struct net_device *dev = link->priv;
     dev_link_t **linkp;
     
     DEBUG(0, "3c589_detach(0x%p)\n", link);
@@ -290,24 +265,18 @@ static void tc589_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer(&link->release);
-    if (link->state & DEV_CONFIG) {
-	tc589_release((u_long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-	    link->state |= DEV_STALE_LINK;
-	    return;
-	}
-    }
+    if (link->dev)
+	unregister_netdev(dev);
+
+    if (link->state & DEV_CONFIG)
+	tc589_release(link);
     
     if (link->handle)
-	CardServices(DeregisterClient, link->handle);
+	pcmcia_deregister_client(link->handle);
     
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (link->dev)
-	unregister_netdev(&lp->dev);
-    kfree(lp);
-    
+    free_netdev(dev);
 } /* tc589_detach */
 
 /*======================================================================
@@ -318,40 +287,40 @@ static void tc589_detach(dev_link_t *link)
     
 ======================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 static void tc589_config(dev_link_t *link)
 {
     client_handle_t handle = link->handle;
-    struct el3_private *lp = link->priv;
-    struct net_device *dev = &lp->dev;
+    struct net_device *dev = link->priv;
+    struct el3_private *lp = netdev_priv(dev);
     tuple_t tuple;
     cisparse_t parse;
-    u_short buf[32], *phys_addr;
-    int last_fn, last_ret, i, j, multi = 0;
-    ioaddr_t ioaddr;
+    u16 buf[32], *phys_addr;
+    int last_fn, last_ret, i, j, multi = 0, fifo;
+    kio_addr_t ioaddr;
     char *ram_split[] = {"5:3", "3:1", "1:1", "3:5"};
     
     DEBUG(0, "3c589_config(0x%p)\n", link);
 
-    phys_addr = (u_short *)dev->dev_addr;
+    phys_addr = (u16 *)dev->dev_addr;
     tuple.Attributes = 0;
     tuple.DesiredTuple = CISTPL_CONFIG;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
     tuple.TupleData = (cisdata_t *)buf;
     tuple.TupleDataMax = sizeof(buf);
     tuple.TupleOffset = 0;
-    CS_CHECK(GetTupleData, handle, &tuple);
-    CS_CHECK(ParseTuple, handle, &tuple, &parse);
+    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+    CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
     link->conf.ConfigBase = parse.config.base;
     link->conf.Present = parse.config.rmask[0];
     
     /* Is this a 3c562? */
     tuple.DesiredTuple = CISTPL_MANFID;
     tuple.Attributes = TUPLE_RETURN_COMMON;
-    if ((CardServices(GetFirstTuple, handle, &tuple) == CS_SUCCESS) &&
-	(CardServices(GetTupleData, handle, &tuple) == CS_SUCCESS)) {
+    if ((pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS) &&
+	(pcmcia_get_tuple_data(handle, &tuple) == CS_SUCCESS)) {
 	if (le16_to_cpu(buf[0]) != MANFID_3COM)
 	    printk(KERN_INFO "3c589_cs: hmmm, is this really a "
 		   "3Com card??\n");
@@ -366,72 +335,75 @@ static void tc589_config(dev_link_t *link)
     for (i = j = 0; j < 0x400; j += 0x10) {
 	if (multi && (j & 0x80)) continue;
 	link->io.BasePort1 = j ^ 0x300;
-	i = CardServices(RequestIO, link->handle, &link->io);
+	i = pcmcia_request_io(link->handle, &link->io);
 	if (i == CS_SUCCESS) break;
     }
     if (i != CS_SUCCESS) {
 	cs_error(link->handle, RequestIO, i);
 	goto failed;
     }
-    CS_CHECK(RequestIRQ, link->handle, &link->irq);
-    CS_CHECK(RequestConfiguration, link->handle, &link->conf);
+    CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
+    CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
 	
     dev->irq = link->irq.AssignedIRQ;
     dev->base_addr = link->io.BasePort1;
-    if (register_netdev(dev) != 0) {
-	printk(KERN_NOTICE "3c589_cs: register_netdev() failed\n");
-	goto failed;
-    }
-    
     ioaddr = dev->base_addr;
     EL3WINDOW(0);
 
     /* The 3c589 has an extra EEPROM for configuration info, including
        the hardware address.  The 3c562 puts the address in the CIS. */
     tuple.DesiredTuple = 0x88;
-    if (CardServices(GetFirstTuple, handle, &tuple) == CS_SUCCESS) {
-	CardServices(GetTupleData, handle, &tuple);
+    if (pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS) {
+	pcmcia_get_tuple_data(handle, &tuple);
 	for (i = 0; i < 3; i++)
 	    phys_addr[i] = htons(buf[i]);
     } else {
 	for (i = 0; i < 3; i++)
 	    phys_addr[i] = htons(read_eeprom(ioaddr, i));
 	if (phys_addr[0] == 0x6060) {
-	    printk(KERN_NOTICE "3c589_cs: IO port conflict at 0x%03lx"
+	    printk(KERN_ERR "3c589_cs: IO port conflict at 0x%03lx"
 		   "-0x%03lx\n", dev->base_addr, dev->base_addr+15);
 	    goto failed;
 	}
     }
 
-    strcpy(lp->node.dev_name, dev->name);
-    link->dev = &lp->node;
-    link->state &= ~DEV_CONFIG_PENDING;
-    
     /* The address and resource configuration register aren't loaded from
        the EEPROM and *must* be set to 0 and IRQ3 for the PCMCIA version. */
     outw(0x3f00, ioaddr + 8);
+    fifo = inl(ioaddr);
 
     /* The if_port symbol can be set when the module is loaded */
     if ((if_port >= 0) && (if_port <= 3))
 	dev->if_port = if_port;
     else
-	printk(KERN_NOTICE "3c589_cs: invalid if_port requested\n");
+	printk(KERN_ERR "3c589_cs: invalid if_port requested\n");
     
+    link->dev = &lp->node;
+    link->state &= ~DEV_CONFIG_PENDING;
+    SET_NETDEV_DEV(dev, &handle_to_dev(handle));
+
+    if (register_netdev(dev) != 0) {
+	printk(KERN_ERR "3c589_cs: register_netdev() failed\n");
+	link->dev = NULL;
+	goto failed;
+    }
+
+    strcpy(lp->node.dev_name, dev->name);
+
     printk(KERN_INFO "%s: 3Com 3c%s, io %#3lx, irq %d, hw_addr ",
 	   dev->name, (multi ? "562" : "589"), dev->base_addr,
 	   dev->irq);
     for (i = 0; i < 6; i++)
 	printk("%02X%s", dev->dev_addr[i], ((i<5) ? ":" : "\n"));
-    i = inl(ioaddr);
     printk(KERN_INFO "  %dK FIFO split %s Rx:Tx, %s xcvr\n",
-	   (i & 7) ? 32 : 8, ram_split[(i >> 16) & 3],
+	   (fifo & 7) ? 32 : 8, ram_split[(fifo >> 16) & 3],
 	   if_names[dev->if_port]);
     return;
 
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    tc589_release((u_long)link);
+    tc589_release(link);
     return;
     
 } /* tc589_config */
@@ -444,26 +416,16 @@ failed:
     
 ======================================================================*/
 
-static void tc589_release(u_long arg)
+static void tc589_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
-
     DEBUG(0, "3c589_release(0x%p)\n", link);
     
-    if (link->open) {
-	DEBUG(1, "3c589_cs: release postponed, '%s' still open\n",
-	      link->dev->dev_name);
-	link->state |= DEV_STALE_CONFIG;
-	return;
-    }
-    
-    CardServices(ReleaseConfiguration, link->handle);
-    CardServices(ReleaseIO, link->handle, &link->io);
-    CardServices(ReleaseIRQ, link->handle, &link->irq);
+    pcmcia_release_configuration(link->handle);
+    pcmcia_release_io(link->handle, &link->io);
+    pcmcia_release_irq(link->handle, &link->irq);
     
     link->state &= ~DEV_CONFIG;
-    
-} /* tc589_release */
+}
 
 /*======================================================================
 
@@ -478,18 +440,15 @@ static int tc589_event(event_t event, int priority,
 		       event_callback_args_t *args)
 {
     dev_link_t *link = args->client_data;
-    struct el3_private *lp = link->priv;
-    struct net_device *dev = &lp->dev;
+    struct net_device *dev = link->priv;
     
     DEBUG(1, "3c589_event(0x%06x)\n", event);
     
     switch (event) {
     case CS_EVENT_CARD_REMOVAL:
 	link->state &= ~DEV_PRESENT;
-	if (link->state & DEV_CONFIG) {
+	if (link->state & DEV_CONFIG)
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
-	}
 	break;
     case CS_EVENT_CARD_INSERTION:
 	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
@@ -502,7 +461,7 @@ static int tc589_event(event_t event, int priority,
 	if (link->state & DEV_CONFIG) {
 	    if (link->open)
 		netif_device_detach(dev);
-	    CardServices(ReleaseConfiguration, link->handle);
+	    pcmcia_release_configuration(link->handle);
 	}
 	break;
     case CS_EVENT_PM_RESUME:
@@ -510,7 +469,7 @@ static int tc589_event(event_t event, int priority,
 	/* Fall through... */
     case CS_EVENT_CARD_RESET:
 	if (link->state & DEV_CONFIG) {
-	    CardServices(RequestConfiguration, link->handle, &link->conf);
+	    pcmcia_request_configuration(link->handle, &link->conf);
 	    if (link->open) {
 		tc589_reset(dev);
 		netif_device_attach(dev);
@@ -526,14 +485,14 @@ static int tc589_event(event_t event, int priority,
 /*
   Use this for commands that may take time to finish
 */
-static void wait_for_completion(struct net_device *dev, int cmd)
+static void tc589_wait_for_completion(struct net_device *dev, int cmd)
 {
     int i = 100;
     outw(cmd, dev->base_addr + EL3_CMD);
     while (--i > 0)
 	if (!(inw(dev->base_addr + EL3_STATUS) & 0x1000)) break;
     if (i == 0)
-	printk(KERN_NOTICE "%s: command 0x%04x did not complete!\n",
+	printk(KERN_WARNING "%s: command 0x%04x did not complete!\n",
 	       dev->name, cmd);
 }
 
@@ -541,7 +500,7 @@ static void wait_for_completion(struct net_device *dev, int cmd)
   Read a word from the EEPROM using the regular EEPROM access register.
   Assume that we are in register window zero.
 */
-static u_short read_eeprom(ioaddr_t ioaddr, int index)
+static u16 read_eeprom(kio_addr_t ioaddr, int index)
 {
     int i;
     outw(EEPROM_READ + index, ioaddr + 10);
@@ -558,8 +517,8 @@ static u_short read_eeprom(ioaddr_t ioaddr, int index)
 */
 static void tc589_set_xcvr(struct net_device *dev, int if_port)
 {
-    struct el3_private *lp = (struct el3_private *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct el3_private *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
     
     EL3WINDOW(0);
     switch (if_port) {
@@ -581,7 +540,7 @@ static void tc589_set_xcvr(struct net_device *dev, int if_port)
 
 static void dump_status(struct net_device *dev)
 {
-    ioaddr_t ioaddr = dev->base_addr;
+    kio_addr_t ioaddr = dev->base_addr;
     EL3WINDOW(1);
     printk(KERN_INFO "  irq status %04x, rx status %04x, tx status "
 	   "%02x  tx free %04x\n", inw(ioaddr+EL3_STATUS),
@@ -597,7 +556,7 @@ static void dump_status(struct net_device *dev)
 /* Reset and restore all of the 3c589 registers. */
 static void tc589_reset(struct net_device *dev)
 {
-    ioaddr_t ioaddr = dev->base_addr;
+    kio_addr_t ioaddr = dev->base_addr;
     int i;
     
     EL3WINDOW(0);
@@ -636,6 +595,34 @@ static void tc589_reset(struct net_device *dev)
 	 | AdapterFailure, ioaddr + EL3_CMD);
 }
 
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
+}
+
+#ifdef PCMCIA_DEBUG
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return pc_debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	pc_debug = level;
+}
+#endif /* PCMCIA_DEBUG */
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+#ifdef PCMCIA_DEBUG
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+#endif /* PCMCIA_DEBUG */
+};
+
 static int el3_config(struct net_device *dev, struct ifmap *map)
 {
     if ((map->port != (u_char)(-1)) && (map->port != dev->if_port)) {
@@ -652,19 +639,19 @@ static int el3_config(struct net_device *dev, struct ifmap *map)
 
 static int el3_open(struct net_device *dev)
 {
-    struct el3_private *lp = (struct el3_private *)dev->priv;
+    struct el3_private *lp = netdev_priv(dev);
     dev_link_t *link = &lp->link;
     
     if (!DEV_OK(link))
 	return -ENODEV;
 
     link->open++;
-    MOD_INC_USE_COUNT;
     netif_start_queue(dev);
     
     tc589_reset(dev);
+    init_timer(&lp->media);
     lp->media.function = &media_check;
-    lp->media.data = (u_long)lp;
+    lp->media.data = (unsigned long) dev;
     lp->media.expires = jiffies + HZ;
     add_timer(&lp->media);
 
@@ -676,23 +663,23 @@ static int el3_open(struct net_device *dev)
 
 static void el3_tx_timeout(struct net_device *dev)
 {
-    struct el3_private *lp = (struct el3_private *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct el3_private *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
     
-    printk(KERN_NOTICE "%s: Transmit timed out!\n", dev->name);
+    printk(KERN_WARNING "%s: Transmit timed out!\n", dev->name);
     dump_status(dev);
     lp->stats.tx_errors++;
     dev->trans_start = jiffies;
     /* Issue TX_RESET and TX_START commands. */
-    wait_for_completion(dev, TxReset);
+    tc589_wait_for_completion(dev, TxReset);
     outw(TxEnable, ioaddr + EL3_CMD);
-    netif_start_queue(dev);
+    netif_wake_queue(dev);
 }
 
 static void pop_tx_status(struct net_device *dev)
 {
-    struct el3_private *lp = (struct el3_private *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct el3_private *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
     int i;
     
     /* Clear the Tx status stack. */
@@ -701,7 +688,7 @@ static void pop_tx_status(struct net_device *dev)
 	if (!(tx_status & 0x84)) break;
 	/* reset transmitter on jabber error or underrun */
 	if (tx_status & 0x30)
-	    wait_for_completion(dev, TxReset);
+	    tc589_wait_for_completion(dev, TxReset);
 	if (tx_status & 0x38) {
 	    DEBUG(1, "%s: transmit error: status 0x%02x\n",
 		  dev->name, tx_status);
@@ -714,13 +701,14 @@ static void pop_tx_status(struct net_device *dev)
 
 static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-    ioaddr_t ioaddr = dev->base_addr;
+    kio_addr_t ioaddr = dev->base_addr;
+    struct el3_private *priv = netdev_priv(dev);
 
     DEBUG(3, "%s: el3_start_xmit(length = %ld) called, "
 	  "status %4.4x.\n", dev->name, (long)skb->len,
 	  inw(ioaddr + EL3_STATUS));
 
-    ((struct el3_private *)dev->priv)->stats.tx_bytes += skb->len;
+    priv->stats.tx_bytes += skb->len;
 
     /* Put out the doubleword header... */
     outw(skb->len, ioaddr + TX_FIFO);
@@ -742,25 +730,28 @@ static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev)
 }
 
 /* The EL3 interrupt handler. */
-static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-    struct el3_private *lp = dev_id;
-    struct net_device *dev = &lp->dev;
-    ioaddr_t ioaddr, status;
-    int i = 0;
+    struct net_device *dev = (struct net_device *) dev_id;
+    struct el3_private *lp = netdev_priv(dev);
+    kio_addr_t ioaddr;
+    __u16 status;
+    int i = 0, handled = 1;
     
     if (!netif_device_present(dev))
-	return;
+	return IRQ_NONE;
+
     ioaddr = dev->base_addr;
 
     DEBUG(3, "%s: interrupt, status %4.4x.\n",
 	  dev->name, inw(ioaddr + EL3_STATUS));
-    
+
+    spin_lock(&lp->lock);    
     while ((status = inw(ioaddr + EL3_STATUS)) &
 	(IntLatch | RxComplete | StatsFull)) {
-	if (!netif_device_present(dev) ||
-	    ((status & 0xe000) != 0x2000)) {
+	if ((status & 0xe000) != 0x2000) {
 	    DEBUG(1, "%s: interrupt from dead card\n", dev->name);
+	    handled = 0;
 	    break;
 	}
 	
@@ -790,16 +781,16 @@ static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		EL3WINDOW(4);
 		fifo_diag = inw(ioaddr + 4);
 		EL3WINDOW(1);
-		printk(KERN_NOTICE "%s: adapter failure, FIFO diagnostic"
+		printk(KERN_WARNING "%s: adapter failure, FIFO diagnostic"
 		       " register %04x.\n", dev->name, fifo_diag);
 		if (fifo_diag & 0x0400) {
 		    /* Tx overrun */
-		    wait_for_completion(dev, TxReset);
+		    tc589_wait_for_completion(dev, TxReset);
 		    outw(TxEnable, ioaddr + EL3_CMD);
 		}
 		if (fifo_diag & 0x2000) {
 		    /* Rx underrun */
-		    wait_for_completion(dev, RxReset);
+		    tc589_wait_for_completion(dev, RxReset);
 		    set_multicast_list(dev);
 		    outw(RxEnable, ioaddr + EL3_CMD);
 		}
@@ -808,7 +799,7 @@ static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 	
 	if (++i > 10) {
-	    printk(KERN_NOTICE "%s: infinite loop in interrupt, "
+	    printk(KERN_ERR "%s: infinite loop in interrupt, "
 		   "status %4.4x.\n", dev->name, status);
 	    /* Clear all interrupts */
 	    outw(AckIntr | 0xFF, ioaddr + EL3_CMD);
@@ -819,18 +810,19 @@ static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
     }
 
     lp->last_irq = jiffies;
+    spin_unlock(&lp->lock);    
     DEBUG(3, "%s: exiting interrupt, status %4.4x.\n",
 	  dev->name, inw(ioaddr + EL3_STATUS));
-    return;
+    return IRQ_RETVAL(handled);
 }
 
-static void media_check(u_long arg)
+static void media_check(unsigned long arg)
 {
-    struct el3_private *lp = (struct el3_private *)(arg);
-    struct net_device *dev = &lp->dev;
-    ioaddr_t ioaddr = dev->base_addr;
-    u_short media, errs;
-    u_long flags;
+    struct net_device *dev = (struct net_device *)(arg);
+    struct el3_private *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
+    u16 media, errs;
+    unsigned long flags;
 
     if (!netif_device_present(dev)) goto reschedule;
 
@@ -840,19 +832,20 @@ static void media_check(u_long arg)
     if ((inw(ioaddr + EL3_STATUS) & IntLatch) &&
 	(inb(ioaddr + EL3_TIMER) == 0xff)) {
 	if (!lp->fast_poll)
-	    printk(KERN_INFO "%s: interrupt(s) dropped!\n", dev->name);
+	    printk(KERN_WARNING "%s: interrupt(s) dropped!\n", dev->name);
 	el3_interrupt(dev->irq, lp, NULL);
 	lp->fast_poll = HZ;
     }
     if (lp->fast_poll) {
 	lp->fast_poll--;
-	lp->media.expires = jiffies + 1;
+	lp->media.expires = jiffies + HZ/100;
 	add_timer(&lp->media);
 	return;
     }
-    
-    save_flags(flags);
-    cli();
+
+    /* lp->lock guards the EL3 window. Window should always be 1 except
+       when the lock is held */
+    spin_lock_irqsave(&lp->lock, flags);    
     EL3WINDOW(4);
     media = inw(ioaddr+WN4_MEDIA) & 0xc810;
 
@@ -897,7 +890,7 @@ static void media_check(u_long arg)
     }
     
     EL3WINDOW(1);
-    restore_flags(flags);
+    spin_unlock_irqrestore(&lp->lock, flags);    
 
 reschedule:
     lp->media.expires = jiffies + HZ;
@@ -906,15 +899,14 @@ reschedule:
 
 static struct net_device_stats *el3_get_stats(struct net_device *dev)
 {
-    struct el3_private *lp = (struct el3_private *)dev->priv;
+    struct el3_private *lp = netdev_priv(dev);
     unsigned long flags;
     dev_link_t *link = &lp->link;
 
     if (DEV_OK(link)) {
-	save_flags(flags);
-	cli();
+    	spin_lock_irqsave(&lp->lock, flags);
 	update_stats(dev);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&lp->lock, flags);
     }
     return &lp->stats;
 }
@@ -924,11 +916,13 @@ static struct net_device_stats *el3_get_stats(struct net_device *dev)
   single-threaded if the device is active. This is expected to be a rare
   operation, and it's simpler for the rest of the driver to assume that
   window 1 is always valid rather than use a special window-state variable.
+  
+  Caller must hold the lock for this
 */
 static void update_stats(struct net_device *dev)
 {
-    struct el3_private *lp = (struct el3_private *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct el3_private *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
 
     DEBUG(2, "%s: updating the statistics.\n", dev->name);
     /* Turn off statistics updates while reading. */
@@ -954,8 +948,8 @@ static void update_stats(struct net_device *dev)
 
 static int el3_rx(struct net_device *dev)
 {
-    struct el3_private *lp = (struct el3_private *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct el3_private *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
     int worklimit = 32;
     short rx_status;
     
@@ -984,15 +978,14 @@ static int el3_rx(struct net_device *dev)
 		  pkt_len, rx_status);
 	    if (skb != NULL) {
 		skb->dev = dev;
-		
 		skb_reserve(skb, 2);
 		insl(ioaddr+RX_FIFO, skb_put(skb, pkt_len),
 			(pkt_len+3)>>2);
 		skb->protocol = eth_type_trans(skb, dev);
-		
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
-		lp->stats.rx_bytes += skb->len;
+		lp->stats.rx_bytes += pkt_len;
 	    } else {
 		DEBUG(1, "%s: couldn't allocate a sk_buff of"
 		      " size %d.\n", dev->name, pkt_len);
@@ -1000,19 +993,19 @@ static int el3_rx(struct net_device *dev)
 	    }
 	}
 	/* Pop the top of the Rx FIFO */
-	wait_for_completion(dev, RxDiscard);
+	tc589_wait_for_completion(dev, RxDiscard);
     }
     if (worklimit == 0)
-	printk(KERN_NOTICE "%s: too much work in el3_rx!\n", dev->name);
+	printk(KERN_WARNING "%s: too much work in el3_rx!\n", dev->name);
     return 0;
 }
 
 static void set_multicast_list(struct net_device *dev)
 {
-    struct el3_private *lp = dev->priv;
+    struct el3_private *lp = netdev_priv(dev);
     dev_link_t *link = &lp->link;
-    ioaddr_t ioaddr = dev->base_addr;
-    u_short opts = SetRxFilter | RxStation | RxBroadcast;
+    kio_addr_t ioaddr = dev->base_addr;
+    u16 opts = SetRxFilter | RxStation | RxBroadcast;
 
     if (!(DEV_OK(link))) return;
     if (dev->flags & IFF_PROMISC)
@@ -1024,9 +1017,9 @@ static void set_multicast_list(struct net_device *dev)
 
 static int el3_close(struct net_device *dev)
 {
-    struct el3_private *lp = dev->priv;
+    struct el3_private *lp = netdev_priv(dev);
     dev_link_t *link = &lp->link;
-    ioaddr_t ioaddr = dev->base_addr;
+    kio_addr_t ioaddr = dev->base_addr;
     
     DEBUG(1, "%s: shutting down ethercard.\n", dev->name);
 
@@ -1059,38 +1052,30 @@ static int el3_close(struct net_device *dev)
 
     link->open--;
     netif_stop_queue(dev);
-    del_timer(&lp->media);
-    if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
-    
-    MOD_DEC_USE_COUNT;
+    del_timer_sync(&lp->media);
     
     return 0;
 }
 
-/*====================================================================*/
+static struct pcmcia_driver tc589_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "3c589_cs",
+	},
+	.attach		= tc589_attach,
+	.detach		= tc589_detach,
+};
 
-static int __init init_3c589_cs(void)
+static int __init init_tc589(void)
 {
-    servinfo_t serv;
-    DEBUG(0, "%s\n", version);
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-	printk(KERN_NOTICE "3c589_cs: Card Services release "
-	       "does not match!\n");
-	return -1;
-    }
-    register_pccard_driver(&dev_info, &tc589_attach, &tc589_detach);
-    return 0;
+	return pcmcia_register_driver(&tc589_driver);
 }
 
-static void __exit exit_3c589_cs(void)
+static void __exit exit_tc589(void)
 {
-    DEBUG(0, "3c589_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list != NULL)
-	tc589_detach(dev_list);
+	pcmcia_unregister_driver(&tc589_driver);
+	BUG_ON(dev_list != NULL);
 }
 
-module_init(init_3c589_cs);
-module_exit(exit_3c589_cs);
+module_init(init_tc589);
+module_exit(exit_tc589);

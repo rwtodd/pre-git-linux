@@ -3,6 +3,7 @@
 #define _ASMSPARC_SIGNAL_H
 
 #include <asm/sigcontext.h>
+#include <linux/compiler.h>
 
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
@@ -89,7 +90,7 @@
 #define _NSIG_WORDS	(__NEW_NSIG / _NSIG_BPW)
 
 #define SIGRTMIN	32
-#define SIGRTMAX	(__NEW_NSIG - 1)
+#define SIGRTMAX	__NEW_NSIG
 
 #if defined(__KERNEL__) || defined(__WANT_POSIX1B_SIGNALS__)
 #define	_NSIG		__NEW_NSIG
@@ -111,17 +112,20 @@ typedef struct {
 	unsigned long	sig[_NSIG_WORDS];
 } __new_sigset_t;
 
+
+#ifdef __KERNEL__
 /* A SunOS sigstack */
 struct sigstack {
 	char *the_stack;
 	int   cur_status;
 };
+#endif
 
 /* Sigvec flags */
-#define SV_SSTACK    1     /* This signal handler should use sig-stack */
-#define SV_INTR      2     /* Sig return should not restart system call */
-#define SV_RESET     4     /* Set handler to SIG_DFL upon taken signal */
-#define SV_IGNCHILD  8     /* Do not send SIGCHLD */
+#define _SV_SSTACK    1u    /* This signal handler should use sig-stack */
+#define _SV_INTR      2u    /* Sig return should not restart system call */
+#define _SV_RESET     4u    /* Set handler to SIG_DFL upon taken signal */
+#define _SV_IGNCHILD  8u    /* Do not send SIGCHLD */
 
 /*
  * sa_flags values: SA_STACK is not currently supported, but will allow the
@@ -132,16 +136,16 @@ struct sigstack {
  * SA_RESTART flag to get restarting signals (which were the default long ago)
  * SA_SHIRQ flag is for shared interrupt support on PCI and EISA.
  */
-#define SA_NOCLDSTOP	SV_IGNCHILD
-#define SA_STACK	SV_SSTACK
-#define SA_ONSTACK	SV_SSTACK
-#define SA_RESTART	SV_INTR
-#define SA_ONESHOT	SV_RESET
-#define SA_INTERRUPT	0x10
-#define SA_NOMASK	0x20
-#define SA_SHIRQ	0x40
-#define SA_NOCLDWAIT	0x100	/* not supported yet */
-#define SA_SIGINFO	0x200
+#define SA_NOCLDSTOP	_SV_IGNCHILD
+#define SA_STACK	_SV_SSTACK
+#define SA_ONSTACK	_SV_SSTACK
+#define SA_RESTART	_SV_INTR
+#define SA_ONESHOT	_SV_RESET
+#define SA_INTERRUPT	0x10u
+#define SA_NOMASK	0x20u
+#define SA_SHIRQ	0x40u
+#define SA_NOCLDWAIT	0x100u
+#define SA_SIGINFO	0x200u
 
 #define SIG_BLOCK          0x01	/* for blocking signals */
 #define SIG_UNBLOCK        0x02	/* for unblocking signals */
@@ -189,6 +193,7 @@ typedef void (*__sighandler_t)(int);
 #define SIG_IGN	((__sighandler_t)1)	/* ignore signal */
 #define SIG_ERR	((__sighandler_t)-1)	/* error return from signal */
 
+#ifdef __KERNEL__
 struct __new_sigaction {
 	__sighandler_t	sa_handler;
 	unsigned long	sa_flags;
@@ -196,12 +201,10 @@ struct __new_sigaction {
 	__new_sigset_t	sa_mask;
 };
 
-#ifdef __KERNEL__
 struct k_sigaction {
 	struct __new_sigaction	sa;
-	void			*ka_restorer;
+	void			__user *ka_restorer;
 };
-#endif
 
 struct __old_sigaction {
 	__sighandler_t	sa_handler;
@@ -211,10 +214,20 @@ struct __old_sigaction {
 };
 
 typedef struct sigaltstack {
-	void		*ss_sp;
+	void		__user *ss_sp;
 	int		ss_flags;
 	size_t		ss_size;
 } stack_t;
+
+struct sparc_deliver_cookie {
+	int restart_syscall;
+	unsigned long orig_i0;
+};
+
+struct pt_regs;
+extern void ptrace_signal_deliver(struct pt_regs *regs, void *cookie);
+
+#endif /* !(__KERNEL__) */
 
 #endif /* !(__ASSEMBLY__) */
 

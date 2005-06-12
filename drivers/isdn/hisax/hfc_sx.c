@@ -1,38 +1,26 @@
-/* $Id: hfc_sx.c,v 1.9 2000/11/24 17:05:37 kai Exp $
-
- * hfc_sx.c     low level driver for CCD´s hfc-s+/sp based cards
+/* $Id: hfc_sx.c,v 1.12.2.5 2004/02/11 13:21:33 keil Exp $
  *
- * Author     Werner Cornelius (werner@isdn4linux.de)
- *            based on existing driver for CCD HFC PCI cards
+ * level driver for Cologne Chip Designs hfc-s+/sp based cards
  *
- * Copyright 1999  by Werner Cornelius (werner@isdn4linux.de)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Author       Werner Cornelius
+ *              based on existing driver for CCD HFC PCI cards
+ * Copyright    by Werner Cornelius  <werner@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "hfc_sx.h"
 #include "isdnl1.h"
 #include <linux/interrupt.h>
+#include <linux/isapnp.h>
 
 extern const char *CardType[];
 
-static const char *hfcsx_revision = "$Revision: 1.9 $";
+static const char *hfcsx_revision = "$Revision: 1.12.2.5 $";
 
 /***************************************/
 /* IRQ-table for CCDs demo board       */
@@ -73,25 +61,18 @@ static u_char ccd_sp_irqtab[16] = {
 /******************************/
 static inline void
 Write_hfc(struct IsdnCardState *cs, u_char regnum, u_char val)
-{       register int flags;
-
-        save_flags(flags);
-	cli();
+{
         byteout(cs->hw.hfcsx.base+1, regnum);
 	byteout(cs->hw.hfcsx.base, val);
-	restore_flags(flags);
 } 
 
 static inline u_char
 Read_hfc(struct IsdnCardState *cs, u_char regnum)
-{       register int flags;
-        register u_char ret; 
+{
+        u_char ret; 
 
-        save_flags(flags);
-	cli();
         byteout(cs->hw.hfcsx.base+1, regnum);
 	ret = bytein(cs->hw.hfcsx.base);
-	restore_flags(flags);
 	return(ret);
 } 
 
@@ -101,20 +82,16 @@ Read_hfc(struct IsdnCardState *cs, u_char regnum)
 /**************************************************/
 static void
 fifo_select(struct IsdnCardState *cs, u_char fifo)
-{       int flags;
-
+{
         if (fifo == cs->hw.hfcsx.last_fifo) 
 	  return; /* still valid */
 
-	save_flags(flags);
-	cli();
         byteout(cs->hw.hfcsx.base+1, HFCSX_FIF_SEL);
 	byteout(cs->hw.hfcsx.base, fifo);
 	while (bytein(cs->hw.hfcsx.base+1) & 1); /* wait for busy */
 	udelay(4);
 	byteout(cs->hw.hfcsx.base, fifo);
 	while (bytein(cs->hw.hfcsx.base+1) & 1); /* wait for busy */
-	restore_flags(flags);
 }
 
 /******************************************/
@@ -123,16 +100,12 @@ fifo_select(struct IsdnCardState *cs, u_char fifo)
 /******************************************/
 static void
 reset_fifo(struct IsdnCardState *cs, u_char fifo)
-{       int flags;
-
-        save_flags(flags); 
-	cli();
+{
 	fifo_select(cs, fifo); /* first select the fifo */
 	byteout(cs->hw.hfcsx.base+1, HFCSX_CIRM);
 	byteout(cs->hw.hfcsx.base, cs->hw.hfcsx.cirm | 0x80); /* reset cmd */
 	udelay(1);
 	while (bytein(cs->hw.hfcsx.base+1) & 1); /* wait for busy */
-	restore_flags(flags);
 } 
 
 
@@ -143,7 +116,8 @@ reset_fifo(struct IsdnCardState *cs, u_char fifo)
 /*************************************************************/
 static int
 write_fifo(struct IsdnCardState *cs, struct sk_buff *skb, u_char fifo, int trans_max)
-{       unsigned short *msp;
+{
+       unsigned short *msp;
         int fifo_size, count, z1, z2;
 	u_char f_msk, f1, f2, *src;
 
@@ -337,17 +311,10 @@ read_fifo(struct IsdnCardState *cs, u_char fifo, int trans_max)
 void
 release_io_hfcsx(struct IsdnCardState *cs)
 {
-	int flags;
-
-	save_flags(flags);
-	cli();
 	cs->hw.hfcsx.int_m2 = 0;	/* interrupt output off ! */
 	Write_hfc(cs, HFCSX_INT_M2, cs->hw.hfcsx.int_m2);
-	restore_flags(flags);
 	Write_hfc(cs, HFCSX_CIRM, HFCSX_RESET);	/* Reset On */
-	sti();
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((30 * HZ) / 1000);	/* Timeout 30ms */
+	msleep(30);				/* Timeout 30ms */
 	Write_hfc(cs, HFCSX_CIRM, 0);	/* Reset Off */
 	del_timer(&cs->hw.hfcsx.timer);
 	release_region(cs->hw.hfcsx.base, 2); /* release IO-Block */
@@ -382,22 +349,15 @@ static int set_fifo_size(struct IsdnCardState *cs)
 static void
 reset_hfcsx(struct IsdnCardState *cs)
 {
-	long flags;
-
-	save_flags(flags);
-	cli();
 	cs->hw.hfcsx.int_m2 = 0;	/* interrupt output off ! */
 	Write_hfc(cs, HFCSX_INT_M2, cs->hw.hfcsx.int_m2);
 
 	printk(KERN_INFO "HFC_SX: resetting card\n");
 	while (1) {
 	  Write_hfc(cs, HFCSX_CIRM, HFCSX_RESET | cs->hw.hfcsx.cirm ); /* Reset */
-	  sti();
-	  set_current_state(TASK_UNINTERRUPTIBLE);
-	  schedule_timeout((30 * HZ) / 1000);	/* Timeout 30ms */
+	  mdelay(30);
 	  Write_hfc(cs, HFCSX_CIRM, cs->hw.hfcsx.cirm); /* Reset Off */
-	  set_current_state(TASK_UNINTERRUPTIBLE);
-	  schedule_timeout((20 * HZ) / 1000);	/* Timeout 20ms */
+	  mdelay(20);
 	  if (Read_hfc(cs, HFCSX_STATUS) & 2)
 	    printk(KERN_WARNING "HFC-SX init bit busy\n");
 	  cs->hw.hfcsx.last_fifo = 0xff; /* invalidate */
@@ -452,7 +412,6 @@ reset_hfcsx(struct IsdnCardState *cs)
 	cs->hw.hfcsx.int_m2 = HFCSX_IRQ_ENABLE;
 	Write_hfc(cs, HFCSX_INT_M2, cs->hw.hfcsx.int_m2);
 	if (Read_hfc(cs, HFCSX_INT_S2));
-	restore_flags(flags);
 }
 
 /***************************************************/
@@ -466,29 +425,6 @@ hfcsx_Timer(struct IsdnCardState *cs)
 /*      WriteReg(cs, HFCD_DATA, HFCD_CTMT, cs->hw.hfcsx.ctmt | 0x80);
    add_timer(&cs->hw.hfcsx.timer);
  */
-}
-
-
-/*********************************/
-/* schedule a new D-channel task */
-/*********************************/
-static void
-sched_event_D_sx(struct IsdnCardState *cs, int event)
-{
-	test_and_set_bit(event, &cs->event);
-	queue_task(&cs->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
-}
-
-/*********************************/
-/* schedule a new b_channel task */
-/*********************************/
-static void
-hfcsx_sched_event(struct BCState *bcs, int event)
-{
-	bcs->event |= 1 << event;
-	queue_task(&bcs->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
 }
 
 /************************************************/
@@ -525,7 +461,7 @@ receive_dmsg(struct IsdnCardState *cs)
 	  skb = read_fifo(cs, HFCSX_SEL_D_RX, 0);
 	  if (skb) {
 	    skb_queue_tail(&cs->rq, skb);
-	    sched_event_D_sx(cs, D_RCVBUFREADY);
+	    schedule_event(cs, D_RCVBUFREADY);
 	  }
 	} while (--count && skb);
 
@@ -539,38 +475,29 @@ receive_dmsg(struct IsdnCardState *cs)
 void
 main_rec_hfcsx(struct BCState *bcs)
 {
-	long flags;
 	struct IsdnCardState *cs = bcs->cs;
 	int count = 5;
 	struct sk_buff *skb;
 
-	save_flags(flags);
-	  
       Begin:
 	count--;
-	cli();
 	if (test_and_set_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags)) {
 		debugl1(cs, "rec_data %d blocked", bcs->channel);
-		restore_flags(flags);
 		return;
 	}
-	sti();
 	skb = read_fifo(cs, ((bcs->channel) && (!cs->hw.hfcsx.bswapped)) ? 
 			HFCSX_SEL_B2_RX : HFCSX_SEL_B1_RX,
 			(bcs->mode == L1_MODE_TRANS) ? 
 			HFCSX_BTRANS_THRESHOLD : 0);
 
 	if (skb) {
-	  cli();
 	  skb_queue_tail(&bcs->rqueue, skb);
-	  sti();
-	  hfcsx_sched_event(bcs, B_RCVBUFREADY);
+	  schedule_event(bcs, B_RCVBUFREADY);
 	}
 
 	test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
 	if (count && skb)
 		goto Begin;
-	restore_flags(flags);
 	return;
 }
 
@@ -599,15 +526,11 @@ static void
 hfcsx_fill_fifo(struct BCState *bcs)
 {
 	struct IsdnCardState *cs = bcs->cs;
-	int flags;
 
 	if (!bcs->tx_skb)
 		return;
 	if (bcs->tx_skb->len <= 0)
 		return;
-
-	save_flags(flags);
-	sti();
 
 	if (write_fifo(cs, bcs->tx_skb, 
 		       ((bcs->channel) && (!cs->hw.hfcsx.bswapped)) ? 
@@ -616,17 +539,18 @@ hfcsx_fill_fifo(struct BCState *bcs)
 		       HFCSX_BTRANS_THRESHOLD : 0)) {
 
 	  bcs->tx_cnt -= bcs->tx_skb->len;
-	  if (bcs->st->lli.l1writewakeup &&
-	      (PACKET_NOACK != bcs->tx_skb->pkt_type))
-	    bcs->st->lli.l1writewakeup(bcs->st, bcs->tx_skb->len);
+	  if (test_bit(FLG_LLI_L1WAKEUP,&bcs->st->lli.flag) &&
+		(PACKET_NOACK != bcs->tx_skb->pkt_type)) {
+		u_long	flags;
+		spin_lock_irqsave(&bcs->aclock, flags);
+		bcs->ackcnt += bcs->tx_skb->len;
+		spin_unlock_irqrestore(&bcs->aclock, flags);
+		schedule_event(bcs, B_ACKPENDING);
+	  }
 	  dev_kfree_skb_any(bcs->tx_skb);
 	  bcs->tx_skb = NULL;
 	  test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
 	}
-
-	cli();
-	restore_flags(flags);
-	return;
 }
 
 /**********************************************/
@@ -670,13 +594,12 @@ dch_nt_l2l1(struct PStack *st, int pr, void *arg)
 static int
 hfcsx_auxcmd(struct IsdnCardState *cs, isdn_ctrl * ic)
 {
-	int flags;
+	unsigned long flags;
 	int i = *(unsigned int *) ic->parm.num;
 
 	if ((ic->arg == 98) &&
 	    (!(cs->hw.hfcsx.int_m1 & (HFCSX_INTS_B2TRANS + HFCSX_INTS_B2REC + HFCSX_INTS_B1TRANS + HFCSX_INTS_B1REC)))) {
-		save_flags(flags);
-		cli();
+	    	spin_lock_irqsave(&cs->lock, flags);
 		Write_hfc(cs, HFCSX_STATES, HFCSX_LOAD_STATE | 0);	/* HFC ST G0 */
 		udelay(10);
 		cs->hw.hfcsx.sctrl |= SCTRL_MODE_NT;
@@ -688,8 +611,8 @@ hfcsx_auxcmd(struct IsdnCardState *cs, isdn_ctrl * ic)
 		cs->dc.hfcsx.ph_state = 1;
 		cs->hw.hfcsx.nt_mode = 1;
 		cs->hw.hfcsx.nt_timer = 0;
+		spin_unlock_irqrestore(&cs->lock, flags);
 		cs->stlist->l2.l2l1 = dch_nt_l2l1;
-		restore_flags(flags);
 		debugl1(cs, "NT mode activated");
 		return (0);
 	}
@@ -697,8 +620,6 @@ hfcsx_auxcmd(struct IsdnCardState *cs, isdn_ctrl * ic)
 	    (cs->hw.hfcsx.nt_mode) || (ic->arg != 12))
 		return (-EINVAL);
 
-	save_flags(flags);
-	cli();
 	if (i) {
 		cs->logecho = 1;
 		cs->hw.hfcsx.trm |= 0x20;	/* enable echo chan */
@@ -713,13 +634,14 @@ hfcsx_auxcmd(struct IsdnCardState *cs, isdn_ctrl * ic)
 	cs->hw.hfcsx.sctrl &= ~SCTRL_B2_ENA;
 	cs->hw.hfcsx.conn |= 0x10;	/* B2-IOM -> B2-ST */
 	cs->hw.hfcsx.ctmt &= ~2;
+	spin_lock_irqsave(&cs->lock, flags);
 	Write_hfc(cs, HFCSX_CTMT, cs->hw.hfcsx.ctmt);
 	Write_hfc(cs, HFCSX_SCTRL_R, cs->hw.hfcsx.sctrl_r);
 	Write_hfc(cs, HFCSX_SCTRL, cs->hw.hfcsx.sctrl);
 	Write_hfc(cs, HFCSX_CONNECT, cs->hw.hfcsx.conn);
 	Write_hfc(cs, HFCSX_TRM, cs->hw.hfcsx.trm);
 	Write_hfc(cs, HFCSX_INT_M1, cs->hw.hfcsx.int_m1);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&cs->lock, flags);
 	return (0);
 }				/* hfcsx_auxcmd */
 
@@ -729,21 +651,14 @@ hfcsx_auxcmd(struct IsdnCardState *cs, isdn_ctrl * ic)
 static void
 receive_emsg(struct IsdnCardState *cs)
 {
-	int flags;
 	int count = 5;
 	u_char *ptr;
 	struct sk_buff *skb;
 
-
-	save_flags(flags);
-	cli();
 	if (test_and_set_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags)) {
 		debugl1(cs, "echo_rec_data blocked");
-		restore_flags(flags);
 		return;
 	}
-	sti();
-
 	do {
 	  skb = read_fifo(cs, HFCSX_SEL_B2_RX, 0);
 	  if (skb) {
@@ -768,7 +683,6 @@ receive_emsg(struct IsdnCardState *cs)
 	} while (--count && skb);
 
 	test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
-	restore_flags(flags);
 	return;
 }				/* receive_emsg */
 
@@ -776,30 +690,28 @@ receive_emsg(struct IsdnCardState *cs)
 /*********************/
 /* Interrupt handler */
 /*********************/
-static void
+static irqreturn_t
 hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char exval;
 	struct BCState *bcs;
 	int count = 15;
-	long flags;
+	u_long flags;
 	u_char val, stat;
 
-	if (!cs) {
-		printk(KERN_WARNING "HFC-SX: Spurious interrupt!\n");
-		return;
-	}
 	if (!(cs->hw.hfcsx.int_m2 & 0x08))
-		return;		/* not initialised */
+		return IRQ_NONE;		/* not initialised */
 
+	spin_lock_irqsave(&cs->lock, flags);
 	if (HFCSX_ANYINT & (stat = Read_hfc(cs, HFCSX_STATUS))) {
 		val = Read_hfc(cs, HFCSX_INT_S1);
 		if (cs->debug & L1_DEB_ISAC)
 			debugl1(cs, "HFC-SX: stat(%02x) s1(%02x)", stat, val);
-	} else
-		return;
-
+	} else {
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return IRQ_NONE;
+	}
 	if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "HFC-SX irq %x %s", val,
 			test_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags) ?
@@ -811,24 +723,22 @@ hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "ph_state chg %d->%d", cs->dc.hfcsx.ph_state,
 				exval);
 		cs->dc.hfcsx.ph_state = exval;
-		sched_event_D_sx(cs, D_L1STATECHANGE);
+		schedule_event(cs, D_L1STATECHANGE);
 		val &= ~0x40;
 	}
 	if (val & 0x80) {	/* timer irq */
 		if (cs->hw.hfcsx.nt_mode) {
 			if ((--cs->hw.hfcsx.nt_timer) < 0)
-				sched_event_D_sx(cs, D_L1STATECHANGE);
+				schedule_event(cs, D_L1STATECHANGE);
 		}
 		val &= ~0x80;
 		Write_hfc(cs, HFCSX_CTMT, cs->hw.hfcsx.ctmt | HFCSX_CLTIMER);
 	}
 	while (val) {
-		save_flags(flags);
-		cli();
 		if (test_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags)) {
 			cs->hw.hfcsx.int_s1 |= val;
-			restore_flags(flags);
-			return;
+			spin_unlock_irqrestore(&cs->lock, flags);
+			return IRQ_HANDLED;
 		}
 		if (cs->hw.hfcsx.int_s1 & 0x18) {
 			exval = val;
@@ -870,7 +780,7 @@ hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 						} else
 							debugl1(cs, "fill_data %d blocked", bcs->channel);
 					} else {
-						hfcsx_sched_event(bcs, B_XMTBUFREADY);
+						schedule_event(bcs, B_XMTBUFREADY);
 					}
 				}
 			}
@@ -894,7 +804,7 @@ hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 						} else
 							debugl1(cs, "fill_data %d blocked", bcs->channel);
 					} else {
-						hfcsx_sched_event(bcs, B_XMTBUFREADY);
+						schedule_event(bcs, B_XMTBUFREADY);
 					}
 				}
 			}
@@ -906,7 +816,7 @@ hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
 				del_timer(&cs->dbusytimer);
 			if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-				sched_event_D_sx(cs, D_CLEARBUSY);
+				schedule_event(cs, D_CLEARBUSY);
 			if (cs->tx_skb) {
 				if (cs->tx_skb->len) {
 					if (!test_and_set_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags)) {
@@ -931,7 +841,7 @@ hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 					debugl1(cs, "hfcsx_fill_dfifo irq blocked");
 				}
 			} else
-				sched_event_D_sx(cs, D_XMTBUFREADY);
+				schedule_event(cs, D_XMTBUFREADY);
 		}
 	      afterXPR:
 		if (cs->hw.hfcsx.int_s1 && count--) {
@@ -941,8 +851,9 @@ hfcsx_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 				debugl1(cs, "HFC-SX irq %x loop %d", val, 15 - count);
 		} else
 			val = 0;
-		restore_flags(flags);
 	}
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 /********************************************************************/
@@ -961,7 +872,7 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 {
 	struct IsdnCardState *cs = (struct IsdnCardState *) st->l1.hardware;
 	struct sk_buff *skb = arg;
-	int flags;
+	u_long flags;
 
 	switch (pr) {
 		case (PH_DATA | REQUEST):
@@ -969,6 +880,7 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 				LogFrame(cs, skb->data, skb->len);
 			if (cs->debug & DEB_DLOG_VERBOSE)
 				dlogframe(cs, skb, 0);
+			spin_lock_irqsave(&cs->lock, flags);
 			if (cs->tx_skb) {
 				skb_queue_tail(&cs->sq, skb);
 #ifdef L2FRAME_DEBUG		/* psa */
@@ -989,12 +901,15 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 					debugl1(cs, "hfcsx_fill_dfifo blocked");
 
 			}
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (PH_PULL | INDICATION):
+			spin_lock_irqsave(&cs->lock, flags);
 			if (cs->tx_skb) {
 				if (cs->debug & L1_DEB_WARN)
 					debugl1(cs, " l2l1 tx_skb exist this shouldn't happen");
 				skb_queue_tail(&cs->sq, skb);
+				spin_unlock_irqrestore(&cs->lock, flags);
 				break;
 			}
 			if (cs->debug & DEB_DLOG_HEX)
@@ -1012,6 +927,7 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 				test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
 			} else
 				debugl1(cs, "hfcsx_fill_dfifo blocked");
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (PH_PULL | REQUEST):
 #ifdef L2FRAME_DEBUG		/* psa */
@@ -1025,57 +941,57 @@ HFCSX_l1hw(struct PStack *st, int pr, void *arg)
 				test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 			break;
 		case (HW_RESET | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			Write_hfc(cs, HFCSX_STATES, HFCSX_LOAD_STATE | 3);	/* HFC ST 3 */
 			udelay(6);
 			Write_hfc(cs, HFCSX_STATES, 3);	/* HFC ST 2 */
 			cs->hw.hfcsx.mst_m |= HFCSX_MASTER;
 			Write_hfc(cs, HFCSX_MST_MODE, cs->hw.hfcsx.mst_m);
 			Write_hfc(cs, HFCSX_STATES, HFCSX_ACTIVATE | HFCSX_DO_ACTION);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			l1_msg(cs, HW_POWERUP | CONFIRM, NULL);
 			break;
 		case (HW_ENABLE | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			Write_hfc(cs, HFCSX_STATES, HFCSX_ACTIVATE | HFCSX_DO_ACTION);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_DEACTIVATE | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			cs->hw.hfcsx.mst_m &= ~HFCSX_MASTER;
 			Write_hfc(cs, HFCSX_MST_MODE, cs->hw.hfcsx.mst_m);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_INFO3 | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			cs->hw.hfcsx.mst_m |= HFCSX_MASTER;
 			Write_hfc(cs, HFCSX_MST_MODE, cs->hw.hfcsx.mst_m);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		case (HW_TESTLOOP | REQUEST):
+			spin_lock_irqsave(&cs->lock, flags);
 			switch ((int) arg) {
 				case (1):
 					Write_hfc(cs, HFCSX_B1_SSL, 0x80);	/* tx slot */
 					Write_hfc(cs, HFCSX_B1_RSL, 0x80);	/* rx slot */
-					save_flags(flags);
-					cli();
 					cs->hw.hfcsx.conn = (cs->hw.hfcsx.conn & ~7) | 1;
 					Write_hfc(cs, HFCSX_CONNECT, cs->hw.hfcsx.conn);
-					restore_flags(flags);
 					break;
-
 				case (2):
 					Write_hfc(cs, HFCSX_B2_SSL, 0x81);	/* tx slot */
 					Write_hfc(cs, HFCSX_B2_RSL, 0x81);	/* rx slot */
-					save_flags(flags);
-					cli();
 					cs->hw.hfcsx.conn = (cs->hw.hfcsx.conn & ~0x38) | 0x08;
 					Write_hfc(cs, HFCSX_CONNECT, cs->hw.hfcsx.conn);
-					restore_flags(flags);
 					break;
-
 				default:
+					spin_unlock_irqrestore(&cs->lock, flags);
 					if (cs->debug & L1_DEB_WARN)
 						debugl1(cs, "hfcsx_l1hw loop invalid %4x", (int) arg);
 					return;
 			}
-			save_flags(flags);
-			cli();
 			cs->hw.hfcsx.trm |= 0x80;	/* enable IOM-loop */
 			Write_hfc(cs, HFCSX_TRM, cs->hw.hfcsx.trm);
-			restore_flags(flags);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
 		default:
 			if (cs->debug & L1_DEB_WARN)
@@ -1115,7 +1031,7 @@ void
 mode_hfcsx(struct BCState *bcs, int mode, int bc)
 {
 	struct IsdnCardState *cs = bcs->cs;
-	int flags, fifo2;
+	int fifo2;
 
 	if (cs->debug & L1_DEB_HSCX)
 		debugl1(cs, "HFCSX bchannel mode %d bchan %d/%d",
@@ -1123,8 +1039,6 @@ mode_hfcsx(struct BCState *bcs, int mode, int bc)
 	bcs->mode = mode;
 	bcs->channel = bc;
 	fifo2 = bc;
-	save_flags(flags);
-	cli();
 	if (cs->chanlimit > 1) {
 		cs->hw.hfcsx.bswapped = 0;	/* B1 and B2 normal mode */
 		cs->hw.hfcsx.sctrl_e &= ~0x80;
@@ -1218,7 +1132,6 @@ mode_hfcsx(struct BCState *bcs, int mode, int bc)
 	  reset_fifo(cs, fifo2 ? HFCSX_SEL_B2_RX : HFCSX_SEL_B1_RX);
 	  reset_fifo(cs, fifo2 ? HFCSX_SEL_B2_TX : HFCSX_SEL_B1_TX);
 	}
-	restore_flags(flags);
 }
 
 /******************************/
@@ -1227,54 +1140,56 @@ mode_hfcsx(struct BCState *bcs, int mode, int bc)
 static void
 hfcsx_l2l1(struct PStack *st, int pr, void *arg)
 {
+	struct BCState *bcs = st->l1.bcs;
 	struct sk_buff *skb = arg;
-	long flags;
+	u_long flags;
 
 	switch (pr) {
 		case (PH_DATA | REQUEST):
-			save_flags(flags);
-			cli();
-			if (st->l1.bcs->tx_skb) {
-				skb_queue_tail(&st->l1.bcs->squeue, skb);
-				restore_flags(flags);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			if (bcs->tx_skb) {
+				skb_queue_tail(&bcs->squeue, skb);
 			} else {
-				st->l1.bcs->tx_skb = skb;
-/*                              test_and_set_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
- */ st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
-				restore_flags(flags);
+				bcs->tx_skb = skb;
+//                              test_and_set_bit(BC_FLG_BUSY, &bcs->Flag);
+				bcs->cs->BC_Send_Data(bcs);
 			}
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			break;
 		case (PH_PULL | INDICATION):
-			if (st->l1.bcs->tx_skb) {
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			if (bcs->tx_skb) {
 				printk(KERN_WARNING "hfc_l2l1: this shouldn't happen\n");
-				break;
+			} else {
+//				test_and_set_bit(BC_FLG_BUSY, &bcs->Flag);
+				bcs->tx_skb = skb;
+				bcs->cs->BC_Send_Data(bcs);
 			}
-			save_flags(flags);
-			cli();
-/*                      test_and_set_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
- */ st->l1.bcs->tx_skb = skb;
-			st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
-			restore_flags(flags);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			break;
 		case (PH_PULL | REQUEST):
-			if (!st->l1.bcs->tx_skb) {
+			if (!bcs->tx_skb) {
 				test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 				st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
 			} else
 				test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 			break;
 		case (PH_ACTIVATE | REQUEST):
-			test_and_set_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			mode_hfcsx(st->l1.bcs, st->l1.mode, st->l1.bc);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			test_and_set_bit(BC_FLG_ACTIV, &bcs->Flag);
+			mode_hfcsx(bcs, st->l1.mode, st->l1.bc);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | REQUEST):
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | CONFIRM):
-			test_and_clear_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			test_and_clear_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-			mode_hfcsx(st->l1.bcs, 0, st->l1.bc);
+			spin_lock_irqsave(&bcs->cs->lock, flags);
+			test_and_clear_bit(BC_FLG_ACTIV, &bcs->Flag);
+			test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
+			mode_hfcsx(bcs, 0, st->l1.bc);
+			spin_unlock_irqrestore(&bcs->cs->lock, flags);
 			st->l1.l1l2(st, PH_DEACTIVATE | CONFIRM, NULL);
 			break;
 	}
@@ -1288,8 +1203,8 @@ close_hfcsx(struct BCState *bcs)
 {
 	mode_hfcsx(bcs, 0, bcs->channel);
 	if (test_and_clear_bit(BC_FLG_INIT, &bcs->Flag)) {
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;
@@ -1338,9 +1253,8 @@ setstack_2b(struct PStack *st, struct BCState *bcs)
 static void
 hfcsx_bh(struct IsdnCardState *cs)
 {
-	int flags;
-/*      struct PStack *stptr;
- */
+	u_long flags;
+
 	if (!cs)
 		return;
 	if (test_and_clear_bit(D_L1STATECHANGE, &cs->event)) {
@@ -1366,8 +1280,7 @@ hfcsx_bh(struct IsdnCardState *cs)
 		} else {
 			switch (cs->dc.hfcsx.ph_state) {
 				case (2):
-					save_flags(flags);
-					cli();
+					spin_lock_irqsave(&cs->lock, flags);
 					if (cs->hw.hfcsx.nt_timer < 0) {
 						cs->hw.hfcsx.nt_timer = 0;
 						cs->hw.hfcsx.int_m1 &= ~HFCSX_INTS_TIMER;
@@ -1389,17 +1302,16 @@ hfcsx_bh(struct IsdnCardState *cs)
 						cs->hw.hfcsx.nt_timer = NT_T1_COUNT;
 						Write_hfc(cs, HFCSX_STATES, 2 | HFCSX_NT_G2_G3);	/* allow G2 -> G3 transition */
 					}
-					restore_flags(flags);
+					spin_unlock_irqrestore(&cs->lock, flags);
 					break;
 				case (1):
 				case (3):
 				case (4):
-					save_flags(flags);
-					cli();
+					spin_lock_irqsave(&cs->lock, flags);
 					cs->hw.hfcsx.nt_timer = 0;
 					cs->hw.hfcsx.int_m1 &= ~HFCSX_INTS_TIMER;
 					Write_hfc(cs, HFCSX_INT_M1, cs->hw.hfcsx.int_m1);
-					restore_flags(flags);
+					spin_unlock_irqrestore(&cs->lock, flags);
 					break;
 				default:
 					break;
@@ -1420,10 +1332,6 @@ void __devinit
 inithfcsx(struct IsdnCardState *cs)
 {
 	cs->setstack_d = setstack_hfcsx;
-	cs->dbusytimer.function = (void *) hfcsx_dbusy_timer;
-	cs->dbusytimer.data = (long) cs;
-	init_timer(&cs->dbusytimer);
-	cs->tqueue.routine = (void *) (void *) hfcsx_bh;
 	cs->BC_Send_Data = &hfcsx_send_data;
 	cs->bcs[0].BC_SetStack = setstack_2b;
 	cs->bcs[1].BC_SetStack = setstack_2b;
@@ -1441,29 +1349,31 @@ inithfcsx(struct IsdnCardState *cs)
 static int
 hfcsx_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
-	long flags;
+	u_long flags;
 
 	if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "HFCSX: card_msg %x", mt);
 	switch (mt) {
 		case CARD_RESET:
+			spin_lock_irqsave(&cs->lock, flags);
 			reset_hfcsx(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_RELEASE:
 			release_io_hfcsx(cs);
 			return (0);
 		case CARD_INIT:
+			spin_lock_irqsave(&cs->lock, flags);
 			inithfcsx(cs);
-			save_flags(flags);
-			sti();
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_timeout((80 * HZ) / 1000);	/* Timeout 80ms */
+			spin_unlock_irqrestore(&cs->lock, flags);
+			msleep(80);				/* Timeout 80ms */
 			/* now switch timer interrupt off */
+			spin_lock_irqsave(&cs->lock, flags);
 			cs->hw.hfcsx.int_m1 &= ~HFCSX_INTS_TIMER;
 			Write_hfc(cs, HFCSX_INT_M1, cs->hw.hfcsx.int_m1);
 			/* reinit mode reg */
 			Write_hfc(cs, HFCSX_MST_MODE, cs->hw.hfcsx.mst_m);
-			restore_flags(flags);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return (0);
 		case CARD_TEST:
 			return (0);
@@ -1471,17 +1381,68 @@ hfcsx_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return (0);
 }
 
+#ifdef __ISAPNP__
+static struct isapnp_device_id hfc_ids[] __initdata = {
+	{ ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2620),
+	  ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2620), 
+	  (unsigned long) "Teles 16.3c2" },
+	{ 0, }
+};
 
+static struct isapnp_device_id *ipid __initdata = &hfc_ids[0];
+static struct pnp_card *pnp_c __devinitdata = NULL;
+#endif
 
 int __devinit
 setup_hfcsx(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
-	int flags;
 
 	strcpy(tmp, hfcsx_revision);
 	printk(KERN_INFO "HiSax: HFC-SX driver Rev. %s\n", HiSax_getrev(tmp));
+#ifdef __ISAPNP__
+	if (!card->para[1] && isapnp_present()) {
+		struct pnp_dev *pnp_d;
+		while(ipid->card_vendor) {
+			if ((pnp_c = pnp_find_card(ipid->card_vendor,
+				ipid->card_device, pnp_c))) {
+				pnp_d = NULL;
+				if ((pnp_d = pnp_find_dev(pnp_c,
+					ipid->vendor, ipid->function, pnp_d))) {
+					int err;
+
+					printk(KERN_INFO "HiSax: %s detected\n",
+						(char *)ipid->driver_data);
+					pnp_disable_dev(pnp_d);
+					err = pnp_activate_dev(pnp_d);
+					if (err<0) {
+						printk(KERN_WARNING "%s: pnp_activate_dev ret(%d)\n",
+							__FUNCTION__, err);
+						return(0);
+					}
+					card->para[1] = pnp_port_start(pnp_d, 0);
+					card->para[0] = pnp_irq(pnp_d, 0);
+					if (!card->para[0] || !card->para[1]) {
+						printk(KERN_ERR "HFC PnP:some resources are missing %ld/%lx\n",
+							card->para[0], card->para[1]);
+						pnp_disable_dev(pnp_d);
+						return(0);
+					}
+					break;
+				} else {
+					printk(KERN_ERR "HFC PnP: PnP error card found, no device\n");
+				}
+			}
+			ipid++;
+			pnp_c = NULL;
+		} 
+		if (!ipid->card_vendor) {
+			printk(KERN_INFO "HFC PnP: no ISAPnP card found\n");
+			return(0);
+		}
+	}
+#endif
 	cs->hw.hfcsx.base = card->para[1] & 0xfffe;
 	cs->irq = card->para[0];
 	cs->hw.hfcsx.int_s1 = 0;
@@ -1489,14 +1450,11 @@ setup_hfcsx(struct IsdnCard *card)
 	cs->hw.hfcsx.fifo = 255;
 	if ((cs->typ == ISDN_CTYPE_HFC_SX) || 
 	    (cs->typ == ISDN_CTYPE_HFC_SP_PCMCIA)) {
-	        if ((!cs->hw.hfcsx.base) || 
-		    check_region((cs->hw.hfcsx.base), 2)) {
+	        if ((!cs->hw.hfcsx.base) || !request_region(cs->hw.hfcsx.base, 2, "HFCSX isdn")) {
 		  printk(KERN_WARNING
-			 "HiSax: HFC-SX io-base 0x%x already in use\n",
+			 "HiSax: HFC-SX io-base %#lx already in use\n",
 		          cs->hw.hfcsx.base);
 		  return(0);
-		} else {
-		  request_region(cs->hw.hfcsx.base, 2, "HFCSX isdn");
 		}
 		byteout(cs->hw.hfcsx.base, cs->hw.hfcsx.base & 0xFF);
 		byteout(cs->hw.hfcsx.base + 1,
@@ -1523,21 +1481,14 @@ setup_hfcsx(struct IsdnCard *card)
 		  release_region(cs->hw.hfcsx.base, 2);
 		  return(0);
 		}  
-		save_flags(flags);
-		cli();
 		if (!(cs->hw.hfcsx.extra = (void *)
 		      kmalloc(sizeof(struct hfcsx_extra), GFP_ATOMIC))) {
-		  restore_flags(flags);
 		  release_region(cs->hw.hfcsx.base, 2);
 		  printk(KERN_WARNING "HFC-SX: unable to allocate memory\n");
 		  return(0);
 		}
-		restore_flags(flags);
-
-		printk(KERN_INFO
-		       "HFC-S%c chip detected at base 0x%x IRQ %d HZ %d\n",
-		       tmp[0], (u_int) cs->hw.hfcsx.base,
-		       cs->irq, HZ);
+		printk(KERN_INFO "HFC-S%c chip detected at base 0x%x IRQ %d HZ %d\n",
+			tmp[0], (u_int) cs->hw.hfcsx.base, cs->irq, HZ);
 		cs->hw.hfcsx.int_m2 = 0;	/* disable alle interrupts */
 		cs->hw.hfcsx.int_m1 = 0;
 		Write_hfc(cs, HFCSX_INT_M1, cs->hw.hfcsx.int_m1);
@@ -1545,6 +1496,10 @@ setup_hfcsx(struct IsdnCard *card)
 	} else
 		return (0);	/* no valid card type */
 
+	cs->dbusytimer.function = (void *) hfcsx_dbusy_timer;
+	cs->dbusytimer.data = (long) cs;
+	init_timer(&cs->dbusytimer);
+	INIT_WORK(&cs->tqueue, (void *)(void *) hfcsx_bh, cs);
 	cs->readisac = NULL;
 	cs->writeisac = NULL;
 	cs->readisacfifo = NULL;
@@ -1564,7 +1519,3 @@ setup_hfcsx(struct IsdnCard *card)
 	cs->auxcmd = &hfcsx_auxcmd;
 	return (1);
 }
-
-
-
-

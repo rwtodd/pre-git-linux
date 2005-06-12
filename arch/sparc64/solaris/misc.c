@@ -1,5 +1,5 @@
-/* $Id: misc.c,v 1.31 2000/12/14 22:57:25 davem Exp $
- * misc.c: Miscelaneous syscall emulation for Solaris
+/* $Id: misc.c,v 1.36 2002/02/09 19:49:31 davem Exp $
+ * misc.c: Miscellaneous syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
@@ -15,11 +15,14 @@
 #include <linux/mman.h>
 #include <linux/file.h>
 #include <linux/timex.h>
+#include <linux/major.h>
+#include <linux/compat.h>
 
 #include <asm/uaccess.h>
 #include <asm/string.h>
 #include <asm/oplib.h>
 #include <asm/idprom.h>
+#include <asm/smp.h>
 
 #include "conv.h"
 
@@ -56,7 +59,7 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 	/* Do we need it here? */
 	set_personality(PER_SVR4);
 	if (flags & MAP_NORESERVE) {
-		static int cnt = 0;
+		static int cnt;
 		
 		if (cnt < 5) {
 			printk("%s:  unimplemented Solaris MAP_NORESERVE mmap() flag\n",
@@ -74,8 +77,8 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 			goto out;
 		else {
 			struct inode * inode = file->f_dentry->d_inode;
-			if(MAJOR(inode->i_rdev) == MEM_MAJOR &&
-			   MINOR(inode->i_rdev) == 5) {
+			if(imajor(inode) == MEM_MAJOR &&
+			   iminor(inode) == 5) {
 				flags |= MAP_ANONYMOUS;
 				fput(file);
 				file = NULL;
@@ -92,12 +95,12 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 	ret_type = flags & _MAP_NEW;
 	flags &= ~_MAP_NEW;
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	retval = do_mmap(file,
 			 (unsigned long) addr, (unsigned long) len,
 			 (unsigned long) prot, (unsigned long) flags, off);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	if(!ret_type)
 		retval = ((retval < 0xf0000000) ? 0 : retval);
 	                        
@@ -118,10 +121,10 @@ asmlinkage u32 solaris_mmap64(struct pt_regs *regs, u32 len, u32 prot, u32 flags
 	u32 offlo;
 	
 	if (regs->u_regs[UREG_G1]) {
-		if (get_user (offlo, (u32 *)(long)((u32)regs->u_regs[UREG_I6] + 0x5c)))
+		if (get_user (offlo, (u32 __user *)(long)((u32)regs->u_regs[UREG_I6] + 0x5c)))
 			return -EFAULT;
 	} else {
-		if (get_user (offlo, (u32 *)(long)((u32)regs->u_regs[UREG_I6] + 0x60)))
+		if (get_user (offlo, (u32 __user *)(long)((u32)regs->u_regs[UREG_I6] + 0x60)))
 			return -EFAULT;
 	}
 	return do_solaris_mmap((u32)regs->u_regs[UREG_I0], len, prot, flags, fd, (((u64)offhi)<<32)|offlo);
@@ -134,20 +137,33 @@ asmlinkage int solaris_brk(u32 brk)
 	return sunos_brk(brk);
 }
 
-#define set_utsfield(to, from, dotchop, countfrom) {			\
-	char *p; 							\
-	int i, len = (countfrom) ? 					\
-		((sizeof(to) > sizeof(from) ? 				\
-			sizeof(from) : sizeof(to))) : sizeof(to); 	\
-	if (copy_to_user(to, from, len))				\
-		return -EFAULT;						\
-	if (dotchop) 							\
-		for (p=from,i=0; *p && *p != '.' && --len; p++,i++); 	\
-	else 								\
-		i = len - 1; 						\
-	if (__put_user('\0', (char *)(to+i)))				\
-		return -EFAULT;						\
+static int __set_utsfield(char __user *to, int to_size,
+			  const char *from, int from_size,
+			  int dotchop, int countfrom)
+{
+	int len = countfrom ? (to_size > from_size ?
+			       from_size : to_size) : to_size;
+	int off;
+
+	if (copy_to_user(to, from, len))
+		return -EFAULT;
+
+	off = len < to_size? len: len - 1;
+	if (dotchop) {
+		const char *p = strnchr(from, len, '.');
+		if (p) off = p - from;
+	}
+
+	if (__put_user('\0', to + off))
+		return -EFAULT;
+
+	return 0;
 }
+
+#define set_utsfield(to, from, dotchop, countfrom) \
+	__set_utsfield((to), sizeof(to), \
+		       (from), sizeof(from), \
+		       (dotchop), (countfrom))
 
 struct sol_uname {
 	char sysname[9];
@@ -215,22 +231,21 @@ static char *serial(char *buffer)
 
 asmlinkage int solaris_utssys(u32 buf, u32 flags, int which, u32 buf2)
 {
+	struct sol_uname __user *v = A(buf);
+	int err;
+
 	switch (which) {
 	case 0:	/* old uname */
 		/* Let's cheat */
-		set_utsfield(((struct sol_uname *)A(buf))->sysname, 
-			"SunOS", 1, 0);
+		err  = set_utsfield(v->sysname, "SunOS", 1, 0);
 		down_read(&uts_sem);
-		set_utsfield(((struct sol_uname *)A(buf))->nodename, 
-			system_utsname.nodename, 1, 1);
+		err |= set_utsfield(v->nodename, system_utsname.nodename,
+				    1, 1);
 		up_read(&uts_sem);
-		set_utsfield(((struct sol_uname *)A(buf))->release, 
-			"2.6", 0, 0);
-		set_utsfield(((struct sol_uname *)A(buf))->version, 
-			"Generic", 0, 0);
-		set_utsfield(((struct sol_uname *)A(buf))->machine, 
-			machine(), 0, 0);
-		return 0;
+		err |= set_utsfield(v->release, "2.6", 0, 0);
+		err |= set_utsfield(v->version, "Generic", 0, 0);
+		err |= set_utsfield(v->machine, machine(), 0, 0);
+		return (err ? -EFAULT : 0);
 	case 2: /* ustat */
 		return -ENOSYS;
 	case 3: /* fusers */
@@ -242,20 +257,19 @@ asmlinkage int solaris_utssys(u32 buf, u32 flags, int which, u32 buf2)
 
 asmlinkage int solaris_utsname(u32 buf)
 {
+	struct sol_utsname __user *v = A(buf);
+	int err;
+
 	/* Why should we not lie a bit? */
 	down_read(&uts_sem);
-	set_utsfield(((struct sol_utsname *)A(buf))->sysname, 
-			"SunOS", 0, 0);
-	set_utsfield(((struct sol_utsname *)A(buf))->nodename, 
-			system_utsname.nodename, 1, 1);
-	set_utsfield(((struct sol_utsname *)A(buf))->release, 
-			"5.6", 0, 0);
-	set_utsfield(((struct sol_utsname *)A(buf))->version, 
-			"Generic", 0, 0);
-	set_utsfield(((struct sol_utsname *)A(buf))->machine, 
-			machine(), 0, 0);
+	err  = set_utsfield(v->sysname, "SunOS", 0, 0);
+	err |= set_utsfield(v->nodename, system_utsname.nodename, 1, 1);
+	err |= set_utsfield(v->release, "5.6", 0, 0);
+	err |= set_utsfield(v->version, "Generic", 0, 0);
+	err |= set_utsfield(v->machine, machine(), 0, 0);
 	up_read(&uts_sem);
-	return 0;
+
+	return (err ? -EFAULT : 0);
 }
 
 #define SI_SYSNAME		1       /* return name of operating system */
@@ -299,11 +313,11 @@ asmlinkage int solaris_sysinfo(int cmd, u32 buf, s32 count)
 	}
 	len = strlen(r) + 1;
 	if (count < len) {
-		if (copy_to_user((char *)A(buf), r, count - 1) ||
-		    __put_user(0, (char *)A(buf) + count - 1))
+		if (copy_to_user(A(buf), r, count - 1) ||
+		    __put_user(0, (char __user *)A(buf) + count - 1))
 			return -EFAULT;
 	} else {
-		if (copy_to_user((char *)A(buf), r, len))
+		if (copy_to_user(A(buf), r, len))
 			return -EFAULT;
 	}
 	return len;
@@ -335,8 +349,6 @@ asmlinkage int solaris_sysinfo(int cmd, u32 buf, s32 count)
 #define	SOLARIS_CONFIG_PHYS_PAGES		26
 #define	SOLARIS_CONFIG_AVPHYS_PAGES		27
 
-extern unsigned prom_cpu_nodes[NR_CPUS];
-
 asmlinkage int solaris_sysconf(int id)
 {
 	switch (id) {
@@ -348,11 +360,10 @@ asmlinkage int solaris_sysconf(int id)
 	case SOLARIS_CONFIG_XOPEN_VER:	return 3;
 	case SOLARIS_CONFIG_CLK_TCK:
 	case SOLARIS_CONFIG_PROF_TCK:
-		return prom_getintdefault(prom_cpu_nodes[smp_processor_id()],
-					  "clock-frequency", 167000000);
+		return sparc64_get_clock_tick(smp_processor_id());
 #ifdef CONFIG_SMP	
 	case SOLARIS_CONFIG_NPROC_CONF:	return NR_CPUS;
-	case SOLARIS_CONFIG_NPROC_ONLN:	return smp_num_cpus;
+	case SOLARIS_CONFIG_NPROC_ONLN:	return num_online_cpus();
 #else
 	case SOLARIS_CONFIG_NPROC_CONF:	return 1;
 	case SOLARIS_CONFIG_NPROC_ONLN:	return 1;
@@ -392,7 +403,7 @@ asmlinkage int solaris_procids(int cmd, s32 pid, s32 pgid)
 	
 	switch (cmd) {
 	case 0: /* getpgrp */
-		return current->pgrp;
+		return process_group(current);
 	case 1: /* setpgrp */
 		{
 			int (*sys_setpgid)(pid_t,pid_t) =
@@ -402,8 +413,8 @@ asmlinkage int solaris_procids(int cmd, s32 pid, s32 pgid)
 			   Solaris setpgrp and setsid? */
 			ret = sys_setpgid(0, 0);
 			if (ret) return ret;
-			current->tty = NULL;
-			return current->pgrp;
+			current->signal->tty = NULL;
+			return process_group(current);
 		}
 	case 2: /* getsid */
 		{
@@ -453,7 +464,7 @@ struct rlimit32 {
 	u32	rlim_max;
 };
 
-asmlinkage int solaris_getrlimit(unsigned int resource, struct rlimit32 *rlim)
+asmlinkage int solaris_getrlimit(unsigned int resource, struct rlimit32 __user *rlim)
 {
 	struct rlimit r;
 	int ret;
@@ -486,15 +497,15 @@ asmlinkage int solaris_getrlimit(unsigned int resource, struct rlimit32 *rlim)
 	return ret;
 }
 
-asmlinkage int solaris_setrlimit(unsigned int resource, struct rlimit32 *rlim)
+asmlinkage int solaris_setrlimit(unsigned int resource, struct rlimit32 __user *rlim)
 {
 	struct rlimit r, rold;
 	int ret;
 	mm_segment_t old_fs = get_fs ();
-	int (*sys_getrlimit)(unsigned int, struct rlimit *) =
-		(int (*)(unsigned int, struct rlimit *))SYS(getrlimit);
-	int (*sys_setrlimit)(unsigned int, struct rlimit *) =
-		(int (*)(unsigned int, struct rlimit *))SYS(setrlimit);
+	int (*sys_getrlimit)(unsigned int, struct rlimit __user *) =
+		(int (*)(unsigned int, struct rlimit __user *))SYS(getrlimit);
+	int (*sys_setrlimit)(unsigned int, struct rlimit __user *) =
+		(int (*)(unsigned int, struct rlimit __user *))SYS(setrlimit);
 
 	if (resource > RLIMIT_SOL_VMEM)
 		return -EINVAL;	
@@ -527,13 +538,13 @@ asmlinkage int solaris_setrlimit(unsigned int resource, struct rlimit32 *rlim)
 	return ret;
 }
 
-asmlinkage int solaris_getrlimit64(unsigned int resource, struct rlimit *rlim)
+asmlinkage int solaris_getrlimit64(unsigned int resource, struct rlimit __user *rlim)
 {
 	struct rlimit r;
 	int ret;
 	mm_segment_t old_fs = get_fs ();
-	int (*sys_getrlimit)(unsigned int, struct rlimit *) =
-		(int (*)(unsigned int, struct rlimit *))SYS(getrlimit);
+	int (*sys_getrlimit)(unsigned int, struct rlimit __user *) =
+		(int (*)(unsigned int, struct rlimit __user *))SYS(getrlimit);
 
 	if (resource > RLIMIT_SOL_VMEM)
 		return -EINVAL;	
@@ -556,15 +567,15 @@ asmlinkage int solaris_getrlimit64(unsigned int resource, struct rlimit *rlim)
 	return ret;
 }
 
-asmlinkage int solaris_setrlimit64(unsigned int resource, struct rlimit *rlim)
+asmlinkage int solaris_setrlimit64(unsigned int resource, struct rlimit __user *rlim)
 {
 	struct rlimit r, rold;
 	int ret;
 	mm_segment_t old_fs = get_fs ();
-	int (*sys_getrlimit)(unsigned int, struct rlimit *) =
-		(int (*)(unsigned int, struct rlimit *))SYS(getrlimit);
-	int (*sys_setrlimit)(unsigned int, struct rlimit *) =
-		(int (*)(unsigned int, struct rlimit *))SYS(setrlimit);
+	int (*sys_getrlimit)(unsigned int, struct rlimit __user *) =
+		(int (*)(unsigned int, struct rlimit __user *))SYS(getrlimit);
+	int (*sys_setrlimit)(unsigned int, struct rlimit __user *) =
+		(int (*)(unsigned int, struct rlimit __user *))SYS(setrlimit);
 
 	if (resource > RLIMIT_SOL_VMEM)
 		return -EINVAL;	
@@ -597,12 +608,8 @@ asmlinkage int solaris_setrlimit64(unsigned int resource, struct rlimit *rlim)
 	return ret;
 }
 
-struct timeval32 {
-	int tv_sec, tv_usec;
-};
-
 struct sol_ntptimeval {
-	struct timeval32 time;
+	struct compat_timeval time;
 	s32 maxerror;
 	s32 esterror;
 };
@@ -627,10 +634,10 @@ struct sol_timex {
 	s32 stbcnt;
 };
 
-asmlinkage int solaris_ntp_gettime(struct sol_ntptimeval *ntp)
+asmlinkage int solaris_ntp_gettime(struct sol_ntptimeval __user *ntp)
 {
-	int (*sys_adjtimex)(struct timex *) =
-		(int (*)(struct timex *))SYS(adjtimex);
+	int (*sys_adjtimex)(struct timex __user *) =
+		(int (*)(struct timex __user *))SYS(adjtimex);
 	struct timex t;
 	int ret;
 	mm_segment_t old_fs = get_fs();
@@ -648,10 +655,10 @@ asmlinkage int solaris_ntp_gettime(struct sol_ntptimeval *ntp)
 	return ret;	                        
 }
 
-asmlinkage int solaris_ntp_adjtime(struct sol_timex *txp)
+asmlinkage int solaris_ntp_adjtime(struct sol_timex __user *txp)
 {
-	int (*sys_adjtimex)(struct timex *) =
-		(int (*)(struct timex *))SYS(adjtimex);
+	int (*sys_adjtimex)(struct timex __user *) =
+		(int (*)(struct timex __user *))SYS(adjtimex);
 	struct timex t;
 	int ret, err;
 	mm_segment_t old_fs = get_fs();
@@ -708,13 +715,14 @@ asmlinkage void solaris_register(void)
 extern long solaris_to_linux_signals[], linux_to_solaris_signals[];
 
 struct exec_domain solaris_exec_domain = {
-	"Solaris",
-	(lcall7_func)NULL,
-	1, 1,	/* PER_SVR4 personality */
-	solaris_to_linux_signals,
-	linux_to_solaris_signals,
-	THIS_MODULE,
-	NULL
+	.name =		"Solaris",
+	.handler =	NULL,
+	.pers_low =	1,		/* PER_SVR4 personality */
+	.pers_high =	1,
+	.signal_map =	solaris_to_linux_signals,
+	.signal_invmap =linux_to_solaris_signals,
+	.module =	THIS_MODULE,
+	.next =		NULL
 };
 
 extern int init_socksys(void);
@@ -723,7 +731,7 @@ extern int init_socksys(void);
 
 MODULE_AUTHOR("Jakub Jelinek (jj@ultra.linux.cz), Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)");
 MODULE_DESCRIPTION("Solaris binary emulation module");
-EXPORT_NO_SYMBOLS;
+MODULE_LICENSE("GPL");
 
 #ifdef __sparc_v9__
 extern u32 tl0_solaris[8];
@@ -737,6 +745,8 @@ extern u32 solaris_sparc_syscall[];
 extern u32 solaris_syscall[];
 extern void cleanup_socksys(void);
 
+extern u32 entry64_personality_patch;
+
 int init_module(void)
 {
 	int ret;
@@ -748,6 +758,11 @@ int init_module(void)
 		return ret;
 	}
 	update_ttable(solaris_sparc_syscall);
+	entry64_personality_patch |=
+		(offsetof(struct task_struct, personality) +
+		 (sizeof(unsigned long) - 1));
+	__asm__ __volatile__("membar #StoreStore; flush %0"
+			     : : "r" (&entry64_personality_patch));
 	return 0;
 }
 

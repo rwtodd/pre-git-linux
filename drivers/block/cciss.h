@@ -8,12 +8,10 @@
 
 #define NWD		16
 #define NWD_SHIFT	4
-#define MAX_PART	16
+#define MAX_PART	(1 << NWD_SHIFT)
 
 #define IO_OK		0
 #define IO_ERROR	1
-
-#define MAJOR_NR COMPAQ_CISS_MAJOR 
 
 struct ctlr_info;
 typedef struct ctlr_info ctlr_info_t;
@@ -29,11 +27,12 @@ typedef struct _drive_info_struct
 {
  	__u32   LunID;	
 	int 	usage_count;
-	int 	nr_blocks;
+	sector_t nr_blocks;
 	int	block_size;
 	int 	heads;
 	int	sectors;
 	int 	cylinders;
+	int	raid_level;
 } drive_info_struct;
 
 struct ctlr_info 
@@ -42,18 +41,20 @@ struct ctlr_info
 	char	devname[8];
 	char    *product_name;
 	char	firm_ver[4]; // Firmware version 
-	unchar  pci_bus;
-        unchar  pci_dev_fn;
+	struct pci_dev *pdev;
 	__u32	board_id;
-	ulong   vaddr;
-	__u32	paddr;	
-	CfgTable_struct *cfgtable;
-	int	intr;
-
+	void __iomem *vaddr;
+	unsigned long paddr;
+	unsigned long io_mem_addr;
+	unsigned long io_mem_length;
+	CfgTable_struct __iomem *cfgtable;
+	unsigned int intr;
+	int	interrupts_enabled;
 	int 	max_commands;
 	int	commands_outstanding;
 	int 	max_outstanding; /* Debug */ 
 	int	num_luns;
+	int 	highest_lun;
 	int	usage_count;  /* number of opens all all minor devices */
 
 	// information about each logical volume
@@ -67,21 +68,24 @@ struct ctlr_info
 	unsigned int Qdepth;
 	unsigned int maxQsinceinit;
 	unsigned int maxSG;
+	spinlock_t lock;
+	struct request_queue *queue;
 
 	//* pointers to command and error info pool */ 
 	CommandList_struct 	*cmd_pool;
+	dma_addr_t		cmd_pool_dhandle; 
 	ErrorInfo_struct 	*errinfo_pool;
-        __u32   		*cmd_pool_bits;
+	dma_addr_t		errinfo_pool_dhandle; 
+        unsigned long  		*cmd_pool_bits;
 	int			nr_allocs;
 	int			nr_frees; 
+	int			busy_configuring;
 
 	// Disk structures we need to pass back
-	struct gendisk   gendisk;
-	   // indexed by minor numbers
-	struct hd_struct hd[256];
-	int              sizes[256];
-	int              blocksizes[256];
-	int              hardsizes[256];
+	struct gendisk   *gendisk[NWD];
+#ifdef CONFIG_CISS_SCSI_TAPE
+	void *scsi_ctlr; /* ptr to structure containing scsi related stuff */
+#endif
 };
 
 /*  Defining the diffent access_menthods */
@@ -93,10 +97,17 @@ struct ctlr_info
 #define SA5_REPLY_INTR_MASK_OFFSET	0x34
 #define SA5_REPLY_PORT_OFFSET		0x44
 #define SA5_INTR_STATUS		0x30
+#define SA5_SCRATCHPAD_OFFSET	0xB0
+
+#define SA5_CTCFG_OFFSET	0xB4
+#define SA5_CTMEM_OFFSET	0xB8
 
 #define SA5_INTR_OFF		0x08
+#define SA5B_INTR_OFF		0x04
 #define SA5_INTR_PENDING	0x08
+#define SA5B_INTR_PENDING	0x04
 #define FIFO_EMPTY		0xffffffff	
+#define CCISS_FIRMWARE_READY	0xffff0000 /* value in scratchpad register */
 
 #define  CISS_ERROR_BIT		0x02
 
@@ -117,7 +128,7 @@ static void SA5_submit_command( ctlr_info_t *h, CommandList_struct *c)
 }
 
 /*  
- *  This card is the oposite of the other cards.  
+ *  This card is the opposite of the other cards.  
  *   0 turns interrupts on... 
  *   0x08 turns them off... 
  */
@@ -125,12 +136,32 @@ static void SA5_intr_mask(ctlr_info_t *h, unsigned long val)
 {
 	if (val) 
 	{ /* Turn interrupts on */
+		h->interrupts_enabled = 1;
 		writel(0, h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
 	} else /* Turn them off */
 	{
+		h->interrupts_enabled = 0;
         	writel( SA5_INTR_OFF, 
 			h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
 	}
+}
+/*
+ *  This card is the opposite of the other cards.
+ *   0 turns interrupts on...
+ *   0x04 turns them off...
+ */
+static void SA5B_intr_mask(ctlr_info_t *h, unsigned long val)
+{
+        if (val)
+        { /* Turn interrupts on */
+		h->interrupts_enabled = 1;
+                writel(0, h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
+        } else /* Turn them off */
+        {
+		h->interrupts_enabled = 0;
+                writel( SA5B_INTR_OFF,
+                        h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
+        }
 }
 /*
  *  Returns true if fifo is full.  
@@ -183,6 +214,21 @@ static unsigned long SA5_intr_pending(ctlr_info_t *h)
 	return 0 ;
 }
 
+/*
+ *      Returns true if an interrupt is pending..
+ */
+static unsigned long SA5B_intr_pending(ctlr_info_t *h)
+{
+        unsigned long register_value  =
+                readl(h->vaddr + SA5_INTR_STATUS);
+#ifdef CCISS_DEBUG
+        printk("cciss: intr_pending %lx\n", register_value);
+#endif  /* CCISS_DEBUG */
+        if( register_value &  SA5B_INTR_PENDING)
+                return  1;
+        return 0 ;
+}
+
 
 static struct access_method SA5_access = {
 	SA5_submit_command,
@@ -192,10 +238,21 @@ static struct access_method SA5_access = {
 	SA5_completed,
 };
 
+static struct access_method SA5B_access = {
+        SA5_submit_command,
+        SA5B_intr_mask,
+        SA5_fifo_full,
+        SA5B_intr_pending,
+        SA5_completed,
+};
+
 struct board_type {
 	__u32	board_id;
 	char	*product_name;
 	struct access_method *access;
 };
+
+#define CCISS_LOCK(i)	(hba[i]->queue->queue_lock)
+
 #endif /* CCISS_H */
 

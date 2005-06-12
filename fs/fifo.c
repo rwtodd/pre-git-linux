@@ -10,8 +10,10 @@
  */
 
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/smp_lock.h>
+#include <linux/fs.h>
+#include <linux/pipe_fs_i.h>
 
 static void wait_for_partner(struct inode* inode, unsigned int* cnt)
 {
@@ -33,7 +35,6 @@ static int fifo_open(struct inode *inode, struct file *filp)
 	int ret;
 
 	ret = -ERESTARTSYS;
-	lock_kernel();
 	if (down_interruptible(PIPE_SEM(*inode)))
 		goto err_nolock_nocleanup;
 
@@ -43,6 +44,9 @@ static int fifo_open(struct inode *inode, struct file *filp)
 			goto err_nocleanup;
 	}
 	filp->f_version = 0;
+
+	/* We can only do regular read/write on fifos */
+	filp->f_mode &= (FMODE_READ | FMODE_WRITE);
 
 	switch (filp->f_mode) {
 	case 1:
@@ -116,7 +120,6 @@ static int fifo_open(struct inode *inode, struct file *filp)
 
 	/* Ok! */
 	up(PIPE_SEM(*inode));
-	unlock_kernel();
 	return 0;
 
 err_rd:
@@ -132,18 +135,13 @@ err_wr:
 	goto err;
 
 err:
-	if (!PIPE_READERS(*inode) && !PIPE_WRITERS(*inode)) {
-		struct pipe_inode_info *info = inode->i_pipe;
-		inode->i_pipe = NULL;
-		free_page((unsigned long)info->base);
-		kfree(info);
-	}
+	if (!PIPE_READERS(*inode) && !PIPE_WRITERS(*inode))
+		free_pipe_info(inode);
 
 err_nocleanup:
 	up(PIPE_SEM(*inode));
 
 err_nolock_nocleanup:
-	unlock_kernel();
 	return ret;
 }
 
@@ -153,5 +151,5 @@ err_nolock_nocleanup:
  * depending on the access mode of the file...
  */
 struct file_operations def_fifo_fops = {
-	open:		fifo_open,	/* will set read or write pipe_fops */
+	.open		= fifo_open,	/* will set read or write pipe_fops */
 };

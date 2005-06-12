@@ -16,7 +16,6 @@
  *   arch/arm/kernel/dma-ebsa285.c
  *   Copyright (C) 1998 Phil Blundell
  */
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -86,6 +85,7 @@ static void isa_enable_dma(dmach_t channel, dma_t *dma)
 			break;
 
 		default:
+			direction = PCI_DMA_NONE;
 			break;
 		}
 
@@ -95,7 +95,7 @@ static void isa_enable_dma(dmach_t channel, dma_t *dma)
 			 * coherence.
 			 */
 			dma->buf.dma_address = pci_map_single(NULL,
-				dma->buf.address, dma->buf.length,
+				dma->buf.__address, dma->buf.length,
 				direction);
 		}
 
@@ -133,10 +133,10 @@ static void isa_disable_dma(dmach_t channel, dma_t *dma)
 }
 
 static struct dma_ops isa_dma_ops = {
-	type:		"ISA",
-	enable:		isa_enable_dma,
-	disable:	isa_disable_dma,
-	residue:	isa_get_dma_residue,
+	.type		= "ISA",
+	.enable		= isa_enable_dma,
+	.disable	= isa_disable_dma,
+	.residue	= isa_get_dma_residue,
 };
 
 static struct resource dma_resources[] = {
@@ -148,17 +148,22 @@ static struct resource dma_resources[] = {
 
 void __init isa_init_dma(dma_t *dma)
 {
-	int dmac_found;
-
+	/*
+	 * Try to autodetect presence of an ISA DMA controller.
+	 * We do some minimal initialisation, and check that
+	 * channel 0's DMA address registers are writeable.
+	 */
 	outb(0xff, 0x0d);
 	outb(0xff, 0xda);
 
+	/*
+	 * Write high and low address, and then read them back
+	 * in the same order.
+	 */
 	outb(0x55, 0x00);
 	outb(0xaa, 0x00);
 
-	dmac_found = inb(0x00) == 0x55 && inb(0x00) == 0xaa;
-
-	if (dmac_found) {
+	if (inb(0) == 0x55 && inb(0) == 0xaa) {
 		int channel, i;
 
 		for (channel = 0; channel < 8; channel++) {

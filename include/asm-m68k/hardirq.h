@@ -1,30 +1,26 @@
 #ifndef __M68K_HARDIRQ_H
 #define __M68K_HARDIRQ_H
 
+#include <linux/config.h>
 #include <linux/threads.h>
 #include <linux/cache.h>
 
 /* entry.S is sensitive to the offsets of these fields */
 typedef struct {
-	unsigned int __softirq_active;
-	unsigned int __softirq_mask;
-	unsigned int __local_irq_count;
-	unsigned int __local_bh_count;
-	unsigned int __syscall_count;
+	unsigned int __softirq_pending;
 } ____cacheline_aligned irq_cpustat_t;
 
 #include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
 
-#define in_interrupt() (local_irq_count(smp_processor_id()) + local_bh_count(smp_processor_id()) != 0)
+#define HARDIRQ_BITS	8
 
-#define in_irq() (local_irq_count(smp_processor_id()) != 0)
-
-#define hardirq_trylock(cpu)	(local_irq_count(cpu) == 0)
-#define hardirq_endlock(cpu)	do { } while (0)
-
-#define irq_enter(cpu)		(local_irq_count(cpu)++)
-#define irq_exit(cpu)		(local_irq_count(cpu)--)
-
-#define synchronize_irq()	barrier()
+/*
+ * The hardirq mask has to be large enough to have
+ * space for potentially all IRQ sources in the system
+ * nesting on a single CPU:
+ */
+#if (1 << HARDIRQ_BITS) < NR_IRQS
+# error HARDIRQ_BITS is too low!
+#endif
 
 #endif

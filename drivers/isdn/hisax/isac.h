@@ -1,13 +1,14 @@
-/* $Id: isac.h,v 1.7 2000/06/26 08:59:13 keil Exp $
+/* $Id: isac.h,v 1.9.2.2 2004/01/12 22:52:27 keil Exp $
  *
- * isac.h   ISAC specific defines
+ * ISAC specific defines
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
-
 
 /* All Registers original Siemens Spec  */
 
@@ -62,7 +63,8 @@
 #define ISAC_IND_AI10	0xD
 #define ISAC_IND_DID	0xF
 
-extern void ISACVersion(struct IsdnCardState *cs, char *s);
-extern void initisac(struct IsdnCardState *cs);
-extern void isac_interrupt(struct IsdnCardState *cs, u_char val);
-extern void clear_pending_isac_ints(struct IsdnCardState *cs);
+extern void ISACVersion(struct IsdnCardState *, char *);
+extern void setup_isac(struct IsdnCardState *);
+extern void initisac(struct IsdnCardState *);
+extern void isac_interrupt(struct IsdnCardState *, u_char);
+extern void clear_pending_isac_ints(struct IsdnCardState *);

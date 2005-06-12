@@ -1,10 +1,12 @@
-/* $Id: hfc_2bs0.h,v 1.3 2000/06/26 08:59:13 keil Exp $
+/* $Id: hfc_2bs0.h,v 1.5.2.2 2004/01/12 22:52:26 keil Exp $
  *
- *  specific defines for CCD's HFC 2BS0
+ * specific defines for CCD's HFC 2BS0
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 

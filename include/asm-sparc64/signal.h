@@ -6,8 +6,10 @@
 
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
+#include <linux/config.h>
 #include <linux/personality.h>
 #include <linux/types.h>
+#include <linux/compat.h>
 #endif
 #endif
 
@@ -87,27 +89,21 @@
 #define _NSIG_BPW     	64
 #define _NSIG_WORDS   	(__NEW_NSIG / _NSIG_BPW)
 
-#define _NSIG_BPW32   	32
-#define _NSIG_WORDS32 	(__NEW_NSIG / _NSIG_BPW32)
-
 #define SIGRTMIN       32
-#define SIGRTMAX       (__NEW_NSIG - 1)
+#define SIGRTMAX       __NEW_NSIG
 
 #if defined(__KERNEL__) || defined(__WANT_POSIX1B_SIGNALS__)
 #define _NSIG			__NEW_NSIG
 #define __new_sigset_t		sigset_t
-#define __new_sigset_t32	sigset_t32
 #define __new_sigaction		sigaction
 #define __new_sigaction32	sigaction32
 #define __old_sigset_t		old_sigset_t
-#define __old_sigset_t32	old_sigset_t32
 #define __old_sigaction		old_sigaction
 #define __old_sigaction32	old_sigaction32
 #else
 #define _NSIG			__OLD_NSIG
 #define NSIG			_NSIG
 #define __old_sigset_t		sigset_t
-#define __old_sigset_t32	sigset_t32
 #define __old_sigaction		sigaction
 #define __old_sigaction32	sigaction32
 #endif
@@ -115,15 +111,10 @@
 #ifndef __ASSEMBLY__
 
 typedef unsigned long __old_sigset_t;            /* at least 32 bits */
-typedef unsigned int __old_sigset_t32;
 
 typedef struct {
        unsigned long sig[_NSIG_WORDS];
 } __new_sigset_t;
-
-typedef struct {
-       unsigned int sig[_NSIG_WORDS32];
-} __new_sigset_t32;
 
 /* A SunOS sigstack */
 struct sigstack {
@@ -133,10 +124,10 @@ struct sigstack {
 };
 
 /* Sigvec flags */
-#define SV_SSTACK    1     /* This signal handler should use sig-stack */
-#define SV_INTR      2     /* Sig return should not restart system call */
-#define SV_RESET     4     /* Set handler to SIG_DFL upon taken signal */
-#define SV_IGNCHILD  8     /* Do not send SIGCHLD */
+#define _SV_SSTACK    1u    /* This signal handler should use sig-stack */
+#define _SV_INTR      2u    /* Sig return should not restart system call */
+#define _SV_RESET     4u    /* Set handler to SIG_DFL upon taken signal */
+#define _SV_IGNCHILD  8u    /* Do not send SIGCHLD */
 
 /*
  * sa_flags values: SA_STACK is not currently supported, but will allow the
@@ -147,16 +138,16 @@ struct sigstack {
  * SA_RESTART flag to get restarting signals (which were the default long ago)
  * SA_SHIRQ flag is for shared interrupt support on PCI and EISA.
  */
-#define SA_NOCLDSTOP	SV_IGNCHILD
-#define SA_STACK	SV_SSTACK
-#define SA_ONSTACK	SV_SSTACK
-#define SA_RESTART	SV_INTR
-#define SA_ONESHOT	SV_RESET
-#define SA_INTERRUPT	0x10
-#define SA_NOMASK	0x20
-#define SA_SHIRQ	0x40
-#define SA_NOCLDWAIT    0x100 /* not supported yet */
-#define SA_SIGINFO      0x200
+#define SA_NOCLDSTOP	_SV_IGNCHILD
+#define SA_STACK	_SV_SSTACK
+#define SA_ONSTACK	_SV_SSTACK
+#define SA_RESTART	_SV_INTR
+#define SA_ONESHOT	_SV_RESET
+#define SA_INTERRUPT	0x10u
+#define SA_NOMASK	0x20u
+#define SA_SHIRQ	0x40u
+#define SA_NOCLDWAIT    0x100u
+#define SA_SIGINFO      0x200u
 
 
 #define SIG_BLOCK          0x01	/* for blocking signals */
@@ -196,9 +187,14 @@ struct sigstack {
 
 /* Type of a signal handler.  */
 #ifdef __KERNEL__
-typedef void (*__sighandler_t)(int, struct sigcontext *);
+typedef void __signalfn_t(int);
+typedef __signalfn_t __user *__sighandler_t;
+
+typedef void __restorefn_t(void);
+typedef __restorefn_t __user *__sigrestore_t;
 #else
 typedef void (*__sighandler_t)(int);
+typedef void (*__sigrestore_t)(void);
 #endif
 
 #define SIG_DFL	((__sighandler_t)0)	/* default signal handling */
@@ -208,21 +204,24 @@ typedef void (*__sighandler_t)(int);
 struct __new_sigaction {
 	__sighandler_t		sa_handler;
 	unsigned long		sa_flags;
-	void 			(*sa_restorer)(void);     /* not used by Linux/SPARC yet */
+	__sigrestore_t 		sa_restorer;  /* not used by Linux/SPARC yet */
 	__new_sigset_t		sa_mask;
 };
 
+#ifdef __KERNEL__
+
+#ifdef CONFIG_COMPAT
 struct __new_sigaction32 {
 	unsigned		sa_handler;
 	unsigned int    	sa_flags;
 	unsigned		sa_restorer;     /* not used by Linux/SPARC yet */
-	__new_sigset_t32 	sa_mask;
+	compat_sigset_t 	sa_mask;
 };
+#endif
 
-#ifdef __KERNEL__
 struct k_sigaction {
 	struct __new_sigaction 	sa;
-	void			*ka_restorer;
+	void __user		*ka_restorer;
 };
 #endif
 
@@ -233,26 +232,44 @@ struct __old_sigaction {
 	void 			(*sa_restorer)(void);     /* not used by Linux/SPARC yet */
 };
 
+#ifdef __KERNEL__
+
+#ifdef CONFIG_COMPAT
 struct __old_sigaction32 {
 	unsigned		sa_handler;
-	__old_sigset_t32  	sa_mask;
+	compat_old_sigset_t  	sa_mask;
 	unsigned int    	sa_flags;
 	unsigned		sa_restorer;     /* not used by Linux/SPARC yet */
 };
+#endif
+
+#endif
 
 typedef struct sigaltstack {
-	void			*ss_sp;
+	void			__user *ss_sp;
 	int			ss_flags;
 	size_t			ss_size;
 } stack_t;
 
 #ifdef __KERNEL__
+
+#ifdef CONFIG_COMPAT
 typedef struct sigaltstack32 {
 	u32			ss_sp;
 	int			ss_flags;
-	__kernel_size_t32	ss_size;
+	compat_size_t		ss_size;
 } stack_t32;
 #endif
+
+struct signal_deliver_cookie {
+	int restart_syscall;
+	unsigned long orig_i0;
+};
+
+struct pt_regs;
+extern void ptrace_signal_deliver(struct pt_regs *regs, void *cookie);
+
+#endif /* !(__KERNEL__) */
 
 #endif /* !(__ASSEMBLY__) */
 

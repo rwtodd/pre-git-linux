@@ -1,6 +1,7 @@
 #ifndef _KBD_KERN_H
 #define _KBD_KERN_H
 
+#include <linux/tty.h>
 #include <linux/interrupt.h>
 #include <linux/keyboard.h>
 
@@ -42,11 +43,12 @@ struct kbd_struct {
 #define LED_SHOW_IOCTL 1        /* only change leds upon ioctl */
 #define LED_SHOW_MEM 2          /* `heartbeat': peek into memory */
 
-	unsigned char ledflagstate:3;	/* flags, not lights */
-	unsigned char default_ledflagstate:3;
+	unsigned char ledflagstate:4;	/* flags, not lights */
+	unsigned char default_ledflagstate:4;
 #define VC_SCROLLOCK	0	/* scroll-lock mode */
 #define VC_NUMLOCK	1	/* numeric lock mode */
 #define VC_CAPSLOCK	2	/* capslock mode */
+#define VC_KANALOCK	3	/* kanalock mode */
 
 	unsigned char kbdmode:2;	/* one 2-bit value */
 #define VC_XLATE	0	/* translate keycodes using keymap */
@@ -69,75 +71,64 @@ extern int kbd_init(void);
 extern unsigned char getledstate(void);
 extern void setledstate(struct kbd_struct *kbd, unsigned int led);
 
-extern struct tasklet_struct console_tasklet;
-
 extern int do_poke_blanked_console;
 
 extern void (*kbd_ledfunc)(unsigned int led);
 
-extern inline void show_console(void)
-{
-	do_poke_blanked_console = 1;
-	tasklet_schedule(&console_tasklet);
-}
+extern void set_console(int nr);
+extern void schedule_console_callback(void);
 
-extern inline void set_console(int nr)
-{
-	want_console = nr;
-	tasklet_schedule(&console_tasklet);
-}
-
-extern inline void set_leds(void)
+static inline void set_leds(void)
 {
 	tasklet_schedule(&keyboard_tasklet);
 }
 
-extern inline int vc_kbd_mode(struct kbd_struct * kbd, int flag)
+static inline int vc_kbd_mode(struct kbd_struct * kbd, int flag)
 {
 	return ((kbd->modeflags >> flag) & 1);
 }
 
-extern inline int vc_kbd_led(struct kbd_struct * kbd, int flag)
+static inline int vc_kbd_led(struct kbd_struct * kbd, int flag)
 {
 	return ((kbd->ledflagstate >> flag) & 1);
 }
 
-extern inline void set_vc_kbd_mode(struct kbd_struct * kbd, int flag)
+static inline void set_vc_kbd_mode(struct kbd_struct * kbd, int flag)
 {
 	kbd->modeflags |= 1 << flag;
 }
 
-extern inline void set_vc_kbd_led(struct kbd_struct * kbd, int flag)
+static inline void set_vc_kbd_led(struct kbd_struct * kbd, int flag)
 {
 	kbd->ledflagstate |= 1 << flag;
 }
 
-extern inline void clr_vc_kbd_mode(struct kbd_struct * kbd, int flag)
+static inline void clr_vc_kbd_mode(struct kbd_struct * kbd, int flag)
 {
 	kbd->modeflags &= ~(1 << flag);
 }
 
-extern inline void clr_vc_kbd_led(struct kbd_struct * kbd, int flag)
+static inline void clr_vc_kbd_led(struct kbd_struct * kbd, int flag)
 {
 	kbd->ledflagstate &= ~(1 << flag);
 }
 
-extern inline void chg_vc_kbd_lock(struct kbd_struct * kbd, int flag)
+static inline void chg_vc_kbd_lock(struct kbd_struct * kbd, int flag)
 {
 	kbd->lockstate ^= 1 << flag;
 }
 
-extern inline void chg_vc_kbd_slock(struct kbd_struct * kbd, int flag)
+static inline void chg_vc_kbd_slock(struct kbd_struct * kbd, int flag)
 {
 	kbd->slockstate ^= 1 << flag;
 }
 
-extern inline void chg_vc_kbd_mode(struct kbd_struct * kbd, int flag)
+static inline void chg_vc_kbd_mode(struct kbd_struct * kbd, int flag)
 {
 	kbd->modeflags ^= 1 << flag;
 }
 
-extern inline void chg_vc_kbd_led(struct kbd_struct * kbd, int flag)
+static inline void chg_vc_kbd_led(struct kbd_struct * kbd, int flag)
 {
 	kbd->ledflagstate ^= 1 << flag;
 }
@@ -151,7 +142,6 @@ struct console;
 int getkeycode(unsigned int scancode);
 int setkeycode(unsigned int scancode, unsigned int keycode);
 void compute_shiftstate(void);
-int keyboard_wait_for_keypress(struct console *);
 
 /* defkeymap.c */
 
@@ -159,12 +149,9 @@ extern unsigned int keymap_count;
 
 /* console.c */
 
-extern task_queue con_task_queue;
-
-extern inline void con_schedule_flip(struct tty_struct *t)
+static inline void con_schedule_flip(struct tty_struct *t)
 {
-	queue_task(&t->flip.tqueue, &con_task_queue);
-	tasklet_schedule(&console_tasklet);
+	schedule_work(&t->flip.work);
 }
 
 #endif

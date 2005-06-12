@@ -1,4 +1,4 @@
-/* $Id: flash.c,v 1.20 2000/11/08 04:57:49 davem Exp $
+/* $Id: flash.c,v 1.25 2001/12/21 04:56:16 davem Exp $
  * flash.c: Allow mmap access to the OBP Flash, for OBP updates.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -9,11 +9,12 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
+#include <linux/spinlock.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -21,7 +22,9 @@
 #include <asm/io.h>
 #include <asm/sbus.h>
 #include <asm/ebus.h>
+#include <asm/upa.h>
 
+static DEFINE_SPINLOCK(flash_lock);
 static struct {
 	unsigned long read_base;	/* Physical read address */
 	unsigned long write_base;	/* Physical write address */
@@ -38,14 +41,14 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 	unsigned long addr;
 	unsigned long size;
 
-	lock_kernel();
+	spin_lock(&flash_lock);
 	if (flash.read_base == flash.write_base) {
 		addr = flash.read_base;
 		size = flash.read_size;
 	} else {
 		if ((vma->vm_flags & VM_READ) &&
 		    (vma->vm_flags & VM_WRITE)) {
-			unlock_kernel();
+			spin_unlock(&flash_lock);
 			return -EINVAL;
 		}
 		if (vma->vm_flags & VM_READ) {
@@ -55,15 +58,15 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 			addr = flash.write_base;
 			size = flash.write_size;
 		} else {
-			unlock_kernel();
+			spin_unlock(&flash_lock);
 			return -ENXIO;
 		}
 	}
-	unlock_kernel();
+	spin_unlock(&flash_lock);
 
 	if ((vma->vm_pgoff << PAGE_SHIFT) > size)
 		return -ENXIO;
-	addr += (vma->vm_pgoff << PAGE_SHIFT);
+	addr = vma->vm_pgoff + (addr >> PAGE_SHIFT);
 
 	if (vma->vm_end - (vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT)) > size)
 		size = vma->vm_end - (vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT));
@@ -72,7 +75,7 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 	pgprot_val(vma->vm_page_prot) |= _PAGE_E;
 	vma->vm_flags |= (VM_SHM | VM_LOCKED);
 
-	if (remap_page_range(vma->vm_start, addr, size, vma->vm_page_prot))
+	if (remap_pfn_range(vma, vma->vm_start, addr, size, vma->vm_page_prot))
 		return -EAGAIN;
 		
 	return 0;
@@ -81,6 +84,7 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 static long long
 flash_llseek(struct file *file, long long offset, int origin)
 {
+	lock_kernel();
 	switch (origin) {
 		case 0:
 			file->f_pos = offset;
@@ -94,22 +98,29 @@ flash_llseek(struct file *file, long long offset, int origin)
 			file->f_pos = flash.read_size;
 			break;
 		default:
+			unlock_kernel();
 			return -EINVAL;
 	}
+	unlock_kernel();
 	return file->f_pos;
 }
 
 static ssize_t
-flash_read(struct file * file, char * buf,
+flash_read(struct file * file, char __user * buf,
 	   size_t count, loff_t *ppos)
 {
 	unsigned long p = file->f_pos;
+	int i;
 	
 	if (count > flash.read_size - p)
 		count = flash.read_size - p;
 
-	if (copy_to_user(buf, flash.read_base + p, count) < 0)
-		return -EFAULT;
+	for (i = 0; i < count; i++) {
+		u8 data = upa_readb(flash.read_base + p + i);
+		if (put_user(data, buf))
+			return -EFAULT;
+		buf++;
+	}
 
 	file->f_pos += count;
 	return count;
@@ -127,9 +138,10 @@ flash_open(struct inode *inode, struct file *file)
 static int
 flash_release(struct inode *inode, struct file *file)
 {
-	lock_kernel();
+	spin_lock(&flash_lock);
 	flash.busy = 0;
-	unlock_kernel();
+	spin_unlock(&flash_lock);
+
 	return 0;
 }
 
@@ -137,26 +149,27 @@ static struct file_operations flash_fops = {
 	/* no write to the Flash, use mmap
 	 * and play flash dependent tricks.
 	 */
-	owner:		THIS_MODULE,
-	llseek:		flash_llseek,
-	read:		flash_read,
-	mmap:		flash_mmap,
-	open:		flash_open,
-	release:	flash_release,
+	.owner =	THIS_MODULE,
+	.llseek =	flash_llseek,
+	.read =		flash_read,
+	.mmap =		flash_mmap,
+	.open =		flash_open,
+	.release =	flash_release,
 };
 
 static struct miscdevice flash_dev = { FLASH_MINOR, "flash", &flash_fops };
 
-EXPORT_NO_SYMBOLS;
-
 static int __init flash_init(void)
 {
 	struct sbus_bus *sbus;
-	struct sbus_dev *sdev = 0;
+	struct sbus_dev *sdev = NULL;
+#ifdef CONFIG_PCI
 	struct linux_ebus *ebus;
-	struct linux_ebus_device *edev = 0;
+	struct linux_ebus_device *edev = NULL;
 	struct linux_prom_registers regs[2];
-	int len, err, nregs;
+	int len, nregs;
+#endif
+	int err;
 
 	for_all_sbusdev(sdev, sbus) {
 		if (!strcmp(sdev->prom_name, "flashprom")) {
@@ -239,3 +252,4 @@ static void __exit flash_cleanup(void)
 
 module_init(flash_init);
 module_exit(flash_cleanup);
+MODULE_LICENSE("GPL");

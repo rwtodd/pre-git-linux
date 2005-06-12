@@ -71,7 +71,7 @@ typedef unsigned long sigset_t;
 
 /* These should not be considered constants from userland.  */
 #define SIGRTMIN	32
-#define SIGRTMAX	(_NSIG-1)
+#define SIGRTMAX	_NSIG
 
 /*
  * SA_FLAGS values:
@@ -93,7 +93,7 @@ typedef unsigned long sigset_t;
 #define SA_NOCLDSTOP	0x00000004
 #define SA_NODEFER	0x00000008
 #define SA_RESETHAND	0x00000010
-#define SA_NOCLDWAIT	0x00000020 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000020
 #define SA_SIGINFO	0x00000040
 
 #define SA_ONESHOT	SA_RESETHAND
@@ -128,7 +128,11 @@ typedef unsigned long sigset_t;
 #define SIG_SETMASK        3	/* for setting the signal mask */
 
 /* Type of a signal handler.  */
-typedef void (*__sighandler_t)(int);
+typedef void __signalfn_t(int);
+typedef __signalfn_t __user *__sighandler_t;
+
+typedef void __restorefn_t(void);
+typedef __restorefn_t __user *__sigrestore_t;
 
 #define SIG_DFL	((__sighandler_t)0)	/* default signal handling */
 #define SIG_IGN	((__sighandler_t)1)	/* ignore signal */
@@ -149,7 +153,7 @@ struct sigaction {
 
 struct k_sigaction {
 	struct sigaction sa;
-	void (*ka_restorer)(void);
+	__sigrestore_t ka_restorer;
 };
 #else
 /* Here we must cater to libcs that poke about in kernel headers.  */
@@ -169,7 +173,7 @@ struct sigaction {
 #endif /* __KERNEL__ */
 
 typedef struct sigaltstack {
-	void *ss_sp;
+	void __user *ss_sp;
 	int ss_flags;
 	size_t ss_size;
 } stack_t;
@@ -179,12 +183,15 @@ typedef struct sigaltstack {
    implemented here for OSF/1 compatibility.  */
 
 struct sigstack {
-	void *ss_sp;
+	void __user *ss_sp;
 	int ss_onstack;
 };
 
 #ifdef __KERNEL__
 #include <asm/sigcontext.h>
+
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
+
 #endif
 
 #endif

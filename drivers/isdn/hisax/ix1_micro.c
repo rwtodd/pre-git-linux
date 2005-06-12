@@ -1,56 +1,31 @@
-/* $Id: ix1_micro.c,v 2.10 2000/11/24 17:05:38 kai Exp $
+/* $Id: ix1_micro.c,v 2.12.2.4 2004/01/13 23:48:39 keil Exp $
  *
- * ix1_micro.c  low level stuff for ITK ix1-micro Rev.2 isdn cards
- *              derived from the original file teles3.c from Karsten Keil
+ * low level stuff for ITK ix1-micro Rev.2 isdn cards
+ * derived from the original file teles3.c from Karsten Keil
  *
- * Copyright (C) 1997 Klaus-Peter Nischke (ITK AG) (for the modifications to
- *                                                  the original file teles.c)
+ * Author       Klaus-Peter Nischke
+ * Copyright    by Klaus-Peter Nischke, ITK AG
+ *                                   <klaus@nischke.do.eunet.de>
+ *              by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Thanks to    Jan den Ouden
- *              Fritz Elfert
- *              Beat Doebeli
- *
+ * Klaus-Peter Nischke
+ * Deusener Str. 287
+ * 44369 Dortmund
+ * Germany
  */
 
-/*
-   For the modification done by the author the following terms and conditions
-   apply (GNU PUBLIC LICENSE)
-
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
-
-   You may contact Klaus-Peter Nischke by email: klaus@nischke.do.eunet.de
-   or by conventional mail:
-
-   Klaus-Peter Nischke
-   Deusener Str. 287
-   44369 Dortmund
-   Germany
- */
-
-
-#define __NO_VERSION__
 #include <linux/init.h>
+#include <linux/isapnp.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *ix1_revision = "$Revision: 2.10 $";
+const char *ix1_revision = "$Revision: 2.12.2.4 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -68,21 +43,15 @@ static inline u_char
 readreg(unsigned int ale, unsigned int adr, u_char off)
 {
 	register u_char ret;
-	long flags;
 
-	save_flags(flags);
-	cli();
 	byteout(ale, off);
 	ret = bytein(adr);
-	restore_flags(flags);
 	return (ret);
 }
 
 static inline void
 readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
 {
-	/* fifo read without cli because it's allready done  */
-
 	byteout(ale, off);
 	insb(adr, data, size);
 }
@@ -91,19 +60,13 @@ readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size
 static inline void
 writereg(unsigned int ale, unsigned int adr, u_char off, u_char data)
 {
-	long flags;
-
-	save_flags(flags);
-	cli();
 	byteout(ale, off);
 	byteout(adr, data);
-	restore_flags(flags);
 }
 
 static inline void
 writefifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
 {
-	/* fifo write without cli because it's allready done  */
 	byteout(ale, off);
 	outsb(adr, data, size);
 }
@@ -161,16 +124,14 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 
 #include "hscx_irq.c"
 
-static void
+static irqreturn_t
 ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
+	u_long flags;
 
-	if (!cs) {
-		printk(KERN_WARNING "IX1: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	val = readreg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_ISTA + 0x40);
       Start_HSCX:
 	if (val)
@@ -197,6 +158,8 @@ ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0);
 	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0);
 	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0);
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 void
@@ -209,39 +172,57 @@ release_io_ix1micro(struct IsdnCardState *cs)
 static void
 ix1_reset(struct IsdnCardState *cs)
 {
-	long flags;
 	int cnt;
 
 	/* reset isac */
-	save_flags(flags);
 	cnt = 3 * (HZ / 10) + 1;
-	sti();
 	while (cnt--) {
 		byteout(cs->hw.ix1.cfg_reg + SPECIAL_PORT_OFFSET, 1);
 		HZDELAY(1);	/* wait >=10 ms */
 	}
 	byteout(cs->hw.ix1.cfg_reg + SPECIAL_PORT_OFFSET, 0);
-	restore_flags(flags);
 }
 
 static int
 ix1_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+
 	switch (mt) {
 		case CARD_RESET:
+			spin_lock_irqsave(&cs->lock, flags);
 			ix1_reset(cs);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_RELEASE:
 			release_io_ix1micro(cs);
 			return(0);
 		case CARD_INIT:
+			spin_lock_irqsave(&cs->lock, flags);
+			ix1_reset(cs);
 			inithscxisac(cs, 3);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			return(0);
 		case CARD_TEST:
 			return(0);
 	}
 	return(0);
 }
+
+#ifdef __ISAPNP__
+static struct isapnp_device_id itk_ids[] __initdata = {
+	{ ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25),
+	  ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25), 
+	  (unsigned long) "ITK micro 2" },
+	{ ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x29),
+	  ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x29), 
+	  (unsigned long) "ITK micro 2." },
+	{ 0, }
+};
+
+static struct isapnp_device_id *ipid __initdata = &itk_ids[0];
+static struct pnp_card *pnp_c __devinitdata = NULL;
+#endif
 
 
 int __init
@@ -255,6 +236,48 @@ setup_ix1micro(struct IsdnCard *card)
 	if (cs->typ != ISDN_CTYPE_IX1MICROR2)
 		return (0);
 
+#ifdef __ISAPNP__
+	if (!card->para[1] && isapnp_present()) {
+		struct pnp_dev *pnp_d;
+		while(ipid->card_vendor) {
+			if ((pnp_c = pnp_find_card(ipid->card_vendor,
+				ipid->card_device, pnp_c))) {
+				pnp_d = NULL;
+				if ((pnp_d = pnp_find_dev(pnp_c,
+					ipid->vendor, ipid->function, pnp_d))) {
+					int err;
+
+					printk(KERN_INFO "HiSax: %s detected\n",
+						(char *)ipid->driver_data);
+					pnp_disable_dev(pnp_d);
+					err = pnp_activate_dev(pnp_d);
+					if (err<0) {
+						printk(KERN_WARNING "%s: pnp_activate_dev ret(%d)\n",
+							__FUNCTION__, err);
+						return(0);
+					}
+					card->para[1] = pnp_port_start(pnp_d, 0);
+					card->para[0] = pnp_irq(pnp_d, 0);
+					if (!card->para[0] || !card->para[1]) {
+						printk(KERN_ERR "ITK PnP:some resources are missing %ld/%lx\n",
+							card->para[0], card->para[1]);
+						pnp_disable_dev(pnp_d);
+						return(0);
+					}
+					break;
+				} else {
+					printk(KERN_ERR "ITK PnP: PnP error card found, no device\n");
+				}
+			}
+			ipid++;
+			pnp_c = NULL;
+		} 
+		if (!ipid->card_vendor) {
+			printk(KERN_INFO "ITK PnP: no ISAPnP card found\n");
+			return(0);
+		}
+	}
+#endif
 	/* IO-Ports */
 	cs->hw.ix1.isac_ale = card->para[1] + ISAC_COMMAND_OFFSET;
 	cs->hw.ix1.hscx_ale = card->para[1] + HSCX_COMMAND_OFFSET;
@@ -263,21 +286,18 @@ setup_ix1micro(struct IsdnCard *card)
 	cs->hw.ix1.cfg_reg = card->para[1];
 	cs->irq = card->para[0];
 	if (cs->hw.ix1.cfg_reg) {
-		if (check_region((cs->hw.ix1.cfg_reg), 4)) {
+		if (!request_region(cs->hw.ix1.cfg_reg, 4, "ix1micro cfg")) {
 			printk(KERN_WARNING
 			  "HiSax: %s config port %x-%x already in use\n",
 			       CardType[card->typ],
 			       cs->hw.ix1.cfg_reg,
 			       cs->hw.ix1.cfg_reg + 4);
 			return (0);
-		} else
-			request_region(cs->hw.ix1.cfg_reg, 4, "ix1micro cfg");
+		}
 	}
-	printk(KERN_INFO
-	       "HiSax: %s config irq:%d io:0x%X\n",
-	       CardType[cs->typ], cs->irq,
-	       cs->hw.ix1.cfg_reg);
-	ix1_reset(cs);
+	printk(KERN_INFO "HiSax: %s config irq:%d io:0x%X\n",
+		CardType[cs->typ], cs->irq, cs->hw.ix1.cfg_reg);
+	setup_isac(cs);
 	cs->readisac = &ReadISAC;
 	cs->writeisac = &WriteISAC;
 	cs->readisacfifo = &ReadISACfifo;

@@ -24,11 +24,11 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/errno.h>
@@ -36,7 +36,6 @@ static char *version =
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
-#include <asm/auxio.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
 
@@ -61,7 +60,7 @@ static char *version =
 #define for_each_socal(s) for (s = socals; s; s = s->next)
 struct socal *socals = NULL;
 
-static void socal_copy_from_xram(void *d, unsigned long xram, long size)
+static void socal_copy_from_xram(void *d, void __iomem *xram, long size)
 {
 	u32 *dp = (u32 *) d;
 	while (size) {
@@ -71,7 +70,7 @@ static void socal_copy_from_xram(void *d, unsigned long xram, long size)
 	}
 }
 
-static void socal_copy_to_xram(unsigned long xram, void *s, long size)
+static void socal_copy_to_xram(void __iomem *xram, void *s, long size)
 {
 	u32 *sp = (u32 *) s;
 	while (size) {
@@ -133,7 +132,7 @@ static void socal_reset(fc_channel *fc)
 	socal_enable(s);
 }
 
-static void inline socal_solicited(struct socal *s, unsigned long qno)
+static inline void socal_solicited(struct socal *s, unsigned long qno)
 {
 	socal_rsp *hwrsp;
 	socal_cq *sw_cq;
@@ -225,7 +224,7 @@ static void inline socal_solicited(struct socal *s, unsigned long qno)
 	}
 }
 
-static void inline socal_request (struct socal *s, u32 cmd)
+static inline void socal_request (struct socal *s, u32 cmd)
 {
 	SOCAL_SETIMASK(s, s->imask & ~(cmd & SOCAL_CMD_REQ_QALL));
 	SOD(("imask %08x %08x\n", s->imask, sbus_readl(s->regs + IMASK)));
@@ -242,7 +241,7 @@ static void inline socal_request (struct socal *s, u32 cmd)
 		s->curr_port ^= 1;
 }
 
-static void inline socal_unsolicited (struct socal *s, unsigned long qno)
+static inline void socal_unsolicited (struct socal *s, unsigned long qno)
 {
 	socal_rsp *hwrsp, *hwrspc;
 	socal_cq *sw_cq;
@@ -405,13 +404,13 @@ update_out:
 	}
 }
 
-static void socal_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t socal_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	u32 cmd;
 	unsigned long flags;
 	register struct socal *s = (struct socal *)dev_id;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(&s->lock, flags);
 	cmd = sbus_readl(s->regs + CMD);
 	for (; (cmd = SOCAL_INTR (s, cmd)); cmd = sbus_readl(s->regs + CMD)) {
 #ifdef SOCALDEBUG
@@ -428,7 +427,9 @@ static void socal_intr(int irq, void *dev_id, struct pt_regs *regs)
 		if (cmd & SOCAL_CMD_REQ_QALL)
 			socal_request (s, cmd);
 	}
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(&s->lock, flags);
+
+	return IRQ_HANDLED;
 }
 
 #define TOKEN(proto, port, token) (((proto)<<12)|(token)|(port))
@@ -667,20 +668,17 @@ static inline void socal_init(struct sbus_dev *sdev, int no)
 	s = kmalloc (sizeof (struct socal), GFP_KERNEL);
 	if (!s) return;
 	memset (s, 0, sizeof(struct socal));
+	spin_lock_init(&s->lock);
 	s->socal_no = no;
 
 	SOD(("socals %08lx socal_intr %08lx socal_hw_enque %08lx\n",
 	     (long)socals, (long)socal_intr, (long)socal_hw_enque))
 	if (version_printed++ == 0)
 		printk (version);
-#ifdef MODULE
-	s->port[0].fc.module = &__this_module;
-	s->port[1].fc.module = &__this_module;
-#else
-	s->port[0].fc.module = NULL;
-	s->port[1].fc.module = NULL;
-#endif
-	                                	
+
+	s->port[0].fc.module = THIS_MODULE;
+	s->port[1].fc.module = THIS_MODULE;
+                                	
 	s->next = socals;
 	socals = s;
 	s->port[0].fc.dev = sdev;
@@ -802,11 +800,11 @@ static inline void socal_init(struct sbus_dev *sdev, int no)
 	s->rsp[1].pool = s->rsp[0].pool + SOCAL_CQ_RSP0_SIZE;
 	s->rsp[2].pool = s->rsp[1].pool + SOCAL_CQ_RSP1_SIZE;
 	
-	s->req[0].hw_cq = (socal_hw_cq *)(s->xram + SOCAL_CQ_REQ_OFFSET);
-	s->req[1].hw_cq = (socal_hw_cq *)(s->xram + SOCAL_CQ_REQ_OFFSET + sizeof(socal_hw_cq));
-	s->rsp[0].hw_cq = (socal_hw_cq *)(s->xram + SOCAL_CQ_RSP_OFFSET);
-	s->rsp[1].hw_cq = (socal_hw_cq *)(s->xram + SOCAL_CQ_RSP_OFFSET + sizeof(socal_hw_cq));
-	s->rsp[2].hw_cq = (socal_hw_cq *)(s->xram + SOCAL_CQ_RSP_OFFSET + 2 * sizeof(socal_hw_cq));
+	s->req[0].hw_cq = (socal_hw_cq __iomem *)(s->xram + SOCAL_CQ_REQ_OFFSET);
+	s->req[1].hw_cq = (socal_hw_cq __iomem *)(s->xram + SOCAL_CQ_REQ_OFFSET + sizeof(socal_hw_cq));
+	s->rsp[0].hw_cq = (socal_hw_cq __iomem *)(s->xram + SOCAL_CQ_RSP_OFFSET);
+	s->rsp[1].hw_cq = (socal_hw_cq __iomem *)(s->xram + SOCAL_CQ_RSP_OFFSET + sizeof(socal_hw_cq));
+	s->rsp[2].hw_cq = (socal_hw_cq __iomem *)(s->xram + SOCAL_CQ_RSP_OFFSET + 2 * sizeof(socal_hw_cq));
 	
 	cq[1].address = cq[0].address + (SOCAL_CQ_REQ0_SIZE * sizeof(socal_req));
 	cq[4].address = cq[1].address + (SOCAL_CQ_REQ1_SIZE * sizeof(socal_req));
@@ -850,14 +848,10 @@ static inline void socal_init(struct sbus_dev *sdev, int no)
 	SOD(("Enabled SOCAL\n"))
 }
 
-#ifndef MODULE
-int __init socal_probe(void)
-#else
-int init_module(void)
-#endif
+static int __init socal_probe(void)
 {
 	struct sbus_bus *sbus;
-	struct sbus_dev *sdev = 0;
+	struct sbus_dev *sdev = NULL;
 	struct socal *s;
 	int cards = 0;
 
@@ -880,10 +874,7 @@ int init_module(void)
 	return 0;
 }
 
-EXPORT_NO_SYMBOLS;
-
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit socal_cleanup(void)
 {
 	struct socal *s;
 	int irq;
@@ -891,7 +882,6 @@ void cleanup_module(void)
 	
 	for_each_socal(s) {
 		irq = s->port[0].fc.irq;
-		disable_irq (irq);
 		free_irq (irq, s);
 
 		fcp_release(&(s->port[0].fc), 2);
@@ -910,4 +900,7 @@ void cleanup_module(void)
 				     s->req_cpu, s->req_dvma);
 	}
 }
-#endif
+
+module_init(socal_probe);
+module_exit(socal_cleanup);
+MODULE_LICENSE("GPL");

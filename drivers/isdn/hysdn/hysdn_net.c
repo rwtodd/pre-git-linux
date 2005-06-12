@@ -1,31 +1,18 @@
-/* $Id: hysdn_net.c,v 1.8 2000/11/13 22:51:47 kai Exp $
-
+/* $Id: hysdn_net.c,v 1.8.6.4 2001/09/23 22:24:54 kai Exp $
+ *
  * Linux driver for HYSDN cards, net (ethernet type) handling routines.
  *
- * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Author    Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Copyright 1999 by Werner Cornelius (werner@titro.de)
  *
- * Copyright 1999  by Werner Cornelius (werner@titro.de)
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * This net module has been inspired by the skeleton driver from
  * Donald Becker (becker@CESDIS.gsfc.nasa.gov)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/signal.h>
@@ -37,8 +24,11 @@
 
 #include "hysdn_defs.h"
 
+unsigned int hynet_enable = 0xffffffff; 
+MODULE_PARM(hynet_enable, "i");
+
 /* store the actual version for log reporting */
-char *hysdn_net_revision = "$Revision: 1.8 $";
+char *hysdn_net_revision = "$Revision: 1.8.6.4 $";
 
 #define MAX_SKB_BUFFERS 20	/* number of buffers for keeping TX-data */
 
@@ -63,8 +53,6 @@ struct net_local {
 	struct sk_buff *skbs[MAX_SKB_BUFFERS];	/* pointers to tx-skbs */
 	int in_idx, out_idx;	/* indexes to buffer ring */
 	int sk_count;		/* number of buffers currently in ring */
-
-	int is_open;		/* flag controlling module locking */
 };				/* net_local */
 
 
@@ -91,10 +79,6 @@ net_open(struct net_device *dev)
 	struct in_device *in_dev;
 	hysdn_card *card = dev->priv;
 	int i;
-
-	if (!((struct net_local *) dev)->is_open)
-		MOD_INC_USE_COUNT;	/* increment only if interface is actually down */
-	((struct net_local *) dev)->is_open = 1;	/* device actually open */
 
 	netif_start_queue(dev);	/* start tx-queueing */
 
@@ -140,9 +124,6 @@ net_close(struct net_device *dev)
 
 	netif_stop_queue(dev);	/* disable queueing */
 
-	if (((struct net_local *) dev)->is_open)
-		MOD_DEC_USE_COUNT;	/* adjust module counter */
-	((struct net_local *) dev)->is_open = 0;
 	flush_tx_buffers((struct net_local *) dev);
 
 	return (0);		/* success */
@@ -179,8 +160,7 @@ net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock_irq(&lp->lock);
 
 	if (lp->sk_count <= 3) {
-		queue_task(&((hysdn_card *) dev->priv)->irq_queue, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
+		schedule_work(&((hysdn_card *) dev->priv)->irq_queue);
 	}
 	return (0);		/* success */
 }				/* net_send_packet */
@@ -301,8 +281,7 @@ hysdn_net_create(hysdn_card * card)
 	hysdn_net_release(card);	/* release an existing net device */
 	if ((dev = kmalloc(sizeof(struct net_local), GFP_KERNEL)) == NULL) {
 		printk(KERN_WARNING "HYSDN: unable to allocate mem\n");
-		if (card->debug_flags & LOG_NET_INIT)
-			return (-ENOMEM);
+		return (-ENOMEM);
 	}
 	memset(dev, 0, sizeof(struct net_local));	/* clean the structure */
 
@@ -346,11 +325,11 @@ hysdn_net_release(hysdn_card * card)
 	flush_tx_buffers((struct net_local *) dev);	/* empty buffers */
 
 	unregister_netdev(dev);	/* release the device */
-	kfree(dev);		/* release the memory allocated */
+	free_netdev(dev);	/* release the memory allocated */
 	if (card->debug_flags & LOG_NET_INIT)
 		hysdn_addlog(card, "network device deleted");
 
-	return (0);		/* always successfull */
+	return (0);		/* always successful */
 }				/* hysdn_net_release */
 
 /*****************************************************************************/

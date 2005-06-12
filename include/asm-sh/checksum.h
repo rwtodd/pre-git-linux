@@ -10,6 +10,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/in6.h>
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -33,8 +34,8 @@ asmlinkage unsigned int csum_partial(const unsigned char * buff, int len, unsign
  * better 64-bit) boundary
  */
 
-asmlinkage unsigned int csum_partial_copy_generic( const char *src, char *dst, int len, int sum,
-						   int *src_err_ptr, int *dst_err_ptr);
+asmlinkage unsigned int csum_partial_copy_generic(const unsigned char *src, unsigned char *dst,
+						  int len, int sum, int *src_err_ptr, int *dst_err_ptr);
 
 /*
  *	Note: when you get a NULL pointer exception here this means someone
@@ -43,29 +44,19 @@ asmlinkage unsigned int csum_partial_copy_generic( const char *src, char *dst, i
  *	If you use these functions directly please don't forget the 
  *	verify_area().
  */
-extern __inline__
-unsigned int csum_partial_copy_nocheck ( const char *src, char *dst,
+static __inline__
+unsigned int csum_partial_copy_nocheck (const unsigned char *src, unsigned char *dst,
 					int len, int sum)
 {
 	return csum_partial_copy_generic ( src, dst, len, sum, NULL, NULL);
 }
 
-extern __inline__
-unsigned int csum_partial_copy_from_user ( const char *src, char *dst,
+static __inline__
+unsigned int csum_partial_copy_from_user (const unsigned char *src, unsigned char *dst,
 						int len, int sum, int *err_ptr)
 {
 	return csum_partial_copy_generic ( src, dst, len, sum, err_ptr, NULL);
 }
-
-/*
- * These are the old (and unsafe) way of doing checksums, a warning message will be
- * printed if they are used and an exeption occurs.
- *
- * these functions should go away after some time.
- */
-
-#define csum_partial_copy_fromuser csum_partial_copy
-unsigned int csum_partial_copy( const char *src, char *dst, int len, int sum);
 
 /*
  *	Fold a partial checksum
@@ -169,7 +160,6 @@ static __inline__ unsigned short ip_compute_csum(unsigned char * buff, int len)
 }
 
 #define _HAVE_ARCH_IPV6_CSUM
-#ifdef CONFIG_IPV6
 static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 						     struct in6_addr *daddr,
 						     __u32 len,
@@ -205,14 +195,15 @@ static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 
 	return csum_fold(sum);
 }
-#endif
 
 /* 
  *	Copy and checksum to user
  */
 #define HAVE_CSUM_COPY_USER
-static __inline__ unsigned int csum_and_copy_to_user (const char *src, char *dst,
-				    int len, int sum, int *err_ptr)
+static __inline__ unsigned int csum_and_copy_to_user (const unsigned char *src,
+						      unsigned char __user *dst,
+						      int len, int sum,
+						      int *err_ptr)
 {
 	if (access_ok(VERIFY_WRITE, dst, len))
 		return csum_partial_copy_generic(src, dst, len, sum, NULL, err_ptr);

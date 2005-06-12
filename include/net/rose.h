@@ -138,6 +138,8 @@ typedef struct {
 	struct sock		*sk;		/* Backlink to socket */
 } rose_cb;
 
+#define rose_sk(__sk) ((rose_cb *)(__sk)->sk_protinfo)
+
 /* af_rose.c */
 extern ax25_address rose_callsign;
 extern int  sysctl_rose_restart_request_timeout;
@@ -152,7 +154,7 @@ extern int  sysctl_rose_maximum_vcs;
 extern int  sysctl_rose_window_size;
 extern int  rosecmp(rose_address *, rose_address *);
 extern int  rosecmpm(rose_address *, rose_address *, unsigned short);
-extern char *rose2asc(rose_address *);
+extern const char *rose2asc(const rose_address *);
 extern struct sock *rose_find_socket(unsigned int, struct rose_neigh *);
 extern void rose_kill_by_neigh(struct rose_neigh *);
 extern unsigned int rose_new_lci(struct rose_neigh *);
@@ -160,23 +162,17 @@ extern int  rose_rx_call_request(struct sk_buff *, struct net_device *, struct r
 extern void rose_destroy_socket(struct sock *);
 
 /* rose_dev.c */
-extern int  rose_rx_ip(struct sk_buff *, struct net_device *);
-extern int  rose_init(struct net_device *);
+extern void  rose_setup(struct net_device *);
 
 /* rose_in.c */
 extern int  rose_process_rx_frame(struct sock *, struct sk_buff *);
 
 /* rose_link.c */
 extern void rose_start_ftimer(struct rose_neigh *);
-extern void rose_start_t0timer(struct rose_neigh *);
 extern void rose_stop_ftimer(struct rose_neigh *);
 extern void rose_stop_t0timer(struct rose_neigh *);
 extern int  rose_ftimer_running(struct rose_neigh *);
-extern int  rose_t0timer_running(struct rose_neigh *);
 extern void rose_link_rx_restart(struct sk_buff *, struct rose_neigh *, unsigned short);
-extern void rose_transmit_restart_request(struct rose_neigh *);
-extern void rose_transmit_restart_confirmation(struct rose_neigh *);
-extern void rose_transmit_diagnostic(struct rose_neigh *, unsigned char);
 extern void rose_transmit_clear_request(struct rose_neigh *, unsigned int, unsigned char, unsigned char);
 extern void rose_transmit_link(struct sk_buff *, struct rose_neigh *);
 
@@ -191,6 +187,9 @@ extern void rose_enquiry_response(struct sock *);
 
 /* rose_route.c */
 extern struct rose_neigh *rose_loopback_neigh;
+extern struct file_operations rose_neigh_fops;
+extern struct file_operations rose_nodes_fops;
+extern struct file_operations rose_routes_fops;
 
 extern int  rose_add_loopback_neigh(void);
 extern int  rose_add_loopback_node(rose_address *);
@@ -200,14 +199,10 @@ extern void rose_link_device_down(struct net_device *);
 extern struct net_device *rose_dev_first(void);
 extern struct net_device *rose_dev_get(rose_address *);
 extern struct rose_route *rose_route_free_lci(unsigned int, struct rose_neigh *);
-extern struct net_device *rose_ax25_dev_get(char *);
 extern struct rose_neigh *rose_get_neigh(rose_address *, unsigned char *, unsigned char *);
-extern int  rose_rt_ioctl(unsigned int, void *);
+extern int  rose_rt_ioctl(unsigned int, void __user *);
 extern void rose_link_failed(ax25_cb *, int);
 extern int  rose_route_frame(struct sk_buff *, ax25_cb *);
-extern int  rose_nodes_get_info(char *, char **, off_t, int);
-extern int  rose_neigh_get_info(char *, char **, off_t, int);
-extern int  rose_routes_get_info(char *, char **, off_t, int);
 extern void rose_rt_free(void);
 
 /* rose_subr.c */
@@ -218,7 +213,6 @@ extern int  rose_validate_nr(struct sock *, unsigned short);
 extern void rose_write_internal(struct sock *, int);
 extern int  rose_decode(struct sk_buff *, int *, int *, int *, int *, int *);
 extern int  rose_parse_facilities(unsigned char *, struct rose_facilities_struct *);
-extern int  rose_create_facilities(unsigned char *, rose_cb *);
 extern void rose_disconnect(struct sock *, int, int, int);
 
 /* rose_timer.c */

@@ -50,13 +50,14 @@ typedef struct {
 
 	igcsr32 bacsr10;		/* 0x40 - base address chip selects */
 	igcsr32 bacsr32;		/* 0x44 - base address chip selects */
-	igcsr32 bacsr54;		/* 0x48 - base address chip selects */
+	igcsr32 bacsr54_eccms761;	/* 0x48 - 751: base addr. chip selects
+						  761: ECC, mode/status */
 
 	igcsr32 rsrvd2[1];		/* 0x4C-0x4F reserved */
 
 	igcsr32 drammap;		/* 0x50 - address mapping control */
 	igcsr32 dramtm;			/* 0x54 - timing, driver strength */
-	igcsr32 dramms;			/* 0x58 - ECC, mode/status */
+	igcsr32 dramms;			/* 0x58 - DRAM mode/status */
 
 	igcsr32 rsrvd3[1];		/* 0x5C-0x5F reserved */
 
@@ -73,7 +74,10 @@ typedef struct {
 	igcsr32 pciarb;			/* 0x84 - PCI arbitration control */
 	igcsr32 pcicfg;			/* 0x88 - PCI config status */
 
-	igcsr32 rsrvd6[5];		/* 0x8C-0x9F reserved */
+	igcsr32 rsrvd6[4];		/* 0x8C-0x9B reserved */
+
+	igcsr32 pci_mem;		/* 0x9C - PCI top of memory,
+						  761 only */
 
 	/* AGP (bus 1) control registers */
 	igcsr32 agpcap;			/* 0xA0 - AGP Capability Identifier */
@@ -102,6 +106,7 @@ typedef struct {
 
 } Irongate1;
 
+extern igcsr32 *IronECC;
 
 /*
  * Memory spaces:
@@ -185,138 +190,37 @@ struct el_IRONGATE_sysdata_mcheck {
  * K7 can only use linear accesses to get at PCI memory and I/O spaces.
  */
 
-#define vucp	volatile unsigned char *
-#define vusp	volatile unsigned short *
-#define vuip	volatile unsigned int *
-#define vulp	volatile unsigned long *
-
-__EXTERN_INLINE unsigned int irongate_inb(unsigned long addr)
-{
-	return __kernel_ldbu(*(vucp)(addr + IRONGATE_IO));
-}
-
-__EXTERN_INLINE void irongate_outb(unsigned char b, unsigned long addr)
-{
-        __kernel_stb(b, *(vucp)(addr + IRONGATE_IO));
-	mb();
-}
-
-__EXTERN_INLINE unsigned int irongate_inw(unsigned long addr)
-{
-	return __kernel_ldwu(*(vusp)(addr + IRONGATE_IO));
-}
-
-__EXTERN_INLINE void irongate_outw(unsigned short b, unsigned long addr)
-{
-        __kernel_stw(b, *(vusp)(addr + IRONGATE_IO));
-	mb();
-}
-
-__EXTERN_INLINE unsigned int irongate_inl(unsigned long addr)
-{
-	return *(vuip)(addr + IRONGATE_IO);
-}
-
-__EXTERN_INLINE void irongate_outl(unsigned int b, unsigned long addr)
-{
-        *(vuip)(addr + IRONGATE_IO) = b;
-	mb();
-}
-
 /*
  * Memory functions.  All accesses are done through linear space.
  */
 
-__EXTERN_INLINE unsigned long irongate_readb(unsigned long addr)
+__EXTERN_INLINE void __iomem *irongate_ioportmap(unsigned long addr)
 {
-	return __kernel_ldbu(*(vucp)addr);
+	return (void __iomem *)(addr + IRONGATE_IO);
 }
 
-__EXTERN_INLINE unsigned long irongate_readw(unsigned long addr)
-{
-	return __kernel_ldwu(*(vusp)addr);
-}
-
-__EXTERN_INLINE unsigned long irongate_readl(unsigned long addr)
-{
-	return *(vuip)addr;
-}
-
-__EXTERN_INLINE unsigned long irongate_readq(unsigned long addr)
-{
-	return *(vulp)addr;
-}
-
-__EXTERN_INLINE void irongate_writeb(unsigned char b, unsigned long addr)
-{
-	__kernel_stb(b, *(vucp)addr);
-}
-
-__EXTERN_INLINE void irongate_writew(unsigned short b, unsigned long addr)
-{
-	__kernel_stw(b, *(vusp)addr);
-}
-
-__EXTERN_INLINE void irongate_writel(unsigned int b, unsigned long addr)
-{
-	*(vuip)addr = b;
-}
-
-__EXTERN_INLINE void irongate_writeq(unsigned long b, unsigned long addr)
-{
-	*(vulp)addr = b;
-}
-
-__EXTERN_INLINE unsigned long irongate_ioremap(unsigned long addr)
-{
-	return addr + IRONGATE_MEM;
-}
+extern void __iomem *irongate_ioremap(unsigned long addr, unsigned long size);
+extern void irongate_iounmap(volatile void __iomem *addr);
 
 __EXTERN_INLINE int irongate_is_ioaddr(unsigned long addr)
 {
 	return addr >= IRONGATE_MEM;
 }
 
-#undef vucp
-#undef vusp
-#undef vuip
-#undef vulp
+__EXTERN_INLINE int irongate_is_mmio(const volatile void __iomem *xaddr)
+{
+	unsigned long addr = (unsigned long)xaddr;
+	return addr < IRONGATE_IO || addr >= IRONGATE_CONF;
+}
 
-#ifdef __WANT_IO_DEF
-
-#define __inb(p)		irongate_inb((unsigned long)(p))
-#define __inw(p)		irongate_inw((unsigned long)(p))
-#define __inl(p)		irongate_inl((unsigned long)(p))
-#define __outb(x,p)		irongate_outb((x),(unsigned long)(p))
-#define __outw(x,p)		irongate_outw((x),(unsigned long)(p))
-#define __outl(x,p)		irongate_outl((x),(unsigned long)(p))
-#define __readb(a)		irongate_readb((unsigned long)(a))
-#define __readw(a)		irongate_readw((unsigned long)(a))
-#define __readl(a)		irongate_readl((unsigned long)(a))
-#define __readq(a)		irongate_readq((unsigned long)(a))
-#define __writeb(x,a)		irongate_writeb((x),(unsigned long)(a))
-#define __writew(x,a)		irongate_writew((x),(unsigned long)(a))
-#define __writel(x,a)		irongate_writel((x),(unsigned long)(a))
-#define __writeq(x,a)		irongate_writeq((x),(unsigned long)(a))
-#define __ioremap(a)		irongate_ioremap((unsigned long)(a))
-#define __is_ioaddr(a)		irongate_is_ioaddr((unsigned long)(a))
-
-#define inb(p)			__inb(p)
-#define inw(p)			__inw(p)
-#define inl(p)			__inl(p)
-#define outb(x,p)		__outb((x),(p))
-#define outw(x,p)		__outw((x),(p))
-#define outl(x,p)		__outl((x),(p))
-#define __raw_readb(a)		__readb(a)
-#define __raw_readw(a)		__readw(a)
-#define __raw_readl(a)		__readl(a)
-#define __raw_readq(a)		__readq(a)
-#define __raw_writeb(v,a)	__writeb((v),(a))
-#define __raw_writew(v,a)	__writew((v),(a))
-#define __raw_writel(v,a)	__writel((v),(a))
-#define __raw_writeq(v,a)	__writeq((v),(a))
-
-#endif /* __WANT_IO_DEF */
+#undef __IO_PREFIX
+#define __IO_PREFIX			irongate
+#define irongate_trivial_rw_bw		1
+#define irongate_trivial_rw_lq		1
+#define irongate_trivial_io_bw		1
+#define irongate_trivial_io_lq		1
+#define irongate_trivial_iounmap	0
+#include <asm/io_trivial.h>
 
 #ifdef __IO_EXTERN_INLINE
 #undef __EXTERN_INLINE

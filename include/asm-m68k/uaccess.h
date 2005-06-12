@@ -4,6 +4,7 @@
 /*
  * User space memory access functions
  */
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <asm/segment.h>
 
@@ -13,7 +14,7 @@
 /* We let the MMU do all checking */
 #define access_ok(type,addr,size) 1
 
-extern inline int verify_area(int type, const void * addr, unsigned long size)
+static inline int verify_area(int type, const void *addr, unsigned long size)
 {
 	return access_ok(type,addr,size)?0:-EFAULT;
 }
@@ -36,9 +37,6 @@ struct exception_table_entry
 	unsigned long insn, fixup;
 };
 
-/* Returns 0 if exception not found and fixup otherwise.  */
-extern unsigned long search_exception_table(unsigned long);
-
 
 /*
  * These are the main single-value transfer routines.  They automatically
@@ -59,6 +57,9 @@ extern unsigned long search_exception_table(unsigned long);
     case 4:						\
 	__put_user_asm(__pu_err, __pu_val, ptr, l);	\
 	break;						\
+    case 8:                                             \
+       __pu_err = __constant_copy_to_user(ptr, &__pu_val, 8);        \
+       break;                                           \
     default:						\
 	__pu_err = __put_user_bad();			\
 	break;						\
@@ -105,6 +106,9 @@ __asm__ __volatile__					\
     case 4:							\
 	__get_user_asm(__gu_err, __gu_val, ptr, l, "=r");	\
 	break;							\
+    case 8:                                                     \
+        __gu_err = __constant_copy_from_user(&__gu_val, ptr, 8);  \
+        break;                                                  \
     default:							\
 	__gu_val = 0;						\
 	__gu_err = __get_user_bad();				\
@@ -516,6 +520,9 @@ __constant_copy_from_user(void *to, const void *from, unsigned long n)
 	 : "=a"(to), "=a"(from), "=d"(n)		\
 	 : "0"(to), "1"(from), "2"(n/4)			\
 	 : "d0", "memory")
+
+#define __copy_to_user_inatomic __copy_to_user
+#define __copy_from_user_inatomic __copy_from_user
 
 static inline unsigned long
 __constant_copy_to_user(void *to, const void *from, unsigned long n)

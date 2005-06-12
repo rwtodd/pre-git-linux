@@ -7,6 +7,7 @@
 #ifndef _SPARC64_SBUS_H
 #define _SPARC64_SBUS_H
 
+#include <linux/dma-mapping.h>
 #include <linux/ioport.h>
 
 #include <asm/oplib.h>
@@ -27,12 +28,12 @@
  * numbers + offsets, and vice versa.
  */
 
-extern __inline__ unsigned long sbus_devaddr(int slotnum, unsigned long offset)
+static __inline__ unsigned long sbus_devaddr(int slotnum, unsigned long offset)
 {
   return (unsigned long) (SUN_SBUS_BVADDR+((slotnum)<<28)+(offset));
 }
 
-extern __inline__ int sbus_dev_slot(unsigned long dev_addr)
+static __inline__ int sbus_dev_slot(unsigned long dev_addr)
 {
   return (int) (((dev_addr)-SUN_SBUS_BVADDR)>>28);
 }
@@ -87,7 +88,8 @@ extern struct sbus_bus *sbus_root;
         for((device) = (bus)->devices; (device); (device)=(device)->next)
         
 #define for_all_sbusdev(device, bus) \
-	for((bus) = sbus_root, ((device) = (bus) ? (bus)->devices : 0); (bus); (device)=((device)->next ? (device)->next : ((bus) = (bus)->next, (bus) ? (bus)->devices : 0)))
+	for ((bus) = sbus_root; (bus); (bus) = (bus)->next) \
+		for ((device) = (bus)->devices; (device); (device) = (device)->next)
 
 /* Driver DVMA interfaces. */
 #define sbus_can_dma_64bit(sdev)	(1)
@@ -98,10 +100,10 @@ extern void sbus_set_sbus64(struct sbus_dev *, int);
 extern void *sbus_alloc_consistent(struct sbus_dev *, size_t, dma_addr_t *dma_addrp);
 extern void sbus_free_consistent(struct sbus_dev *, size_t, void *, dma_addr_t);
 
-#define SBUS_DMA_BIDIRECTIONAL	0
-#define SBUS_DMA_TODEVICE	1
-#define SBUS_DMA_FROMDEVICE	2
-#define	SBUS_DMA_NONE		3
+#define SBUS_DMA_BIDIRECTIONAL	DMA_BIDIRECTIONAL
+#define SBUS_DMA_TODEVICE	DMA_TO_DEVICE
+#define SBUS_DMA_FROMDEVICE	DMA_FROM_DEVICE
+#define	SBUS_DMA_NONE		DMA_NONE
 
 /* All the rest use streaming mode mappings. */
 extern dma_addr_t sbus_map_single(struct sbus_dev *, void *, size_t, int);
@@ -110,7 +112,11 @@ extern int sbus_map_sg(struct sbus_dev *, struct scatterlist *, int, int);
 extern void sbus_unmap_sg(struct sbus_dev *, struct scatterlist *, int, int);
 
 /* Finally, allow explicit synchronization of streamable mappings. */
-extern void sbus_dma_sync_single(struct sbus_dev *, dma_addr_t, size_t, int);
-extern void sbus_dma_sync_sg(struct sbus_dev *, struct scatterlist *, int, int);
+extern void sbus_dma_sync_single_for_cpu(struct sbus_dev *, dma_addr_t, size_t, int);
+#define sbus_dma_sync_single sbus_dma_sync_single_for_cpu
+extern void sbus_dma_sync_single_for_device(struct sbus_dev *, dma_addr_t, size_t, int);
+extern void sbus_dma_sync_sg_for_cpu(struct sbus_dev *, struct scatterlist *, int, int);
+#define sbus_dma_sync_sg sbus_dma_sync_sg_for_cpu
+extern void sbus_dma_sync_sg_for_device(struct sbus_dev *, struct scatterlist *, int, int);
 
 #endif /* !(_SPARC64_SBUS_H) */

@@ -3,8 +3,8 @@
 
 #include <asm/sigcontext.h>
 
-int restore_i387_soft(void *s387, struct _fpstate *buf);
-int save_i387_soft(void *s387, struct _fpstate * buf);
+int restore_i387_soft(void *s387, struct _fpstate __user *buf);
+int save_i387_soft(void *s387, struct _fpstate __user *buf);
 
 /* This structure matches the layout of the data saved to the stack
    following a device-not-present interrupt, part of it saved
@@ -12,7 +12,6 @@ int save_i387_soft(void *s387, struct _fpstate * buf);
    */
 struct info {
 	long ___orig_eip;
-	long ___ret_from_system_call;
 	long ___ebx;
 	long ___ecx;
 	long ___edx;

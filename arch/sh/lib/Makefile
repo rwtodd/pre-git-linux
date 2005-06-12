@@ -2,10 +2,12 @@
 # Makefile for SuperH-specific library files..
 #
 
-L_TARGET = lib.a
-obj-y  = delay.o memcpy.o memset.o memmove.o memchr.o old-checksum.o \
-	 checksum.o strcasecmp.o
+lib-y  = delay.o memset.o memmove.o memchr.o \
+	 checksum.o strcasecmp.o strlen.o div64.o udivdi3.o \
+	 div64-generic.o
 
-USE_STANDARD_AS_RULE := true
+memcpy-y			:= memcpy.o
+memcpy-$(CONFIG_CPU_SH4)	:= memcpy-sh4.o
 
-include $(TOPDIR)/Rules.make
+lib-y	+= $(memcpy-y)
+

@@ -1,43 +1,31 @@
 /* $Id: lmc_media.c,v 1.13 2000/04/11 05:25:26 asj Exp $ */
 
-#include <linux/version.h>
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
-#include <asm/segment.h>
-//#include <asm/smp.h>
-
-#if LINUX_VERSION_CODE < 0x20155
-#include <linux/bios32.h>
-#endif
-
 #include <linux/in.h>
 #include <linux/if_arp.h>
-#include <asm/processor.h>             /* Processor type for cache alignment. */
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include "../syncppp.h"
 #include <linux/inet.h>
+#include <linux/bitops.h>
 
-#if LINUX_VERSION_CODE >= 0x20200
+#include <net/syncppp.h>
+
+#include <asm/processor.h>             /* Processor type for cache alignment. */
+#include <asm/io.h>
+#include <asm/dma.h>
+
 #include <asm/uaccess.h>
-//#include <asm/spinlock.h>
-#endif
 
-#include "lmc_ver.h"
 #include "lmc.h"
 #include "lmc_var.h"
 #include "lmc_ioctl.h"
@@ -56,7 +44,7 @@
   * Matt Thomas (matt@3am-software.com).
   *
   * This software may be used and distributed according to the terms
-  * of the GNU Public License version 2, incorporated herein by reference.
+  * of the GNU General Public License version 2, incorporated herein by reference.
   */
 
 /*

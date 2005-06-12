@@ -12,11 +12,11 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/smp_lock.h>
+#include <linux/spinlock.h>
 #include <linux/timer.h>
 #include <linux/ioport.h>
 #include <linux/major.h>
@@ -27,7 +27,6 @@
 
 #if defined(__i386__)
 # include <asm/system.h>
-# include <asm/segment.h>
 #endif
 
 #if defined(__sparc__)
@@ -90,12 +89,12 @@ static struct inst instances[BPP_NO];
 
 #if defined(__i386__)
 
-const unsigned short base_addrs[BPP_NO] = { 0x278, 0x378, 0x3bc };
+static const unsigned short base_addrs[BPP_NO] = { 0x278, 0x378, 0x3bc };
 
 /*
  * These are for data access.
  * Control lines accesses are hidden in set_bits() and get_bits().
- * The exeption is the probe procedure, which is system-dependent.
+ * The exception is the probe procedure, which is system-dependent.
  */
 #define bpp_outb_p(data, base)  outb_p((data), (base))
 #define bpp_inb(base)  inb(base)
@@ -247,7 +246,7 @@ static unsigned short get_pins(unsigned minor)
 #define P_ERR_IRP       0x0002      /* RW1  1= rising edge */
 #define P_ERR_IRQ_EN    0x0001      /* RW   */
 
-unsigned long base_addrs[BPP_NO];
+static void __iomem *base_addrs[BPP_NO];
 
 #define bpp_outb_p(data, base)	sbus_writeb(data, (base) + BPP_DR)
 #define bpp_inb_p(base)		sbus_readb((base) + BPP_DR)
@@ -255,7 +254,7 @@ unsigned long base_addrs[BPP_NO];
 
 static void set_pins(unsigned short pins, unsigned minor)
 {
-      unsigned long base = base_addrs[minor];
+      void __iomem *base = base_addrs[minor];
       unsigned char bits_tcr = 0, bits_or = 0;
 
       if (instances[minor].direction & 0x20) bits_tcr |= P_TCR_DIR;
@@ -276,7 +275,7 @@ static void set_pins(unsigned short pins, unsigned minor)
  */
 static unsigned short get_pins(unsigned minor)
 {
-      unsigned long base = base_addrs[minor];
+      void __iomem *base = base_addrs[minor];
       unsigned short bits = 0;
       unsigned value_tcr = sbus_readb(base + BPP_TCR);
       unsigned value_ir = sbus_readb(base + BPP_IR);
@@ -303,6 +302,7 @@ static void bpp_wake_up(unsigned long val)
 
 static void snooze(unsigned long snooze_time, unsigned minor)
 {
+      init_timer(&instances[minor].timer_list);
       instances[minor].timer_list.expires = jiffies + snooze_time + 1;
       instances[minor].timer_list.data    = minor;
       add_timer(&instances[minor].timer_list);
@@ -432,20 +432,33 @@ static int terminate(unsigned minor)
       return 0;
 }
 
+static DEFINE_SPINLOCK(bpp_open_lock);
 
 /*
  * Allow only one process to open the device at a time.
  */
 static int bpp_open(struct inode *inode, struct file *f)
 {
-      unsigned minor = MINOR(inode->i_rdev);
-      if (minor >= BPP_NO) return -ENODEV;
-      if (! instances[minor].present) return -ENODEV;
-      if (instances[minor].opened) return -EBUSY;
+      unsigned minor = iminor(inode);
+      int ret;
 
-      instances[minor].opened = 1;
+      spin_lock(&bpp_open_lock);
+      ret = 0;
+      if (minor >= BPP_NO) {
+	      ret = -ENODEV;
+      } else {
+	      if (! instances[minor].present) {
+		      ret = -ENODEV;
+	      } else {
+		      if (instances[minor].opened) 
+			      ret = -EBUSY;
+		      else
+			      instances[minor].opened = 1;
+	      }
+      }
+      spin_unlock(&bpp_open_lock);
 
-      return 0;
+      return ret;
 }
 
 /*
@@ -456,18 +469,20 @@ static int bpp_open(struct inode *inode, struct file *f)
  */
 static int bpp_release(struct inode *inode, struct file *f)
 {
-      unsigned minor = MINOR(inode->i_rdev);
+      unsigned minor = iminor(inode);
 
-      lock_kernel();
+      spin_lock(&bpp_open_lock);
       instances[minor].opened = 0;
 
       if (instances[minor].mode != COMPATIBILITY)
-      terminate(minor);
-      unlock_kernel();
+	      terminate(minor);
+
+      spin_unlock(&bpp_open_lock);
+
       return 0;
 }
 
-static long read_nibble(unsigned minor, char *c, unsigned long cnt)
+static long read_nibble(unsigned minor, char __user *c, unsigned long cnt)
 {
       unsigned long remaining = cnt;
       long rc;
@@ -520,7 +535,7 @@ static long read_nibble(unsigned minor, char *c, unsigned long cnt)
       return cnt - remaining;
 }
 
-static long read_ecp(unsigned minor, char *c, unsigned long cnt)
+static long read_ecp(unsigned minor, char __user *c, unsigned long cnt)
 {
       unsigned long remaining;
       long rc;
@@ -615,10 +630,10 @@ static long read_ecp(unsigned minor, char *c, unsigned long cnt)
       return cnt - remaining;
 }
 
-static ssize_t bpp_read(struct file *f, char *c, size_t cnt, loff_t * ppos)
+static ssize_t bpp_read(struct file *f, char __user *c, size_t cnt, loff_t * ppos)
 {
       long rc;
-      const unsigned minor = MINOR(f->f_dentry->d_inode->i_rdev);
+      unsigned minor = iminor(f->f_dentry->d_inode);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -677,7 +692,7 @@ static ssize_t bpp_read(struct file *f, char *c, size_t cnt, loff_t * ppos)
  * Compatibility mode handshaking is a matter of writing data,
  * strobing it, and waiting for the printer to stop being busy.
  */
-static long write_compat(unsigned minor, const char *c, unsigned long cnt)
+static long write_compat(unsigned minor, const char __user *c, unsigned long cnt)
 {
       long rc;
       unsigned short pins = get_pins(minor);
@@ -715,7 +730,7 @@ static long write_compat(unsigned minor, const char *c, unsigned long cnt)
  * Write data using ECP mode. Watch out that the port may be set up
  * for reading. If so, turn the port around.
  */
-static long write_ecp(unsigned minor, const char *c, unsigned long cnt)
+static long write_ecp(unsigned minor, const char __user *c, unsigned long cnt)
 {
       unsigned short pins = get_pins(minor);
       unsigned long remaining = cnt;
@@ -768,10 +783,10 @@ static long write_ecp(unsigned minor, const char *c, unsigned long cnt)
  * that. Otherwise, terminate and do my writing in compat mode. This
  * is the safest course as any device can handle it.
  */
-static ssize_t bpp_write(struct file *f, const char *c, size_t cnt, loff_t * ppos)
+static ssize_t bpp_write(struct file *f, const char __user *c, size_t cnt, loff_t * ppos)
 {
       long errno = 0;
-      const unsigned minor = MINOR(f->f_dentry->d_inode->i_rdev);
+      unsigned minor = iminor(f->f_dentry->d_inode);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -797,7 +812,7 @@ static int bpp_ioctl(struct inode *inode, struct file *f, unsigned int cmd,
 {
       int errno = 0;
 
-      unsigned minor = MINOR(inode->i_rdev);
+      unsigned minor = iminor(inode);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -844,12 +859,12 @@ static int bpp_ioctl(struct inode *inode, struct file *f, unsigned int cmd,
 }
 
 static struct file_operations bpp_fops = {
-	owner:		THIS_MODULE,
-	read:		bpp_read,
-	write:		bpp_write,
-	ioctl:		bpp_ioctl,
-	open:		bpp_open,
-	release:	bpp_release,
+	.owner =	THIS_MODULE,
+	.read =		bpp_read,
+	.write =	bpp_write,
+	.ioctl =	bpp_ioctl,
+	.open =		bpp_open,
+	.release =	bpp_release,
 };
 
 #if defined(__i386__)
@@ -870,7 +885,7 @@ static void probeLptPort(unsigned idx)
       instances[idx].run_flag = 0;
       init_timer(&instances[idx].timer_list);
       instances[idx].timer_list.function = bpp_wake_up;
-      if (check_region(lpAddr,3)) return;
+      if (!request_region(lpAddr,3, dev_name)) return;
 
       /*
        * First, make sure the instance exists. Do this by writing to
@@ -888,7 +903,6 @@ static void probeLptPort(unsigned idx)
             unsigned save;
             instances[idx].present = 1;
 
-            request_region(lpAddr,3, dev_name);
             save = inb_p(lpAddr+2);
             for (testvalue=0; testvalue<BPP_DELAY; testvalue++)
                   ;
@@ -905,7 +919,9 @@ static void probeLptPort(unsigned idx)
                   instances[idx].enhanced = 1;
             outb_p(save, lpAddr+2);
       }
-
+      else {
+            release_region(lpAddr,3);
+      }
       /*
        * Leave the port in compat idle mode.
        */
@@ -924,7 +940,7 @@ static inline void freeLptPort(int idx)
 
 #if defined(__sparc__)
 
-static unsigned long map_bpp(struct sbus_dev *dev, int idx)
+static void __iomem *map_bpp(struct sbus_dev *dev, int idx)
 {
       return sbus_ioremap(&dev->resource[0], 0, BPP_SIZE, "bpp");
 }
@@ -953,7 +969,7 @@ static int collectLptPorts(void)
 
 static void probeLptPort(unsigned idx)
 {
-      unsigned long rp = base_addrs[idx];
+      void __iomem *rp = base_addrs[idx];
       __u32 csr;
       char *brand;
 
@@ -967,7 +983,7 @@ static void probeLptPort(unsigned idx)
       init_timer(&instances[idx].timer_list);
       instances[idx].timer_list.function = bpp_wake_up;
 
-      if (rp == 0) return;
+      if (!rp) return;
 
       instances[idx].present = 1;
       instances[idx].enhanced = 1;   /* Sure */
@@ -998,7 +1014,7 @@ static void probeLptPort(unsigned idx)
       default:
             brand = "Unknown";
       }
-      printk("bpp%d: %s at 0x%lx\n", idx, brand, rp);
+      printk("bpp%d: %s at %p\n", idx, brand, rp);
 
       /*
        * Leave the port in compat idle mode.
@@ -1015,8 +1031,6 @@ static inline void freeLptPort(int idx)
 
 #endif
 
-static devfs_handle_t devfs_handle;
-
 static int __init bpp_init(void)
 {
 	int rc;
@@ -1026,18 +1040,19 @@ static int __init bpp_init(void)
 	if (rc == 0)
 		return -ENODEV;
 
-	rc = devfs_register_chrdev(BPP_MAJOR, dev_name, &bpp_fops);
+	rc = register_chrdev(BPP_MAJOR, dev_name, &bpp_fops);
 	if (rc < 0)
 		return rc;
 
-	for (idx = 0; idx < BPP_NO; idx += 1) {
+	for (idx = 0; idx < BPP_NO; idx++) {
 		instances[idx].opened = 0;
 		probeLptPort(idx);
 	}
-	devfs_handle = devfs_mk_dir (NULL, "bpp", NULL);
-	devfs_register_series (devfs_handle, "%u", BPP_NO, DEVFS_FL_DEFAULT,
-			       BPP_MAJOR, 0, S_IFCHR | S_IRUSR | S_IWUSR,
-			       &bpp_fops, NULL);
+	devfs_mk_dir("bpp");
+	for (idx = 0; idx < BPP_NO; idx++) {
+		devfs_mk_cdev(MKDEV(BPP_MAJOR, idx),
+				S_IFCHR | S_IRUSR | S_IWUSR, "bpp/%d", idx);
+	}
 
 	return 0;
 }
@@ -1046,10 +1061,12 @@ static void __exit bpp_cleanup(void)
 {
 	unsigned idx;
 
-	devfs_unregister (devfs_handle);
-	devfs_unregister_chrdev(BPP_MAJOR, dev_name);
+	for (idx = 0; idx < BPP_NO; idx++)
+		devfs_remove("bpp/%d", idx);
+	devfs_remove("bpp");
+	unregister_chrdev(BPP_MAJOR, dev_name);
 
-	for (idx = 0 ;  idx < BPP_NO ;  idx += 1) {
+	for (idx = 0;  idx < BPP_NO; idx++) {
 		if (instances[idx].present)
 			freeLptPort(idx);
 	}
@@ -1057,3 +1074,6 @@ static void __exit bpp_cleanup(void)
 
 module_init(bpp_init);
 module_exit(bpp_cleanup);
+
+MODULE_LICENSE("GPL");
+

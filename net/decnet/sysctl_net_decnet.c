@@ -9,6 +9,7 @@
  *
  *
  * Changes:
+ * Steve Whitehouse - C99 changes and default device handling
  *
  */
 #include <linux/config.h>
@@ -19,6 +20,7 @@
 #include <linux/string.h>
 #include <net/neighbour.h>
 #include <net/dst.h>
+#include <net/flow.h>
 
 #include <asm/uaccess.h>
 
@@ -27,12 +29,13 @@
 #include <net/dn_route.h>
 
 
-int decnet_debug_level = 0;
+int decnet_debug_level;
 int decnet_time_wait = 30;
 int decnet_dn_count = 1;
 int decnet_di_count = 3;
 int decnet_dr_count = 3;
 int decnet_log_martians = 1;
+int decnet_no_fc_max_cwnd = NSP_MIN_WINDOW;
 
 #ifdef CONFIG_SYSCTL
 extern int decnet_dst_gc_interval;
@@ -42,6 +45,8 @@ static int min_state_count[] = { 1 };
 static int max_state_count[] = { NSP_MAXRXTSHIFT };
 static int min_decnet_dst_gc_interval[] = { 1 };
 static int max_decnet_dst_gc_interval[] = { 60 };
+static int min_decnet_no_fc_max_cwnd[] = { NSP_MIN_WINDOW };
+static int max_decnet_no_fc_max_cwnd[] = { NSP_MAX_WINDOW };
 static char node_name[7] = "???";
 
 static struct ctl_table_header *dn_table_header = NULL;
@@ -122,12 +127,12 @@ static int parse_addr(dn_address *addr, char *str)
 }
 
 
-static int dn_node_address_strategy(ctl_table *table, int *name, int nlen,
-				void *oldval, size_t *oldlenp,
-				void *newval, size_t newlen,
+static int dn_node_address_strategy(ctl_table *table, int __user *name, int nlen,
+				void __user *oldval, size_t __user *oldlenp,
+				void __user *newval, size_t newlen,
 				void **context)
 {
-	int len;
+	size_t len;
 	dn_address addr;
 
 	if (oldval && oldlenp) {
@@ -136,20 +141,19 @@ static int dn_node_address_strategy(ctl_table *table, int *name, int nlen,
 		if (len) {
 			if (len != sizeof(unsigned short))
 				return -EINVAL;
-			if (put_user(decnet_address, (unsigned short *)oldval))
+			if (put_user(decnet_address, (unsigned short __user *)oldval))
 				return -EFAULT;
 		}
 	}
 	if (newval && newlen) {
 		if (newlen != sizeof(unsigned short))
 			return -EINVAL;
-		if (get_user(addr, (unsigned short *)newval))
+		if (get_user(addr, (unsigned short __user *)newval))
 			return -EFAULT;
 
 		dn_dev_devices_off();
 
 		decnet_address = addr;
-		dn_dn2eth(decnet_ether_address, dn_ntohs(decnet_address));
 
 		dn_dev_devices_on();
 	}
@@ -158,13 +162,14 @@ static int dn_node_address_strategy(ctl_table *table, int *name, int nlen,
 
 static int dn_node_address_handler(ctl_table *table, int write, 
 				struct file *filp,
-				void *buffer, size_t *lenp)
+				void __user *buffer,
+				size_t *lenp, loff_t *ppos)
 {
 	char addr[DN_ASCBUF_LEN];
-	int len;
+	size_t len;
 	dn_address dnaddr;
 
-	if (!*lenp || (filp->f_pos && !write)) {
+	if (!*lenp || (*ppos && !write)) {
 		*lenp = 0;
 		return 0;
 	}
@@ -184,11 +189,10 @@ static int dn_node_address_handler(ctl_table *table, int write,
 		dn_dev_devices_off();
 
 		decnet_address = dnaddr;
-		dn_dn2eth(decnet_ether_address, dn_ntohs(decnet_address));
 
 		dn_dev_devices_on();
 
-		filp->f_pos += len;
+		*ppos += len;
 
 		return 0;
 	}
@@ -203,21 +207,22 @@ static int dn_node_address_handler(ctl_table *table, int write,
 		return -EFAULT;
 
 	*lenp = len;
-	filp->f_pos += len;
+	*ppos += len;
 
 	return 0;
 }
 
 
-static int dn_def_dev_strategy(ctl_table *table, int *name, int nlen,
-				void *oldval, size_t *oldlenp,
-				void *newval, size_t newlen,
+static int dn_def_dev_strategy(ctl_table *table, int __user *name, int nlen,
+				void __user *oldval, size_t __user *oldlenp,
+				void __user *newval, size_t newlen,
 				void **context)
 {
 	size_t len;
-	struct net_device *dev = decnet_default_device;
+	struct net_device *dev;
 	char devname[17];
 	size_t namel;
+	int rv = 0;
 
 	devname[0] = 0;
 
@@ -225,8 +230,11 @@ static int dn_def_dev_strategy(ctl_table *table, int *name, int nlen,
 		if (get_user(len, oldlenp))
 			return -EFAULT;
 		if (len) {
-			if (dev)
+			dev = dn_dev_get_default();
+			if (dev) {
 				strcpy(devname, dev->name);
+				dev_put(dev);
+			}
 
 			namel = strlen(devname) + 1;
 			if (len > namel) len = namel;	
@@ -248,28 +256,32 @@ static int dn_def_dev_strategy(ctl_table *table, int *name, int nlen,
 
 		devname[newlen] = 0;
 
-		if ((dev = __dev_get_by_name(devname)) == NULL)
+		dev = dev_get_by_name(devname);
+		if (dev == NULL)
 			return -ENODEV;
 
-		if (dev->dn_ptr == NULL)
-			return -ENODEV;
-
-		decnet_default_device = dev;
+		rv = -ENODEV;
+		if (dev->dn_ptr != NULL) {
+			rv = dn_dev_set_default(dev, 1);
+			if (rv)
+				dev_put(dev);
+		}
 	}
 
-	return 0;
+	return rv;
 }
 
 
 static int dn_def_dev_handler(ctl_table *table, int write, 
 				struct file * filp,
-				void *buffer, size_t *lenp)
+				void __user *buffer,
+				size_t *lenp, loff_t *ppos)
 {
-	int len;
-	struct net_device *dev = decnet_default_device;
+	size_t len;
+	struct net_device *dev;
 	char devname[17];
 
-	if (!*lenp || (filp->f_pos && !write)) {
+	if (!*lenp || (*ppos && !write)) {
 		*lenp = 0;
 		return 0;
 	}
@@ -284,24 +296,32 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 		devname[*lenp] = 0;
 		strip_it(devname);
 
-		if ((dev = __dev_get_by_name(devname)) == NULL)
+		dev = dev_get_by_name(devname);
+		if (dev == NULL)
 			return -ENODEV;
 
-		if (dev->dn_ptr == NULL)
+		if (dev->dn_ptr == NULL) {
+			dev_put(dev);
 			return -ENODEV;
+		}
 
-		decnet_default_device = dev;
-		filp->f_pos += *lenp;
+		if (dn_dev_set_default(dev, 1)) {
+			dev_put(dev);
+			return -ENODEV;
+		}
+		*ppos += *lenp;
 
 		return 0;
 	}
 
+	dev = dn_dev_get_default();
 	if (dev == NULL) {
 		*lenp = 0;
 		return 0;
 	}
 
 	strcpy(devname, dev->name);
+	dev_put(dev);
 	len = strlen(devname);
 	devname[len++] = '\n';
 
@@ -311,53 +331,131 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 		return -EFAULT;
 
 	*lenp = len;
-	filp->f_pos += len;
+	*ppos += len;
 
 	return 0;
 }
 
 static ctl_table dn_table[] = {
-	{NET_DECNET_NODE_ADDRESS, "node_address", NULL, 7, 0644, NULL,
-	dn_node_address_handler, dn_node_address_strategy, NULL,
-	NULL, NULL},
-	{NET_DECNET_NODE_NAME, "node_name", node_name, 7, 0644, NULL,
-	&proc_dostring, &sysctl_string, NULL, NULL, NULL},
-	{NET_DECNET_DEFAULT_DEVICE, "default_device", NULL, 16, 0644, NULL,
-	dn_def_dev_handler, dn_def_dev_strategy, NULL, NULL, NULL},
-	{NET_DECNET_TIME_WAIT, "time_wait", &decnet_time_wait,
-	sizeof(int), 0644,
-	NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	&min_decnet_time_wait, &max_decnet_time_wait},
-	{NET_DECNET_DN_COUNT, "dn_count", &decnet_dn_count,
-	sizeof(int), 0644,
-	NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	&min_state_count, &max_state_count},
-	{NET_DECNET_DI_COUNT, "di_count", &decnet_di_count,
-	sizeof(int), 0644,
-	NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	&min_state_count, &max_state_count},
-	{NET_DECNET_DR_COUNT, "dr_count", &decnet_dr_count,
-	sizeof(int), 0644,
-	NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	&min_state_count, &max_state_count},
-	{NET_DECNET_DST_GC_INTERVAL, "dst_gc_interval", &decnet_dst_gc_interval,
-	sizeof(int), 0644,
-	NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	&min_decnet_dst_gc_interval, &max_decnet_dst_gc_interval},
-	{NET_DECNET_DEBUG_LEVEL, "debug", &decnet_debug_level, 
-	sizeof(int), 0644, 
-	NULL, &proc_dointvec, &sysctl_intvec, NULL,
-	NULL, NULL},
+	{
+		.ctl_name = NET_DECNET_NODE_ADDRESS, 
+		.procname = "node_address", 
+		.maxlen = 7, 
+		.mode = 0644, 
+		.proc_handler = dn_node_address_handler,
+		.strategy = dn_node_address_strategy,
+	},
+	{
+		.ctl_name = NET_DECNET_NODE_NAME,
+		.procname = "node_name",
+		.data = node_name, 
+		.maxlen = 7,
+		.mode = 0644,
+		.proc_handler = &proc_dostring,
+		.strategy = &sysctl_string,
+	},
+	{
+		.ctl_name = NET_DECNET_DEFAULT_DEVICE,
+		.procname = "default_device", 
+		.maxlen = 16, 
+		.mode = 0644,
+		.proc_handler = dn_def_dev_handler,
+		.strategy = dn_def_dev_strategy,
+	},
+	{
+		.ctl_name = NET_DECNET_TIME_WAIT,
+		.procname = "time_wait",
+		.data = &decnet_time_wait,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec_minmax,
+		.strategy = &sysctl_intvec,
+		.extra1 = &min_decnet_time_wait,
+		.extra2 = &max_decnet_time_wait
+	},
+	{
+		.ctl_name = NET_DECNET_DN_COUNT,
+		.procname = "dn_count",
+		.data = &decnet_dn_count,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec_minmax,
+		.strategy = &sysctl_intvec,
+		.extra1 = &min_state_count,
+		.extra2 = &max_state_count
+	},
+	{
+		.ctl_name = NET_DECNET_DI_COUNT,
+		.procname = "di_count",
+		.data = &decnet_di_count,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec_minmax,
+		.strategy = &sysctl_intvec,
+		.extra1 = &min_state_count,
+		.extra2 = &max_state_count
+	},
+	{
+		.ctl_name = NET_DECNET_DR_COUNT,
+		.procname = "dr_count",
+		.data = &decnet_dr_count,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec_minmax,
+		.strategy = &sysctl_intvec,
+		.extra1 = &min_state_count,
+		.extra2 = &max_state_count
+	},
+	{
+		.ctl_name = NET_DECNET_DST_GC_INTERVAL,
+		.procname = "dst_gc_interval",
+		.data = &decnet_dst_gc_interval,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec_minmax,
+		.strategy = &sysctl_intvec,
+		.extra1 = &min_decnet_dst_gc_interval,
+		.extra2 = &max_decnet_dst_gc_interval
+	},
+	{
+		.ctl_name = NET_DECNET_NO_FC_MAX_CWND,
+		.procname = "no_fc_max_cwnd",
+		.data = &decnet_no_fc_max_cwnd,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec_minmax,
+		.strategy = &sysctl_intvec,
+		.extra1 = &min_decnet_no_fc_max_cwnd,
+		.extra2 = &max_decnet_no_fc_max_cwnd
+	},
+	{
+		.ctl_name = NET_DECNET_DEBUG_LEVEL,
+		.procname = "debug",
+		.data = &decnet_debug_level,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec,
+		.strategy = &sysctl_intvec,
+	},
 	{0}
 };
 
 static ctl_table dn_dir_table[] = {
-	{NET_DECNET, "decnet", NULL, 0, 0555, dn_table},
+	{
+		.ctl_name = NET_DECNET, 
+		.procname = "decnet", 
+		.mode = 0555, 
+		.child = dn_table},
 	{0}
 };
 
 static ctl_table dn_root_table[] = {
-	{CTL_NET, "net", NULL, 0, 0555, dn_dir_table},
+	{
+		.ctl_name = CTL_NET, 
+		.procname = "net", 
+		.mode = 0555, 
+		.child = dn_dir_table
+	},
 	{0}
 };
 

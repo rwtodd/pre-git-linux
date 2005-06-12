@@ -6,11 +6,10 @@
     Director, National Security Agency.
 
     This software may be used and distributed according to the terms
-    of the GNU Public License, incorporated herein by reference.
+    of the GNU General Public License, incorporated herein by reference.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-        Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+    Scyld Computing Corporation, 410 Severn Ave., Suite 210, Annapolis MD 21403
 
     This driver should work with many programmed-I/O 8390-based ethernet
     boards.  Currently it supports the NE1000, NE2000, many clones,
@@ -30,6 +29,7 @@
     last in cleanup_modue()
     Richard Guenther    : Added support for ISAPnP cards
     Paul Gortmaker	: Discontinued PCI support - use ne2k-pci.c instead.
+    Hayato Fujiwara	: Add m32r support.
 
 */
 
@@ -43,17 +43,20 @@ static const char version2[] =
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/isapnp.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+
 #include <asm/system.h>
 #include <asm/io.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
 #include "8390.h"
+
+#define DRV_NAME "ne"
 
 /* Some defines that people can play with if so inclined. */
 
@@ -76,12 +79,20 @@ static unsigned int netcard_portlist[] __initdata = {
 };
 #endif
 
-static struct { unsigned short vendor, function; char *name; }
-isapnp_clone_list[] __initdata = {
-	{ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),		"NN NE2000" },
-	{ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),		"Generic PNP" },
-	{0,}
+static struct isapnp_device_id isapnp_clone_list[] __initdata = {
+	{	ISAPNP_CARD_ID('A','X','E',0x2011),
+		ISAPNP_VENDOR('A','X','E'), ISAPNP_FUNCTION(0x2011),
+		(long) "NetGear EA201" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),
+		(long) "NN NE2000" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),
+		(long) "Generic PNP" },
+	{ }	/* terminate list */
 };
+
+MODULE_DEVICE_TABLE(isapnp, isapnp_clone_list);
 
 #ifdef SUPPORT_NE_BAD_CLONES
 /* A list of bad clones that we none-the-less recognize. */
@@ -101,7 +112,7 @@ bad_clone_list[] __initdata = {
     {"PCM-4823", "PCM-4823", {0x00, 0xc0, 0x6c}}, /* Broken Advantech MoBo */
     {"REALTEK", "RTL8019", {0x00, 0x00, 0xe8}}, /* no-name with Realtek chip */
     {"LCS-8834", "LCS-8836", {0x04, 0x04, 0x37}}, /* ShinyNet (SET) */
-    {0,}
+    {NULL,}
 };
 #endif
 
@@ -118,7 +129,14 @@ bad_clone_list[] __initdata = {
 #define NESM_START_PG	0x40	/* First page of TX buffer */
 #define NESM_STOP_PG	0x80	/* Last page +1 of RX ring */
 
-int ne_probe(struct net_device *dev);
+#ifdef CONFIG_PLAT_MAPPI
+#  define DCR_VAL 0x4b
+#elif CONFIG_PLAT_OAKS32R
+#  define DCR_VAL 0x48
+#else
+#  define DCR_VAL 0x49
+#endif
+
 static int ne_probe1(struct net_device *dev, int ioaddr);
 static int ne_probe_isapnp(struct net_device *dev);
 
@@ -155,9 +173,12 @@ static void ne_block_output(struct net_device *dev, const int count,
 	E2010	 starts at 0x100 and ends at 0x4000.
 	E2010-x starts at 0x100 and ends at 0xffff.  */
 
-int __init ne_probe(struct net_device *dev)
+static int __init do_ne_probe(struct net_device *dev)
 {
 	unsigned int base_addr = dev->base_addr;
+#ifndef MODULE
+	int orig_irq = dev->irq;
+#endif
 
 	SET_MODULE_OWNER(dev);
 
@@ -175,6 +196,7 @@ int __init ne_probe(struct net_device *dev)
 	/* Last resort. The semi-risky ISA auto-probe. */
 	for (base_addr = 0; netcard_portlist[base_addr] != 0; base_addr++) {
 		int ioaddr = netcard_portlist[base_addr];
+		dev->irq = orig_irq;
 		if (ne_probe1(dev, ioaddr) == 0)
 			return 0;
 	}
@@ -183,34 +205,74 @@ int __init ne_probe(struct net_device *dev)
 	return -ENODEV;
 }
 
+static void cleanup_card(struct net_device *dev)
+{
+	struct pnp_dev *idev = (struct pnp_dev *)ei_status.priv;
+	if (idev)
+		pnp_device_detach(idev);
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, NE_IO_EXTENT);
+}
+
+#ifndef MODULE
+struct net_device * __init ne_probe(int unit)
+{
+	struct net_device *dev = alloc_ei_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_ne_probe(dev);
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	cleanup_card(dev);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
+
 static int __init ne_probe_isapnp(struct net_device *dev)
 {
 	int i;
 
 	for (i = 0; isapnp_clone_list[i].vendor != 0; i++) {
-		struct pci_dev *idev = NULL;
+		struct pnp_dev *idev = NULL;
 
-		while ((idev = isapnp_find_dev(NULL,
-					       isapnp_clone_list[i].vendor,
-					       isapnp_clone_list[i].function,
-					       idev))) {
+		while ((idev = pnp_find_dev(NULL,
+					    isapnp_clone_list[i].vendor,
+					    isapnp_clone_list[i].function,
+					    idev))) {
 			/* Avoid already found cards from previous calls */
-			if (idev->prepare(idev))
+			if (pnp_device_attach(idev) < 0)
 				continue;
-			if (idev->activate(idev))
+			if (pnp_activate_dev(idev) < 0) {
+			      	pnp_device_detach(idev);
+			      	continue;
+			}
+			/* if no io and irq, search for next */
+			if (!pnp_port_valid(idev, 0) || !pnp_irq_valid(idev, 0)) {
+				pnp_device_detach(idev);
 				continue;
-			/* if no irq, search for next */
-			if (idev->irq_resource[0].start == 0)
-				continue;
+			}
 			/* found it */
-			dev->base_addr = idev->resource[0].start;
-			dev->irq = idev->irq_resource[0].start;
+			dev->base_addr = pnp_port_start(idev, 0);
+			dev->irq = pnp_irq(idev, 0);
 			printk(KERN_INFO "ne.c: ISAPnP reports %s at i/o %#lx, irq %d.\n",
-				isapnp_clone_list[i].name,
-
+				(char *) isapnp_clone_list[i].driver_data,
 				dev->base_addr, dev->irq);
 			if (ne_probe1(dev, dev->base_addr) != 0) {	/* Shouldn't happen. */
 				printk(KERN_ERR "ne.c: Probe of ISAPnP card at %#lx failed.\n", dev->base_addr);
+				pnp_device_detach(idev);
 				return -ENXIO;
 			}
 			ei_status.priv = (unsigned long)idev;
@@ -233,9 +295,9 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 	int start_page, stop_page;
 	int neX000, ctron, copam, bad_card;
 	int reg0, ret;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
-	if (!request_region(ioaddr, NE_IO_EXTENT, dev->name))
+	if (!request_region(ioaddr, NE_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
 
 	reg0 = inb_p(ioaddr);
@@ -334,7 +396,7 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 		for (i = 0; i < 16; i++)
 			SA_prom[i] = SA_prom[i+i];
 		/* We must set the 8390 for word mode. */
-		outb_p(0x49, ioaddr + EN0_DCFG);
+		outb_p(DCR_VAL, ioaddr + EN0_DCFG);
 		start_page = NESM_START_PG;
 		stop_page = NESM_STOP_PG;
 	} else {
@@ -342,7 +404,12 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 		stop_page = NE1SM_STOP_PG;
 	}
 
+#if  defined(CONFIG_PLAT_MAPPI) || defined(CONFIG_PLAT_OAKS32R)
+	neX000 = ((SA_prom[14] == 0x57  &&  SA_prom[15] == 0x57)
+		|| (SA_prom[14] == 0x42 && SA_prom[15] == 0x42));
+#else
 	neX000 = (SA_prom[14] == 0x57  &&  SA_prom[15] == 0x57);
+#endif
 	ctron =  (SA_prom[0] == 0x00 && SA_prom[1] == 0x00 && SA_prom[2] == 0x1d);
 	copam =  (SA_prom[14] == 0x49 && SA_prom[15] == 0x00);
 
@@ -413,28 +480,30 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 		goto err_out;
 	}
 
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev))
-	{
-        	printk (" unable to get memory for dev->priv.\n");
-        	ret = -ENOMEM;
-		goto err_out;
-	}
-
 	/* Snarf the interrupt now.  There's no point in waiting since we cannot
 	   share and the board will usually be enabled. */
 	ret = request_irq(dev->irq, ei_interrupt, 0, name, dev);
 	if (ret) {
 		printk (" unable to get IRQ %d (errno=%d).\n", dev->irq, ret);
-		goto err_out_kfree;
+		goto err_out;
 	}
 
 	dev->base_addr = ioaddr;
 
+#ifdef CONFIG_PLAT_MAPPI
+	outb_p(E8390_NODMA + E8390_PAGE1 + E8390_STOP,
+		ioaddr + E8390_CMD); /* 0x61 */
+	for (i = 0 ; i < ETHER_ADDR_LEN ; i++) {
+		dev->dev_addr[i] = SA_prom[i]
+			= inb_p(ioaddr + EN1_PHYS_SHIFT(i));
+		printk(" %2.2x", SA_prom[i]);
+	}
+#else
 	for(i = 0; i < ETHER_ADDR_LEN; i++) {
 		printk(" %2.2x", SA_prom[i]);
 		dev->dev_addr[i] = SA_prom[i];
 	}
+#endif
 
 	printk("\n%s: %s found at %#x, using IRQ %d.\n",
 		dev->name, name, ioaddr, dev->irq);
@@ -442,7 +511,11 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 	ei_status.name = name;
 	ei_status.tx_start_page = start_page;
 	ei_status.stop_page = stop_page;
+#ifdef CONFIG_PLAT_OAKS32R
+	ei_status.word16 = 0;
+#else
 	ei_status.word16 = (wordlength == 2);
+#endif
 
 	ei_status.rx_start_page = start_page + TX_PAGES;
 #ifdef PACKETBUF_MEMSIZE
@@ -457,12 +530,12 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 	ei_status.priv = 0;
 	dev->open = &ne_open;
 	dev->stop = &ne_close;
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	dev->poll_controller = ei_poll;
+#endif
 	NS8390_init(dev, 0);
 	return 0;
 
-err_out_kfree:
-	kfree(dev->priv);
-	dev->priv = NULL;
 err_out:
 	release_region(ioaddr, NE_IO_EXTENT);
 	return ret;
@@ -722,14 +795,19 @@ retry:
 
 #ifdef MODULE
 #define MAX_NE_CARDS	4	/* Max number of NE cards per module */
-static struct net_device dev_ne[MAX_NE_CARDS];
+static struct net_device *dev_ne[MAX_NE_CARDS];
 static int io[MAX_NE_CARDS];
 static int irq[MAX_NE_CARDS];
 static int bad[MAX_NE_CARDS];	/* 0xbad = bad sig or no reset ack */
 
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
-MODULE_PARM(bad, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(bad, int, NULL, 0);
+MODULE_PARM_DESC(io, "I/O base address(es),required");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(bad, "Accept card(s) with bad signatures");
+MODULE_DESCRIPTION("NE1000/NE2000 ISA/PnP Ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that no ISA autoprobe takes place. We can't guarantee
 that the ne2k probe is the last 8390 based probe to take place (as it
@@ -741,25 +819,31 @@ int init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_ne[this_dev];
+		struct net_device *dev = alloc_ei_netdev();
+		if (!dev)
+			break;
 		dev->irq = irq[this_dev];
 		dev->mem_end = bad[this_dev];
 		dev->base_addr = io[this_dev];
-		dev->init = ne_probe;
-		if (register_netdev(dev) == 0) {
-			found++;
-			continue;
+		if (do_ne_probe(dev) == 0) {
+			if (register_netdev(dev) == 0) {
+				dev_ne[found++] = dev;
+				continue;
+			}
+			cleanup_card(dev);
 		}
-		if (found != 0) { 	/* Got at least one. */
-			return 0;
-		}
+		free_netdev(dev);
+		if (found)
+			break;
 		if (io[this_dev] != 0)
 			printk(KERN_WARNING "ne.c: No NE*000 card found at i/o = %#x\n", io[this_dev]);
 		else
 			printk(KERN_NOTICE "ne.c: You must supply \"io=0xNNN\" value(s) for ISA cards.\n");
 		return -ENXIO;
 	}
-	return 0;
+	if (found)
+		return 0;
+	return -ENODEV;
 }
 
 void cleanup_module(void)
@@ -767,25 +851,12 @@ void cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_ne[this_dev];
-		if (dev->priv != NULL) {
-			void *priv = dev->priv;
-			struct pci_dev *idev = (struct pci_dev *)ei_status.priv;
-			if (idev)
-				idev->deactivate(idev);
-			free_irq(dev->irq, dev);
-			release_region(dev->base_addr, NE_IO_EXTENT);
+		struct net_device *dev = dev_ne[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-			kfree(priv);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "gcc -DKERNEL -Wall -O6 -fomit-frame-pointer -I/usr/src/linux/net/tcp -c ne.c"
- *  version-control: t
- *  kept-new-versions: 5
- * End:
- */

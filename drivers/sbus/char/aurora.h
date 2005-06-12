@@ -1,4 +1,4 @@
-/*	$Id: aurora.h,v 1.5 1999/12/02 09:55:16 davem Exp $
+/*	$Id: aurora.h,v 1.6 2001/06/05 12:23:38 davem Exp $
  *	linux/drivers/sbus/char/aurora.h -- Aurora multiport driver
  *
  *	Copyright (c) 1999 by Oliver Aldulea (oli@bv.ro)
@@ -244,17 +244,14 @@ struct Aurora_port {
 	struct tty_struct 	* tty;
 	int			count;
 	int			blocked_open;
-	int			event;
+	long			event;
 	int			timeout;
 	int			close_delay;
-	long			session;
-	long			pgrp;
 	unsigned char 		* xmit_buf;
 	int			custom_divisor;
 	int			xmit_head;
 	int			xmit_tail;
 	int			xmit_cnt;
-	struct termios          normal_termios;
 	wait_queue_head_t	open_wait;
 	wait_queue_head_t	close_wait;
 	struct tq_struct	tqueue;

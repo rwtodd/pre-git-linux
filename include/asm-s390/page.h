@@ -9,6 +9,9 @@
 #ifndef _S390_PAGE_H
 #define _S390_PAGE_H
 
+#include <asm/setup.h>
+#include <asm/types.h>
+
 /* PAGE_SHIFT determines the page size */
 #define PAGE_SHIFT      12
 #define PAGE_SIZE       (1UL << PAGE_SHIFT)
@@ -17,16 +20,94 @@
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
 
-#define STRICT_MM_TYPECHECKS
+#ifndef __s390x__
 
-#define BUG() do { \
-        printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-        __asm__ __volatile__(".word 0x0000"); \
-} while (0)                                       
+static inline void clear_page(void *page)
+{
+	register_pair rp;
 
-#define PAGE_BUG(page) do { \
-        BUG(); \
-} while (0)                      
+	rp.subreg.even = (unsigned long) page;
+	rp.subreg.odd = (unsigned long) 4096;
+        asm volatile ("   slr  1,1\n"
+		      "   mvcl %0,0"
+		      : "+&a" (rp) : : "memory", "cc", "1" );
+}
+
+static inline void copy_page(void *to, void *from)
+{
+        if (MACHINE_HAS_MVPG)
+		asm volatile ("   sr   0,0\n"
+			      "   mvpg %0,%1"
+			      : : "a" ((void *)(to)), "a" ((void *)(from))
+			      : "memory", "cc", "0" );
+	else
+		asm volatile ("   mvc  0(256,%0),0(%1)\n"
+			      "   mvc  256(256,%0),256(%1)\n"
+			      "   mvc  512(256,%0),512(%1)\n"
+			      "   mvc  768(256,%0),768(%1)\n"
+			      "   mvc  1024(256,%0),1024(%1)\n"
+			      "   mvc  1280(256,%0),1280(%1)\n"
+			      "   mvc  1536(256,%0),1536(%1)\n"
+			      "   mvc  1792(256,%0),1792(%1)\n"
+			      "   mvc  2048(256,%0),2048(%1)\n"
+			      "   mvc  2304(256,%0),2304(%1)\n"
+			      "   mvc  2560(256,%0),2560(%1)\n"
+			      "   mvc  2816(256,%0),2816(%1)\n"
+			      "   mvc  3072(256,%0),3072(%1)\n"
+			      "   mvc  3328(256,%0),3328(%1)\n"
+			      "   mvc  3584(256,%0),3584(%1)\n"
+			      "   mvc  3840(256,%0),3840(%1)\n"
+			      : : "a"((void *)(to)),"a"((void *)(from)) 
+			      : "memory" );
+}
+
+#else /* __s390x__ */
+
+static inline void clear_page(void *page)
+{
+        asm volatile ("   lgr  2,%0\n"
+                      "   lghi 3,4096\n"
+                      "   slgr 1,1\n"
+                      "   mvcl 2,0"
+                      : : "a" ((void *) (page))
+		      : "memory", "cc", "1", "2", "3" );
+}
+
+static inline void copy_page(void *to, void *from)
+{
+        if (MACHINE_HAS_MVPG)
+		asm volatile ("   sgr  0,0\n"
+			      "   mvpg %0,%1"
+			      : : "a" ((void *)(to)), "a" ((void *)(from))
+			      : "memory", "cc", "0" );
+	else
+		asm volatile ("   mvc  0(256,%0),0(%1)\n"
+			      "   mvc  256(256,%0),256(%1)\n"
+			      "   mvc  512(256,%0),512(%1)\n"
+			      "   mvc  768(256,%0),768(%1)\n"
+			      "   mvc  1024(256,%0),1024(%1)\n"
+			      "   mvc  1280(256,%0),1280(%1)\n"
+			      "   mvc  1536(256,%0),1536(%1)\n"
+			      "   mvc  1792(256,%0),1792(%1)\n"
+			      "   mvc  2048(256,%0),2048(%1)\n"
+			      "   mvc  2304(256,%0),2304(%1)\n"
+			      "   mvc  2560(256,%0),2560(%1)\n"
+			      "   mvc  2816(256,%0),2816(%1)\n"
+			      "   mvc  3072(256,%0),3072(%1)\n"
+			      "   mvc  3328(256,%0),3328(%1)\n"
+			      "   mvc  3584(256,%0),3584(%1)\n"
+			      "   mvc  3840(256,%0),3840(%1)\n"
+			      : : "a"((void *)(to)),"a"((void *)(from)) 
+			      : "memory" );
+}
+
+#endif /* __s390x__ */
+
+#define clear_user_page(page, vaddr, pg)	clear_page(page)
+#define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
+
+#define alloc_zeroed_user_highpage(vma, vaddr) alloc_page_vma(GFP_HIGHUSER | __GFP_ZERO, vma, vaddr)
+#define __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
 
 /* Pure 2^n version of get_order */
 extern __inline__ int get_order(unsigned long size)
@@ -43,17 +124,17 @@ extern __inline__ int get_order(unsigned long size)
 }
 
 /*
- * gcc uses builtin, i.e. MVCLE for both operations
- */
-
-#define clear_page(page)        memset((void *)(page), 0, PAGE_SIZE)
-#define copy_page(to,from)      memcpy((void *)(to), (void *)(from), PAGE_SIZE)
-
-#ifdef STRICT_MM_TYPECHECKS
-/*
  * These are used to make use of C type-checking..
  */
+
+typedef struct { unsigned long pgprot; } pgprot_t;
 typedef struct { unsigned long pte; } pte_t;
+
+#define pte_val(x)      ((x).pte)
+#define pgprot_val(x)   ((x).pgprot)
+
+#ifndef __s390x__
+
 typedef struct { unsigned long pmd; } pmd_t;
 typedef struct {
         unsigned long pgd0;
@@ -61,60 +142,67 @@ typedef struct {
         unsigned long pgd2;
         unsigned long pgd3;
         } pgd_t;
-typedef struct { unsigned long pgprot; } pgprot_t;
 
-#define pte_val(x)      ((x).pte)
 #define pmd_val(x)      ((x).pmd)
 #define pgd_val(x)      ((x).pgd0)
-#define pgprot_val(x)   ((x).pgprot)
+
+#else /* __s390x__ */
+
+typedef struct { 
+        unsigned long pmd0;
+        unsigned long pmd1; 
+        } pmd_t;
+typedef struct { unsigned long pgd; } pgd_t;
+
+#define pmd_val(x)      ((x).pmd0)
+#define pmd_val1(x)     ((x).pmd1)
+#define pgd_val(x)      ((x).pgd)
+
+#endif /* __s390x__ */
 
 #define __pte(x)        ((pte_t) { (x) } )
 #define __pmd(x)        ((pmd_t) { (x) } )
 #define __pgd(x)        ((pgd_t) { (x) } )
 #define __pgprot(x)     ((pgprot_t) { (x) } )
 
-#else
-/*
- * .. while these make it easier on the compiler
- */
-typedef unsigned long pte_t;
-typedef unsigned long pmd_t;
-typedef struct {
-        unsigned long pgd0;
-        unsigned long pgd1;
-        unsigned long pgd2;
-        unsigned long pgd3;
-        } pgd_t;
-typedef unsigned long pgprot_t;
+/* default storage key used for all pages */
+extern unsigned int default_storage_key;
 
-#define pte_val(x)      (x)
-#define pmd_val(x)      (x)
-#define pgd_val(x)      (x)
-#define pgprot_val(x)   (x)
+static inline void
+page_set_storage_key(unsigned long addr, unsigned int skey)
+{
+	asm volatile ( "sske %0,%1" : : "d" (skey), "a" (addr) );
+}
 
-#define __pte(x)        (x)
-#define __pmd(x)        (x)
-#define __pgd(x)        (x)
-#define __pgprot(x)     (x)
+static inline unsigned int
+page_get_storage_key(unsigned long addr)
+{
+	unsigned int skey;
 
-#endif
-#endif                                 /* !__ASSEMBLY__                    */
+	asm volatile ( "iske %0,%1" : "=d" (skey) : "a" (addr), "0" (0) );
+
+	return skey;
+}
+
+#endif /* !__ASSEMBLY__ */
 
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)        (((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-/*
- *
- *
- */
+#define __PAGE_OFFSET           0x0UL
+#define PAGE_OFFSET             0x0UL
+#define __pa(x)                 (unsigned long)(x)
+#define __va(x)                 (void *)(unsigned long)(x)
+#define pfn_to_page(pfn)	(mem_map + (pfn))
+#define page_to_pfn(page)	((unsigned long)((page) - mem_map))
+#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 
-#define __PAGE_OFFSET           (0x0)
-#define PAGE_OFFSET             ((unsigned long)__PAGE_OFFSET)
-#define __pa(x)                 ((unsigned long)(x)-PAGE_OFFSET)
-#define __va(x)                 ((void *)((unsigned long)(x)+PAGE_OFFSET))
-#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+#define pfn_valid(pfn)		((pfn) < max_mapnr)
+#define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
 
-#endif                                 /* __KERNEL__                       */
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
-#endif                                 /* _S390_PAGE_H                     */
+#endif /* __KERNEL__ */
+
+#endif /* _S390_PAGE_H */

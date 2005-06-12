@@ -4,16 +4,17 @@
 
     Copyright 1993 United States Government as represented by the
     Director, National Security Agency.  This software may be used and
-    distributed according to the terms of the GNU Public License,
+    distributed according to the terms of the GNU General Public License,
     incorporated herein by reference.
 
     This is a device driver for the 3Com Etherlink 3c501.
     Do not purchase this card, even as a joke.  It's performance is horrible,
     and it breaks in many ways.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-       Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The original author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
     Fixed (again!) the missing interrupt locking on TX/RX shifting.
     		Alan Cox <Alan.Cox@linux.org>
@@ -32,7 +33,20 @@
     		
     Cleaned up for 2.3.x because we broke SMP now. 
     		20000208 Alan Cox <alan@redhat.com>
+
+    Check up pass for 2.5. Nothing significant changed
+    		20021009 Alan Cox <alan@redhat.com>
+
+    Fixed zero fill corner case 
+    		20030104 Alan Cox <alan@redhat.com>
     		
+    		
+   For the avoidance of doubt the "preferred form" of this code is one which
+   is in an open non patent encumbered format. Where cryptographic key signing
+   forms part of the process of creating an executable the information
+   including keys needed to generate an equivalently functional executable
+   are deemed to be part of the source code.
+
 */
 
 
@@ -85,8 +99,12 @@
  *
  */
 
-static const char *version =
-    "3c501.c: 2000/02/08 Alan Cox (alan@redhat.com).\n";
+#define DRV_NAME	"3c501"
+#define DRV_VERSION	"2002/10/09"
+
+
+static const char version[] =
+	DRV_NAME ".c: " DRV_VERSION " Alan Cox (alan@redhat.com).\n";
 
 /*
  *	Braindamage remaining:
@@ -96,18 +114,19 @@ static const char *version =
 #include <linux/module.h>
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/ptrace.h>
 #include <linux/fcntl.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/config.h>	/* for CONFIG_IP_MULTICAST */
 #include <linux/spinlock.h>
+#include <linux/ethtool.h>
+#include <linux/delay.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
+#include <asm/uaccess.h>
 #include <asm/io.h>
 
 #include <linux/netdevice.h>
@@ -115,111 +134,18 @@ static const char *version =
 #include <linux/skbuff.h>
 #include <linux/init.h>
 
-/* A zero-terminated list of I/O addresses to be probed.
-   The 3c501 can be at many locations, but here are the popular ones. */
-static unsigned int netcard_portlist[] __initdata = { 
-	0x280, 0x300, 0
-};
-
-
-/*
- *	Index to functions.
- */
-
-int el1_probe(struct net_device *dev);
-static int  el1_probe1(struct net_device *dev, int ioaddr);
-static int  el_open(struct net_device *dev);
-static void el_timeout(struct net_device *dev);
-static int  el_start_xmit(struct sk_buff *skb, struct net_device *dev);
-static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void el_receive(struct net_device *dev);
-static void el_reset(struct net_device *dev);
-static int  el1_close(struct net_device *dev);
-static struct net_device_stats *el1_get_stats(struct net_device *dev);
-static void set_multicast_list(struct net_device *dev);
-
-#define EL1_IO_EXTENT	16
-
-#ifndef EL_DEBUG
-#define EL_DEBUG  0	/* use 0 for production, 1 for devel., >2 for debug */
-#endif			/* Anything above 5 is wordy death! */
-static int el_debug = EL_DEBUG;
-
-/*
- *	Board-specific info in dev->priv.
- */
-
-struct net_local
-{
-	struct net_device_stats stats;
-	int		tx_pkt_start;	/* The length of the current Tx packet. */
-	int		collisions;	/* Tx collisions this packet */
-	int		loading;	/* Spot buffer load collisions */
-	int		txing;		/* True if card is in TX mode */
-	spinlock_t	lock;		/* Serializing lock */
-};
-
-
-#define RX_STATUS (ioaddr + 0x06)
-#define RX_CMD	  RX_STATUS
-#define TX_STATUS (ioaddr + 0x07)
-#define TX_CMD	  TX_STATUS
-#define GP_LOW 	  (ioaddr + 0x08)
-#define GP_HIGH   (ioaddr + 0x09)
-#define RX_BUF_CLR (ioaddr + 0x0A)
-#define RX_LOW	  (ioaddr + 0x0A)
-#define RX_HIGH   (ioaddr + 0x0B)
-#define SAPROM	  (ioaddr + 0x0C)
-#define AX_STATUS (ioaddr + 0x0E)
-#define AX_CMD	  AX_STATUS
-#define DATAPORT  (ioaddr + 0x0F)
-#define TX_RDY 0x08		/* In TX_STATUS */
-
-#define EL1_DATAPTR	0x08
-#define EL1_RXPTR	0x0A
-#define EL1_SAPROM	0x0C
-#define EL1_DATAPORT 	0x0f
-
-/*
- *	Writes to the ax command register.
- */
-
-#define AX_OFF	0x00			/* Irq off, buffer access on */
-#define AX_SYS  0x40			/* Load the buffer */
-#define AX_XMIT 0x44			/* Transmit a packet */
-#define AX_RX	0x48			/* Receive a packet */
-#define AX_LOOP	0x0C			/* Loopback mode */
-#define AX_RESET 0x80
-
-/*
- *	Normal receive mode written to RX_STATUS.  We must intr on short packets
- *	to avoid bogus rx lockups.
- */
-
-#define RX_NORM 0xA8		/* 0x68 == all addrs, 0xA8 only to me. */
-#define RX_PROM 0x68		/* Senior Prom, uhmm promiscuous mode. */
-#define RX_MULT 0xE8		/* Accept multicast packets. */
-#define TX_NORM 0x0A		/* Interrupt on everything that might hang the chip */
-
-/*
- *	TX_STATUS register.
- */
-
-#define TX_COLLISION 0x02
-#define TX_16COLLISIONS 0x04
-#define TX_READY 0x08
-
-#define RX_RUNT 0x08
-#define RX_MISSED 0x01		/* Missed a packet due to 3c501 braindamage. */
-#define RX_GOOD	0x30		/* Good packet 0x20, or simple overflow 0x10. */
-
+#include "3c501.h"
 
 /*
  *	The boilerplate probe code.
  */
 
+static int io=0x280;
+static int irq=5;
+static int mem_start;
+
 /**
- * el1_probe:
+ * el1_probe:		-	probe for a 3c501
  * @dev: The device structure passed in to probe. 
  *
  * This can be called from two places. The network layer will probe using
@@ -231,27 +157,51 @@ struct net_local
  * probe and failing to find anything.
  */
  
-int __init el1_probe(struct net_device *dev)
+struct net_device * __init el1_probe(int unit)
 {
-	int i;
-	int base_addr = dev->base_addr;
+	struct net_device *dev = alloc_etherdev(sizeof(struct net_local));
+	static unsigned ports[] = { 0x280, 0x300, 0};
+	unsigned *port;
+	int err = 0;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	if (unit >= 0) {
+		sprintf(dev->name, "eth%d", unit);
+		netdev_boot_setup_check(dev);
+		io = dev->base_addr;
+		irq = dev->irq;
+		mem_start = dev->mem_start & 7;
+	}
 
 	SET_MODULE_OWNER(dev);
 
-	if (base_addr > 0x1ff)	/* Check a single specified location. */
-		return el1_probe1(dev, base_addr);
-	else if (base_addr != 0)	/* Don't probe at all. */
-		return -ENXIO;
-
-	for (i = 0; netcard_portlist[i]; i++)
-		if (el1_probe1(dev, netcard_portlist[i]) == 0)
-			return 0;
-
-	return -ENODEV;
+	if (io > 0x1ff) {	/* Check a single specified location. */
+		err = el1_probe1(dev, io);
+	} else if (io != 0) {
+		err = -ENXIO;		/* Don't probe at all. */
+	} else {
+		for (port = ports; *port && el1_probe1(dev, *port); port++)
+			;
+		if (!*port)
+			err = -ENODEV;
+	}
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	release_region(dev->base_addr, EL1_IO_EXTENT);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
 
 /**
- *	el1_probe: 
+ *	el1_probe1: 
  *	@dev: The device structure to use
  *	@ioaddr: An I/O address to probe at.
  *
@@ -275,7 +225,7 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 	 *	Reserve I/O resource for exclusive use by this driver
 	 */
 
-	if (!request_region(ioaddr, EL1_IO_EXTENT, dev->name))
+	if (!request_region(ioaddr, EL1_IO_EXTENT, DRV_NAME))
 		return -ENODEV;
 
 	/*
@@ -311,20 +261,25 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 	 *	high.
 	 */
 
+	dev->irq = irq;
+
 	if (dev->irq < 2)
 	{
-		autoirq_setup(2);
+		unsigned long irq_mask;
+
+		irq_mask = probe_irq_on();
 		inb(RX_STATUS);		/* Clear pending interrupts. */
 		inb(TX_STATUS);
 		outb(AX_LOOP + 1, AX_CMD);
 
 		outb(0x00, AX_CMD);
 
-		autoirq = autoirq_report(1);
+		mdelay(20);
+		autoirq = probe_irq_off(irq_mask);
 
 		if (autoirq == 0)
 		{
-			printk("%s probe at %#x failed to detect IRQ line.\n",
+			printk(KERN_WARNING "%s probe at %#x failed to detect IRQ line.\n",
 				mname, ioaddr);
 			release_region(ioaddr, EL1_IO_EXTENT);
 			return -EAGAIN;
@@ -335,8 +290,8 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 	dev->base_addr = ioaddr;
 	memcpy(dev->dev_addr, station_addr, ETH_ALEN);
 
-	if (dev->mem_start & 0xf)
-		el_debug = dev->mem_start & 0x7;
+	if (mem_start & 0xf)
+		el_debug = mem_start & 0x7;
 	if (autoirq)
 		dev->irq = autoirq;
 
@@ -348,20 +303,10 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 #endif
 
 	if (el_debug)
-		printk("%s", version);
+		printk(KERN_DEBUG "%s", version);
 
-	/*
-	 *	Initialize the device structure.
-	 */
-
-	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	if (dev->priv == NULL) {
-		release_region(ioaddr, EL1_IO_EXTENT);
-		return -ENOMEM;
-	}
 	memset(dev->priv, 0, sizeof(struct net_local));
-
-	lp=dev->priv;
+	lp = netdev_priv(dev);
 	spin_lock_init(&lp->lock);
 	
 	/*
@@ -375,13 +320,7 @@ static int __init el1_probe1(struct net_device *dev, int ioaddr)
 	dev->stop = &el1_close;
 	dev->get_stats = &el1_get_stats;
 	dev->set_multicast_list = &set_multicast_list;
-
-	/*
-	 *	Setup the generic properties
-	 */
-
-	ether_setup(dev);
-
+	dev->ethtool_ops = &netdev_ethtool_ops;
 	return 0;
 }
 
@@ -402,11 +341,11 @@ static int el_open(struct net_device *dev)
 {
 	int retval;
 	int ioaddr = dev->base_addr;
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	unsigned long flags;
 
 	if (el_debug > 2)
-		printk("%s: Doing el_open()...", dev->name);
+		printk(KERN_DEBUG "%s: Doing el_open()...", dev->name);
 
 	if ((retval = request_irq(dev->irq, &el_interrupt, 0, dev->name, dev)))
 		return retval;
@@ -432,7 +371,7 @@ static int el_open(struct net_device *dev)
  
 static void el_timeout(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
  
 	if (el_debug)
@@ -472,7 +411,7 @@ static void el_timeout(struct net_device *dev)
 
 static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 	unsigned long flags;
 
@@ -492,8 +431,15 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	do
 	{
-		int gp_start = 0x800 - (ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN);
+		int len = skb->len;
+		int pad = 0;
+		int gp_start;
 		unsigned char *buf = skb->data;
+		
+		if (len < ETH_ZLEN)
+			pad = ETH_ZLEN - len;
+			
+		gp_start = 0x800 - ( len + pad );
 
 		lp->tx_pkt_start = gp_start;
     		lp->collisions = 0;
@@ -521,7 +467,11 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		
 		outw(0x00, RX_BUF_CLR);		/* Set rx packet area to 0. */
 		outw(gp_start, GP_LOW);		/* aim - packet will be loaded into buffer start */
-		outsb(DATAPORT,buf,skb->len);	/* load buffer (usual thing each byte increments the pointer) */
+		outsb(DATAPORT,buf,len);	/* load buffer (usual thing each byte increments the pointer) */
+		if (pad) {
+			while(pad--)		/* Zero fill buffer tail */
+				outb(0, DATAPORT);
+		}
 		outw(gp_start, GP_LOW);		/* the board reuses the same register */
 	
 		if(lp->loading != 2)
@@ -530,19 +480,18 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			lp->loading=0;
 			dev->trans_start = jiffies;
 			if (el_debug > 2)
-				printk(" queued xmit.\n");
+				printk(KERN_DEBUG " queued xmit.\n");
 			dev_kfree_skb (skb);
 			return 0;
 		}
 		/* A receive upset our load, despite our best efforts */
 		if(el_debug>2)
-			printk("%s: burped during tx load.\n", dev->name);
+			printk(KERN_DEBUG "%s: burped during tx load.\n", dev->name);
 		spin_lock_irqsave(&lp->lock, flags);
 	}
 	while(1);
 
 }
-
 
 /**
  * el_interrupt:
@@ -551,7 +500,7 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * @regs: Register data (surplus to our requirements)
  *
  * Handle the ether interface interrupts. The 3c501 needs a lot more 
- * hand holding than most cards. In paticular we get a transmit interrupt
+ * hand holding than most cards. In particular we get a transmit interrupt
  * with a collision error because the board firmware isnt capable of rewinding
  * its own transmit buffer pointers. It can however count to 16 for us.
  *
@@ -567,7 +516,7 @@ static int el_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * TCP window.
  */
 
-static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct net_local *lp;
@@ -575,7 +524,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	int axsr;			/* Aux. status reg. */
 
 	ioaddr = dev->base_addr;
-	lp = (struct net_local *)dev->priv;
+	lp = netdev_priv(dev);
 
 	spin_lock(&lp->lock);
 	
@@ -611,11 +560,11 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			if(el_debug > 2)
 			{
 				printk(KERN_DEBUG "%s: Interrupt while loading [", dev->name);
-				printk(" txsr=%02x gp=%04x rp=%04x]\n", txsr, inw(GP_LOW),inw(RX_LOW));
+				printk(KERN_DEBUG " txsr=%02x gp=%04x rp=%04x]\n", txsr, inw(GP_LOW),inw(RX_LOW));
 			}
 			lp->loading=2;		/* Force a reload */
 			spin_unlock(&lp->lock);
-			return;
+			goto out;
 		}
 
 		if (el_debug > 6)
@@ -628,7 +577,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			 *	reset immediately ?
 			 */
 			if(el_debug>1)
-				printk("%s: Unusual interrupt during Tx, txsr=%02x axsr=%02x"
+				printk(KERN_DEBUG "%s: Unusual interrupt during Tx, txsr=%02x axsr=%02x"
 			  		" gp=%03x rp=%03x.\n", dev->name, txsr, axsr,
 			inw(ioaddr + EL1_DATAPTR), inw(ioaddr + EL1_RXPTR));
 			lp->txing = 0;
@@ -640,7 +589,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			 *	Timed out
 			 */
 			if (el_debug)
-				printk("%s: Transmit failed 16 times, Ethernet jammed?\n",dev->name);
+				printk (KERN_DEBUG "%s: Transmit failed 16 times, Ethernet jammed?\n",dev->name);
 			outb(AX_SYS, AX_CMD);
 			lp->txing = 0;
 			lp->stats.tx_aborted_errors++;
@@ -653,7 +602,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			 */
 
 			if (el_debug > 6)
-				printk(" retransmitting after a collision.\n");
+				printk(KERN_DEBUG " retransmitting after a collision.\n");
 			/*
 			 *	Poor little chip can't reset its own start pointer
 			 */
@@ -663,7 +612,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			outb(AX_XMIT, AX_CMD);
 			lp->stats.collisions++;
 			spin_unlock(&lp->lock);
-			return;
+			goto out;
 		}
 		else
 		{
@@ -672,7 +621,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			 */
 			lp->stats.tx_packets++;
 			if (el_debug > 6)
-				printk(" Tx succeeded %s\n",
+				printk(KERN_DEBUG " Tx succeeded %s\n",
 		       			(txsr & TX_RDY) ? "." : "but tx is busy!");
 			/*
 			 *	This is safe the interrupt is atomic WRT itself.
@@ -690,7 +639,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 		int rxsr = inb(RX_STATUS);
 		if (el_debug > 5)
-			printk(" rxsr=%02x txsr=%02x rp=%04x", rxsr, inb(TX_STATUS),inw(RX_LOW));
+			printk(KERN_DEBUG " rxsr=%02x txsr=%02x rp=%04x", rxsr, inb(TX_STATUS),inw(RX_LOW));
 		/*
 		 *	Just reading rx_status fixes most errors.
 		 */
@@ -700,7 +649,7 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		{	/* Handled to avoid board lock-up. */
 			lp->stats.rx_length_errors++;
 			if (el_debug > 5)
-				printk(" runt.\n");
+				printk(KERN_DEBUG " runt.\n");
 		}
 		else if (rxsr & RX_GOOD)
 		{
@@ -715,12 +664,12 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			 *	Nothing?  Something is broken!
 			 */
 			if (el_debug > 2)
-				printk("%s: No packet seen, rxsr=%02x **resetting 3c501***\n",
+				printk(KERN_DEBUG "%s: No packet seen, rxsr=%02x **resetting 3c501***\n",
 					dev->name, rxsr);
 			el_reset(dev);
 		}
 		if (el_debug > 3)
-			printk(".\n");
+			printk(KERN_DEBUG ".\n");
 	}
 
 	/*
@@ -732,7 +681,8 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	inb(RX_STATUS);		/* Be certain that interrupts are cleared. */
 	inb(TX_STATUS);
 	spin_unlock(&lp->lock);
-	return;
+out:
+	return IRQ_HANDLED;
 }
 
 
@@ -741,14 +691,14 @@ static void el_interrupt(int irq, void *dev_id, struct pt_regs *regs)
  * @dev: Device to pull the packets from
  *
  * We have a good packet. Well, not really "good", just mostly not broken.
- * We must check everything to see if it is good. In paticular we occasionally
+ * We must check everything to see if it is good. In particular we occasionally
  * get wild packet sizes from the card. If the packet seems sane we PIO it
  * off the card and queue it for the protocol layers.
  */
 
 static void el_receive(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 	int pkt_len;
 	struct sk_buff *skb;
@@ -756,12 +706,12 @@ static void el_receive(struct net_device *dev)
 	pkt_len = inw(RX_LOW);
 
 	if (el_debug > 4)
-		printk(" el_receive %d.\n", pkt_len);
+		printk(KERN_DEBUG " el_receive %d.\n", pkt_len);
 
 	if ((pkt_len < 60)  ||  (pkt_len > 1536))
 	{
 		if (el_debug)
-			printk("%s: bogus packet, length=%d\n", dev->name, pkt_len);
+			printk(KERN_DEBUG "%s: bogus packet, length=%d\n", dev->name, pkt_len);
 		lp->stats.rx_over_errors++;
 		return;
 	}
@@ -780,7 +730,7 @@ static void el_receive(struct net_device *dev)
 	outw(0x00, GP_LOW);
 	if (skb == NULL)
 	{
-		printk("%s: Memory squeeze, dropping packet.\n", dev->name);
+		printk(KERN_INFO "%s: Memory squeeze, dropping packet.\n", dev->name);
 		lp->stats.rx_dropped++;
 		return;
 	}
@@ -796,6 +746,7 @@ static void el_receive(struct net_device *dev)
 		insb(DATAPORT, skb_put(skb,pkt_len), pkt_len);
 		skb->protocol=eth_type_trans(skb,dev);
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
 		lp->stats.rx_bytes+=pkt_len;
 	}
@@ -813,11 +764,11 @@ static void el_receive(struct net_device *dev)
 
 static void  el_reset(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
 	if (el_debug> 2)
-		printk("3c501 reset...");
+		printk(KERN_INFO "3c501 reset...");
 	outb(AX_RESET, AX_CMD);		/* Reset the chip */
 	outb(AX_LOOP, AX_CMD);		/* Aux control, irq and loopback enabled */
 	{
@@ -850,7 +801,7 @@ static int el1_close(struct net_device *dev)
 	int ioaddr = dev->base_addr;
 
 	if (el_debug > 2)
-		printk("%s: Shutting down Ethernet card at %#x.\n", dev->name, ioaddr);
+		printk(KERN_INFO "%s: Shutting down Ethernet card at %#x.\n", dev->name, ioaddr);
 
 	netif_stop_queue(dev);
 	
@@ -877,7 +828,7 @@ static int el1_close(struct net_device *dev)
  
 static struct net_device_stats *el1_get_stats(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	return &lp->stats;
 }
 
@@ -912,24 +863,45 @@ static void set_multicast_list(struct net_device *dev)
 	}
 }
 
-#ifdef MODULE
 
-static struct net_device dev_3c501 = {
-	init:		el1_probe,
-	base_addr:	0x280,
-	irq:		5,
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	debug = level;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
 };
 
-static int io=0x280;
-static int irq=5;
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
+#ifdef MODULE
+
+static struct net_device *dev_3c501;
+
+module_param(io, int, 0);
+module_param(irq, int, 0);
+MODULE_PARM_DESC(io, "EtherLink I/O base address");
+MODULE_PARM_DESC(irq, "EtherLink IRQ number");
 
 /**
  * init_module:
  *
  * When the driver is loaded as a module this function is called. We fake up
- * a device structure with the base I/O and interrupt set as if it was being
+ * a device structure with the base I/O and interrupt set as if it were being
  * called from Space.c. This minimises the extra code that would otherwise
  * be required.
  *
@@ -939,10 +911,9 @@ MODULE_PARM(irq, "i");
  
 int init_module(void)
 {
-	dev_3c501.irq=irq;
-	dev_3c501.base_addr=io;
-	if (register_netdev(&dev_3c501) != 0)
-		return -EIO;
+	dev_3c501 = el1_probe(-1);
+	if (IS_ERR(dev_3c501))
+		return PTR_ERR(dev_3c501);
 	return 0;
 }
 
@@ -955,30 +926,15 @@ int init_module(void)
  
 void cleanup_module(void)
 {
-	/*
-	 *	No need to check MOD_IN_USE, as sys_delete_module() checks.
-	 */
-
-	unregister_netdev(&dev_3c501);
-
-	/*
-	 *	Free up the private structure, or leak memory :-)
-	 */
-
-	kfree(dev_3c501.priv);
-	dev_3c501.priv = NULL;	/* gets re-allocated by el1_probe1 */
-
-	/*
-	 *	If we don't do this, we can't re-insmod it later.
-	 */
-	release_region(dev_3c501.base_addr, EL1_IO_EXTENT);
+	struct net_device *dev = dev_3c501;
+	unregister_netdev(dev);
+	release_region(dev->base_addr, EL1_IO_EXTENT);
+	free_netdev(dev);
 }
 
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer  -m486 -c -o 3c501.o 3c501.c"
- *  kept-new-versions: 5
- * End:
- */
+
+MODULE_AUTHOR("Donald Becker, Alan Cox");
+MODULE_DESCRIPTION("Support for the ancient 3Com 3c501 ethernet card");
+MODULE_LICENSE("GPL");
+

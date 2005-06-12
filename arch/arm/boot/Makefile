@@ -5,135 +5,87 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995-2000 Russell King
+# Copyright (C) 1995-2002 Russell King
 #
 
-SYSTEM	=$(TOPDIR)/vmlinux
+MKIMAGE         := $(srctree)/scripts/mkuboot.sh
 
-ifeq ($(CONFIG_CPU_26),y)
-ZTEXTADDR	 = 0x02080000
-PARAMS_PHYS	 = 0x0207c000
-INITRD_PHYS	 = 0x02180000
-INITRD_VIRT	 = 0x02180000
+ifneq ($(MACHINE),)
+include $(srctree)/$(MACHINE)/Makefile.boot
 endif
 
-ifeq ($(CONFIG_ARCH_RPC),y)
-ZTEXTADDR	 = 0x10008000
-PARAMS_PHYS	 = 0x10000100
-INITRD_PHYS	 = 0x18000000
-INITRD_VIRT	 = 0xc8000000
+# Note: the following conditions must always be true:
+#   ZRELADDR == virt_to_phys(TEXTADDR)
+#   PARAMS_PHYS must be within 4MB of ZRELADDR
+#   INITRD_PHYS must be in RAM
+ZRELADDR    := $(zreladdr-y)
+PARAMS_PHYS := $(params_phys-y)
+INITRD_PHYS := $(initrd_phys-y)
+
+export ZRELADDR INITRD_PHYS PARAMS_PHYS
+
+targets := Image zImage xipImage bootpImage uImage
+
+ifeq ($(CONFIG_XIP_KERNEL),y)
+
+$(obj)/xipImage: vmlinux FORCE
+	$(call if_changed,objcopy)
+	@echo '  Kernel: $@ is ready (physical address: $(CONFIG_XIP_PHYS_ADDR))'
+
+$(obj)/Image $(obj)/zImage: FORCE
+	@echo 'Kernel configured for XIP (CONFIG_XIP_KERNEL=y)'
+	@echo 'Only the xipImage target is available in this case'
+	@false
+
+else
+
+$(obj)/xipImage: FORCE
+	@echo 'Kernel not configured for XIP (CONFIG_XIP_KERNEL!=y)'
+	@false
+
+$(obj)/Image: vmlinux FORCE
+	$(call if_changed,objcopy)
+	@echo '  Kernel: $@ is ready'
+
+$(obj)/compressed/vmlinux: $(obj)/Image FORCE
+	$(Q)$(MAKE) $(build)=$(obj)/compressed $@
+
+$(obj)/zImage:	$(obj)/compressed/vmlinux FORCE
+	$(call if_changed,objcopy)
+	@echo '  Kernel: $@ is ready'
+
 endif
 
-ifeq ($(CONFIG_ARCH_CLPS7500),y)
-ZTEXTADDR	 = 0x10008000
-endif
+quiet_cmd_uimage = UIMAGE  $@
+      cmd_uimage = $(CONFIG_SHELL) $(MKIMAGE) -A arm -O linux -T kernel \
+		   -C none -a $(ZRELADDR) -e $(ZRELADDR) \
+		   -n 'Linux-$(KERNELRELEASE)' -d $< $@
 
-ifeq ($(CONFIG_ARCH_EBSA110),y)
-ZTEXTADDR	 = 0x00008000
-PARAMS_PHYS	 = 0x00000400
-INITRD_PHYS	 = 0x00800000
-INITRD_VIRT	 = 0xc0800000
-endif
+$(obj)/uImage:	$(obj)/zImage FORCE
+	$(call if_changed,uimage)
+	@echo '  Image $@ is ready'
 
-ifeq ($(CONFIG_ARCH_SHARK),y)
-ZTEXTADDR	 = 0x08508000
-ZRELADDR	 = 0x08008000
-endif
+$(obj)/bootp/bootp: $(obj)/zImage initrd FORCE
+	$(Q)$(MAKE) $(build)=$(obj)/bootp $@
+	@:
 
-ifeq ($(CONFIG_FOOTBRIDGE),y)
-ZTEXTADDR	 = 0x00008000
-PARAMS_PHYS	 = 0x00000100
-INITRD_PHYS	 = 0x00800000
-INITRD_VIRT	 = 0xc0800000
-endif
+$(obj)/bootpImage: $(obj)/bootp/bootp FORCE
+	$(call if_changed,objcopy)
+	@echo '  Kernel: $@ is ready'
 
-ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
-ZTEXTADDR	 = 0x00008000
-PARAMS_PHYS	 = 0x00000100
-INITRD_PHYS	 = 0x00800000
-INITRD_VIRT	 = 0xc0800000
-endif
-
-ifeq ($(CONFIG_ARCH_NEXUSPCI),y)
-ZTEXTADDR	 = 0x40200000
-ZRELADDR	 = 0x40008000
-endif
-
-ifeq ($(CONFIG_ARCH_L7200),y)
-# RAM based kernel
-#ZTEXTADDR	 = 0xf0400000
-#ZRELADDR	 = 0xf0008000
-
-# FLASH based kernel
-ZTEXTADDR	 = 0x00010000
-ZRELADDR	 = 0xf0008000
-ZBSSADDR	 = 0xf03e0000
-endif
-
-ifeq ($(CONFIG_ARCH_P720T),y)
-ZTEXTADDR	 = 0xc0018000
-ZRELADDR	 = 0xc0018000
-PARAMS_PHYS	 = 0xc0000100
-INITRD_PHYS	 = 0xc0400000
-INITRD_VIRT	 = 0xc0400000
-endif
-
-ifeq ($(CONFIG_ARCH_SA1100),y)
-ZTEXTADDR	 = 0xc0008000
-ZRELADDR	 = 0xc0008000
-ifeq ($(CONFIG_SA1100_VICTOR),y)
-  ZTEXTADDR	 = 0x00002000
-  ZBSSADDR	 = 0xc0100000
-endif
-ifeq ($(CONFIG_SA1100_SHERMAN),y)
-  ZTEXTADDR      = 0x00050000   
-  ZBSSADDR       = 0xc0100000
-endif
-ifeq ($(CONFIG_SA1100_GRAPHICSCLIENT),y)
-  ZTEXTADDR	 = 0xC0200000
-endif
-endif
-
-#
-# If you don't define ZRELADDR above,
-# then it defaults to ZTEXTADDR
-#
-ifeq ($(ZRELADDR),)
-ZRELADDR	= $(ZTEXTADDR)
-endif
-
-export	SYSTEM ZTEXTADDR ZBSSADDR ZRELADDR INITRD_PHYS INITRD_VIRT PARAMS_PHYS
-
-Image:	$(CONFIGURE) $(SYSTEM)
-	$(OBJCOPY) $(SYSTEM) $@
-
-bzImage: zImage
-
-zImage:	$(CONFIGURE) compressed/vmlinux
-	$(OBJCOPY) compressed/vmlinux $@
-
-bootpImage: bootp/bootp
-	$(OBJCOPY) bootp/bootp $@
-
-compressed/vmlinux: $(TOPDIR)/vmlinux dep
-	@$(MAKE) -C compressed vmlinux
-
-bootp/bootp: zImage initrd
-	@$(MAKE) -C bootp bootp
-
+.PHONY: initrd FORCE
 initrd:
-	@test "$(INITRD_VIRT)" != "" || (echo This architecture does not support INITRD; exit -1)
-	@test "$(INITRD)" != "" || (echo You must specify INITRD; exit -1)
+	@test "$(INITRD_PHYS)" != "" || \
+	(echo This machine does not support INITRD; exit -1)
+	@test "$(INITRD)" != "" || \
+	(echo You must specify INITRD; exit -1)
 
-install: $(CONFIGURE) Image
-	sh ./install.sh $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION) Image $(TOPDIR)/System.map "$(INSTALL_PATH)"
+install: $(obj)/Image
+	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
+	$(obj)/Image System.map "$(INSTALL_PATH)"
 
-zinstall: $(CONFIGURE) zImage
-	sh ./install.sh $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION) zImage $(TOPDIR)/System.map "$(INSTALL_PATH)"
+zinstall: $(obj)/zImage
+	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
+	$(obj)/zImage System.map "$(INSTALL_PATH)"
 
-clean:
-	$(RM) Image zImage bootpImage
-	@$(MAKE) -C compressed clean
-	@$(MAKE) -C bootp clean
-
-dep:
+subdir-	    := bootp compressed

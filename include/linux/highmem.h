@@ -2,68 +2,64 @@
 #define _LINUX_HIGHMEM_H
 
 #include <linux/config.h>
-#include <asm/pgalloc.h>
+#include <linux/fs.h>
+#include <linux/mm.h>
+
+#include <asm/cacheflush.h>
 
 #ifdef CONFIG_HIGHMEM
-
-extern struct page *highmem_start_page;
 
 #include <asm/highmem.h>
 
 /* declarations for linux/mm/highmem.c */
-FASTCALL(unsigned int nr_free_highpages(void));
-
-extern struct buffer_head * create_bounce(int rw, struct buffer_head * bh_orig);
-
-
-static inline char *bh_kmap(struct buffer_head *bh)
-{
-	return kmap(bh->b_page) + bh_offset(bh);
-}
-
-static inline void bh_kunmap(struct buffer_head *bh)
-{
-	kunmap(bh->b_page);
-}
+unsigned int nr_free_highpages(void);
 
 #else /* CONFIG_HIGHMEM */
 
 static inline unsigned int nr_free_highpages(void) { return 0; }
 
-static inline void *kmap(struct page *page) { return page_address(page); }
+static inline void *kmap(struct page *page)
+{
+	might_sleep();
+	return page_address(page);
+}
 
-#define kunmap(page) do { } while (0)
+#define kunmap(page) do { (void) (page); } while (0)
 
-#define kmap_atomic(page,idx)		kmap(page)
-#define kunmap_atomic(page,idx)		kunmap(page)
-
-#define bh_kmap(bh)	((bh)->b_data)
-#define bh_kunmap(bh)	do { } while (0);
+#define kmap_atomic(page, idx)		page_address(page)
+#define kunmap_atomic(addr, idx)	do { } while (0)
+#define kmap_atomic_to_page(ptr)	virt_to_page(ptr)
 
 #endif /* CONFIG_HIGHMEM */
 
 /* when CONFIG_HIGHMEM is not set these will be plain clear/copy_page */
 static inline void clear_user_highpage(struct page *page, unsigned long vaddr)
 {
-	clear_user_page(kmap(page), vaddr);
-	kunmap(page);
+	void *addr = kmap_atomic(page, KM_USER0);
+	clear_user_page(addr, vaddr, page);
+	kunmap_atomic(addr, KM_USER0);
+	/* Make sure this page is cleared on other CPU's too before using it */
+	smp_wmb();
 }
+
+#ifndef __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
+static inline struct page *
+alloc_zeroed_user_highpage(struct vm_area_struct *vma, unsigned long vaddr)
+{
+	struct page *page = alloc_page_vma(GFP_HIGHUSER, vma, vaddr);
+
+	if (page)
+		clear_user_highpage(page, vaddr);
+
+	return page;
+}
+#endif
 
 static inline void clear_highpage(struct page *page)
 {
-	clear_page(kmap(page));
-	kunmap(page);
-}
-
-static inline void memclear_highpage(struct page *page, unsigned int offset, unsigned int size)
-{
-	char *kaddr;
-
-	if (offset + size > PAGE_SIZE)
-		BUG();
-	kaddr = kmap(page);
-	memset(kaddr + offset, 0, size);
-	kunmap(page);
+	void *kaddr = kmap_atomic(page, KM_USER0);
+	clear_page(kaddr);
+	kunmap_atomic(kaddr, KM_USER0);
 }
 
 /*
@@ -71,36 +67,38 @@ static inline void memclear_highpage(struct page *page, unsigned int offset, uns
  */
 static inline void memclear_highpage_flush(struct page *page, unsigned int offset, unsigned int size)
 {
-	char *kaddr;
+	void *kaddr;
 
-	if (offset + size > PAGE_SIZE)
-		BUG();
-	kaddr = kmap(page);
-	memset(kaddr + offset, 0, size);
-	flush_page_to_ram(page);
-	kunmap(page);
+	BUG_ON(offset + size > PAGE_SIZE);
+
+	kaddr = kmap_atomic(page, KM_USER0);
+	memset((char *)kaddr + offset, 0, size);
+	flush_dcache_page(page);
+	kunmap_atomic(kaddr, KM_USER0);
 }
 
 static inline void copy_user_highpage(struct page *to, struct page *from, unsigned long vaddr)
 {
 	char *vfrom, *vto;
 
-	vfrom = kmap(from);
-	vto = kmap(to);
-	copy_user_page(vto, vfrom, vaddr);
-	kunmap(from);
-	kunmap(to);
+	vfrom = kmap_atomic(from, KM_USER0);
+	vto = kmap_atomic(to, KM_USER1);
+	copy_user_page(vto, vfrom, vaddr, to);
+	kunmap_atomic(vfrom, KM_USER0);
+	kunmap_atomic(vto, KM_USER1);
+	/* Make sure this page is cleared on other CPU's too before using it */
+	smp_wmb();
 }
 
 static inline void copy_highpage(struct page *to, struct page *from)
 {
 	char *vfrom, *vto;
 
-	vfrom = kmap(from);
-	vto = kmap(to);
+	vfrom = kmap_atomic(from, KM_USER0);
+	vto = kmap_atomic(to, KM_USER1);
 	copy_page(vto, vfrom);
-	kunmap(from);
-	kunmap(to);
+	kunmap_atomic(vfrom, KM_USER0);
+	kunmap_atomic(vto, KM_USER1);
 }
 
 #endif /* _LINUX_HIGHMEM_H */

@@ -6,10 +6,9 @@
  *  adding & removing files & directories
  */
 
-#include <linux/string.h>
 #include "hpfs_fn.h"
 
-int hpfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+static int hpfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 {
 	const char *name = dentry->d_name.name;
 	unsigned len = dentry->d_name.len;
@@ -25,25 +24,49 @@ int hpfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	struct hpfs_dirent dee;
 	int err;
 	if ((err = hpfs_chk_name((char *)name, &len))) return err==-ENOENT ? -EINVAL : err;
-	if (!(fnode = hpfs_alloc_fnode(dir->i_sb, dir->i_hpfs_dno, &fno, &bh))) goto bail;
-	if (!(dnode = hpfs_alloc_dnode(dir->i_sb, fno, &dno, &qbh0, 1))) goto bail1;
+	lock_kernel();
+	err = -ENOSPC;
+	fnode = hpfs_alloc_fnode(dir->i_sb, hpfs_i(dir)->i_dno, &fno, &bh);
+	if (!fnode)
+		goto bail;
+	dnode = hpfs_alloc_dnode(dir->i_sb, fno, &dno, &qbh0, 1);
+	if (!dnode)
+		goto bail1;
 	memset(&dee, 0, sizeof dee);
 	dee.directory = 1;
 	if (!(mode & 0222)) dee.read_only = 1;
 	/*dee.archive = 0;*/
 	dee.hidden = name[0] == '.';
 	dee.fnode = fno;
-	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, CURRENT_TIME);
-	hpfs_lock_inode(dir);
+	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, get_seconds());
+	result = new_inode(dir->i_sb);
+	if (!result)
+		goto bail2;
+	hpfs_init_inode(result);
+	result->i_ino = fno;
+	hpfs_i(result)->i_parent_dir = dir->i_ino;
+	hpfs_i(result)->i_dno = dno;
+	result->i_ctime.tv_sec = result->i_mtime.tv_sec = result->i_atime.tv_sec = local_to_gmt(dir->i_sb, dee.creation_date);
+	result->i_ctime.tv_nsec = 0; 
+	result->i_mtime.tv_nsec = 0; 
+	result->i_atime.tv_nsec = 0; 
+	hpfs_i(result)->i_ea_size = 0;
+	result->i_mode |= S_IFDIR;
+	result->i_op = &hpfs_dir_iops;
+	result->i_fop = &hpfs_dir_ops;
+	result->i_blocks = 4;
+	result->i_size = 2048;
+	result->i_nlink = 2;
+	if (dee.read_only)
+		result->i_mode &= ~0222;
+
+	down(&hpfs_i(dir)->i_sem);
 	r = hpfs_add_dirent(dir, (char *)name, len, &dee, 0);
-	if (r == 1) goto bail2;
+	if (r == 1)
+		goto bail3;
 	if (r == -1) {
-		brelse(bh);
-		hpfs_brelse4(&qbh0);
-		hpfs_free_sectors(dir->i_sb, fno, 1);
-		hpfs_free_dnode(dir->i_sb, dno);
-		hpfs_unlock_inode(dir);
-		return -EEXIST;
+		err = -EEXIST;
+		goto bail3;
 	}
 	fnode->len = len;
 	memcpy(fnode->name, name, len > 15 ? 15 : len);
@@ -57,7 +80,7 @@ int hpfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	dnode->root_dnode = 1;
 	dnode->up = fno;
 	de = hpfs_add_de(dir->i_sb, dnode, "\001\001", 2, 0);
-	de->creation_date = de->write_date = de->read_date = gmt_to_local(dir->i_sb, CURRENT_TIME);
+	de->creation_date = de->write_date = de->read_date = gmt_to_local(dir->i_sb, get_seconds());
 	if (!(mode & 0222)) de->read_only = 1;
 	de->first = de->directory = 1;
 	/*de->hidden = de->system = 0;*/
@@ -67,167 +90,203 @@ int hpfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	hpfs_mark_4buffers_dirty(&qbh0);
 	hpfs_brelse4(&qbh0);
 	dir->i_nlink++;
-	hpfs_lock_iget(dir->i_sb, 1);
-	if ((result = iget(dir->i_sb, fno))) {
-		result->i_hpfs_parent_dir = dir->i_ino;
-		result->i_ctime = result->i_mtime = result->i_atime = local_to_gmt(dir->i_sb, dee.creation_date);
-		result->i_hpfs_ea_size = 0;
-		if (dee.read_only) result->i_mode &= ~0222;
-		if (result->i_uid != current->fsuid ||
-		    result->i_gid != current->fsgid ||
-		    result->i_mode != (mode | S_IFDIR)) {
-			result->i_uid = current->fsuid;
-			result->i_gid = current->fsgid;
-			result->i_mode = mode | S_IFDIR;
-			hpfs_write_inode_nolock(result);
-		}
-		d_instantiate(dentry, result);
-	}
-	hpfs_unlock_iget(dir->i_sb);
-	hpfs_unlock_inode(dir);
-	return 0;
-	bail2:
-	hpfs_brelse4(&qbh0);
-	hpfs_free_dnode(dir->i_sb, dno);
-	hpfs_unlock_inode(dir);
-	bail1:
-	brelse(bh);
-	hpfs_free_sectors(dir->i_sb, fno, 1);
-	bail:
-	return -ENOSPC;
-}
+	insert_inode_hash(result);
 
-int hpfs_create(struct inode *dir, struct dentry *dentry, int mode)
-{
-	const char *name = dentry->d_name.name;
-	unsigned len = dentry->d_name.len;
-	struct inode *result = NULL;
-	struct buffer_head *bh;
-	struct fnode *fnode;
-	fnode_secno fno;
-	int r;
-	struct hpfs_dirent dee;
-	int err;
-	if ((err = hpfs_chk_name((char *)name, &len))) return err==-ENOENT ? -EINVAL : err;
-	if (!(fnode = hpfs_alloc_fnode(dir->i_sb, dir->i_hpfs_dno, &fno, &bh))) goto bail;
-	memset(&dee, 0, sizeof dee);
-	if (!(mode & 0222)) dee.read_only = 1;
-	dee.archive = 1;
-	dee.hidden = name[0] == '.';
-	dee.fnode = fno;
-	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, CURRENT_TIME);
-	hpfs_lock_inode(dir);
-	r = hpfs_add_dirent(dir, (char *)name, len, &dee, 0);
-	if (r == 1) goto bail1;
-	if (r == -1) {
-		brelse(bh);
-		hpfs_free_sectors(dir->i_sb, fno, 1);
-		hpfs_unlock_inode(dir);
-		return -EEXIST;
-	}
-	fnode->len = len;
-	memcpy(fnode->name, name, len > 15 ? 15 : len);
-	fnode->up = dir->i_ino;
-	mark_buffer_dirty(bh);
-	brelse(bh);
-	hpfs_lock_iget(dir->i_sb, 2);
-	if ((result = iget(dir->i_sb, fno))) {
-		hpfs_decide_conv(result, (char *)name, len);
-		result->i_hpfs_parent_dir = dir->i_ino;
-		result->i_ctime = result->i_mtime = result->i_atime = local_to_gmt(dir->i_sb, dee.creation_date);
-		result->i_hpfs_ea_size = 0;
-		if (dee.read_only) result->i_mode &= ~0222;
-		if (result->i_blocks == -1) result->i_blocks = 1;
-		if (result->i_size == -1) {
-			result->i_size = 0;
-			result->i_data.a_ops = &hpfs_aops;
-			result->u.hpfs_i.mmu_private = 0;
-		}
-		if (result->i_uid != current->fsuid ||
-		    result->i_gid != current->fsgid ||
-		    result->i_mode != (mode | S_IFREG)) {
-			result->i_uid = current->fsuid;
-			result->i_gid = current->fsgid;
-			result->i_mode = mode | S_IFREG;
-			hpfs_write_inode_nolock(result);
-		}
-		d_instantiate(dentry, result);
-	}
-	hpfs_unlock_iget(dir->i_sb);
-	hpfs_unlock_inode(dir);
-	return 0;
-	bail1:
-	brelse(bh);
-	hpfs_free_sectors(dir->i_sb, fno, 1);
-	hpfs_unlock_inode(dir);
-	bail:
-	return -ENOSPC;
-}
-
-int hpfs_mknod(struct inode *dir, struct dentry *dentry, int mode, int rdev)
-{
-	const char *name = dentry->d_name.name;
-	unsigned len = dentry->d_name.len;
-	struct buffer_head *bh;
-	struct fnode *fnode;
-	fnode_secno fno;
-	int r;
-	struct hpfs_dirent dee;
-	struct inode *result = NULL;
-	int err;
-	if ((err = hpfs_chk_name((char *)name, &len))) return err==-ENOENT ? -EINVAL : err;
-	if (dir->i_sb->s_hpfs_eas < 2) return -EPERM;
-	if (!(fnode = hpfs_alloc_fnode(dir->i_sb, dir->i_hpfs_dno, &fno, &bh))) goto bail;
-	memset(&dee, 0, sizeof dee);
-	if (!(mode & 0222)) dee.read_only = 1;
-	dee.archive = 1;
-	dee.hidden = name[0] == '.';
-	dee.fnode = fno;
-	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, CURRENT_TIME);
-	hpfs_lock_inode(dir);
-	r = hpfs_add_dirent(dir, (char *)name, len, &dee, 0);
-	if (r == 1) goto bail1;
-	if (r == -1) {
-		brelse(bh);
-		hpfs_free_sectors(dir->i_sb, fno, 1);
-		hpfs_unlock_inode(dir);
-		return -EEXIST;
-	}
-	fnode->len = len;
-	memcpy(fnode->name, name, len > 15 ? 15 : len);
-	fnode->up = dir->i_ino;
-	mark_buffer_dirty(bh);
-	hpfs_lock_iget(dir->i_sb, 2);
-	if ((result = iget(dir->i_sb, fno))) {
-		result->i_hpfs_parent_dir = dir->i_ino;
-		result->i_ctime = result->i_mtime = result->i_atime = local_to_gmt(dir->i_sb, dee.creation_date);
-		result->i_hpfs_ea_size = 0;
-		/*if (result->i_blocks == -1) result->i_blocks = 1;
-		if (result->i_size == -1) result->i_size = 0;*/
+	if (result->i_uid != current->fsuid ||
+	    result->i_gid != current->fsgid ||
+	    result->i_mode != (mode | S_IFDIR)) {
 		result->i_uid = current->fsuid;
 		result->i_gid = current->fsgid;
-		result->i_nlink = 1;
-		result->i_size = 0;
-		result->i_blocks = 1;
-		init_special_inode(result, mode, rdev);
+		result->i_mode = mode | S_IFDIR;
 		hpfs_write_inode_nolock(result);
-		d_instantiate(dentry, result);
 	}
-	hpfs_unlock_iget(dir->i_sb);
-	hpfs_unlock_inode(dir);
-	brelse(bh);
+	d_instantiate(dentry, result);
+	up(&hpfs_i(dir)->i_sem);
+	unlock_kernel();
 	return 0;
-	bail1:
+bail3:
+	up(&hpfs_i(dir)->i_sem);
+	iput(result);
+bail2:
+	hpfs_brelse4(&qbh0);
+	hpfs_free_dnode(dir->i_sb, dno);
+bail1:
 	brelse(bh);
 	hpfs_free_sectors(dir->i_sb, fno, 1);
-	hpfs_unlock_inode(dir);
-	bail:
-	return -ENOSPC;
+bail:
+	unlock_kernel();
+	return err;
 }
 
-extern struct address_space_operations hpfs_symlink_aops;
+static int hpfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidata *nd)
+{
+	const char *name = dentry->d_name.name;
+	unsigned len = dentry->d_name.len;
+	struct inode *result = NULL;
+	struct buffer_head *bh;
+	struct fnode *fnode;
+	fnode_secno fno;
+	int r;
+	struct hpfs_dirent dee;
+	int err;
+	if ((err = hpfs_chk_name((char *)name, &len)))
+		return err==-ENOENT ? -EINVAL : err;
+	lock_kernel();
+	err = -ENOSPC;
+	fnode = hpfs_alloc_fnode(dir->i_sb, hpfs_i(dir)->i_dno, &fno, &bh);
+	if (!fnode)
+		goto bail;
+	memset(&dee, 0, sizeof dee);
+	if (!(mode & 0222)) dee.read_only = 1;
+	dee.archive = 1;
+	dee.hidden = name[0] == '.';
+	dee.fnode = fno;
+	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, get_seconds());
 
-int hpfs_symlink(struct inode *dir, struct dentry *dentry, const char *symlink)
+	result = new_inode(dir->i_sb);
+	if (!result)
+		goto bail1;
+	
+	hpfs_init_inode(result);
+	result->i_ino = fno;
+	result->i_mode |= S_IFREG;
+	result->i_mode &= ~0111;
+	result->i_op = &hpfs_file_iops;
+	result->i_fop = &hpfs_file_ops;
+	result->i_nlink = 1;
+	hpfs_decide_conv(result, (char *)name, len);
+	hpfs_i(result)->i_parent_dir = dir->i_ino;
+	result->i_ctime.tv_sec = result->i_mtime.tv_sec = result->i_atime.tv_sec = local_to_gmt(dir->i_sb, dee.creation_date);
+	result->i_ctime.tv_nsec = 0;
+	result->i_mtime.tv_nsec = 0;
+	result->i_atime.tv_nsec = 0;
+	hpfs_i(result)->i_ea_size = 0;
+	if (dee.read_only)
+		result->i_mode &= ~0222;
+	result->i_blocks = 1;
+	result->i_size = 0;
+	result->i_data.a_ops = &hpfs_aops;
+	hpfs_i(result)->mmu_private = 0;
+
+	down(&hpfs_i(dir)->i_sem);
+	r = hpfs_add_dirent(dir, (char *)name, len, &dee, 0);
+	if (r == 1)
+		goto bail2;
+	if (r == -1) {
+		err = -EEXIST;
+		goto bail2;
+	}
+	fnode->len = len;
+	memcpy(fnode->name, name, len > 15 ? 15 : len);
+	fnode->up = dir->i_ino;
+	mark_buffer_dirty(bh);
+	brelse(bh);
+
+	insert_inode_hash(result);
+
+	if (result->i_uid != current->fsuid ||
+	    result->i_gid != current->fsgid ||
+	    result->i_mode != (mode | S_IFREG)) {
+		result->i_uid = current->fsuid;
+		result->i_gid = current->fsgid;
+		result->i_mode = mode | S_IFREG;
+		hpfs_write_inode_nolock(result);
+	}
+	d_instantiate(dentry, result);
+	up(&hpfs_i(dir)->i_sem);
+	unlock_kernel();
+	return 0;
+
+bail2:
+	up(&hpfs_i(dir)->i_sem);
+	iput(result);
+bail1:
+	brelse(bh);
+	hpfs_free_sectors(dir->i_sb, fno, 1);
+bail:
+	unlock_kernel();
+	return err;
+}
+
+static int hpfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t rdev)
+{
+	const char *name = dentry->d_name.name;
+	unsigned len = dentry->d_name.len;
+	struct buffer_head *bh;
+	struct fnode *fnode;
+	fnode_secno fno;
+	int r;
+	struct hpfs_dirent dee;
+	struct inode *result = NULL;
+	int err;
+	if ((err = hpfs_chk_name((char *)name, &len))) return err==-ENOENT ? -EINVAL : err;
+	if (hpfs_sb(dir->i_sb)->sb_eas < 2) return -EPERM;
+	if (!new_valid_dev(rdev))
+		return -EINVAL;
+	lock_kernel();
+	err = -ENOSPC;
+	fnode = hpfs_alloc_fnode(dir->i_sb, hpfs_i(dir)->i_dno, &fno, &bh);
+	if (!fnode)
+		goto bail;
+	memset(&dee, 0, sizeof dee);
+	if (!(mode & 0222)) dee.read_only = 1;
+	dee.archive = 1;
+	dee.hidden = name[0] == '.';
+	dee.fnode = fno;
+	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, get_seconds());
+
+	result = new_inode(dir->i_sb);
+	if (!result)
+		goto bail1;
+
+	hpfs_init_inode(result);
+	result->i_ino = fno;
+	hpfs_i(result)->i_parent_dir = dir->i_ino;
+	result->i_ctime.tv_sec = result->i_mtime.tv_sec = result->i_atime.tv_sec = local_to_gmt(dir->i_sb, dee.creation_date);
+	result->i_ctime.tv_nsec = 0;
+	result->i_mtime.tv_nsec = 0;
+	result->i_atime.tv_nsec = 0;
+	hpfs_i(result)->i_ea_size = 0;
+	result->i_uid = current->fsuid;
+	result->i_gid = current->fsgid;
+	result->i_nlink = 1;
+	result->i_size = 0;
+	result->i_blocks = 1;
+	init_special_inode(result, mode, rdev);
+
+	down(&hpfs_i(dir)->i_sem);
+	r = hpfs_add_dirent(dir, (char *)name, len, &dee, 0);
+	if (r == 1)
+		goto bail2;
+	if (r == -1) {
+		err = -EEXIST;
+		goto bail2;
+	}
+	fnode->len = len;
+	memcpy(fnode->name, name, len > 15 ? 15 : len);
+	fnode->up = dir->i_ino;
+	mark_buffer_dirty(bh);
+
+	insert_inode_hash(result);
+
+	hpfs_write_inode_nolock(result);
+	d_instantiate(dentry, result);
+	up(&hpfs_i(dir)->i_sem);
+	brelse(bh);
+	unlock_kernel();
+	return 0;
+bail2:
+	up(&hpfs_i(dir)->i_sem);
+	iput(result);
+bail1:
+	brelse(bh);
+	hpfs_free_sectors(dir->i_sb, fno, 1);
+bail:
+	unlock_kernel();
+	return err;
+}
+
+static int hpfs_symlink(struct inode *dir, struct dentry *dentry, const char *symlink)
 {
 	const char *name = dentry->d_name.name;
 	unsigned len = dentry->d_name.len;
@@ -239,61 +298,75 @@ int hpfs_symlink(struct inode *dir, struct dentry *dentry, const char *symlink)
 	struct inode *result;
 	int err;
 	if ((err = hpfs_chk_name((char *)name, &len))) return err==-ENOENT ? -EINVAL : err;
-	if (dir->i_sb->s_hpfs_eas < 2) return -EPERM;
-	if (!(fnode = hpfs_alloc_fnode(dir->i_sb, dir->i_hpfs_dno, &fno, &bh))) goto bail;
+	lock_kernel();
+	if (hpfs_sb(dir->i_sb)->sb_eas < 2) {
+		unlock_kernel();
+		return -EPERM;
+	}
+	err = -ENOSPC;
+	fnode = hpfs_alloc_fnode(dir->i_sb, hpfs_i(dir)->i_dno, &fno, &bh);
+	if (!fnode)
+		goto bail;
 	memset(&dee, 0, sizeof dee);
 	dee.archive = 1;
 	dee.hidden = name[0] == '.';
 	dee.fnode = fno;
-	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, CURRENT_TIME);
-	hpfs_lock_inode(dir);
+	dee.creation_date = dee.write_date = dee.read_date = gmt_to_local(dir->i_sb, get_seconds());
+
+	result = new_inode(dir->i_sb);
+	if (!result)
+		goto bail1;
+	result->i_ino = fno;
+	hpfs_init_inode(result);
+	hpfs_i(result)->i_parent_dir = dir->i_ino;
+	result->i_ctime.tv_sec = result->i_mtime.tv_sec = result->i_atime.tv_sec = local_to_gmt(dir->i_sb, dee.creation_date);
+	result->i_ctime.tv_nsec = 0;
+	result->i_mtime.tv_nsec = 0;
+	result->i_atime.tv_nsec = 0;
+	hpfs_i(result)->i_ea_size = 0;
+	result->i_mode = S_IFLNK | 0777;
+	result->i_uid = current->fsuid;
+	result->i_gid = current->fsgid;
+	result->i_blocks = 1;
+	result->i_nlink = 1;
+	result->i_size = strlen(symlink);
+	result->i_op = &page_symlink_inode_operations;
+	result->i_data.a_ops = &hpfs_symlink_aops;
+
+	down(&hpfs_i(dir)->i_sem);
 	r = hpfs_add_dirent(dir, (char *)name, len, &dee, 0);
-	if (r == 1) goto bail1;
+	if (r == 1)
+		goto bail2;
 	if (r == -1) {
-		brelse(bh);
-		hpfs_free_sectors(dir->i_sb, fno, 1);
-		hpfs_unlock_inode(dir);
-		return -EEXIST;
+		err = -EEXIST;
+		goto bail2;
 	}
 	fnode->len = len;
 	memcpy(fnode->name, name, len > 15 ? 15 : len);
 	fnode->up = dir->i_ino;
+	hpfs_set_ea(result, fnode, "SYMLINK", (char *)symlink, strlen(symlink));
 	mark_buffer_dirty(bh);
 	brelse(bh);
-	hpfs_lock_iget(dir->i_sb, 2);
-	if ((result = iget(dir->i_sb, fno))) {
-		result->i_hpfs_parent_dir = dir->i_ino;
-		result->i_ctime = result->i_mtime = result->i_atime = local_to_gmt(dir->i_sb, dee.creation_date);
-		result->i_hpfs_ea_size = 0;
-		/*if (result->i_blocks == -1) result->i_blocks = 1;
-		if (result->i_size == -1) result->i_size = 0;*/
-		result->i_mode = S_IFLNK | 0777;
-		result->i_uid = current->fsuid;
-		result->i_gid = current->fsgid;
-		result->i_blocks = 1;
-		result->i_size = strlen(symlink);
-		result->i_op = &page_symlink_inode_operations;
-		result->i_data.a_ops = &hpfs_symlink_aops;
-		if ((fnode = hpfs_map_fnode(dir->i_sb, fno, &bh))) {
-			hpfs_set_ea(result, fnode, "SYMLINK", (char *)symlink, strlen(symlink));
-			mark_buffer_dirty(bh);
-			brelse(bh);
-		}
-		hpfs_write_inode_nolock(result);
-		d_instantiate(dentry, result);
-	}
-	hpfs_unlock_iget(dir->i_sb);
-	hpfs_unlock_inode(dir);
+
+	insert_inode_hash(result);
+
+	hpfs_write_inode_nolock(result);
+	d_instantiate(dentry, result);
+	up(&hpfs_i(dir)->i_sem);
+	unlock_kernel();
 	return 0;
-	bail1:
+bail2:
+	up(&hpfs_i(dir)->i_sem);
+	iput(result);
+bail1:
 	brelse(bh);
 	hpfs_free_sectors(dir->i_sb, fno, 1);
-	hpfs_unlock_inode(dir);
-	bail:
-	return -ENOSPC;
+bail:
+	unlock_kernel();
+	return err;
 }
 
-int hpfs_unlink(struct inode *dir, struct dentry *dentry)
+static int hpfs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	const char *name = dentry->d_name.name;
 	unsigned len = dentry->d_name.len;
@@ -304,58 +377,78 @@ int hpfs_unlink(struct inode *dir, struct dentry *dentry)
 	fnode_secno fno;
 	int r;
 	int rep = 0;
+	int err;
+
+	lock_kernel();
 	hpfs_adjust_length((char *)name, &len);
-	again:
-	hpfs_lock_2inodes(dir, inode);
-	if (!(de = map_dirent(dir, dir->i_hpfs_dno, (char *)name, len, &dno, &qbh))) {
-		hpfs_unlock_2inodes(dir, inode);
-		return -ENOENT;
-	}
-	if (de->first) {
-		hpfs_brelse4(&qbh);
-		hpfs_unlock_2inodes(dir, inode);
-		return -EPERM;
-	}
-	if (de->directory) {
-		hpfs_brelse4(&qbh);
-		hpfs_unlock_2inodes(dir, inode);
-		return -EISDIR;
-	}
+again:
+	down(&hpfs_i(inode)->i_parent);
+	down(&hpfs_i(dir)->i_sem);
+	err = -ENOENT;
+	de = map_dirent(dir, hpfs_i(dir)->i_dno, (char *)name, len, &dno, &qbh);
+	if (!de)
+		goto out;
+
+	err = -EPERM;
+	if (de->first)
+		goto out1;
+
+	err = -EISDIR;
+	if (de->directory)
+		goto out1;
+
 	fno = de->fnode;
-	if ((r = hpfs_remove_dirent(dir, dno, de, &qbh, 1)) == 1) hpfs_error(dir->i_sb, "there was error when removing dirent");
-	if (r != 2) {
-		inode->i_nlink--;
-		hpfs_unlock_2inodes(dir, inode);
-	} else {	/* no space for deleting, try to truncate file */
-		struct iattr newattrs;
-		int err;
-		hpfs_unlock_2inodes(dir, inode);
-		if (rep)
-			goto ret;
+	r = hpfs_remove_dirent(dir, dno, de, &qbh, 1);
+	switch (r) {
+	case 1:
+		hpfs_error(dir->i_sb, "there was error when removing dirent");
+		err = -EFSERROR;
+		break;
+	case 2:		/* no space for deleting, try to truncate file */
+
+		err = -ENOSPC;
+		if (rep++)
+			break;
+
+		up(&hpfs_i(dir)->i_sem);
+		up(&hpfs_i(inode)->i_parent);
 		d_drop(dentry);
+		spin_lock(&dentry->d_lock);
 		if (atomic_read(&dentry->d_count) > 1 ||
-		    permission(inode, MAY_WRITE) ||
+		    permission(inode, MAY_WRITE, NULL) ||
+		    !S_ISREG(inode->i_mode) ||
 		    get_write_access(inode)) {
+			spin_unlock(&dentry->d_lock);
 			d_rehash(dentry);
-			goto ret;
+		} else {
+			struct iattr newattrs;
+			spin_unlock(&dentry->d_lock);
+			/*printk("HPFS: truncating file before delete.\n");*/
+			newattrs.ia_size = 0;
+			newattrs.ia_valid = ATTR_SIZE | ATTR_CTIME;
+			err = notify_change(dentry, &newattrs);
+			put_write_access(inode);
+			if (!err)
+				goto again;
 		}
-		/*printk("HPFS: truncating file before delete.\n");*/
-		down(&inode->i_sem);
-		newattrs.ia_size = 0;
-		newattrs.ia_valid = ATTR_SIZE | ATTR_CTIME;
-		err = notify_change(dentry, &newattrs);
-		up(&inode->i_sem);
-		put_write_access(inode);
-		if (err)
-			goto ret;
-		rep = 1;
-		goto again;
+		unlock_kernel();
+		return -ENOSPC;
+	default:
+		inode->i_nlink--;
+		err = 0;
 	}
-	ret:
-	return r == 2 ? -ENOSPC : r == 1 ? -EFSERROR : 0;
+	goto out;
+
+out1:
+	hpfs_brelse4(&qbh);
+out:
+	up(&hpfs_i(dir)->i_sem);
+	up(&hpfs_i(inode)->i_parent);
+	unlock_kernel();
+	return err;
 }
 
-int hpfs_rmdir(struct inode *dir, struct dentry *dentry)
+static int hpfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	const char *name = dentry->d_name.name;
 	unsigned len = dentry->d_name.len;
@@ -365,41 +458,57 @@ int hpfs_rmdir(struct inode *dir, struct dentry *dentry)
 	dnode_secno dno;
 	fnode_secno fno;
 	int n_items = 0;
+	int err;
 	int r;
+
 	hpfs_adjust_length((char *)name, &len);
-	hpfs_lock_2inodes(dir, inode);
-	if (!(de = map_dirent(dir, dir->i_hpfs_dno, (char *)name, len, &dno, &qbh))) {
-		hpfs_unlock_2inodes(dir, inode);
-		return -ENOENT;
-	}	
-	if (de->first) {
-		hpfs_brelse4(&qbh);
-		hpfs_unlock_2inodes(dir, inode);
-		return -EPERM;
-	}
-	if (!de->directory) {
-		hpfs_brelse4(&qbh);
-		hpfs_unlock_2inodes(dir, inode);
-		return -ENOTDIR;
-	}
-	hpfs_count_dnodes(dir->i_sb, inode->i_hpfs_dno, NULL, NULL, &n_items);
-	if (n_items) {
-		hpfs_brelse4(&qbh);
-		hpfs_unlock_2inodes(dir, inode);
-		return -ENOTEMPTY;
-	}
+	lock_kernel();
+	down(&hpfs_i(inode)->i_parent);
+	down(&hpfs_i(dir)->i_sem);
+	err = -ENOENT;
+	de = map_dirent(dir, hpfs_i(dir)->i_dno, (char *)name, len, &dno, &qbh);
+	if (!de)
+		goto out;
+
+	err = -EPERM;
+	if (de->first)
+		goto out1;
+
+	err = -ENOTDIR;
+	if (!de->directory)
+		goto out1;
+
+	hpfs_count_dnodes(dir->i_sb, hpfs_i(inode)->i_dno, NULL, NULL, &n_items);
+	err = -ENOTEMPTY;
+	if (n_items)
+		goto out1;
+
 	fno = de->fnode;
-	if ((r = hpfs_remove_dirent(dir, dno, de, &qbh, 1)) == 1)
+	r = hpfs_remove_dirent(dir, dno, de, &qbh, 1);
+	switch (r) {
+	case 1:
 		hpfs_error(dir->i_sb, "there was error when removing dirent");
-	if (r != 2) {
+		err = -EFSERROR;
+		break;
+	case 2:
+		err = -ENOSPC;
+		break;
+	default:
 		dir->i_nlink--;
 		inode->i_nlink = 0;
-		hpfs_unlock_2inodes(dir, inode);
-	} else hpfs_unlock_2inodes(dir, inode);
-	return r == 2 ? -ENOSPC : r == 1 ? -EFSERROR : 0;
+		err = 0;
+	}
+	goto out;
+out1:
+	hpfs_brelse4(&qbh);
+out:
+	up(&hpfs_i(dir)->i_sem);
+	up(&hpfs_i(inode)->i_parent);
+	unlock_kernel();
+	return err;
 }
 
-int hpfs_symlink_readpage(struct file *file, struct page *page)
+static int hpfs_symlink_readpage(struct file *file, struct page *page)
 {
 	char *link = kmap(page);
 	struct inode *i = page->mapping->host;
@@ -418,18 +527,22 @@ int hpfs_symlink_readpage(struct file *file, struct page *page)
 	unlock_kernel();
 	SetPageUptodate(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
 
 fail:
 	unlock_kernel();
 	SetPageError(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return err;
 }
+
+struct address_space_operations hpfs_symlink_aops = {
+	.readpage	= hpfs_symlink_readpage
+};
 	
-int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+static int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		struct inode *new_dir, struct dentry *new_dentry)
 {
 	char *old_name = (char *)old_dentry->d_name.name;
@@ -450,7 +563,14 @@ int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	err = 0;
 	hpfs_adjust_length((char *)old_name, &old_len);
 
-	hpfs_lock_3inodes(old_dir, new_dir, i);
+	lock_kernel();
+	/* order doesn't matter, due to VFS exclusion */
+	down(&hpfs_i(i)->i_parent);
+	if (new_inode)
+		down(&hpfs_i(new_inode)->i_parent);
+	down(&hpfs_i(old_dir)->i_sem);
+	if (new_dir != old_dir)
+		down(&hpfs_i(new_dir)->i_sem);
 	
 	/* Erm? Moving over the empty non-busy directory is perfectly legal */
 	if (new_inode && S_ISDIR(new_inode->i_mode)) {
@@ -458,7 +578,7 @@ int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		goto end1;
 	}
 
-	if (!(dep = map_dirent(old_dir, old_dir->i_hpfs_dno, (char *)old_name, old_len, &dno, &qbh))) {
+	if (!(dep = map_dirent(old_dir, hpfs_i(old_dir)->i_dno, (char *)old_name, old_len, &dno, &qbh))) {
 		hpfs_error(i->i_sb, "lookup succeeded but map dirent failed");
 		err = -ENOENT;
 		goto end1;
@@ -469,7 +589,7 @@ int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	if (new_inode) {
 		int r;
 		if ((r = hpfs_remove_dirent(old_dir, dno, dep, &qbh, 1)) != 2) {
-			if ((nde = map_dirent(new_dir, new_dir->i_hpfs_dno, (char *)new_name, new_len, NULL, &qbh1))) {
+			if ((nde = map_dirent(new_dir, hpfs_i(new_dir)->i_dno, (char *)new_name, new_len, NULL, &qbh1))) {
 				new_inode->i_nlink = 0;
 				copy_de(nde, &de);
 				memcpy(nde->name, new_name, new_len);
@@ -497,7 +617,7 @@ int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	}
 	
 	if (new_dir == old_dir)
-		if (!(dep = map_dirent(old_dir, old_dir->i_hpfs_dno, (char *)old_name, old_len, &dno, &qbh))) {
+		if (!(dep = map_dirent(old_dir, hpfs_i(old_dir)->i_dno, (char *)old_name, old_len, &dno, &qbh))) {
 			hpfs_unlock_creation(i->i_sb);
 			hpfs_error(i->i_sb, "lookup succeeded but map dirent failed at #2");
 			err = -ENOENT;
@@ -513,7 +633,7 @@ int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	hpfs_unlock_creation(i->i_sb);
 	
 	end:
-	i->i_hpfs_parent_dir = new_dir->i_ino;
+	hpfs_i(i)->i_parent_dir = new_dir->i_ino;
 	if (S_ISDIR(i->i_mode)) {
 		new_dir->i_nlink++;
 		old_dir->i_nlink--;
@@ -526,9 +646,28 @@ int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		mark_buffer_dirty(bh);
 		brelse(bh);
 	}
-	i->i_hpfs_conv = i->i_sb->s_hpfs_conv;
+	hpfs_i(i)->i_conv = hpfs_sb(i->i_sb)->sb_conv;
 	hpfs_decide_conv(i, (char *)new_name, new_len);
-	end1:
-	hpfs_unlock_3inodes(old_dir, new_dir, i);
+end1:
+	if (old_dir != new_dir)
+		up(&hpfs_i(new_dir)->i_sem);
+	up(&hpfs_i(old_dir)->i_sem);
+	up(&hpfs_i(i)->i_parent);
+	if (new_inode)
+		up(&hpfs_i(new_inode)->i_parent);
+	unlock_kernel();
 	return err;
 }
+
+struct inode_operations hpfs_dir_iops =
+{
+	.create		= hpfs_create,
+	.lookup		= hpfs_lookup,
+	.unlink		= hpfs_unlink,
+	.symlink	= hpfs_symlink,
+	.mkdir		= hpfs_mkdir,
+	.rmdir		= hpfs_rmdir,
+	.mknod		= hpfs_mknod,
+	.rename		= hpfs_rename,
+	.setattr	= hpfs_notify_change,
+};

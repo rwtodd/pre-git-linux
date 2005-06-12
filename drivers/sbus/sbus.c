@@ -1,11 +1,11 @@
-/* $Id: sbus.c,v 1.91 2000/11/08 05:04:06 davem Exp $
+/* $Id: sbus.c,v 1.100 2002/01/24 15:36:24 davem Exp $
  * sbus.c:  SBus support routines.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/config.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -20,6 +20,13 @@
 struct sbus_bus *sbus_root = NULL;
 
 static struct linux_prom_irqs irqs[PROMINTR_MAX] __initdata = { { 0 } };
+#ifdef CONFIG_SPARC32
+static int interrupts[PROMINTR_MAX] __initdata = { 0 };
+#endif
+
+#ifdef CONFIG_PCI
+extern int pcic_present(void);
+#endif
 
 /* Perhaps when I figure out more about the iommu we'll put a
  * device registration routine here that probe_sbus() calls to
@@ -67,29 +74,12 @@ static void __init fill_sbus_device(int prom_node, struct sbus_dev *sdev)
 	sdev->ranges_applied = 0;
 
 	base = (unsigned long) sdev->reg_addrs[0].phys_addr;
-	if (base >= SUN_SBUS_BVADDR ||
-	    (sparc_cpu_model != sun4c && sparc_cpu_model != sun4)) {
-		/* OK, we can compute the slot number in a
-		 * straightforward manner.
-		 */
-		if (sparc_cpu_model == sun4u ||
-		    sparc_cpu_model == sun4d)
-			sdev->slot = sdev->reg_addrs[0].which_io;
-		else
-			sdev->slot = sbus_dev_slot(base);
-	} else {
-		int rnum;
 
-		/* Fixups are needed to compute the slot number. */
+	/* Compute the slot number. */
+	if (base >= SUN_SBUS_BVADDR && sparc_cpu_model == sun4m) {
+		sdev->slot = sbus_dev_slot(base);
+	} else {
 		sdev->slot = sdev->reg_addrs[0].which_io;
-		sdev->reg_addrs[0].phys_addr =
-			sbus_devaddr(sdev->slot, base);
-		for (rnum = 1; rnum < sdev->num_registers; rnum++) {
-			base = (unsigned long)
-				sdev->reg_addrs[rnum].phys_addr;
-			sdev->reg_addrs[rnum].phys_addr =
-				sbus_devaddr(sdev->slot, base);
-		}
 	}
 
 no_regs:
@@ -121,7 +111,7 @@ no_ranges:
 	 * XXX Pull this crud out into an arch specific area
 	 * XXX at some point. -DaveM
 	 */
-#ifdef __sparc_v9__
+#ifdef CONFIG_SPARC64
 	len = prom_getproperty(prom_node, "interrupts",
 			       (char *) irqs, sizeof(irqs));
 	if (len == -1 || len == 0) {
@@ -136,24 +126,43 @@ no_ranges:
 
 		sdev->irqs[0] =	sbus_build_irq(sdev->bus, pri);
 	}
-#else
+#endif /* CONFIG_SPARC64 */
+
+#ifdef CONFIG_SPARC32
 	len = prom_getproperty(prom_node, "intr",
 			       (char *)irqs, sizeof(irqs));
-	if (len == -1)
-		len = 0;
-	sdev->num_irqs = len / 8;
-	if (sdev->num_irqs == 0) {
-		sdev->irqs[0] = 0;
-	} else if (sparc_cpu_model == sun4d) {
-		extern unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq);
+	if (len != -1) {
+		sdev->num_irqs = len / 8;
+		if (sdev->num_irqs == 0) {
+			sdev->irqs[0] = 0;
+		} else if (sparc_cpu_model == sun4d) {
+			extern unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq);
 
-		for (len = 0; len < sdev->num_irqs; len++)
-			sdev->irqs[len] = sun4d_build_irq(sdev, irqs[len].pri);
+			for (len = 0; len < sdev->num_irqs; len++)
+				sdev->irqs[len] = sun4d_build_irq(sdev, irqs[len].pri);
+		} else {
+			for (len = 0; len < sdev->num_irqs; len++)
+				sdev->irqs[len] = irqs[len].pri;
+		}
 	} else {
-		for (len = 0; len < sdev->num_irqs; len++)
-			sdev->irqs[len] = irqs[len].pri;
-	}
-#endif /* !__sparc_v9__ */
+		/* No "intr" node found-- check for "interrupts" node.
+		 * This node contains SBus interrupt levels, not IPLs
+		 * as in "intr", and no vector values.  We convert 
+		 * SBus interrupt levels to PILs (platform specific).
+		 */
+		len = prom_getproperty(prom_node, "interrupts", 
+					(char *)interrupts, sizeof(interrupts));
+		if (len == -1) {
+			sdev->irqs[0] = 0;
+			sdev->num_irqs = 0;
+		} else {
+			sdev->num_irqs = len / sizeof(int);
+			for (len = 0; len < sdev->num_irqs; len++) {
+				sdev->irqs[len] = sbint_to_irq(sdev, interrupts[len]);
+			}
+		}
+	} 
+#endif /* CONFIG_SPARC32 */
 }
 
 /* This routine gets called from whoever needs the sbus first, to scan
@@ -183,7 +192,7 @@ static void __init sbus_do_child_siblings(int start_node,
 	while((this_node = prom_getsibling(this_node)) != 0) {
 		this_dev->next = kmalloc(sizeof(struct sbus_dev), GFP_ATOMIC);
 		this_dev = this_dev->next;
-		this_dev->next = 0;
+		this_dev->next = NULL;
 		this_dev->parent = parent;
 
 		this_dev->bus = sbus;
@@ -193,7 +202,7 @@ static void __init sbus_do_child_siblings(int start_node,
 			this_dev->child = kmalloc(sizeof(struct sbus_dev),
 						  GFP_ATOMIC);
 			this_dev->child->bus = sbus;
-			this_dev->child->next = 0;
+			this_dev->child->next = NULL;
 			fill_sbus_device(prom_getchild(this_node), this_dev->child);
 			sbus_do_child_siblings(prom_getchild(this_node),
 					       this_dev->child, this_dev, sbus);
@@ -208,6 +217,8 @@ static void __init sbus_do_child_siblings(int start_node,
  * prom_sbus_ranges_init(), with all sun4d stuff cut away.
  * Ask DaveM what is going on here, how is sun4d supposed to work... XXX
  */
+/* added back sun4d patch from Thomas Bogendoerfer - should be OK (crn) */
+
 static void __init sbus_bus_ranges_init(int parent_node, struct sbus_bus *sbus)
 {
 	int len;
@@ -220,6 +231,20 @@ static void __init sbus_bus_ranges_init(int parent_node, struct sbus_bus *sbus)
 		return;
 	}
 	sbus->num_sbus_ranges = len / sizeof(struct linux_prom_ranges);
+#ifdef CONFIG_SPARC32
+	if (sparc_cpu_model == sun4d) {
+		struct linux_prom_ranges iounit_ranges[PROMREG_MAX];
+		int num_iounit_ranges;
+
+		len = prom_getproperty(parent_node, "ranges",
+				       (char *) iounit_ranges,
+				       sizeof (iounit_ranges));
+		if (len != -1) {
+			num_iounit_ranges = (len/sizeof(struct linux_prom_ranges));
+			prom_adjust_ranges (sbus->sbus_ranges, sbus->num_sbus_ranges, iounit_ranges, num_iounit_ranges);
+		}
+	}
+#endif
 }
 
 static void __init __apply_ranges_to_regs(struct linux_prom_ranges *ranges,
@@ -238,12 +263,17 @@ static void __init __apply_ranges_to_regs(struct linux_prom_ranges *ranges,
 					break;
 			}
 			if (rngnum == num_ranges) {
-				prom_printf("sbus_apply_ranges: Cannot find matching "
-					    "range nregs[%d] nranges[%d].\n",
-					    num_regs, num_ranges);
-				prom_halt();
+				/* We used to flag this as an error.  Actually
+				 * some devices do not report the regs as we expect.
+				 * For example, see SUNW,pln device.  In that case
+				 * the reg property is in a format internal to that
+				 * node, ie. it is not in the SBUS register space
+				 * per se. -DaveM
+				 */
+				return;
 			}
 			regs[regnum].which_io = ranges[rngnum].ot_parent_space;
+			regs[regnum].phys_addr -= ranges[rngnum].ot_child_base;
 			regs[regnum].phys_addr += ranges[rngnum].ot_parent_base;
 		}
 	}
@@ -293,8 +323,13 @@ static void __init sbus_fixup_all_regs(struct sbus_dev *first_sdev)
 }
 
 extern void register_proc_sparc_ioport(void);
+extern void firetruck_init(void);
 
-void __init sbus_init(void)
+#ifdef CONFIG_SUN4
+extern void sun4_dvma_init(void);
+#endif
+
+static int __init sbus_init(void)
 {
 	int nd, this_sbus, sbus_devs, topnd, iommund;
 	unsigned int sbus_clock;
@@ -302,12 +337,13 @@ void __init sbus_init(void)
 	struct sbus_dev *this_dev;
 	int num_sbus = 0;  /* How many did we find? */
 
-#ifndef __sparc_v9__
+#ifdef CONFIG_SPARC32
 	register_proc_sparc_ioport();
 #endif
 
 #ifdef CONFIG_SUN4
-	return sun4_dvma_init();
+	sun4_dvma_init();
+	return 0;
 #endif
 
 	topnd = prom_getchild(prom_root_node);
@@ -318,16 +354,15 @@ void __init sbus_init(void)
 		nd = prom_searchsiblings(topnd, "sbus");
 		if(nd == 0) {
 #ifdef CONFIG_PCI
-			if (!pcibios_present()) {	
+			if (!pcic_present()) {
 				prom_printf("Neither SBUS nor PCI found.\n");
 				prom_halt();
 			} else {
-#ifdef __sparc_v9__
-				extern void firetruck_init(void);
+#ifdef CONFIG_SPARC64
 				firetruck_init();
 #endif
 			}
-			return;
+			return 0;
 #else
 			prom_printf("YEEE, UltraSparc sbus not found\n");
 			prom_halt();
@@ -344,11 +379,11 @@ void __init sbus_init(void)
 		   (nd = prom_getchild(iommund)) == 0 ||
 		   (nd = prom_searchsiblings(nd, "sbus")) == 0) {
 #ifdef CONFIG_PCI
-                        if (!pcibios_present()) {       
+                        if (!pcic_present()) {
                                 prom_printf("Neither SBUS nor PCI found.\n");
                                 prom_halt();
                         }
-                        return;
+                        return 0;
 #else
 			/* No reason to run further - the data access trap will occur. */
 			panic("sbus not found");
@@ -369,18 +404,19 @@ void __init sbus_init(void)
 
 	/* Loop until we find no more SBUS's */
 	while(this_sbus) {
-#ifdef __sparc_v9__						  
+#ifdef CONFIG_SPARC64
 		/* IOMMU hides inside SBUS/SYSIO prom node on Ultra. */
 		if(sparc_cpu_model == sun4u) {
 			extern void sbus_iommu_init(int prom_node, struct sbus_bus *sbus);
 
 			sbus_iommu_init(this_sbus, sbus);
 		}
-#endif
-#ifndef __sparc_v9__						  
+#endif /* CONFIG_SPARC64 */
+
+#ifdef CONFIG_SPARC32
 		if (sparc_cpu_model == sun4d)
 			iounit_init(this_sbus, iommund, sbus);
-#endif						   
+#endif /* CONFIG_SPARC32 */
 		printk("sbus%d: ", num_sbus);
 		sbus_clock = prom_getint(this_sbus, "clock-frequency");
 		if(sbus_clock == -1)
@@ -392,7 +428,7 @@ void __init sbus_init(void)
 		prom_getstring(this_sbus, "name",
 			       sbus->prom_name, sizeof(sbus->prom_name));
 		sbus->clock_freq = sbus_clock;
-#ifndef __sparc_v9__		
+#ifdef CONFIG_SPARC32
 		if (sparc_cpu_model == sun4d) {
 			sbus->devid = prom_getint(iommund, "device-id");
 			sbus->board = prom_getint(iommund, "board#");
@@ -402,6 +438,10 @@ void __init sbus_init(void)
 		sbus_bus_ranges_init(iommund, sbus);
 
 		sbus_devs = prom_getchild(this_sbus);
+		if (!sbus_devs) {
+			sbus->devices = NULL;
+			goto next_bus;
+		}
 
 		sbus->devices = kmalloc(sizeof(struct sbus_dev), GFP_ATOMIC);
 
@@ -419,7 +459,7 @@ void __init sbus_init(void)
 						  GFP_ATOMIC);
 			/* Fill it */
 			this_dev->child->bus = sbus;
-			this_dev->child->next = 0;
+			this_dev->child->next = NULL;
 			fill_sbus_device(prom_getchild(sbus_devs),
 					 this_dev->child);
 			sbus_do_child_siblings(prom_getchild(sbus_devs),
@@ -449,7 +489,7 @@ void __init sbus_init(void)
 							  GFP_ATOMIC);
 				/* Fill it */
 				this_dev->child->bus = sbus;
-				this_dev->child->next = 0;
+				this_dev->child->next = NULL;
 				fill_sbus_device(prom_getchild(sbus_devs),
 						 this_dev->child);
 				sbus_do_child_siblings(prom_getchild(sbus_devs),
@@ -465,7 +505,7 @@ void __init sbus_init(void)
 		sbus_fixup_all_regs(sbus->devices);
 
 		dvma_init(sbus);
-
+	next_bus:
 		num_sbus++;
 		if(sparc_cpu_model == sun4u) {
 			this_sbus = prom_getsibling(this_sbus);
@@ -501,10 +541,8 @@ void __init sbus_init(void)
 		sun4d_init_sbi_irq();
 	}
 	
-#ifdef __sparc_v9__
+#ifdef CONFIG_SPARC64
 	if (sparc_cpu_model == sun4u) {
-		extern void firetruck_init(void);
-
 		firetruck_init();
 	}
 #endif
@@ -512,11 +550,15 @@ void __init sbus_init(void)
 	if (sparc_cpu_model == sun4u)
 		auxio_probe ();
 #endif
-#ifdef __sparc_v9__
+#ifdef CONFIG_SPARC64
 	if (sparc_cpu_model == sun4u) {
 		extern void clock_probe(void);
 
 		clock_probe();
 	}
 #endif
+
+	return 0;
 }
+
+subsys_initcall(sbus_init);
